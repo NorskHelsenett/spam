@@ -6,8 +6,9 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
+
+var ErrBindingExists = errors.New("sbom binding already exists for this asset")
 
 type SBOMInput struct {
 	Format           string
@@ -32,40 +33,37 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 		return nil, errors.New("content hash required")
 	}
 
-	var existing SBOM
-	if err := db.WithContext(ctx).Where("content_hash = ?", input.ContentHash).First(&existing).Error; err == nil {
-		return &existing, nil
-	} else if err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	sbom := SBOM{
+	var sbom SBOM
+	result := db.WithContext(ctx).Where(SBOM{
+		ContentHash: input.ContentHash,
+	}).Attrs(SBOM{
 		ID:               uuid.NewString(),
 		Format:           input.Format,
-		ContentHash:      input.ContentHash,
 		ContentBytes:     input.ContentBytes,
 		IngestedByUserID: input.IngestedByUserID,
-	}
+	}).FirstOrCreate(&sbom)
 
-	result := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "content_hash"}},
-		DoNothing: true,
-	}).Create(&sbom)
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	if result.RowsAffected == 0 {
-		if err := db.WithContext(ctx).Where("content_hash = ?", input.ContentHash).First(&sbom).Error; err != nil {
-			return nil, err
-		}
-	}
-
 	return &sbom, nil
 }
 
 func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMBinding, error) {
 	if input.AssetType == "" || input.AssetRefID == "" || input.SBOMID == "" || input.Source == "" {
 		return nil, errors.New("binding fields required")
+	}
+
+	// Check if binding already exists for this asset
+	var existing SBOMBinding
+	err := db.WithContext(ctx).
+		Where("asset_type = ? AND asset_ref_id = ?", input.AssetType, input.AssetRefID).
+		First(&existing).Error
+	if err == nil {
+		return nil, ErrBindingExists
+	}
+	if err != gorm.ErrRecordNotFound {
+		return nil, err
 	}
 
 	binding := SBOMBinding{
@@ -77,19 +75,8 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 		CreatedByUserID: input.CreatedByUserID,
 	}
 
-	result := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "asset_type"}, {Name: "asset_ref_id"}, {Name: "sbom_id"}},
-		DoNothing: true,
-	}).Create(&binding)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		if err := db.WithContext(ctx).
-			Where("asset_type = ? AND asset_ref_id = ? AND sbom_id = ?", input.AssetType, input.AssetRefID, input.SBOMID).
-			First(&binding).Error; err != nil {
-			return nil, err
-		}
+	if err := db.WithContext(ctx).Create(&binding).Error; err != nil {
+		return nil, err
 	}
 
 	return &binding, nil

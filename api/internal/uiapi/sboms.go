@@ -109,7 +109,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		hash := sha256.Sum256(content)
 
 		var response sbomUploadResponse
-		err = db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+			err = db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 			repo, err := resolveRepo(r.Context(), tx, repoID, provider, org, slug, session.UserID)
 			if err != nil {
 				return err
@@ -186,6 +186,10 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			}
 			if errors.Is(err, errBadRequest) {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if errors.Is(err, artifacts.ErrBindingExists) {
+				http.Error(w, "sbom already exists for this commit", http.StatusConflict)
 				return
 			}
 			log.Printf("SBOM upload failed (repo_id=%q provider=%q org=%q slug=%q): %v", repoID, provider, org, slug, err)
