@@ -85,4 +85,4 @@ spec:
   selector:
     app.kubernetes.io/name: postgresql
     app.kubernetes.io/instance: {{ .Release.Name }}
-
+{{- end }}
