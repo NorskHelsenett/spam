@@ -120,8 +120,8 @@
 
 	const isActive = (href: string) => {
 		const path = $pageStore.url?.pathname ?? '/';
-		if (href === '/') {
-			return path === '/';
+		if (href === '/app') {
+			return path === '/app';
 		}
 		return path === href || path.startsWith(`${href}/`);
 	};
