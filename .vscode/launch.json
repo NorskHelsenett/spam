@@ -16,7 +16,11 @@
                 "PGUSER": "postgres",
                 "PGPASSWORD": "",
                 "PGDATABASE": "postgres",
-                "PGSSLMODE": "disable"
+                "PGSSLMODE": "disable",
+                "OIDC_CLIENT_ID": "spam-local-client",
+                "OIDC_CLIENT_SECRET": "spam-local-secret",
+                "OIDC_REDIRECT_URI": "http://localhost:5178/api/callback",
+                "OIDC_PROVIDER_URI": "http://host.containers.internal:9999"
             },
         }
     ]
