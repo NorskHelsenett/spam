@@ -60,50 +60,50 @@
   /* Light theme */
   html.light {
     color-scheme: light;
-    font-size: 0.875rem;
+    font-size: 0.9rem;
 
     /* Base colors */
-    --main-content-bg: #fbf1c7;
+    --main-content-bg: #f2f3ec;
     --sidebar-bg: transparent;
-    --card-bg: #f9f5d7;
-    --hover-bg: #ebdbb2;
-    --hover-bg-subtle: rgba(235, 219, 178, 0.5);
-    --border-color: #d5c4a1;
+    --card-bg: #fcfcfc;
+    --hover-bg: #eceae4;
+    --hover-bg-subtle: rgba(236, 234, 228, 0.5);
+    --border-color: #e5e7eb;
 
     /* Text colors */
-    --text-primary: #3c3836;
-    --text-secondary: #504945;
-    --text-tertiary: #665c54;
-    --text-quaternary: #7c6f64;
-    --text-muted: #928374;
-    --text-bright: #282828;
-    --text-dimmed: #bdae93;
+    --text-primary: #1e1e1e;
+    --text-secondary: #646464;
+    --text-tertiary: #7a7a7a;
+    --text-quaternary: #8c8c8c;
+    --text-muted: #a0a0a0;
+    --text-bright: #141414;
+    --text-dimmed: #b4b4b4;
 
     /* Semantic colors */
-    --accent: #d79921;
-    --accent-dark: #b57614;
-    --error: #cc241d;
-    --error-dark: #9d0006;
-    --success: #79740e;
-    --success-dark: #427b58;
-    --warning: #d79921;
-    --warning-dark: #b57614;
+    --accent: #a8c5e3;
+    --accent-dark: #98b5d3;
+    --error: #ef4444;
+    --error-dark: #dc2626;
+    --success: #c9e4ca;
+    --success-dark: #b9d4ba;
+    --warning: #eeddd1;
+    --warning-dark: #e6d3cc;
 
     /* Metric-specific colors */
-    --info: #076678;
-    --cpu-color: #076678;
-    --memory-color: #8f3f71;
-    --disk-color: #427b58;
-    --temperature-color: #d65d0e;
-    --network-color: #8f3f71;
-    --gpu-color: #427b58;
+    --info: #a8c5e3;
+    --cpu-color: #a8c5e3;
+    --memory-color: #e7e9fa;
+    --disk-color: #c9e4ca;
+    --temperature-color: #ef4444;
+    --network-color: #98b5d3;
+    --gpu-color: #e7e9fa;
 
     /* Battery colors */
-    --charging-color: #d79921;
-    --discharging-color: #427b58;
+    --charging-color: #a8c5e3;
+    --discharging-color: #ef4444;
 
     /* Other */
-    --selection-bg: rgba(215, 153, 33, 0.35);
+    --selection-bg: rgba(238, 221, 209, 0.45);
 
     background-color: var(--main-content-bg);
     color: var(--text-primary);
