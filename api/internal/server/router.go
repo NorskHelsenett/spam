@@ -15,27 +15,32 @@ import (
 func NewRouter(db *gorm.DB, authService *auth.Service) http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
-	r.Use(middleware.Logger)
-	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	// Health check endpoint without middleware to avoid noise in logs
+	r.Get("/api/healthz", health.Handler(db))
 
-	r.Route("/api", func(api chi.Router) {
-		api.Get("/healthz", health.Handler(db))
-		if authService != nil {
-			api.Route("/auth", func(authRouter chi.Router) {
-				authRouter.Get("/login", authService.LoginHandler())
-				authRouter.Get("/callback", authService.CallbackHandler())
-				authRouter.Get("/me", authService.MeHandler())
-				authRouter.Post("/logout", authService.LogoutHandler())
-			})
+	// Apply middleware to all other routes
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequestID)
+		r.Use(middleware.RealIP)
+		r.Use(middleware.Logger)
+		r.Use(middleware.Recoverer)
+		r.Use(middleware.Timeout(60 * time.Second))
+
+		r.Route("/api", func(api chi.Router) {
+			if authService != nil {
+				api.Route("/auth", func(authRouter chi.Router) {
+					authRouter.Get("/login", authService.LoginHandler())
+					authRouter.Get("/callback", authService.CallbackHandler())
+					authRouter.Get("/me", authService.MeHandler())
+					authRouter.Post("/logout", authService.LogoutHandler())
+				})
+			}
+		})
+
+		if spaHandler != nil {
+			r.Handle("/*", spaHandler)
 		}
 	})
-
-	if spaHandler != nil {
-		r.Handle("/*", spaHandler)
-	}
 
 	return r
 }
