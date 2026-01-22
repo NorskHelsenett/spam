@@ -1,25 +1,25 @@
 <script lang="ts">
 	const alerts = [
 		{
-			id: 'evt-3021',
-			title: 'Agent offline',
-			detail: 'edge-01 missed three consecutive heartbeats.',
+			id: 'alert-5841',
+			title: 'Critical CVE detected',
+			detail: 'openssl 3.0.1 (CVE-2023-0466) impacting checkout-service@8.4.2.',
 			severity: 'Critical',
 			tone: 'var(--error)'
 		},
 		{
-			id: 'evt-3020',
-			title: 'Drive scrub finished',
-			detail: 'archive-02 completed pool integrity scan.',
-			severity: 'Info',
-			tone: 'var(--info)'
-		},
-		{
-			id: 'evt-3016',
-			title: 'Temperature warning',
-			detail: 'compute-05 peaked at 79°C under sustained load.',
+			id: 'alert-5837',
+			title: 'License policy violation',
+			detail: 'GPL-3.0 dependency introduced in analytics-job via chartjs 4.4.1.',
 			severity: 'Warning',
 			tone: 'var(--warning)'
+		},
+		{
+			id: 'alert-5828',
+			title: 'SBOM freshness restored',
+			detail: 'billing-worker@4.9.0 SBOM updated — now within 30m SLA.',
+			severity: 'Info',
+			tone: 'var(--info)'
 		}
 	];
 
@@ -27,16 +27,16 @@
 </script>
 
 <svelte:head>
-	<title>Notifications • Spam Monitor</title>
+	<title>Alerts • Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Notification center</h1>
+				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Alert center</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">
-					Live alerts roll in here. For now we render static placeholder rows to validate the layout.
+					Supply-chain policy events, vulnerability gates, and compliance notifications surface here.
 				</p>
 			</div>
 			<div class="flex flex-wrap gap-2 text-sm text-[var(--text-secondary)]">

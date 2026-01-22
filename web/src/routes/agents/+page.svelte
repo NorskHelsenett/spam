@@ -1,61 +1,159 @@
 <script lang="ts">
-	const segments = [
+	const collections = [
 		{
-			name: 'Linux nodes',
-			count: 9,
-			description: 'Bare-metal and KVM guests joined to the cluster.',
-			tag: 'Ubuntu · Debian · Rocky',
+			name: 'Payments platform',
+			sboms: 6,
+			description: 'Checkout, billing, and ledger workloads under PCI scope.',
+			tag: 'Critical risk surface',
+			accent: 'var(--error)'
+		},
+		{
+			name: 'Customer experience',
+			sboms: 8,
+			description: 'Frontend applications and public APIs served globally.',
+			tag: 'SLO-bound services',
 			accent: 'var(--accent)'
 		},
 		{
-			name: 'Homelab services',
-			count: 5,
-			description: 'Applications connected through the agent gateway.',
-			tag: 'Docker · Nomad · k3s',
+			name: 'Data and analytics',
+			sboms: 5,
+			description: 'Batch pipelines and ML training environments.',
+			tag: 'Regulated datasets',
 			accent: 'var(--info)'
-		},
-		{
-			name: 'Edge devices',
-			count: 3,
-			description: 'Remote appliances forwarding metrics and alerts.',
-			tag: 'WireGuard',
-			accent: 'var(--warning)'
 		}
 	];
 
-	const tableRows = Array.from({ length: 8 }, (_, index) => ({
-		name: `agent-${index + 1}`,
-		role: index % 2 === 0 ? 'Collector' : 'Executor',
-		dc: index % 3 === 0 ? 'lab' : index % 3 === 1 ? 'edge' : 'cloud',
-		status: index % 4 === 0 ? 'Maintenance' : 'Online',
-		version: '0.8.12'
-	}));
+	const sbomRows = [
+		{
+			artifact: 'checkout-service@8.4.2',
+			format: 'CycloneDX JSON',
+			components: 412,
+			critical: 2,
+			high: 5,
+			licenseAlerts: 1,
+			lastUpdated: '5 minutes ago',
+			status: 'Policy block',
+			statusColor: 'var(--error)'
+		},
+		{
+			artifact: 'billing-worker@4.9.0',
+			format: 'SPDX 2.3',
+			components: 267,
+			critical: 0,
+			high: 3,
+			licenseAlerts: 0,
+			lastUpdated: '22 minutes ago',
+			status: 'Ready for deploy',
+			statusColor: 'var(--success)'
+		},
+		{
+			artifact: 'mobile-app@12.3.1',
+			format: 'CycloneDX JSON',
+			components: 163,
+			critical: 1,
+			high: 4,
+			licenseAlerts: 2,
+			lastUpdated: '41 minutes ago',
+			status: 'Legal review pending',
+			statusColor: 'var(--warning)'
+		},
+		{
+			artifact: 'analytics-job@4.2.0',
+			format: 'SPDX 2.3',
+			components: 508,
+			critical: 0,
+			high: 1,
+			licenseAlerts: 0,
+			lastUpdated: 'Today 03:12 UTC',
+			status: 'Ingest complete',
+			statusColor: 'var(--accent)'
+		},
+		{
+			artifact: 'edge-appliance@2.8.1',
+			format: 'CycloneDX XML',
+			components: 298,
+			critical: 1,
+			high: 2,
+			licenseAlerts: 0,
+			lastUpdated: 'Yesterday 18:44 UTC',
+			status: 'Awaiting VEX update',
+			statusColor: 'var(--info)'
+		}
+	];
+
+	const policyRuns = [
+		{
+			name: 'Open source license policy',
+			status: 'Pass',
+			statusColor: 'var(--success)',
+			updated: '12 minutes ago',
+			details: 'MIT/Apache-2.0 baseline enforced pre-merge.'
+		},
+		{
+			name: 'Critical CVE gate',
+			status: 'Failing',
+			statusColor: 'var(--error)',
+			updated: '18 minutes ago',
+			details: 'Blocked checkout-service deploy (2 critical CVEs).'
+		},
+		{
+			name: 'SBOM freshness SLA',
+			status: 'Pass',
+			statusColor: 'var(--accent)',
+			updated: '47 minutes ago',
+			details: '33/36 pipelines delivering SBOMs < 30 minutes old.'
+		}
+	];
+
+	const ingestionCoverage = [
+		{
+			label: 'GitHub Actions pipelines',
+			scope: '13 repositories',
+			status: 'Healthy',
+			statusColor: 'var(--success)',
+			details: 'SBOM export and VEX upload on every release tag.'
+		},
+		{
+			label: 'Jenkins nightly builds',
+			scope: '5 jobs',
+			status: 'Degraded',
+			statusColor: 'var(--warning)',
+			details: 'One pipeline missing SBOM due to dependency cache miss.'
+		},
+		{
+			label: 'Manual uploads',
+			scope: '4 artefacts',
+			status: 'Needs automation',
+			statusColor: 'var(--info)',
+			details: 'Teams onboarding to automated export next sprint.'
+		}
+	];
 </script>
 
 <svelte:head>
-	<title>Agents • Spam Monitor</title>
+	<title>SBOM Library • Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Agent catalogue</h1>
-				<p class="text-sm text-[var(--text-tertiary)]">High-level grouping of managed agents. Data shown here is placeholder content.</p>
+				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">SBOM library</h1>
+				<p class="text-sm text-[var(--text-tertiary)]">Curated view of every artefact tracked across your software supply chain.</p>
 			</div>
 			<button type="button" class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]">
-				Add agent
+				Upload SBOM
 			</button>
 		</header>
 		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-			{#each segments as segment}
+			{#each collections as collection}
 				<article class="metric-card p-5 sm:p-6">
-					<div class="flex items-center justify-between">
-						<h2 class="text-lg font-semibold text-[var(--text-bright)]">{segment.name}</h2>
-						<span class="text-2xl font-bold" style={`color: ${segment.accent}`}>{segment.count}</span>
+					<div class="flex items-center justify-between gap-3">
+						<h2 class="text-lg font-semibold text-[var(--text-bright)]">{collection.name}</h2>
+						<span class="text-2xl font-bold" style={`color: ${collection.accent}`}>{collection.sboms}</span>
 					</div>
-					<p class="mt-2 text-sm text-[var(--text-secondary)]">{segment.description}</p>
-					<span class="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-tertiary)]">{segment.tag}</span>
+					<p class="mt-2 text-sm text-[var(--text-secondary)]">{collection.description}</p>
+					<span class="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-tertiary)]">{collection.tag}</span>
 				</article>
 			{/each}
 		</div>
@@ -63,38 +161,85 @@
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Inventory</h2>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">SBOM inventory</h2>
 			<div class="flex flex-wrap gap-3 text-sm text-[var(--text-secondary)]">
-				<span class="rounded-full border border-[var(--border-color)] px-3 py-1">Sort: role</span>
-				<span class="rounded-full border border-[var(--border-color)] px-3 py-1">Filter: online</span>
+				<span class="rounded-full border border-[var(--border-color)] px-3 py-1">Filter: critical CVEs</span>
+				<span class="rounded-full border border-[var(--border-color)] px-3 py-1">Format: CycloneDX</span>
 			</div>
 		</header>
 		<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 			<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 				<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 					<tr>
-						<th class="px-5 py-3 text-left">Agent</th>
-						<th class="px-5 py-3 text-left">Role</th>
-						<th class="px-5 py-3 text-left">Zone</th>
-						<th class="px-5 py-3 text-left">Version</th>
+						<th class="px-5 py-3 text-left">Artefact</th>
+						<th class="px-5 py-3 text-left">Format</th>
+						<th class="px-5 py-3 text-left">Components</th>
+						<th class="px-5 py-3 text-left">Critical</th>
+						<th class="px-5 py-3 text-left">High</th>
+						<th class="px-5 py-3 text-left">License alerts</th>
+						<th class="px-5 py-3 text-left">Last updated</th>
 						<th class="px-5 py-3 text-left">Status</th>
 					</tr>
 				</thead>
 				<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-					{#each tableRows as row}
+					{#each sbomRows as row}
 						<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-							<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{row.name}</td>
-							<td class="px-5 py-3">{row.role}</td>
-							<td class="px-5 py-3 uppercase tracking-[0.18em] text-[var(--text-tertiary)]">{row.dc}</td>
-							<td class="px-5 py-3">{row.version}</td>
+							<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{row.artifact}</td>
+							<td class="px-5 py-3">{row.format}</td>
+							<td class="px-5 py-3">{row.components}</td>
+							<td class="px-5 py-3 font-semibold" style={`color: ${row.critical > 0 ? 'var(--error)' : 'var(--text-secondary)'}`}>{row.critical}</td>
+							<td class="px-5 py-3 font-semibold" style={`color: ${row.high > 0 ? 'var(--warning)' : 'var(--text-secondary)'}`}>{row.high}</td>
+							<td class="px-5 py-3 font-semibold" style={`color: ${row.licenseAlerts > 0 ? 'var(--info)' : 'var(--text-secondary)'}`}>{row.licenseAlerts}</td>
+							<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{row.lastUpdated}</td>
 							<td class="px-5 py-3">
-								<span class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs" style={`color: ${row.status === 'Maintenance' ? 'var(--warning)' : 'var(--success)'}`}>{row.status}</span>
+								<span class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs" style={`color: ${row.statusColor}`}>{row.status}</span>
 							</td>
 						</tr>
 					{/each}
 				</tbody>
 			</table>
 		</div>
-		<p class="text-xs text-[var(--text-tertiary)]">Data is illustrative; wire this table to your API when backend endpoints are ready.</p>
+		<p class="text-xs text-[var(--text-tertiary)]">Connect this table to your inventory service to surface live SBOM telemetry.</p>
+	</section>
+
+	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Compliance and ingestion</h2>
+			<button type="button" class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]">
+				View policy workspace
+			</button>
+		</header>
+		<div class="grid gap-4 lg:grid-cols-2">
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+				<h3 class="text-sm font-semibold uppercase tracking-[0.28em] text-[var(--text-tertiary)]">Policy runs</h3>
+				<ul class="mt-4 space-y-4 text-sm text-[var(--text-secondary)]">
+					{#each policyRuns as run}
+						<li class="rounded-xl border border-[var(--border-color)]/50 bg-[var(--main-content-bg)]/60 px-4 py-3">
+							<div class="flex flex-wrap items-center justify-between gap-2">
+								<span class="font-medium text-[var(--text-bright)]">{run.name}</span>
+								<span class="text-xs font-semibold" style={`color: ${run.statusColor}`}>{run.status}</span>
+							</div>
+							<p class="mt-2 text-xs text-[var(--text-tertiary)]">{run.details}</p>
+							<p class="mt-2 text-[10px] uppercase tracking-[0.24em] text-[var(--text-muted)]">Updated {run.updated}</p>
+						</li>
+					{/each}
+				</ul>
+			</div>
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+				<h3 class="text-sm font-semibold uppercase tracking-[0.28em] text-[var(--text-tertiary)]">Ingestion coverage</h3>
+				<ul class="mt-4 space-y-4 text-sm text-[var(--text-secondary)]">
+					{#each ingestionCoverage as item}
+						<li class="rounded-xl border border-[var(--border-color)]/50 bg-[var(--main-content-bg)]/60 px-4 py-3">
+							<div class="flex flex-wrap items-center justify-between gap-2">
+								<span class="font-medium text-[var(--text-bright)]">{item.label}</span>
+								<span class="text-xs font-semibold" style={`color: ${item.statusColor}`}>{item.status}</span>
+							</div>
+							<p class="mt-2 text-xs text-[var(--text-tertiary)]">{item.details}</p>
+							<p class="mt-2 text-[10px] uppercase tracking-[0.24em] text-[var(--text-muted)]">Coverage: {item.scope}</p>
+						</li>
+					{/each}
+				</ul>
+			</div>
+		</div>
 	</section>
 </div>
