@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/models"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
 
@@ -42,7 +44,28 @@ func run() error {
 		}
 	}()
 
-	router := server.NewRouter(gormDB)
+	if err := gormDB.AutoMigrate(&models.Session{}); err != nil {
+		return fmt.Errorf("migrate database: %w", err)
+	}
+
+	authService, err := auth.NewService(ctx, auth.Config{
+		IssuerURL:         cfg.OIDC.IssuerURL,
+		ClientID:          cfg.OIDC.ClientID,
+		ClientSecret:      cfg.OIDC.ClientSecret,
+		RedirectURL:       cfg.OIDC.RedirectURL,
+		Scopes:            cfg.OIDC.Scopes,
+		SessionCookieName: cfg.OIDC.SessionCookieName,
+		AuthCookieName:    cfg.OIDC.AuthCookieName,
+		SessionTTL:        cfg.OIDC.SessionTTL,
+		CookieHashKey:     cfg.OIDC.CookieHashKey,
+		CookieBlockKey:    cfg.OIDC.CookieBlockKey,
+		CookieSecure:      cfg.OIDC.CookieSecure,
+	}, gormDB)
+	if err != nil {
+		return fmt.Errorf("init oidc auth: %w", err)
+	}
+
+	router := server.NewRouter(gormDB, authService)
 
 	addr := cfg.HTTPPort
 	if !strings.HasPrefix(addr, ":") {

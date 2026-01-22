@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -11,7 +12,7 @@ import (
 )
 
 // NewRouter wires the HTTP routes and middleware for the API server.
-func NewRouter(db *gorm.DB) http.Handler {
+func NewRouter(db *gorm.DB, authService *auth.Service) http.Handler {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -22,6 +23,14 @@ func NewRouter(db *gorm.DB) http.Handler {
 
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/healthz", health.Handler(db))
+		if authService != nil {
+			api.Route("/auth", func(authRouter chi.Router) {
+				authRouter.Get("/login", authService.LoginHandler())
+				authRouter.Get("/callback", authService.CallbackHandler())
+				authRouter.Get("/me", authService.MeHandler())
+				authRouter.Post("/logout", authService.LogoutHandler())
+			})
+		}
 	})
 
 	if spaHandler != nil {
