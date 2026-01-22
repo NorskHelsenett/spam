@@ -1,0 +1,128 @@
+@layer components {
+  .layout {
+    display: flex;
+    min-height: 100vh;
+    background-color: var(--main-content-bg);
+    color: var(--text-primary);
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  .layout__sidebar {
+    width: 16rem;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    padding: 2.5rem 1.75rem;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+  }
+
+  .layout__brand {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 1.5rem;
+    font-weight: 600;
+    text-decoration: none;
+    color: var(--text-bright);
+  }
+
+  .layout__brand-accent {
+    color: var(--accent);
+  }
+
+  .layout__nav ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .layout__nav a {
+    display: block;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    text-decoration: none;
+    color: var(--text-secondary);
+    border: 1px solid transparent;
+    transition: border-color 0.2s ease, background-color 0.2s ease, color 0.2s ease;
+  }
+
+  .layout__nav a:hover {
+    background-color: var(--hover-bg-subtle);
+    color: var(--text-bright);
+    border-color: var(--border-color);
+  }
+
+  .layout__nav a.is-active {
+    background-color: var(--hover-bg);
+    color: var(--accent);
+    border-color: var(--border-color);
+  }
+
+  .layout__main {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    background-color: var(--main-content-bg);
+  }
+
+  .layout__content {
+    flex: 1;
+    padding: clamp(1.5rem, 4vw, 3rem);
+    display: flex;
+    justify-content: center;
+    overflow-y: auto;
+  }
+
+  .layout__page {
+    width: min(1100px, 100%);
+    background-color: var(--card-bg);
+    border-radius: 1.5rem;
+    border: 1px solid var(--border-color);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.25);
+    padding: clamp(1.5rem, 5vw, 3rem);
+    backdrop-filter: blur(4px);
+  }
+
+  @media (max-width: 960px) {
+    .layout {
+      flex-direction: column;
+    }
+
+    .layout__sidebar {
+      width: 100%;
+      flex-direction: row;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1.5rem;
+      border-right: none;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .layout__brand {
+      font-size: 1.25rem;
+    }
+
+    .layout__nav ul {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .layout__nav a {
+      padding: 0.5rem 0.85rem;
+    }
+
+    .layout__content {
+      padding: 1.25rem;
+    }
+
+    .layout__page {
+      border-radius: 1rem;
+      padding: 1.5rem;
+    }
+  }
+}
