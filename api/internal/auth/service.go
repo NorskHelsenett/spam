@@ -304,6 +304,11 @@ func (s *Service) loadSession(r *http.Request) (*models.Session, error) {
 	return &session, nil
 }
 
+// LoadSession exposes session lookup for other modules.
+func (s *Service) LoadSession(r *http.Request) (*models.Session, error) {
+	return s.loadSession(r)
+}
+
 func (s *Service) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) error {
 	encoded, err := s.cookies.Encode(s.sessionCookieName, sessionID)
 	if err != nil {

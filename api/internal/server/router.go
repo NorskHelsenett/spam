@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -34,7 +35,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 					authRouter.Get("/me", authService.MeHandler())
 					authRouter.Post("/logout", authService.LogoutHandler())
 				})
-				api.Get("/app/stream", authService.AppStreamHandler(shutdown))
+				api.Get("/app/stream", events.AppStreamHandler(authService.LoadSession, shutdown))
 			}
 		})
 

@@ -1,4 +1,4 @@
-package auth
+package events
 
 import (
 	"encoding/json"
@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/NorskHelsenett/spam/internal/models"
 )
 
 type heartbeatPayload struct {
@@ -28,9 +30,9 @@ type readyPayload struct {
 }
 
 // AppStreamHandler streams server-sent events for authenticated app sessions.
-func (s *Service) AppStreamHandler(shutdown <-chan struct{}) http.HandlerFunc {
+func AppStreamHandler(loadSession func(*http.Request) (*models.Session, error), shutdown <-chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		session, err := s.loadSession(r)
+		session, err := loadSession(r)
 		if err != nil {
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
 			return

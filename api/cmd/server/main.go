@@ -44,7 +44,7 @@ func run() error {
 		}
 	}()
 
-	if err := gormDB.AutoMigrate(&models.Session{}); err != nil {
+	if err := gormDB.AutoMigrate(&models.Session{}, &models.Job{}, &models.OutboxEvent{}); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
