@@ -128,6 +128,74 @@
 			details: 'Teams onboarding to automated export next sprint.'
 		}
 	];
+
+	let uploadOpen = $state(false);
+	let uploadError = $state('');
+	let uploadSuccess = $state('');
+	let uploadBusy = $state(false);
+	let uploadFile: File | null = $state(null);
+	let uploadForm = $state({
+		provider: 'manual',
+		org: '',
+		slug: '',
+		commitSha: '',
+		ref: '',
+		format: ''
+	});
+
+	const submitUpload = async () => {
+		uploadError = '';
+		uploadSuccess = '';
+
+		if (!uploadFile) {
+			uploadError = 'Please select an SBOM file.';
+			return;
+		}
+		if (!uploadForm.commitSha.trim()) {
+			uploadError = 'Commit SHA is required.';
+			return;
+		}
+		if (!uploadForm.org.trim() || !uploadForm.slug.trim()) {
+			uploadError = 'Org and repo name are required.';
+			return;
+		}
+
+		uploadBusy = true;
+
+		try {
+			const payload = new FormData();
+			payload.append('sbom_file', uploadFile);
+			payload.append('provider', uploadForm.provider.trim());
+			payload.append('org', uploadForm.org.trim());
+			payload.append('slug', uploadForm.slug.trim());
+			payload.append('commit_sha', uploadForm.commitSha.trim());
+			if (uploadForm.ref.trim()) {
+				payload.append('ref', uploadForm.ref.trim());
+			}
+			if (uploadForm.format.trim()) {
+				payload.append('format', uploadForm.format.trim());
+			}
+
+			const response = await fetch('/api/sboms/upload', {
+				method: 'POST',
+				credentials: 'include',
+				body: payload
+			});
+
+			if (!response.ok) {
+				uploadError = 'Upload failed. Check the SBOM and repo details.';
+				return;
+			}
+
+			uploadSuccess = 'SBOM uploaded and queued for parsing.';
+			uploadFile = null;
+			uploadForm = { ...uploadForm, commitSha: '', ref: '', format: '' };
+		} catch {
+			uploadError = 'Upload failed. Try again.';
+		} finally {
+			uploadBusy = false;
+		}
+	};
 </script>
 
 <svelte:head>
@@ -141,7 +209,15 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">SBOM library</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">Curated view of every artefact tracked across your software supply chain.</p>
 			</div>
-			<button type="button" class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]">
+			<button
+				type="button"
+				class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => {
+					uploadOpen = true;
+					uploadError = '';
+					uploadSuccess = '';
+				}}
+			>
 				Upload SBOM
 			</button>
 		</header>
@@ -158,6 +234,129 @@
 			{/each}
 		</div>
 	</section>
+
+	{#if uploadOpen}
+		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+			<div class="w-full max-w-xl rounded-3xl border border-[var(--border-color)] bg-[var(--main-content-bg)] p-6 shadow-2xl">
+				<div class="flex items-start justify-between gap-4">
+					<div>
+						<h2 class="text-xl font-semibold text-[var(--text-bright)]">Upload SBOM</h2>
+						<p class="mt-1 text-sm text-[var(--text-secondary)]">Attach an SBOM to a repo commit and enqueue parsing.</p>
+					</div>
+					<button
+						type="button"
+						class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+						onclick={() => (uploadOpen = false)}
+					>
+						Close
+					</button>
+				</div>
+
+				<div class="mt-6 grid gap-4">
+					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+						SBOM file
+						<input
+							type="file"
+							accept=".json,application/json"
+							class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+							onchange={(event) => {
+								const target = event.target as HTMLInputElement;
+								uploadFile = target.files ? target.files[0] : null;
+							}}
+						/>
+					</label>
+
+					<div class="grid gap-4 sm:grid-cols-2">
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Org
+							<input
+								type="text"
+								placeholder="team"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.org}
+							/>
+						</label>
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Repo
+							<input
+								type="text"
+								placeholder="service-api"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.slug}
+							/>
+						</label>
+					</div>
+
+					<div class="grid gap-4 sm:grid-cols-2">
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Commit SHA
+							<input
+								type="text"
+								placeholder="Full SHA"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.commitSha}
+							/>
+						</label>
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Ref (optional)
+							<input
+								type="text"
+								placeholder="refs/heads/main"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.ref}
+							/>
+						</label>
+					</div>
+
+					<div class="grid gap-4 sm:grid-cols-2">
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Provider
+							<input
+								type="text"
+								placeholder="manual"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.provider}
+							/>
+						</label>
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Format (optional)
+							<input
+								type="text"
+								placeholder="cyclonedx-json"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={uploadForm.format}
+							/>
+						</label>
+					</div>
+
+					{#if uploadError}
+						<p class="text-sm text-[var(--error)]">{uploadError}</p>
+					{/if}
+					{#if uploadSuccess}
+						<p class="text-sm text-[var(--success)]">{uploadSuccess}</p>
+					{/if}
+
+					<div class="flex flex-wrap items-center justify-end gap-3">
+						<button
+							type="button"
+							class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+							onclick={() => (uploadOpen = false)}
+						>
+							Cancel
+						</button>
+						<button
+							type="button"
+							class="rounded-full border border-transparent bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-[var(--main-content-bg)] transition hover:opacity-90 disabled:opacity-50"
+							disabled={uploadBusy}
+							onclick={submitUpload}
+						>
+							{uploadBusy ? 'Uploading…' : 'Upload'}
+						</button>
+					</div>
+				</div>
+			</div>
+		</div>
+	{/if}
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

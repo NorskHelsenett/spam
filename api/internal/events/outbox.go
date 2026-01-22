@@ -3,7 +3,6 @@ package events
 import (
 	"encoding/json"
 
-	"github.com/NorskHelsenett/spam/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -22,7 +21,7 @@ func EmitEvent(tx *gorm.DB, eventType, aggregateType, aggregateID string, payloa
 		return err
 	}
 
-	event := models.OutboxEvent{
+	event := OutboxEvent{
 		ID:            uuid.NewString(),
 		EventType:     eventType,
 		AggregateType: aggregateType,

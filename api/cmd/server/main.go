@@ -12,10 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
-	"github.com/NorskHelsenett/spam/internal/models"
+	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/inventory"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
 
@@ -44,7 +48,21 @@ func run() error {
 		}
 	}()
 
-	if err := gormDB.AutoMigrate(&models.Session{}, &models.Job{}, &models.OutboxEvent{}); err != nil {
+	if err := gormDB.AutoMigrate(
+		&auth.Session{},
+		&auth.User{},
+		&auth.Group{},
+		&auth.UserGroup{},
+		&assets.Repo{},
+		&assets.RepoCommit{},
+		&artifacts.SBOM{},
+		&artifacts.SBOMBinding{},
+		&inventory.Component{},
+		&inventory.ComponentVersion{},
+		&inventory.SBOMComponent{},
+		&jobs.Job{},
+		&events.OutboxEvent{},
+	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 

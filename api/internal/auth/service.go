@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/NorskHelsenett/spam/internal/models"
+	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
 	"golang.org/x/oauth2"
@@ -59,10 +59,14 @@ type userClaims struct {
 }
 
 type userResponse struct {
-	Subject string                 `json:"subject"`
-	Email   string                 `json:"email,omitempty"`
-	Name    string                 `json:"name,omitempty"`
-	Claims  map[string]interface{} `json:"claims,omitempty"`
+	UserID   string                 `json:"user_id,omitempty"`
+	Subject  string                 `json:"subject"`
+	Email    string                 `json:"email,omitempty"`
+	Name     string                 `json:"name,omitempty"`
+	Claims   map[string]interface{} `json:"claims,omitempty"`
+	Groups   []string               `json:"groups,omitempty"`
+	Role     string                 `json:"role,omitempty"`
+	Approved bool                   `json:"approved"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -219,14 +223,26 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			return
 		}
 
+		userResult, err := s.ensureUser(r.Context(), claims)
+		pending := false
+		if err != nil {
+			if errors.Is(err, errUserPendingApproval) {
+				pending = true
+			} else {
+				http.Error(w, "failed to persist user", http.StatusInternalServerError)
+				return
+			}
+		}
+
 		sessionID, err := randomString(48)
 		if err != nil {
 			http.Error(w, "failed to start session", http.StatusInternalServerError)
 			return
 		}
 
-		session := models.Session{
+		session := Session{
 			ID:        sessionID,
+			UserID:    userResult.user.ID,
 			Subject:   claims.Subject,
 			Email:     claims.Email,
 			Name:      preferredName(claims),
@@ -245,6 +261,10 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 		}
 
 		s.clearAuthCookie(w)
+		if pending {
+			http.Redirect(w, r, "/auth/pending", http.StatusFound)
+			return
+		}
 		http.Redirect(w, r, "/", http.StatusFound)
 	}
 }
@@ -265,10 +285,20 @@ func (s *Service) MeHandler() http.HandlerFunc {
 		}
 
 		response := userResponse{
+			UserID:  session.UserID,
 			Subject: session.Subject,
 			Email:   session.Email,
 			Name:    session.Name,
 			Claims:  claims,
+		}
+
+		if session.UserID != "" {
+			groups, role, approved, err := s.userAccessSnapshot(r.Context(), session.UserID)
+			if err == nil {
+				response.Groups = groups
+				response.Role = role
+				response.Approved = approved
+			}
 		}
 
 		writeJSON(w, http.StatusOK, response)
@@ -279,25 +309,53 @@ func (s *Service) LogoutHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID, err := s.readSessionCookie(r)
 		if err == nil {
-			_ = s.db.Delete(&models.Session{}, "id = ?", sessionID).Error
+			_ = s.db.Delete(&Session{}, "id = ?", sessionID).Error
 		}
 		s.clearSessionCookie(w)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-func (s *Service) loadSession(r *http.Request) (*models.Session, error) {
+func (s *Service) loadSession(r *http.Request) (*Session, error) {
 	sessionID, err := s.readSessionCookie(r)
 	if err != nil {
 		return nil, err
 	}
 
-	var session models.Session
+	var session Session
 	if err := s.db.First(&session, "id = ?", sessionID).Error; err != nil {
 		return nil, err
 	}
 	if time.Now().After(session.ExpiresAt) {
-		_ = s.db.Delete(&models.Session{}, "id = ?", sessionID).Error
+		_ = s.db.Delete(&Session{}, "id = ?", sessionID).Error
+		return nil, errors.New("session expired")
+	}
+
+	if session.UserID != "" {
+		var user User
+		if err := s.db.First(&user, "id = ?", session.UserID).Error; err != nil {
+			return nil, err
+		}
+		if user.ApprovedAt == nil {
+			return nil, errors.New("user pending approval")
+		}
+	}
+
+	return &session, nil
+}
+
+func (s *Service) loadSessionAllowPending(r *http.Request) (*Session, error) {
+	sessionID, err := s.readSessionCookie(r)
+	if err != nil {
+		return nil, err
+	}
+
+	var session Session
+	if err := s.db.First(&session, "id = ?", sessionID).Error; err != nil {
+		return nil, err
+	}
+	if time.Now().After(session.ExpiresAt) {
+		_ = s.db.Delete(&Session{}, "id = ?", sessionID).Error
 		return nil, errors.New("session expired")
 	}
 
@@ -305,8 +363,38 @@ func (s *Service) loadSession(r *http.Request) (*models.Session, error) {
 }
 
 // LoadSession exposes session lookup for other modules.
-func (s *Service) LoadSession(r *http.Request) (*models.Session, error) {
+func (s *Service) LoadSession(r *http.Request) (*Session, error) {
 	return s.loadSession(r)
+}
+
+// SessionInfo returns the minimal session snapshot for SSE/auth flows.
+func (s *Service) SessionInfo(r *http.Request) (events.SessionInfo, error) {
+	session, err := s.loadSession(r)
+	if err != nil {
+		return events.SessionInfo{}, err
+	}
+	return events.SessionInfo{
+		ID:      session.ID,
+		UserID:  session.UserID,
+		Subject: session.Subject,
+		Name:    session.Name,
+		Email:   session.Email,
+	}, nil
+}
+
+// PendingSessionInfo returns session details even if the user is pending approval.
+func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error) {
+	session, err := s.loadSessionAllowPending(r)
+	if err != nil {
+		return events.SessionInfo{}, err
+	}
+	return events.SessionInfo{
+		ID:      session.ID,
+		UserID:  session.UserID,
+		Subject: session.Subject,
+		Name:    session.Name,
+		Email:   session.Email,
+	}, nil
 }
 
 func (s *Service) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) error {

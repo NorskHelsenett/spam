@@ -6,8 +6,6 @@ import (
 	"log"
 	"net/http"
 	"time"
-
-	"github.com/NorskHelsenett/spam/internal/models"
 )
 
 type heartbeatPayload struct {
@@ -29,8 +27,16 @@ type readyPayload struct {
 	Email     string `json:"email,omitempty"`
 }
 
+type SessionInfo struct {
+	ID      string
+	UserID  string
+	Subject string
+	Name    string
+	Email   string
+}
+
 // AppStreamHandler streams server-sent events for authenticated app sessions.
-func AppStreamHandler(loadSession func(*http.Request) (*models.Session, error), shutdown <-chan struct{}) http.HandlerFunc {
+func AppStreamHandler(loadSession func(*http.Request) (SessionInfo, error), shutdown <-chan struct{}) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, err := loadSession(r)
 		if err != nil {

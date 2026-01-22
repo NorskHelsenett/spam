@@ -1,0 +1,16 @@
+users:
+  - name: "Alice Admin"
+    email: "alice.admin@test.local"
+    claims:
+      groups: ["soc", "platform", "team-a"]
+      roles: ["admin"]
+  - name: "Bob Viewer"
+    email: "bob.viewer@test.local"
+    claims:
+      groups: ["team-a"]
+      roles: ["viewer"]
+  - name: "Charlie SoC"
+    email: "charlie.soc@test.local"
+    claims:
+      groups: ["soc"]
+      roles: ["viewer"]

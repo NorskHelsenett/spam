@@ -7,6 +7,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
+	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"gorm.io/gorm"
@@ -35,7 +36,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 					authRouter.Get("/me", authService.MeHandler())
 					authRouter.Post("/logout", authService.LogoutHandler())
 				})
-				api.Get("/app/stream", events.AppStreamHandler(authService.LoadSession, shutdown))
+				api.Get("/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
+				api.Get("/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
+				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
+				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
+				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
 			}
 		})
 

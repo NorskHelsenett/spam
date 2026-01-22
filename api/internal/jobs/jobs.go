@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/events"
-	"github.com/NorskHelsenett/spam/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -21,17 +20,38 @@ type CreateJobInput struct {
 }
 
 type JobEventPayload struct {
-	JobID       string           `json:"job_id"`
-	Type        string           `json:"type"`
-	Status      models.JobStatus `json:"status"`
-	Previous    models.JobStatus `json:"previous,omitempty"`
-	Attempts    int              `json:"attempts"`
-	MaxAttempts int              `json:"max_attempts"`
-	RunAt       time.Time        `json:"run_at"`
+	JobID       string    `json:"job_id"`
+	Type        string    `json:"type"`
+	Status      JobStatus `json:"status"`
+	Previous    JobStatus `json:"previous,omitempty"`
+	Attempts    int       `json:"attempts"`
+	MaxAttempts int       `json:"max_attempts"`
+	RunAt       time.Time `json:"run_at"`
 }
 
 // CreateJob inserts a new queued job and emits a JOB_CREATED event.
-func CreateJob(ctx context.Context, db *gorm.DB, input CreateJobInput) (*models.Job, error) {
+func CreateJob(ctx context.Context, db *gorm.DB, input CreateJobInput) (*Job, error) {
+	if input.Type == "" {
+		return nil, errors.New("job type required")
+	}
+
+	var job Job
+	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		created, err := CreateJobTx(ctx, tx, input)
+		if err != nil {
+			return err
+		}
+		job = *created
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &job, nil
+}
+
+// CreateJobTx inserts a job inside an existing transaction.
+func CreateJobTx(ctx context.Context, tx *gorm.DB, input CreateJobInput) (*Job, error) {
 	if input.Type == "" {
 		return nil, errors.New("job type required")
 	}
@@ -51,28 +71,26 @@ func CreateJob(ctx context.Context, db *gorm.DB, input CreateJobInput) (*models.
 		return nil, err
 	}
 
-	job := models.Job{
+	job := Job{
 		ID:          uuid.NewString(),
 		Type:        input.Type,
-		Status:      models.JobStatusQueued,
+		Status:      JobStatusQueued,
 		Payload:     payloadJSON,
 		MaxAttempts: maxAttempts,
 		RunAt:       runAt,
 	}
 
-	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&job).Error; err != nil {
-			return err
-		}
+	if err := tx.WithContext(ctx).Create(&job).Error; err != nil {
+		return nil, err
+	}
 
-		return events.EmitEvent(tx, events.EventJobCreated, "job", job.ID, JobEventPayload{
-			JobID:       job.ID,
-			Type:        job.Type,
-			Status:      job.Status,
-			Attempts:    job.Attempts,
-			MaxAttempts: job.MaxAttempts,
-			RunAt:       job.RunAt,
-		})
+	if err := events.EmitEvent(tx, events.EventJobCreated, "job", job.ID, JobEventPayload{
+		JobID:       job.ID,
+		Type:        job.Type,
+		Status:      job.Status,
+		Attempts:    job.Attempts,
+		MaxAttempts: job.MaxAttempts,
+		RunAt:       job.RunAt,
 	}); err != nil {
 		return nil, err
 	}
@@ -81,8 +99,8 @@ func CreateJob(ctx context.Context, db *gorm.DB, input CreateJobInput) (*models.
 }
 
 // UpdateJobStatus changes a job status and emits a JOB_STATUS_CHANGED event.
-func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status models.JobStatus, result interface{}, errText string, nextRunAt *time.Time) (*models.Job, error) {
-	var updated models.Job
+func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status JobStatus, result interface{}, errText string, nextRunAt *time.Time) (*Job, error) {
+	var updated Job
 
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.First(&updated, "id = ?", jobID).Error; err != nil {
@@ -107,10 +125,10 @@ func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status mode
 			"updated_at":        now,
 		}
 
-		if status == models.JobStatusSucceeded || status == models.JobStatusFailed {
+		if status == JobStatusSucceeded || status == JobStatusFailed {
 			updates["finished_at"] = now
 		}
-		if status == models.JobStatusRetry {
+		if status == JobStatusRetry {
 			if nextRunAt != nil && !nextRunAt.IsZero() {
 				updates["run_at"] = *nextRunAt
 			} else {
@@ -124,10 +142,10 @@ func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status mode
 
 		updated.Status = status
 		updated.Error = errText
-		if status == models.JobStatusSucceeded || status == models.JobStatusFailed {
+		if status == JobStatusSucceeded || status == JobStatusFailed {
 			updated.FinishedAt = &now
 		}
-		if status == models.JobStatusRetry {
+		if status == JobStatusRetry {
 			runAt := now
 			if nextRunAt != nil && !nextRunAt.IsZero() {
 				runAt = *nextRunAt

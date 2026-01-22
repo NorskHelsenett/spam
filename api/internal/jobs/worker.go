@@ -6,20 +6,19 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/events"
-	"github.com/NorskHelsenett/spam/internal/models"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
 // ClaimNextJob selects the next available job and marks it RUNNING.
-func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Time) (*models.Job, error) {
-	var claimed *models.Job
+func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Time) (*Job, error) {
+	var claimed *Job
 
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var job models.Job
+		var job Job
 		if err := tx.
 			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status IN ? AND run_at <= ?", []models.JobStatus{models.JobStatusQueued, models.JobStatusRetry}, now).
+			Where("status IN ? AND run_at <= ?", []JobStatus{JobStatusQueued, JobStatusRetry}, now).
 			Order("run_at asc, created_at asc").
 			First(&job).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -31,7 +30,7 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 		previous := job.Status
 		attemptedAt := now
 		updates := map[string]interface{}{
-			"status":            models.JobStatusRunning,
+			"status":            JobStatusRunning,
 			"locked_at":         attemptedAt,
 			"locked_by":         workerID,
 			"attempts":          job.Attempts + 1,
@@ -43,7 +42,7 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 			return err
 		}
 
-		job.Status = models.JobStatusRunning
+		job.Status = JobStatusRunning
 		job.LockedAt = &attemptedAt
 		job.LockedBy = workerID
 		job.Attempts++
@@ -72,13 +71,13 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 
 // RequeueStaleJobs moves stale RUNNING jobs back to RETRY for safe restarts.
 func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, now time.Time) (int, error) {
-	var jobs []models.Job
+	var jobs []Job
 	updated := 0
 
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status = ? AND locked_at < ?", models.JobStatusRunning, staleBefore).
+			Where("status = ? AND locked_at < ?", JobStatusRunning, staleBefore).
 			Find(&jobs).Error; err != nil {
 			return err
 		}
@@ -87,7 +86,7 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, n
 			job := jobs[i]
 			previous := job.Status
 			updates := map[string]interface{}{
-				"status":     models.JobStatusRetry,
+				"status":     JobStatusRetry,
 				"locked_at":  nil,
 				"locked_by":  "",
 				"run_at":     now,
@@ -98,7 +97,7 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, n
 				return err
 			}
 
-			job.Status = models.JobStatusRetry
+			job.Status = JobStatusRetry
 			job.RunAt = now
 
 			if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{

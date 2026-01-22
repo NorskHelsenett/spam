@@ -21,13 +21,13 @@ Tasks are ordered to minimize refactors and preserve architectural integrity.
 ## Phase 1 – Schema Spine (Highest Priority)
 
 ### 1.1 Core Tables
-- [ ] Create `repo`
-- [ ] Create `repo_commit`
-- [ ] Create `sbom`
-- [ ] Create `sbom_binding`
-- [ ] Create `component`
-- [ ] Create `component_version`
-- [ ] Create `sbom_component`
+- [x] Create `repo`
+- [x] Create `repo_commit`
+- [x] Create `sbom`
+- [x] Create `sbom_binding`
+- [x] Create `component`
+- [x] Create `component_version`
+- [x] Create `sbom_component`
 
 Acceptance:
 - SBOM deduplication enforced by `content_hash`
@@ -37,9 +37,10 @@ Acceptance:
 ---
 
 ### 1.2 Identity and Access
-- [ ] Create `group`
-- [ ] Create `user_group`
+- [x] Create `group`
+- [x] Create `user_group`
 - [ ] Create `access_scope`
+- [x] Require admin approval for new users after the first admin
 
 Acceptance:
 - Access decisions possible without user-specific hacks
@@ -50,10 +51,10 @@ Acceptance:
 ## Phase 2 – Job and Event Backbone
 
 ### 2.1 Job Queue
-- [ ] Create `job` table
-- [ ] Implement job lifecycle:
+- [x] Create `job` table
+- [x] Implement job lifecycle:
       QUEUED → RUNNING → SUCCEEDED / FAILED / RETRY
-- [ ] Implement `FOR UPDATE SKIP LOCKED` worker logic
+- [x] Implement `FOR UPDATE SKIP LOCKED` worker logic
 
 Acceptance:
 - Jobs restart safely
@@ -62,8 +63,8 @@ Acceptance:
 ---
 
 ### 2.2 Outbox Events
-- [ ] Create `outbox_event` table
-- [ ] Emit events for:
+- [x] Create `outbox_event` table
+- [x] Emit events for:
       - JOB_CREATED
       - JOB_STATUS_CHANGED
       - SBOM_BOUND
@@ -78,12 +79,12 @@ Acceptance:
 ## Phase 3 – Manual SBOM Upload (First Value)
 
 ### 3.1 Upload API
-- [ ] Upload CycloneDX JSON
-- [ ] Upload SPDX JSON
-- [ ] Compute `content_hash`
-- [ ] Store SBOM (bytea initially acceptable)
-- [ ] Create sbom + binding
-- [ ] Enqueue PARSE_SBOM job
+- [x] Upload CycloneDX JSON
+- [x] Upload SPDX JSON
+- [x] Compute `content_hash`
+- [x] Store SBOM (bytea initially acceptable)
+- [x] Create sbom + binding
+- [x] Enqueue PARSE_SBOM job
 
 Acceptance:
 - Same SBOM uploaded twice is deduplicated

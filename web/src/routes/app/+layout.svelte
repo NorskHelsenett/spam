@@ -62,6 +62,9 @@
 					return;
 				}
 
+				const data = await response.json();
+				isAdmin = data?.role === 'admin';
+
 				if (!cancelled) {
 					startAppStream();
 				}
@@ -83,10 +86,11 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, BellRing, Boxes, CircleUserRound } from 'lucide-svelte';
+import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
-	let accountDialogOpen = $state(false);
+let accountDialogOpen = $state(false);
+let isAdmin = $state(false);
 
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
@@ -213,6 +217,23 @@
 					<span class="font-medium">{link.label}</span>
 				</a>
 			{/each}
+			{#if isAdmin}
+				<a
+					href="/app/users"
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+						isActive('/app/users')
+							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
+							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
+					}`}
+					data-sveltekit-preload-data="hover"
+					aria-current={isActive('/app/users') ? 'page' : undefined}
+				>
+					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
+						<UsersRound size={18} stroke-width={1.7} />
+					</span>
+					<span class="font-medium">Users</span>
+				</a>
+			{/if}
 		</nav>
 
 		<div class="mt-auto flex flex-col gap-2 pt-6">
