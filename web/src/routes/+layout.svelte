@@ -52,7 +52,7 @@
 	<div class="fixed left-0 right-0 top-0 z-50 h-1 w-full" style="background-color: var(--main-content-bg);"></div>
 
 	<div class="flex h-screen max-h-screen overflow-hidden text-[var(--text-primary)]">
-		<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto px-6 py-10 md:flex">
+		<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 
 
 			<div class="mt-10 space-y-3">
@@ -101,8 +101,8 @@
 		</aside>
 
 		<div class="flex h-full flex-1 flex-col">
-			<main class="flex-1 overflow-y-auto px-4 pb-10 pt-12 sm:px-8">
-				<div class="mx-auto w-full max-w-[1900px] space-y-10 rounded-2xl bg-[var(--main-content-bg)]/96 p-6 shadow-[0_24px_60px_rgba(0,0,0,0.35)] backdrop-blur-sm sm:p-10">
+			<main class="flex-1 overflow-y-auto bg-[var(--main-content-bg)] px-4 pb-10 pt-12 sm:px-8">
+				<div class="mx-auto w-full max-w-[1900px] space-y-10 p-6 sm:p-10">
 					{@render children?.()}
 				</div>
 			</main>
