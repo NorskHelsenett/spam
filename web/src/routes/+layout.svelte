@@ -4,6 +4,10 @@
 	import './layout.css';
 	import favicon from '$lib/assets/favicon.svg';
 	import { page } from '$app/stores';
+	import { browser } from '$app/environment';
+	import { onMount } from 'svelte';
+	import { Sun, Moon } from 'lucide-svelte';
+	import { writable, get } from 'svelte/store';
 
 	const navLinks = [
 		{ href: '/', label: 'Overview', icon: 'overview' },
@@ -25,11 +29,88 @@
 			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
 		newAgent:
 			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 1a2 2 0 0 0-2 2c0 .74.4 1.39 1 1.73V7H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V10a3 3 0 0 0-3-3h-4V4.73A2 2 0 0 0 14 3a2 2 0 0 0-2-2Zm-7 9a1 1 0 0 1 1-1h1.38l1.45 2.89A2 2 0 0 0 10.38 13H13.6a2 2 0 0 0 1.8-1.11L16.85 9H18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1Zm6.38 2-1-2H14.6l-1 2Z"/></svg>',
-		theme:
-			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M21.752 15.002a9 9 0 0 1-13.5 7.794.75.75 0 0 1 .135-1.34 4 4 0 0 0 2.366-3.656v-.8a.75.75 0 0 1 .478-.697 5.5 5.5 0 1 0-3.391-5.105.75.75 0 0 1-.724.75H4.25a.75.75 0 0 1-.743-.842 9 9 0 0 1 17.51 3.896.77.77 0 0 1-.05.4"/></svg>',
 		account:
 			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm-4.52 1.2a4 4 0 0 0-3.46 3.97V18a3 3 0 0 0 3 3h9a3 3 0 0 0 3-3v-.83a4 4 0 0 0-3.46-3.97 7 7 0 0 1-8.08 0Z"/></svg>'
 	} as const;
+
+	type ExtendedMediaQueryList = MediaQueryList & {
+		addListener?: (listener: (this: MediaQueryList, ev: MediaQueryListEvent) => void) => void;
+		removeListener?: (listener: (this: MediaQueryList, ev: MediaQueryListEvent) => void) => void;
+	};
+
+	const THEME_STORAGE_KEY = 'spam-monitor-theme';
+	const theme = writable<'light' | 'dark'>('dark');
+	let explicitPreference: 'light' | 'dark' | null = null;
+	let systemTheme: 'light' | 'dark' = 'dark';
+	let mediaQuery: ExtendedMediaQueryList | null = null;
+
+	const applyTheme = (value: 'light' | 'dark') => {
+		if (browser) {
+			const root = document.documentElement;
+			root.classList.remove('light', 'dark');
+			root.classList.add(value);
+		}
+		theme.set(value);
+	};
+
+	const toggleTheme = () => {
+		const nextTheme: 'light' | 'dark' = get(theme) === 'dark' ? 'light' : 'dark';
+		applyTheme(nextTheme);
+
+		if (!browser) {
+			return;
+		}
+
+		if (nextTheme === systemTheme) {
+			localStorage.removeItem(THEME_STORAGE_KEY);
+			explicitPreference = null;
+		} else {
+			localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+			explicitPreference = nextTheme;
+		}
+	};
+
+	onMount(() => {
+		if (!browser) {
+			return;
+		}
+
+		const stored = localStorage.getItem(THEME_STORAGE_KEY);
+		if (stored === 'light' || stored === 'dark') {
+			explicitPreference = stored;
+		} else {
+			explicitPreference = null;
+		}
+
+		mediaQuery = window.matchMedia('(prefers-color-scheme: dark)') as ExtendedMediaQueryList;
+		systemTheme = mediaQuery.matches ? 'dark' : 'light';
+		const initialTheme = explicitPreference ?? systemTheme;
+		applyTheme(initialTheme);
+
+		const handleSystemChange = (event: MediaQueryListEvent) => {
+			systemTheme = event.matches ? 'dark' : 'light';
+			if (!explicitPreference) {
+				applyTheme(systemTheme);
+			}
+		};
+
+		if (typeof mediaQuery.addEventListener === 'function') {
+			mediaQuery.addEventListener('change', handleSystemChange);
+		} else if (typeof mediaQuery.addListener === 'function') {
+			mediaQuery.addListener(handleSystemChange);
+		}
+
+		return () => {
+			if (!mediaQuery) {
+				return;
+			}
+			if (typeof mediaQuery.removeEventListener === 'function') {
+				mediaQuery.removeEventListener('change', handleSystemChange);
+			} else if (typeof mediaQuery.removeListener === 'function') {
+				mediaQuery.removeListener(handleSystemChange);
+			}
+		};
+	});
 
 	let { children } = $props();
 	const pageStore = page;
@@ -89,9 +170,21 @@
 			</nav>
 
 			<div class="mt-auto flex flex-col gap-3 pt-6">
-				<button type="button" class="group flex items-center gap-3 rounded-full border border-transparent py-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-					<span class="flex h-9 w-9 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">{@html utilityIcons.theme}</span>
-					<span class="font-medium">Theme</span>
+				<button
+					type="button"
+					onclick={toggleTheme}
+					class="group flex items-center gap-3 rounded-full border border-transparent py-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+					aria-label={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
+					title={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
+				>
+					<span class="flex h-9 w-9 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
+						{#if $theme === 'dark'}
+							<Moon size={18} />
+						{:else}
+							<Sun size={18} />
+						{/if}
+					</span>
+					<span class="font-medium">Theme: {$theme === 'dark' ? 'Dark' : 'Light'}</span>
 				</button>
 				<button type="button" class="group flex items-center gap-3 rounded-full border border-transparent py-3 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
 					<span class="flex h-9 w-9 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">{@html utilityIcons.account}</span>

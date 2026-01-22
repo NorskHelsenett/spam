@@ -61,7 +61,7 @@
 
     /* Base colors */
     --main-content-bg: #fbf1c7;
-    --sidebar-bg: transparent
+    --sidebar-bg: transparent;
     --card-bg: #f9f5d7;
     --hover-bg: #ebdbb2;
     --hover-bg-subtle: rgba(235, 219, 178, 0.5);
@@ -118,7 +118,7 @@
   }
 
   section {
-    @apply border border-[var(--border-color)] bg-[var(--card-bg)]/85 px-6 py-8 shadow-2xl;
+    @apply border border-[var(--border-color)] bg-[var(--card-bg)]/85 px-6 py-8 shadow-xl;
   }
 }
 
