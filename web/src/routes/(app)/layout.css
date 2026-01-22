@@ -34,11 +34,11 @@
   }
 
   .light .panel-surface {
-    box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1);
+    /* box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1); */
   }
 
   .light .metric-card {
-    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12);
+    /* box-shadow: 0 18px 40px rgba(0, 0, 0, 0.12); */
   }
 
   @media (max-width: 768px) {
