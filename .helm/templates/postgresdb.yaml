@@ -38,15 +38,13 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgresql.auth.existingSecret | default (printf "%s-postgresql" .Release.Name) }}
-                  key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | default "password" }}
-            {{- if or .Values.postgresql.auth.postgresPassword .Values.postgresql.auth.existingSecret }}
+                  name: {{ .Release.Name }}-postgresql
+                  key: password
             - name: POSTGRES_POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgresql.auth.existingSecret | default (printf "%s-postgresql" .Release.Name) }}
-                  key: {{ .Values.postgresql.auth.secretKeys.adminPasswordKey | default "postgres-password" }}
-            {{- end }}
+                  name: {{ .Release.Name }}-postgresql
+                  key: postgres-password
           {{- with .Values.postgresql.primary.resources }}
           resources:
             {{- toYaml . | nindent 12 }}

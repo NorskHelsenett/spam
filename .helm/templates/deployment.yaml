@@ -39,158 +39,9 @@ spec:
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if or .Values.initContainers (eq (.Values.enableArtifactDownload | default false) true) }}
+      {{- with .Values.initContainers }}
       initContainers:
-        {{- with .Values.initContainers }}
         {{- toYaml . | nindent 8 }}
-        {{- end }}
-        {{- if .Values.enableArtifactDownload | default false }}
-        - name: download-artifacts
-          image: alpine:latest
-          imagePullPolicy: IfNotPresent
-          command:
-            - sh
-            - -c
-            - |
-              set -eu
-              if ! set -o pipefail 2>/dev/null; then
-                echo "pipefail not supported by this shell; continuing without it" >&2
-              fi
-              echo "Preparing init container environment..."
-              apk add --no-cache ca-certificates unzip >/dev/null
-              update-ca-certificates >/dev/null 2>&1 || true
-              echo "Downloading agent releases to $AGENT_ARTIFACT_DIR from $AGENT_RELEASE_BASE_URL..."
-              mkdir -p "$AGENT_ARTIFACT_DIR"
-              artifacts="
-                agent-darwin-amd64.tar.gz
-                agent-darwin-arm64.tar.gz
-                agent-linux-amd64.tar.gz
-                agent-linux-amd64-cuda.tar.gz
-                agent-linux-arm64.tar.gz
-                agent-linux-armv7.tar.gz
-              "
-
-              # Download artifacts and their checksums
-              echo "Downloading artifacts..."
-              for file in $artifacts; do
-                echo "  Downloading $file..."
-                wget -q -O "$AGENT_ARTIFACT_DIR/$file" "$AGENT_RELEASE_BASE_URL$file"
-
-                echo "  Downloading $file.sha256..."
-                if wget -q -O "$AGENT_ARTIFACT_DIR/$file.sha256" "$AGENT_RELEASE_BASE_URL$file.sha256"; then
-                  echo "  ✓ Checksum file downloaded"
-                else
-                  echo "  ⚠ Warning: No checksum file available for $file" >&2
-                fi
-              done
-
-              # Verify checksums
-              echo "Verifying checksums..."
-              VERIFY_FAILED=0
-              for file in $artifacts; do
-                if [ -f "$AGENT_ARTIFACT_DIR/$file.sha256" ]; then
-                  echo "  Verifying $file..."
-                  cd "$AGENT_ARTIFACT_DIR"
-
-                  # Read expected checksum (first field of .sha256 file)
-                  EXPECTED=$(cat "$file.sha256" | awk '{print $1}')
-
-                  # Compute actual checksum
-                  ACTUAL=$(sha256sum "$file" | awk '{print $1}')
-
-                  if [ "$EXPECTED" = "$ACTUAL" ]; then
-                    echo "  ✓ Checksum verified: $file"
-                  else
-                    echo "  ✗ CHECKSUM MISMATCH: $file" >&2
-                    echo "    Expected: $EXPECTED" >&2
-                    echo "    Got:      $ACTUAL" >&2
-                    VERIFY_FAILED=1
-                  fi
-
-                  cd - >/dev/null
-                else
-                  echo "  ⚠ Skipping verification for $file (no checksum)" >&2
-                fi
-              done
-
-              if [ $VERIFY_FAILED -eq 1 ]; then
-                echo ""
-                echo "ERROR: One or more artifacts failed checksum verification!" >&2
-                echo "This could indicate a compromised download or MITM attack." >&2
-                echo "Refusing to extract artifacts for security reasons." >&2
-                exit 1
-              fi
-
-              echo "All checksums verified successfully!"
-              echo ""
-              echo "Extracting artifacts..."
-              for tarfile in "$AGENT_ARTIFACT_DIR"/*.tar.gz; do
-                [ -e "$tarfile" ] || continue
-                base="$(basename "$tarfile" .tar.gz)"
-                echo "Extracting $tarfile -> $base"
-                workdir="$(mktemp -d)"
-                tar -xzf "$tarfile" -C "$workdir"
-                if [ -f "$workdir/agent" ]; then
-                  mv "$workdir/agent" "$AGENT_ARTIFACT_DIR/$base"
-                  chmod 0755 "$AGENT_ARTIFACT_DIR/$base"
-                else
-                  echo "Warning: expected agent binary missing from $tarfile" >&2
-                fi
-                rm -rf "$workdir"
-                rm -f "$tarfile"
-                rm -f "$AGENT_ARTIFACT_DIR/$(basename "$tarfile").sha256"
-              done
-
-              for zipfile in "$AGENT_ARTIFACT_DIR"/*.zip; do
-                [ -e "$zipfile" ] || continue
-                base="$(basename "$zipfile" .zip)"
-                echo "Unzipping $zipfile -> ${base}.exe"
-                workdir="$(mktemp -d)"
-                unzip -qo "$zipfile" -d "$workdir"
-                if [ -f "$workdir/agent.exe" ]; then
-                  mv "$workdir/agent.exe" "$AGENT_ARTIFACT_DIR/${base}.exe"
-                  chmod 0755 "$AGENT_ARTIFACT_DIR/${base}.exe"
-                else
-                  echo "Warning: expected agent.exe missing from $zipfile" >&2
-                fi
-                rm -rf "$workdir"
-                rm -f "$zipfile"
-                rm -f "$AGENT_ARTIFACT_DIR/$(basename "$zipfile").sha256"
-              done
-              echo "Raw binaries ready for serving:"
-              ls -lah "$AGENT_ARTIFACT_DIR"
-          volumeMounts:
-            - name: agent-artifacts
-              mountPath: /var/opt/agents
-          {{- if .Values.environments }}
-          env:
-            {{- toYaml .Values.environments | nindent 12 }}
-            {{- if .Values.postgresql.enabled }}
-            - name: POSTGRES_HOST
-              value: "{{ .Release.Name }}-postgresql"
-            - name: POSTGRES_PORT
-              value: "5432"
-            - name: POSTGRES_USER
-              value: {{ .Values.postgresql.auth.username | quote }}
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.postgresql.auth.existingSecret | default (printf "%s-postgresql" .Release.Name) }}
-                  key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | default "password" }}
-            - name: POSTGRES_DB
-              value: {{ .Values.postgresql.auth.database | quote }}
-            - name: POSTGRES_SSLMODE
-              value: {{ .Values.postgresqlConnection.sslmode | quote }}
-            {{- else if .Values.postgresqlConnection.host }}
-            - name: POSTGRES_HOST
-              value: {{ .Values.postgresqlConnection.host | quote }}
-            - name: POSTGRES_PORT
-              value: {{ .Values.postgresqlConnection.port | quote }}
-            - name: POSTGRES_SSLMODE
-              value: {{ .Values.postgresqlConnection.sslmode | quote }}
-            {{- end }}
-          {{- end }}
-        {{- end }}
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -242,15 +93,15 @@ spec:
               value: "{{ .Release.Name }}-postgresql"
             - name: POSTGRES_PORT
               value: "5432"
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
             - name: POSTGRES_USER
               value: {{ .Values.postgresql.auth.username | quote }}
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.postgresql.auth.existingSecret | default (printf "%s-postgresql" .Release.Name) }}
-                  key: {{ .Values.postgresql.auth.secretKeys.userPasswordKey | default "password" }}
-            - name: POSTGRES_DB
-              value: {{ .Values.postgresql.auth.database | quote }}
+                  name: {{ .Release.Name }}-postgresql
+                  key: password
             - name: POSTGRES_SSLMODE
               value: {{ .Values.postgresqlConnection.sslmode | quote }}
             {{- else if .Values.postgresqlConnection.host }}

@@ -22,42 +22,56 @@ image:
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
 
-# Set to true to enable initContainer for downloading agent artifacts
-# Requires AGENT_VERSION and AGENT_RELEASE_BASE_URL to be set in environments
-enableArtifactDownload: false  
+# Additional environment variables for the application
+# These override defaults; most required vars come from appSecret
+environments: []
+  # Optional environment variables (all have defaults):
+  # - name: "HTTP_PORT"
+  #   value: "8080"
+  # - name: "SESSION_TTL"
+  #   value: "8h"
+  # - name: "COOKIE_SECURE"
+  #   value: "true"
+  # - name: "SESSION_COOKIE_NAME"
+  #   value: "spam_session"
+  # - name: "AUTH_STATE_COOKIE_NAME"
+  #   value: "spam_oidc"
 
-environments:
-  - name: "AGENT_ARTIFACT_DIR"
-    value: "/var/opt/agents"
-  - name: "DB_DIR"
-    value: "/data"
-  # Agent release configuration: choose one of three modes:
-  # Mode 1 (Recommended): Auto-fetch latest release
-  - name: "AGENT_RELEASE_REPO_URL"
-    value: "https://git.torden.tech/jonasbg/spam"  # Auto-discovers latest release
-  - name: "AGENT_RELEASE_CACHE_TTL"
-    value: "5m"  # How often to check for new releases (e.g., 5m, 1h, 30m)
-  # Mode 2 (Pinned): Pin to specific version with auto-constructed download URL
-  # Uncomment AGENT_VERSION to pin to a specific release while keeping AGENT_RELEASE_REPO_URL
-  # - name: "AGENT_VERSION"
-  #   value: "v0.12.0"  # With AGENT_RELEASE_REPO_URL set, this pins to a specific version
-  # Mode 3 (Manual): Explicitly set both version and download URL (comment out AGENT_RELEASE_REPO_URL)
-  # - name: "AGENT_VERSION"
-  #   value: "v0.12.1"
-  # - name: "AGENT_RELEASE_BASE_URL"
-  #   value: "https://git.torden.tech/jonasbg/spam/releases/download/v0.12.1/"
-  - name: "METRICS_RETENTION_DAYS"
-    value: "30"  # Days to retain metrics data (0=default 365, negative=forever)
-  - name: "VAPID_SUBSCRIBER"
-    value: "mailto:admin@example.com"  # Email or URL for VAPID identification (required for Safari/APNs push notifications)
-
-# Application secret configuration
-# Provide app secrets here; values can be explicit or auto-generated when empty
+# Application secrets configuration (OIDC and session keys)
+# These secrets are required for the application to run
 appSecret:
+  # Set to true to create the secret automatically
   enabled: true
-  existingSecret: ""  # Use an existing secret instead of creating one
-  data:
-    AGENT_SESSION_HMAC_KEY: ""  # Leave empty to auto-generate a random key
+  
+  # Use an existing secret instead of creating one (optional)
+  # If set, the chart will NOT create a new secret and will use the specified one
+  existingSecret: ""  # e.g., "spam-app-secret"
+  
+  # OIDC Configuration (required for authentication)
+  oidc:
+    issuerUrl: ""      # OIDC provider URL (e.g., "https://auth.example.com")
+    clientId: ""       # OIDC client ID
+    clientSecret: ""   # OIDC client secret
+    redirectUrl: ""    # Callback URL (e.g., "https://spam.example.com/api/auth/callback")
+    scopes: "openid profile email"  # OAuth scopes
+  
+  # Session cookie keys (auto-generated if empty)
+  # These are base64-encoded random keys for securing session cookies
+  session:
+    cookieHashKey: ""   # HMAC key for cookie signing (≥32 bytes, auto-generated)
+    cookieBlockKey: ""  # AES key for cookie encryption (16/24/32 bytes, auto-generated)
+
+# To manually create the secret, use:
+#   kubectl create secret generic spam-app-secret \
+#     --from-literal=OIDC_ISSUER_URL='https://auth.example.com' \
+#     --from-literal=OIDC_CLIENT_ID='your-client-id' \
+#     --from-literal=OIDC_CLIENT_SECRET='your-client-secret' \
+#     --from-literal=OIDC_REDIRECT_URL='https://spam.example.com/api/auth/callback' \
+#     --from-literal=OIDC_SCOPES='openid profile email' \
+#     --from-literal=SESSION_COOKIE_HASH_KEY='$(openssl rand -base64 32)' \
+#     --from-literal=SESSION_COOKIE_BLOCK_KEY='$(openssl rand -base64 32)' \
+#     --namespace spam
+# Then set appSecret.existingSecret="spam-app-secret" above
 
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
@@ -162,20 +176,9 @@ postgresql:
   # Authentication configuration
   auth:
     username: spam
-    password: ""  # Leave empty to auto-generate a strong password
     database: spam
-    postgresPassword: ""  # Leave empty to auto-generate postgres user password
-
-    # Optional: Use existing secret for credentials (recommended for production)
-    # If set, the chart will NOT create a new secret and will use the specified one instead
-    # This prevents overwriting existing secrets in the cluster
-    existingSecret: ""  # e.g., "spam-postgresql" to use your existing secret
-
-    # Secret key names (only used when existingSecret is set)
-    # These define which keys in the existing secret contain the passwords
-    secretKeys:
-      userPasswordKey: password           # Key containing the user password
-      adminPasswordKey: postgres-password  # Key containing the postgres admin password
+    password: ""  # Leave empty to auto-generate a strong password
+    postgresPassword: ""  # Leave empty to auto-generate postgres admin password
 
   # Primary instance configuration
   primary:
