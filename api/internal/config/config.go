@@ -64,19 +64,19 @@ func Load() (Config, error) {
 }
 
 func buildDSNFromPGEnv() (string, error) {
-	host := strings.TrimSpace(os.Getenv("PGHOST"))
-	user := strings.TrimSpace(os.Getenv("PGUSER"))
-	name := strings.TrimSpace(os.Getenv("PGDATABASE"))
+	host := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
+	user := strings.TrimSpace(os.Getenv("POSTGRES_USER"))
+	name := strings.TrimSpace(os.Getenv("POSTGRES_DB"))
 
 	if host == "" || user == "" || name == "" {
-		return "", errors.New("database configuration missing: set DATABASE_URL or PGHOST, PGUSER, and PGDATABASE")
+		return "", errors.New("database configuration missing: set DATABASE_URL or POSTGRES_HOST, POSTGRES_USER, and POSTGRES_DB")
 	}
 
-	port := getEnv("PGPORT", "5432")
-	password := strings.TrimSpace(os.Getenv("PGPASSWORD"))
-	sslMode := getEnv("PGSSLMODE", "disable")
-	timeZone := getEnv("PGTZ", "UTC")
-	clientEncoding := getEnv("PGCLIENTENCODING", "UTF8")
+	port := getEnv("POSTGRES_PORT", "5432")
+	password := strings.TrimSpace(os.Getenv("POSTGRES_PASSWORD"))
+	sslMode := getEnv("POSTGRES_SSLMODE", "disable")
+	timeZone := getEnv("POSTGRES_TZ", "UTC")
+	clientEncoding := getEnv("POSTGRES_CLIENT_ENCODING", "UTF8")
 
 	return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s TimeZone=%s client_encoding=%s",
 		host, port, user, password, name, sslMode, timeZone,
