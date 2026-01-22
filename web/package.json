@@ -37,6 +37,7 @@
 		"vite": "^7.2.6"
 	},
 	"dependencies": {
-		"@fontsource/inter": "^5.2.8"
+		"@fontsource/inter": "^5.2.8",
+		"lucide-svelte": "^0.562.0"
 	}
 }
