@@ -65,7 +65,7 @@
 		>
 			{#if showCloseButton}
 				<!-- Close Button Sidebar -->
-				<div class="flex shrink-0 select-none flex-row flex-wrap overflow-x-auto bg-[var(--card-bg)]/40 p-1.5 md:min-w-[180px] md:max-w-[210px] md:flex-col md:p-0">
+				<div class="flex shrink-0 select-none flex-row flex-wrap overflow-x-auto p-1.5 md:min-w-[180px] md:max-w-[210px] md:flex-col md:p-0">
 					<div class="hidden py-3 ps-2.5 md:block">
 						<button 
 							type="button"

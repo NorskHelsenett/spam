@@ -40,6 +40,12 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		CreatedByUserID: input.CreatedByUserID,
 	}
 
+	if err := db.WithContext(ctx).Where("provider = ? AND org = ? AND slug = ?", provider, input.Org, input.Slug).First(&repo).Error; err == nil {
+		return &repo, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
 	result := db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "provider"}, {Name: "org"}, {Name: "slug"}},
 		DoNothing: true,
@@ -66,6 +72,12 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 		RepoID:    input.RepoID,
 		CommitSHA: input.CommitSHA,
 		Ref:       input.Ref,
+	}
+
+	if err := db.WithContext(ctx).Where("repo_id = ? AND commit_sha = ?", input.RepoID, input.CommitSHA).First(&commit).Error; err == nil {
+		return &commit, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, err
 	}
 
 	result := db.WithContext(ctx).Clauses(clause.OnConflict{

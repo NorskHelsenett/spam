@@ -32,6 +32,13 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 		return nil, errors.New("content hash required")
 	}
 
+	var existing SBOM
+	if err := db.WithContext(ctx).Where("content_hash = ?", input.ContentHash).First(&existing).Error; err == nil {
+		return &existing, nil
+	} else if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
 	sbom := SBOM{
 		ID:               uuid.NewString(),
 		Format:           input.Format,

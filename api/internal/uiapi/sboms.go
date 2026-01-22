@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 
@@ -21,6 +22,11 @@ const (
 	maxSBOMUploadBytes  = 25 << 20
 	assetTypeRepoCommit = "REPO_COMMIT"
 	sbomSourceUpload    = "UPLOAD"
+)
+
+var (
+	errRepoNotFound = errors.New("repo not found")
+	errBadRequest   = errors.New("repo_id or org/slug required")
 )
 
 type sbomUploadResponse struct {
@@ -174,10 +180,16 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return nil
 		})
 		if err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
+			if errors.Is(err, errRepoNotFound) {
 				http.Error(w, "repo not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, errBadRequest) {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			log.Printf("SBOM upload failed (repo_id=%q provider=%q org=%q slug=%q): %v", repoID, provider, org, slug, err)
+			log.Printf("SBOM upload failed: %v", err)
 			http.Error(w, "sbom upload failed", http.StatusInternalServerError)
 			return
 		}
@@ -187,20 +199,25 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 }
 
 func resolveRepo(ctx context.Context, tx *gorm.DB, repoID, provider, org, slug, createdBy string) (*assets.Repo, error) {
+	if org != "" && slug != "" {
+		var repo assets.Repo
+		if err := tx.WithContext(ctx).First(&repo, "org = ? AND slug = ? AND provider = ?", org, slug, provider).Error; err == nil {
+			return &repo, nil
+		}
+	}
+
 	if repoID != "" {
 		var repo assets.Repo
 		if err := tx.WithContext(ctx).First(&repo, "id = ?", repoID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, errRepoNotFound
+			}
 			return nil, err
 		}
 		return &repo, nil
 	}
 
-	return assets.UpsertRepo(ctx, tx, assets.RepoInput{
-		Provider:        provider,
-		Org:             org,
-		Slug:            slug,
-		CreatedByUserID: createdBy,
-	})
+	return nil, errBadRequest
 }
 
 func detectSBOMFormat(payload []byte) string {
