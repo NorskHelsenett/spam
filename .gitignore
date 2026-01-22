@@ -1,0 +1,8 @@
+**/__debug_bin*
+agent/bin/**
+agent/tstat
+server/server
+**/metrics.db*
+api/server
+**/.gocache/*
+.env

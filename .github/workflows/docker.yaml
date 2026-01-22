@@ -1,0 +1,149 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches: [ "*" ]
+    paths:
+      - 'web/**'
+      - 'api/**'
+      - '.helm/**'
+      - '.github/workflows/docker.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Derive registry host
+        # Extract plain host (strip scheme) from Gitea server URL and export to environment
+        run: |
+          set -e
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+
+      - name: Docker Metadata action
+        uses: docker/metadata-action@v4.3.0
+        id: meta
+        with:
+          images: ${{ env.REGISTRY_HOST }}/${{ github.repository }}
+          tags: |
+              type=ref,event=branch
+              type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+              type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Enable docker layer caching
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        id: build-docker-image
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ github.repository }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ github.repository }}:buildcache,mode=max
+
+      - name: Install Helm
+        if: ${{ github.ref == 'refs/heads/main' }}
+        uses: azure/setup-helm@v3
+
+      - name: Login to OCI Registry for Helm
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          echo "${{ secrets.REGISTRY_ACCESS_TOKEN }}" | helm registry login ${{ env.REGISTRY_HOST }} -u "${{ github.actor }}" --password-stdin
+
+      # Push Helm chart to GitHub Container Registry
+      - name: Push Helm chart
+        if: ${{ github.ref == 'refs/heads/main' }}
+        run: |
+          # Query the latest published chart to derive current version (ignore errors if first publish)
+          set -euo pipefail
+          repo_path=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          chart_name=$(awk -F': ' '/^name:/ {print $2; exit}' .helm/Chart.yaml)
+          chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path"
+          chart_ref="${chart_repo}/${chart_name}"
+          
+          # Get version from Chart.yaml
+          CHART_YAML_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' .helm/Chart.yaml | tr -d ' ')
+          
+          tmp_chart_metadata=$(mktemp)
+          if helm show chart "$chart_ref" > "$tmp_chart_metadata" 2>/dev/null; then
+            PUBLISHED_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' "$tmp_chart_metadata" | tr -d ' ')
+          else
+            echo "No existing chart found for $chart_ref, starting at 0.0.0"
+            PUBLISHED_VERSION="0.0.0"
+          fi
+          rm -f "$tmp_chart_metadata"
+          
+          # Function to compare semantic versions
+          version_gt() {
+            test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
+          }
+          
+          # Determine which version to use
+          if version_gt "$CHART_YAML_VERSION" "$PUBLISHED_VERSION"; then
+            NEW_VERSION="$CHART_YAML_VERSION"
+            echo "Using Chart.yaml version $NEW_VERSION (higher than published $PUBLISHED_VERSION)"
+          else
+            # Increment published version
+            IFS='.' read -r major minor patch <<< "$PUBLISHED_VERSION"
+            NEW_VERSION="$major.$minor.$((patch+1))"
+            echo "Bumping chart version: $PUBLISHED_VERSION -> $NEW_VERSION"
+            # Update version line in Chart.yaml
+            sed -i -E "s/^version: .*/version: $NEW_VERSION/" .helm/Chart.yaml
+          fi
+          
+          echo "Final version: $NEW_VERSION"
+          
+          # Inject image digest (append to 'latest' so tag matches chart values expectation)
+          DIGEST=${{ steps.build-docker-image.outputs.digest }}
+          IMAGE_TAG="latest@${DIGEST}"
+          echo "Injecting image tag with digest: $IMAGE_TAG"
+          python3 - <<EOF
+          import pathlib
+
+          image_tag = "${IMAGE_TAG}"
+          path = pathlib.Path(".helm/values.yaml")
+          lines = path.read_text().splitlines()
+          for idx, line in enumerate(lines):
+              stripped = line.lstrip()
+              if stripped.startswith("tag:"):
+                  indent = line[:len(line) - len(stripped)]
+                  lines[idx] = f'{indent}tag: "{image_tag}"'
+                  break
+          path.write_text("\n".join(lines) + ("\n" if lines else ""))
+          EOF
+          
+          # Add required Helm repositories for dependencies
+          echo "Adding Helm repositories..."
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo update
+          
+          # Package and push (already logged in earlier step)
+          (cd .helm && helm dependency build && helm package .)
+          helm push ".helm/${chart_name}-${NEW_VERSION}.tgz" "$chart_repo"
