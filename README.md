@@ -9,3 +9,6 @@ A comprehensive and secure dashboard for managing all your third party component
 - Kubernetes helm charts
 - CVE database and alerts
 - Plug and play git repo ingestion using OIDC login features and not API tokens
+
+
+Architecture Decision Record
