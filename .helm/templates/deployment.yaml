@@ -80,7 +80,7 @@ spec:
           {{- if .Values.appSecret.enabled }}
           envFrom:
             - secretRef:
-                name: {{ .Values.appSecret.existingSecret | default (printf "%s-app" .Release.Name) }}
+                name: {{ .Values.appSecret.existingSecret | default (printf "%s-app-secret" .Release.Name) }}
           {{- end }}
           env:
             - name: HEALTH_PORT

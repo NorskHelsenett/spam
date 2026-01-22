@@ -41,7 +41,7 @@ environments: []
 # These secrets are required for the application to run
 appSecret:
   # Set to true to create the secret automatically
-  enabled: true
+  enabled: false
   
   # Use an existing secret instead of creating one (optional)
   # If set, the chart will NOT create a new secret and will use the specified one
