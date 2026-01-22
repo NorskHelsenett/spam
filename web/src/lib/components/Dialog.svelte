@@ -50,7 +50,7 @@
 {#if open}
 	<!-- Backdrop -->
 	<div 
-		class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm"
+		class="fixed inset-0 z-50 bg-black/25 backdrop-blur-[1px]"
 		onclick={handleBackdropClick}
 		role="presentation"
 	>
