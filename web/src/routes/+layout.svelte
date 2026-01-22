@@ -26,10 +26,6 @@
 	};
 
 	const utilityIcons = {
-		search:
-			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
-		newAgent:
-			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 1a2 2 0 0 0-2 2c0 .74.4 1.39 1 1.73V7H7a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V10a3 3 0 0 0-3-3h-4V4.73A2 2 0 0 0 14 3a2 2 0 0 0-2-2Zm-7 9a1 1 0 0 1 1-1h1.38l1.45 2.89A2 2 0 0 0 10.38 13H13.6a2 2 0 0 0 1.8-1.11L16.85 9H18a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1Zm6.38 2-1-2H14.6l-1 2Z"/></svg>',
 		account:
 			'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm-4.52 1.2a4 4 0 0 0-3.46 3.97V18a3 3 0 0 0 3 3h9a3 3 0 0 0 3-3v-.83a4 4 0 0 0-3.46-3.97 7 7 0 0 1-8.08 0Z"/></svg>'
 	} as const;
@@ -135,22 +131,7 @@
 
 <div class="flex h-screen max-h-screen overflow-hidden text-[var(--text-primary)]">
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
-		<div class="mt-10 space-y-2">
-			<button type="button" class="group flex w-full items-center gap-2 rounded-full border border-transparent bg-[var(--card-bg)]/70 px-4 py-2 text-left text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-				<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">{@html utilityIcons.search}</span>
-				<span class="flex-1 font-medium">Search...</span>
-				<span class="hidden items-center gap-1 text-xs text-[var(--text-muted)] md:flex">
-					<kbd class="kbd">Ctrl</kbd>
-					<kbd class="kbd">K</kbd>
-				</span>
-			</button>
-			<button type="button" class="group flex w-full items-center gap-2 rounded-full border border-transparent bg-[var(--card-bg)]/70 px-4 py-2 text-left text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-				<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">{@html utilityIcons.newAgent}</span>
-				<span class="flex-1 font-medium">New Agent</span>
-			</button>
-		</div>
-
-		<nav class="mt-8 flex-1 space-y-2" aria-label="Primary">
+		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
 			{#each navLinks as link}
 				<a
 					href={link.href}
