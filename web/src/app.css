@@ -2,10 +2,12 @@
 @plugin '@tailwindcss/typography';
 
 @layer base {
+
   /* Dark theme (default) */
   :root,
   html.dark {
     color-scheme: dark;
+    font-size: 0.8rem;
     font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
 
     /* Base colors */
@@ -58,6 +60,7 @@
   /* Light theme */
   html.light {
     color-scheme: light;
+    font-size: 0.875rem;
 
     /* Base colors */
     --main-content-bg: #fbf1c7;
