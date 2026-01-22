@@ -68,20 +68,6 @@
 </script>
 
 <Dialog bind:open>
-	<!-- Close Button (Mobile/Desktop) -->
-	<div class="flex shrink-0 select-none flex-row flex-wrap overflow-x-auto bg-[var(--card-bg)]/40 p-1.5 md:min-w-[180px] md:max-w-[210px] md:flex-col md:p-0">
-		<div class="hidden py-3 ps-2.5 md:block">
-			<button 
-				type="button"
-				class="flex h-9 w-9 items-center justify-center rounded-lg bg-transparent transition hover:bg-[var(--hover-bg)]"
-				aria-label="Close"
-				onclick={() => open = false}
-			>
-				<X size={20} stroke-width={2} />
-			</button>
-		</div>
-	</div>
-
 	<!-- Content -->
 	<div class="relative flex w-full flex-col overflow-y-auto px-4 text-sm p-8 md:p-8">
 		<div class="border-b border-[var(--hover-bg)] py-3">

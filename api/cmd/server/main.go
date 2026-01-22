@@ -66,6 +66,8 @@ func run() error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
+	events.StartNotificationListener(ctx, cfg.DatabaseURL)
+
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,
 		ClientID:          cfg.OIDC.ClientID,

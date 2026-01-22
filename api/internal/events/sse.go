@@ -71,10 +71,27 @@ func AppStreamHandler(loadSession func(*http.Request) (SessionInfo, error), shut
 		heartbeat := time.NewTicker(20 * time.Second)
 		defer heartbeat.Stop()
 
+		var client *streamClient
+		if session.UserID != "" {
+			client = registerStream(session.UserID)
+			defer unregisterStream(client)
+		}
+
 		for {
 			select {
 			case <-r.Context().Done():
 				return
+			case event, ok := <-clientChannel(client):
+				if !ok {
+					return
+				}
+				if event.Event == "" {
+					continue
+				}
+				if err := writeSSE(w, event.Event, event.Payload); err != nil {
+					return
+				}
+				flusher.Flush()
 			case <-shutdown:
 				if err := writeSSE(w, "shutting_down", shutdownPayload{Message: "server shutting down"}); err != nil {
 					return
@@ -97,6 +114,13 @@ func AppStreamHandler(loadSession func(*http.Request) (SessionInfo, error), shut
 			}
 		}
 	}
+}
+
+func clientChannel(client *streamClient) <-chan StreamEvent {
+	if client == nil {
+		return nil
+	}
+	return client.ch
 }
 
 func writeSSE(w http.ResponseWriter, event string, payload interface{}) error {

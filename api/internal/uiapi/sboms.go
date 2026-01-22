@@ -153,7 +153,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			}
 
 			job, err := jobs.CreateJobTx(r.Context(), tx, jobs.CreateJobInput{
-				Type: "PARSE_SBOM",
+				Type: jobs.JobTypeParseSBOM,
 				Payload: map[string]string{
 					"sbom_id":    sbom.ID,
 					"binding_id": binding.ID,

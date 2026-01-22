@@ -5,10 +5,12 @@
 	let { 
 		open = $bindable(false),
 		onClose = () => {},
+		showCloseButton = true,
 		children
 	}: {
 		open?: boolean;
 		onClose?: () => void;
+		showCloseButton?: boolean;
 		children?: any;
 	} = $props();
 
@@ -56,11 +58,26 @@
 	>
 		<!-- Dialog Container -->
 		<div 
-			class="fixed left-1/2 top-1/2 z-50 flex h-[55vh] w-[90vw] max-w-4xl flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl md:flex-row" 
-			style="transform: translate(-50%, -50%) scale(1.1); transform-origin: center center;"
+			class="fixed left-1/2 top-1/2 z-50 flex h-auto max-h-[90vh] w-[95vw] max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl" 
+			style="transform: translate(-50%, -50%);"
 			role="dialog"
 			aria-modal="true"
 		>
+			{#if showCloseButton}
+				<!-- Close Button Sidebar -->
+				<div class="flex shrink-0 select-none flex-row flex-wrap overflow-x-auto bg-[var(--card-bg)]/40 p-1.5 md:min-w-[180px] md:max-w-[210px] md:flex-col md:p-0">
+					<div class="hidden py-3 ps-2.5 md:block">
+						<button 
+							type="button"
+							class="flex h-9 w-9 items-center justify-center rounded-lg bg-transparent transition hover:bg-[var(--hover-bg)]"
+							aria-label="Close"
+							onclick={handleClose}
+						>
+							<X size={20} stroke-width={2} />
+						</button>
+					</div>
+				</div>
+			{/if}
 			{@render children?.()}
 		</div>
 	</div>

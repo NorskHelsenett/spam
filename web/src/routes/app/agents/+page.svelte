@@ -1,4 +1,6 @@
 <script lang="ts">
+	import Dialog from '$lib/components/Dialog.svelte';
+
 	const collections = [
 		{
 			name: 'Payments platform',
@@ -134,6 +136,7 @@
 	let uploadSuccess = $state('');
 	let uploadBusy = $state(false);
 	let uploadFile: File | null = $state(null);
+	let repoUrl = $state('');
 	let uploadForm = $state({
 		provider: 'manual',
 		org: '',
@@ -142,6 +145,37 @@
 		ref: '',
 		format: ''
 	});
+
+	const parseRepoUrl = (url: string) => {
+		if (!url.trim()) return;
+		
+		try {
+			const urlObj = new URL(url);
+			const hostname = urlObj.hostname;
+			const pathname = urlObj.pathname;
+			
+			// Extract org and repo from pathname (e.g., /jonasbg/spam)
+			const parts = pathname.split('/').filter(p => p.length > 0);
+			
+			if (parts.length >= 2) {
+				uploadForm.org = parts[0];
+				uploadForm.slug = parts[1];
+				
+				// Infer provider from hostname
+				if (hostname.includes('github')) {
+					uploadForm.provider = 'github';
+				} else if (hostname.includes('gitlab')) {
+					uploadForm.provider = 'gitlab';
+				} else if (hostname.includes('git.torden.tech')) {
+					uploadForm.provider = 'gitea';
+				} else {
+					uploadForm.provider = 'git';
+				}
+			}
+		} catch (e) {
+			// Invalid URL, ignore
+		}
+	};
 
 	const submitUpload = async () => {
 		uploadError = '';
@@ -183,13 +217,21 @@
 			});
 
 			if (!response.ok) {
-				uploadError = 'Upload failed. Check the SBOM and repo details.';
+				const errorText = await response.text();
+				uploadError = `Upload failed: ${errorText || response.statusText}`;
 				return;
 			}
 
 			uploadSuccess = 'SBOM uploaded and queued for parsing.';
 			uploadFile = null;
-			uploadForm = { ...uploadForm, commitSha: '', ref: '', format: '' };
+			repoUrl = '';
+			uploadForm = { provider: 'manual', org: '', slug: '', commitSha: '', ref: '', format: '' };
+			
+			// Close modal after 1 second
+			setTimeout(() => {
+				uploadOpen = false;
+				uploadSuccess = '';
+			}, 1000);
 		} catch {
 			uploadError = 'Upload failed. Try again.';
 		} finally {
@@ -235,24 +277,27 @@
 		</div>
 	</section>
 
-	{#if uploadOpen}
-		<div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
-			<div class="w-full max-w-xl rounded-3xl border border-[var(--border-color)] bg-[var(--main-content-bg)] p-6 shadow-2xl">
-				<div class="flex items-start justify-between gap-4">
-					<div>
-						<h2 class="text-xl font-semibold text-[var(--text-bright)]">Upload SBOM</h2>
-						<p class="mt-1 text-sm text-[var(--text-secondary)]">Attach an SBOM to a repo commit and enqueue parsing.</p>
-					</div>
-					<button
-						type="button"
-						class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-						onclick={() => (uploadOpen = false)}
-					>
-						Close
-					</button>
-				</div>
+	<Dialog bind:open={uploadOpen}>
+		<div class="flex h-full w-full flex-col">
+			<div class="border-b border-[var(--border-color)] p-6">
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Upload SBOM</h2>
+				<p class="mt-1 text-sm text-[var(--text-secondary)]">Attach an SBOM to a repo commit and enqueue parsing.</p>
+			</div>
 
-				<div class="mt-6 grid gap-4">
+			<div class="flex-1 p-6">
+				<div class="grid gap-4">
+					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+						Repository URL
+						<input
+							type="text"
+							placeholder="http://git.torden.tech/jonasbg/spam"
+							class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+							bind:value={repoUrl}
+							oninput={() => parseRepoUrl(repoUrl)}
+						/>
+						<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a repo URL to auto-fill org, repo, and provider</span>
+					</label>
+
 					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 						SBOM file
 						<input
@@ -335,28 +380,28 @@
 					{#if uploadSuccess}
 						<p class="text-sm text-[var(--success)]">{uploadSuccess}</p>
 					{/if}
-
-					<div class="flex flex-wrap items-center justify-end gap-3">
-						<button
-							type="button"
-							class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-							onclick={() => (uploadOpen = false)}
-						>
-							Cancel
-						</button>
-						<button
-							type="button"
-							class="rounded-full border border-transparent bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-[var(--main-content-bg)] transition hover:opacity-90 disabled:opacity-50"
-							disabled={uploadBusy}
-							onclick={submitUpload}
-						>
-							{uploadBusy ? 'Uploading…' : 'Upload'}
-						</button>
-					</div>
 				</div>
 			</div>
+
+			<div class="flex flex-wrap items-center justify-end gap-3 border-t border-[var(--border-color)] p-6">
+				<button
+					type="button"
+					class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+					onclick={() => (uploadOpen = false)}
+				>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="rounded-full border border-transparent bg-[var(--accent)] px-5 py-2 text-sm font-semibold text-[var(--main-content-bg)] transition hover:opacity-90 disabled:opacity-50"
+					disabled={uploadBusy}
+					onclick={submitUpload}
+				>
+					{uploadBusy ? 'Uploading…' : 'Upload'}
+				</button>
+			</div>
 		</div>
-	{/if}
+	</Dialog>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">

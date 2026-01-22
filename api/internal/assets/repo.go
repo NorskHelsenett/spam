@@ -83,3 +83,19 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 
 	return &commit, nil
 }
+
+func FindRepo(ctx context.Context, db *gorm.DB, repoID string) (*Repo, error) {
+	var repo Repo
+	if err := db.WithContext(ctx).First(&repo, "id = ?", repoID).Error; err != nil {
+		return nil, err
+	}
+	return &repo, nil
+}
+
+func FindRepoCommit(ctx context.Context, db *gorm.DB, commitID string) (*RepoCommit, error) {
+	var commit RepoCommit
+	if err := db.WithContext(ctx).First(&commit, "id = ?", commitID).Error; err != nil {
+		return nil, err
+	}
+	return &commit, nil
+}

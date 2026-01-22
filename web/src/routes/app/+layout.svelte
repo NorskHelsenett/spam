@@ -33,6 +33,10 @@
 			console.info('sse heartbeat', parsePayload(event));
 		});
 
+		appEventSource.addEventListener('sbom_parsed', (event) => {
+			console.info('sse sbom parsed', parsePayload(event));
+		});
+
 		appEventSource.addEventListener('shutting_down', (event) => {
 			console.warn('sse shutting down', parsePayload(event));
 		});
