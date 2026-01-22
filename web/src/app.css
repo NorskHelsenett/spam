@@ -1,0 +1,131 @@
+@import 'tailwindcss';
+@plugin '@tailwindcss/typography';
+
+@layer base {
+  /* Dark theme (default) */
+  :root,
+  html.dark {
+    color-scheme: dark;
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+
+    /* Base colors */
+    --main-content-bg: #1d2021;
+    --sidebar-bg: transparent;
+    --card-bg: #282828;
+    --hover-bg: #3c3836;
+    --hover-bg-subtle: rgba(60, 56, 54, 0.5);
+    --border-color: #504945;
+
+    /* Text colors */
+    --text-primary: #ebdbb2;
+    --text-secondary: #d5c4a1;
+    --text-tertiary: #bdae93;
+    --text-quaternary: #a89984;
+    --text-muted: #928374;
+    --text-bright: #fbf1c7;
+    --text-dimmed: #665c54;
+
+    /* Semantic colors */
+    --accent: #fabd2f;
+    --accent-dark: #d79921;
+    --error: #fb4934;
+    --error-dark: #cc241d;
+    --success: #b8bb26;
+    --success-dark: #98971a;
+    --warning: #fabd2f;
+    --warning-dark: #d79921;
+
+    /* Metric-specific colors */
+    --info: #83a598;
+    --cpu-color: #83a598;
+    --memory-color: #d3869b;
+    --disk-color: #8ec07c;
+    --temperature-color: #fe8019;
+    --network-color: #b16286;
+    --gpu-color: #689d6a;
+
+    /* Battery colors */
+    --charging-color: #facc15;
+    --discharging-color: #0fbf8d;
+
+    /* Other */
+    --selection-bg: rgba(250, 189, 47, 0.35);
+
+    background-color: var(--main-content-bg);
+    color: var(--text-primary);
+  }
+
+  /* Light theme */
+  html.light {
+    color-scheme: light;
+
+    /* Base colors */
+    --main-content-bg: #fbf1c7;
+    --sidebar-bg: transparent
+    --card-bg: #f9f5d7;
+    --hover-bg: #ebdbb2;
+    --hover-bg-subtle: rgba(235, 219, 178, 0.5);
+    --border-color: #d5c4a1;
+
+    /* Text colors */
+    --text-primary: #3c3836;
+    --text-secondary: #504945;
+    --text-tertiary: #665c54;
+    --text-quaternary: #7c6f64;
+    --text-muted: #928374;
+    --text-bright: #282828;
+    --text-dimmed: #bdae93;
+
+    /* Semantic colors */
+    --accent: #d79921;
+    --accent-dark: #b57614;
+    --error: #cc241d;
+    --error-dark: #9d0006;
+    --success: #79740e;
+    --success-dark: #427b58;
+    --warning: #d79921;
+    --warning-dark: #b57614;
+
+    /* Metric-specific colors */
+    --info: #076678;
+    --cpu-color: #076678;
+    --memory-color: #8f3f71;
+    --disk-color: #427b58;
+    --temperature-color: #d65d0e;
+    --network-color: #8f3f71;
+    --gpu-color: #427b58;
+
+    /* Battery colors */
+    --charging-color: #d79921;
+    --discharging-color: #427b58;
+
+    /* Other */
+    --selection-bg: rgba(215, 153, 33, 0.35);
+
+    background-color: var(--main-content-bg);
+    color: var(--text-primary);
+  }
+
+  body {
+    @apply antialiased;
+    background-color: var(--main-content-bg);
+    color: var(--text-primary);
+  }
+
+  ::selection {
+    background-color: var(--selection-bg);
+    color: var(--text-bright);
+  }
+
+  section {
+    @apply border border-[var(--border-color)] bg-[var(--card-bg)]/85 px-6 py-8 shadow-2xl;
+  }
+}
+
+button {
+  @apply cursor-pointer;
+}
+
+button:disabled {
+  @apply cursor-not-allowed opacity-50;
+}
