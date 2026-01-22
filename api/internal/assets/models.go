@@ -16,6 +16,7 @@ type Repo struct {
 type RepoCommit struct {
 	ID        string `gorm:"primaryKey;size:36"`
 	RepoID    string `gorm:"size:36;not null;uniqueIndex:ux_repo_commit"`
+	Repo      Repo   `gorm:"constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;"`
 	CommitSHA string `gorm:"size:64;not null;uniqueIndex:ux_repo_commit"`
 	Ref       string `gorm:"size:255"`
 	CreatedAt time.Time

@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type RepoInput struct {
@@ -32,33 +31,19 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		return nil, errors.New("org and slug required")
 	}
 
-	repo := Repo{
+	var repo Repo
+	result := db.WithContext(ctx).Where(Repo{
+		Provider: provider,
+		Org:      input.Org,
+		Slug:     input.Slug,
+	}).Attrs(Repo{
 		ID:              uuid.NewString(),
-		Provider:        provider,
-		Org:             input.Org,
-		Slug:            input.Slug,
 		CreatedByUserID: input.CreatedByUserID,
-	}
+	}).FirstOrCreate(&repo)
 
-	if err := db.WithContext(ctx).Where("provider = ? AND org = ? AND slug = ?", provider, input.Org, input.Slug).First(&repo).Error; err == nil {
-		return &repo, nil
-	} else if err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	result := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "provider"}, {Name: "org"}, {Name: "slug"}},
-		DoNothing: true,
-	}).Create(&repo)
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	if result.RowsAffected == 0 {
-		if err := db.WithContext(ctx).Where("provider = ? AND org = ? AND slug = ?", provider, input.Org, input.Slug).First(&repo).Error; err != nil {
-			return nil, err
-		}
-	}
-
 	return &repo, nil
 }
 
@@ -67,32 +52,18 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 		return nil, errors.New("repo id and commit sha required")
 	}
 
-	commit := RepoCommit{
-		ID:        uuid.NewString(),
+	var commit RepoCommit
+	result := db.WithContext(ctx).Where(RepoCommit{
 		RepoID:    input.RepoID,
 		CommitSHA: input.CommitSHA,
-		Ref:       input.Ref,
-	}
+	}).Attrs(RepoCommit{
+		ID:  uuid.NewString(),
+		Ref: input.Ref,
+	}).FirstOrCreate(&commit)
 
-	if err := db.WithContext(ctx).Where("repo_id = ? AND commit_sha = ?", input.RepoID, input.CommitSHA).First(&commit).Error; err == nil {
-		return &commit, nil
-	} else if err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	result := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "repo_id"}, {Name: "commit_sha"}},
-		DoNothing: true,
-	}).Create(&commit)
 	if result.Error != nil {
 		return nil, result.Error
 	}
-	if result.RowsAffected == 0 {
-		if err := db.WithContext(ctx).Where("repo_id = ? AND commit_sha = ?", input.RepoID, input.CommitSHA).First(&commit).Error; err != nil {
-			return nil, err
-		}
-	}
-
 	return &commit, nil
 }
 

@@ -200,10 +200,12 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 func resolveRepo(ctx context.Context, tx *gorm.DB, repoID, provider, org, slug, createdBy string) (*assets.Repo, error) {
 	if org != "" && slug != "" {
-		var repo assets.Repo
-		if err := tx.WithContext(ctx).First(&repo, "org = ? AND slug = ? AND provider = ?", org, slug, provider).Error; err == nil {
-			return &repo, nil
-		}
+		return assets.UpsertRepo(ctx, tx, assets.RepoInput{
+			Provider:        provider,
+			Org:             org,
+			Slug:            slug,
+			CreatedByUserID: createdBy,
+		})
 	}
 
 	if repoID != "" {
