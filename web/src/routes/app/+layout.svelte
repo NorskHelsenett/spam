@@ -6,6 +6,7 @@
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
+	import AccountDialog from '$lib/components/AccountDialog.svelte';
 
 	// Check auth on mount
 	onMount(async () => {
@@ -29,6 +30,8 @@
 	import SunIcon from 'lucide-svelte/icons/sun';
 	import { ChartPie, BellRing, Boxes, CircleUserRound } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
+
+	let accountDialogOpen = $state(false);
 
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
@@ -174,7 +177,11 @@
 				</span>
 				<span class="font-medium">Theme: {$theme === 'dark' ? 'Dark' : 'Light'}</span>
 			</button>
-			<button type="button" class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+			<button 
+				type="button" 
+				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+				onclick={() => accountDialogOpen = true}
+			>
 				<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 					<CircleUserRound size={18} stroke-width={1.7} />
 				</span>
@@ -191,3 +198,5 @@
 		</main>
 	</div>
 </div>
+
+<AccountDialog bind:open={accountDialogOpen} />
