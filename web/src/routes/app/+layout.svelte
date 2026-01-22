@@ -7,24 +7,79 @@
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
+	
+	let appEventSource: EventSource | null = null;
+
+	const startAppStream = () => {
+		if (!browser || appEventSource) {
+			return;
+		}
+
+		appEventSource = new EventSource('/api/app/stream');
+
+		const parsePayload = (event: MessageEvent) => {
+			try {
+				return JSON.parse(event.data);
+			} catch {
+				return event.data;
+			}
+		};
+
+		appEventSource.addEventListener('ready', (event) => {
+			console.info('sse ready', parsePayload(event));
+		});
+
+		appEventSource.addEventListener('heartbeat', (event) => {
+			console.info('sse heartbeat', parsePayload(event));
+		});
+
+		appEventSource.addEventListener('shutting_down', (event) => {
+			console.warn('sse shutting down', parsePayload(event));
+		});
+
+		appEventSource.onerror = (event) => {
+			console.warn('sse connection error', event);
+		};
+	};
 
 	// Check auth on mount
-	onMount(async () => {
-		if (browser) {
+	onMount(() => {
+		if (!browser) {
+			return;
+		}
+
+		let cancelled = false;
+
+		const checkAuthAndStart = async () => {
 			try {
 				const response = await fetch('/api/auth/me', {
 					credentials: 'include'
 				});
-				
+
 				if (!response.ok) {
 					// Not authenticated, redirect to login
 					window.location.href = '/auth/login';
+					return;
+				}
+
+				if (!cancelled) {
+					startAppStream();
 				}
 			} catch (error) {
 				// Error checking auth, redirect to login
 				window.location.href = '/auth/login';
 			}
-		}
+		};
+
+		checkAuthAndStart();
+
+		return () => {
+			cancelled = true;
+			if (appEventSource) {
+				appEventSource.close();
+				appEventSource = null;
+			}
+		};
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';

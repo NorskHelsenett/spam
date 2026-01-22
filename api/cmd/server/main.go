@@ -65,7 +65,8 @@ func run() error {
 		return fmt.Errorf("init oidc auth: %w", err)
 	}
 
-	router := server.NewRouter(gormDB, authService)
+	shutdownCh := make(chan struct{})
+	router := server.NewRouter(gormDB, authService, shutdownCh)
 
 	addr := cfg.HTTPPort
 	if !strings.HasPrefix(addr, ":") {
@@ -80,6 +81,7 @@ func run() error {
 
 	go func() {
 		<-ctx.Done()
+		close(shutdownCh)
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

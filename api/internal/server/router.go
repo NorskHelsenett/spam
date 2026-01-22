@@ -12,7 +12,7 @@ import (
 )
 
 // NewRouter wires the HTTP routes and middleware for the API server.
-func NewRouter(db *gorm.DB, authService *auth.Service) http.Handler {
+func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{}) http.Handler {
 	r := chi.NewRouter()
 
 	// Health check endpoint without middleware to avoid noise in logs
@@ -34,6 +34,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service) http.Handler {
 					authRouter.Get("/me", authService.MeHandler())
 					authRouter.Post("/logout", authService.LogoutHandler())
 				})
+				api.Get("/app/stream", authService.AppStreamHandler(shutdown))
 			}
 		})
 
