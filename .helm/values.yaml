@@ -105,8 +105,6 @@ service:
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
   port: 8080
 
-healthPort: 8081
-
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
   enabled: false
@@ -137,11 +135,11 @@ resources: {}
 livenessProbe:
   httpGet:
     path: /healthz
-    port: health
+    port: http
 readinessProbe:
   httpGet:
     path: /healthz
-    port: health
+    port: http
 
 # Additional volumes on the output Deployment definition.
 volumes: []

@@ -55,9 +55,6 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
-            - name: health
-              containerPort: {{ .Values.healthPort }}
-              protocol: TCP
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}
@@ -83,8 +80,6 @@ spec:
                 name: {{ .Values.appSecret.existingSecret | default (printf "%s-app-secret" .Release.Name) }}
           {{- end }}
           env:
-            - name: HEALTH_PORT
-              value: {{ .Values.healthPort | quote }}
             {{- with .Values.environments }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

@@ -292,6 +292,53 @@ To rotate session keys:
 
 ## Troubleshooting
 
+### Password Authentication Failed for PostgreSQL
+
+If you see: `FATAL: password authentication failed for user "spam"`
+
+This happens when the password in the Kubernetes secret doesn't match the password stored in the PostgreSQL database. PostgreSQL only reads the password during initial database creation.
+
+**Solution 1: Reset PostgreSQL with existing data preserved**
+
+```bash
+# Get the current password from the secret
+CURRENT_PASSWORD=$(kubectl get secret spam-postgresql -n spam -o jsonpath='{.data.password}' | base64 -d)
+
+# Connect to PostgreSQL and update the password
+kubectl exec -n spam spam-postgresql-0 -- psql -U postgres -c "ALTER USER spam WITH PASSWORD '$CURRENT_PASSWORD';"
+```
+
+**Solution 2: Fresh start (deletes all data)**
+
+```bash
+# Uninstall the release
+helm uninstall spam -n spam
+
+# Delete the PVC (this deletes the database!)
+kubectl delete pvc -n spam data-spam-postgresql-0
+
+# Reinstall with a known password
+helm install spam .helm/ -n spam \
+  --set postgresql.enabled=true \
+  --set postgresql.auth.password="yourpassword"
+```
+
+**Solution 3: Set a fixed password to prevent issues**
+
+In `values.yaml`:
+```yaml
+postgresql:
+  auth:
+    password: "your-secure-password-here"
+    postgresPassword: "your-admin-password-here"
+```
+
+Then upgrade:
+```bash
+helm upgrade spam .helm/ -n spam
+kubectl delete pod -n spam spam-postgresql-0  # Force pod restart
+```
+
 ### Check Secret Values
 
 ```bash
