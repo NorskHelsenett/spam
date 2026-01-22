@@ -21,9 +21,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service) http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Timeout(60 * time.Second))
 
-	r.Get("/healthz", health.Handler(db))
-
 	r.Route("/api", func(api chi.Router) {
+		api.Get("/healthz", health.Handler(db))
 		if authService != nil {
 			api.Route("/auth", func(authRouter chi.Router) {
 				authRouter.Get("/login", authService.LoginHandler())

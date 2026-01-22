@@ -47,10 +47,10 @@ spec:
     - host: {{ $hostName | quote }}
       http:
         paths:
-          # Block /healthz from external access - only allow internal cluster access
+          # Block /api/healthz from external access - only allow internal cluster access
           {{- $paths := .paths | default (list (dict "path" "/" "pathType" "ImplementationSpecific")) }}
           {{- range $path := $paths }}
-          {{- if ne ($path.path | default "/") "/healthz" }}
+          {{- if ne ($path.path | default "/") "/api/healthz" }}
           - path: {{ $path.path | default "/" }}
             pathType: {{ $path.pathType | default "ImplementationSpecific" }}
             backend:
