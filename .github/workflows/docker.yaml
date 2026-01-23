@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   build-and-deploy:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -27,6 +28,11 @@ jobs:
           host="${GITHUB_SERVER_URL#https://}"
           host="${host#http://}"
           echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+
+      - name: Derive repository secrets
+        run: |
+          set -e
+          echo "REGISTRY_ACCESS_TOKEN=${{ secrets.GITHUB_TOKEN || secrets.REGISTRY_ACCESS_TOKEN }}" >> "$GITHUB_ENV"
 
       - name: Docker Metadata action
         uses: docker/metadata-action@v4.3.0
@@ -54,7 +60,7 @@ jobs:
         with:
           registry: ${{ env.REGISTRY_HOST }}
           username: ${{ github.actor }}
-          password: ${{ secrets.REGISTRY_ACCESS_TOKEN }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -75,7 +81,7 @@ jobs:
       - name: Login to OCI Registry for Helm
         if: ${{ github.ref == 'refs/heads/main' }}
         run: |
-          echo "${{ secrets.REGISTRY_ACCESS_TOKEN }}" | helm registry login ${{ env.REGISTRY_HOST }} -u "${{ github.actor }}" --password-stdin
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | helm registry login ${{ env.REGISTRY_HOST }} -u "${{ github.actor }}" --password-stdin
 
       # Push Helm chart to GitHub Container Registry
       - name: Push Helm chart
