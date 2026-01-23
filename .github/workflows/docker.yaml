@@ -30,12 +30,14 @@ jobs:
           host="${GITHUB_SERVER_URL#https://}"
           host="${host#http://}"
           echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
 
       - name: Docker Metadata action
         uses: docker/metadata-action@v4.3.0
         id: meta
         with:
-          images: ${{ env.REGISTRY_HOST }}/${{ github.repository }}
+          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}
           tags: |
               type=ref,event=branch
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
@@ -68,8 +70,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ github.repository }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ github.repository }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache,mode=max
 
       - name: Install Helm
         if: ${{ github.ref == 'refs/heads/main' }}
