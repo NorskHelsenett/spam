@@ -15,7 +15,7 @@
                 "POSTGRES_PASSWORD": "postgres",
                 "POSTGRES_DB": "postgres",
                 "POSTGRES_SSLMODE": "disable",
-                "OIDC_ISSUER_URL": "http://localhost:22222",
+                "OIDC_ISSUER_URL": "http://localhost:19999",
                 "OIDC_CLIENT_ID": "spam-web",
                 "OIDC_CLIENT_SECRET": "replace-me",
                 "OIDC_REDIRECT_URL": "http://localhost:5178/api/auth/callback",
@@ -45,7 +45,10 @@
     "compounds": [
         {
             "name": "API + Worker",
-            "configurations": ["API server", "Worker"],
+            "configurations": [
+                "API server",
+                "Worker"
+            ],
             "stopAll": true
         }
     ]

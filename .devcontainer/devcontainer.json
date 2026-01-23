@@ -6,28 +6,18 @@
 	"image": "mcr.microsoft.com/devcontainers/go:1.25",
 	"features": {
 		"ghcr.io/devcontainers/features/node:1": {},
-		"ghcr.io/itsmechlark/features/postgresql:1": {}
+		"ghcr.io/itsmechlark/features/postgresql:1": {},
+		"ghcr.io/jonasbg/mocc/mocc:1": {
+			"port": "19999",
+			"users": "${containerWorkspaceFolder}/users.yaml",
+			"autostart": true
+		},
 	},
 	"customizations": {
 		"vscode": {
 			"extensions": [
 				"svelte.svelte-vscode"
 			],
-			"settings": {
-				"terminal.integrated.profiles.linux": {
-					"mocc": {
-						"path": "/usr/local/bin/mocc",
-						"args": [
-							"--host",
-							"0.0.0.0",
-							"--port",
-							"8888",
-							"--users",
-							"/workspaces/spam/users.yaml"
-						]
-					}
-				}
-			}
 		}
 	},
 	"forwardPorts": [],

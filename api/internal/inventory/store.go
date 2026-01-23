@@ -26,43 +26,65 @@ func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInpu
 	}
 
 	var component Component
+
+	// If PURL provided, look up by PURL first
 	if input.PURL != "" {
+		err := db.WithContext(ctx).Where("purl = ?", input.PURL).First(&component).Error
+		if err == nil {
+			return &component, nil
+		}
+		if err != gorm.ErrRecordNotFound {
+			return nil, err
+		}
+		// Not found, create new
 		component = Component{
 			ID:        uuid.NewString(),
 			Name:      input.Name,
 			PURL:      input.PURL,
 			Ecosystem: ecosystem,
 		}
-		result := db.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "purl"}},
-			DoNothing: true,
-		}).Create(&component)
-		if result.Error != nil {
-			return nil, result.Error
-		}
-		if result.RowsAffected == 0 {
-			if err := db.WithContext(ctx).Where("purl = ?", input.PURL).First(&component).Error; err != nil {
-				return nil, err
+		if err := db.WithContext(ctx).Create(&component).Error; err != nil {
+			// Handle race condition - another process may have inserted
+			if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "SQLSTATE 23505") {
+				if err := db.WithContext(ctx).Where("purl = ?", input.PURL).First(&component).Error; err != nil {
+					return nil, err
+				}
+				return &component, nil
 			}
+			return nil, err
 		}
 		return &component, nil
 	}
 
-	if err := db.WithContext(ctx).
-		Where("name = ? AND ecosystem = ?", input.Name, ecosystem).
-		First(&component).Error; err != nil {
-		if err != gorm.ErrRecordNotFound {
-			return nil, err
+	// No PURL - look up by name and ecosystem
+	err := db.WithContext(ctx).
+		Where("name = ? AND ecosystem = ? AND (purl IS NULL OR purl = '')", input.Name, ecosystem).
+		First(&component).Error
+	if err == nil {
+		return &component, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	// Not found, create new
+	component = Component{
+		ID:        uuid.NewString(),
+		Name:      input.Name,
+		PURL:      "",
+		Ecosystem: ecosystem,
+	}
+	if err := db.WithContext(ctx).Create(&component).Error; err != nil {
+		// Handle race condition
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "SQLSTATE 23505") {
+			if err := db.WithContext(ctx).
+				Where("name = ? AND ecosystem = ? AND (purl IS NULL OR purl = '')", input.Name, ecosystem).
+				First(&component).Error; err != nil {
+				return nil, err
+			}
+			return &component, nil
 		}
-		component = Component{
-			ID:        uuid.NewString(),
-			Name:      input.Name,
-			PURL:      "",
-			Ecosystem: ecosystem,
-		}
-		if err := db.WithContext(ctx).Create(&component).Error; err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 
 	return &component, nil
