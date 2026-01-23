@@ -130,22 +130,42 @@ jobs:
           
           echo "Final version: $NEW_VERSION"
           
-          # Inject image digest (append to 'latest' so tag matches chart values expectation)
+          # Inject image repository and digest
           DIGEST=${{ steps.build-docker-image.outputs.digest }}
           IMAGE_TAG="latest@${DIGEST}"
+          IMAGE_REPO="${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}"
+          echo "Injecting image repository: $IMAGE_REPO"
           echo "Injecting image tag with digest: $IMAGE_TAG"
           python3 - <<EOF
           import pathlib
 
           image_tag = "${IMAGE_TAG}"
+          image_repo = "${IMAGE_REPO}"
           path = pathlib.Path(".helm/values.yaml")
           lines = path.read_text().splitlines()
+          
+          in_image_section = False
           for idx, line in enumerate(lines):
               stripped = line.lstrip()
-              if stripped.startswith("tag:"):
-                  indent = line[:len(line) - len(stripped)]
-                  lines[idx] = f'{indent}tag: "{image_tag}"'
-                  break
+              
+              # Detect if we're in the image section
+              if stripped.startswith("image:"):
+                  in_image_section = True
+                  continue
+              
+              # Exit image section when we hit another top-level key
+              if in_image_section and stripped and not line.startswith((" ", "\t")):
+                  in_image_section = False
+              
+              # Update repository and tag within image section
+              if in_image_section:
+                  if stripped.startswith("repository:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}repository: {image_repo}'
+                  elif stripped.startswith("tag:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}tag: "{image_tag}"'
+          
           path.write_text("\n".join(lines) + ("\n" if lines else ""))
           EOF
           
