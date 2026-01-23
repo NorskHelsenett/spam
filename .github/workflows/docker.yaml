@@ -17,6 +17,8 @@ concurrency:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -28,11 +30,6 @@ jobs:
           host="${GITHUB_SERVER_URL#https://}"
           host="${host#http://}"
           echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
-
-      - name: Derive repository secrets
-        run: |
-          set -e
-          echo "REGISTRY_ACCESS_TOKEN=${{ secrets.GITHUB_TOKEN || secrets.REGISTRY_ACCESS_TOKEN }}" >> "$GITHUB_ENV"
 
       - name: Docker Metadata action
         uses: docker/metadata-action@v4.3.0
