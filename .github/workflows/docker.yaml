@@ -24,12 +24,17 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Derive registry host
-        # Extract plain host (strip scheme) from Gitea server URL and export to environment
+        # Extract plain host (strip scheme) from server URL and export to environment
+        # Use ghcr.io for GitHub.com, otherwise use the server host (for Gitea, etc.)
         run: |
           set -e
           host="${GITHUB_SERVER_URL#https://}"
           host="${host#http://}"
-          echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          if [ "$host" = "github.com" ]; then
+            echo "REGISTRY_HOST=ghcr.io" >> "$GITHUB_ENV"
+          else
+            echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          fi
           repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
 
