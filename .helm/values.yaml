@@ -197,6 +197,19 @@ postgresql:
         memory: 512Mi
         cpu: 500m
 
+# Worker configuration
+# The worker processes background jobs (SBOM parsing, etc.)
+worker:
+  enabled: true
+  replicaCount: 1
+  resources: {}
+    # limits:
+    #   cpu: 200m
+    #   memory: 256Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
 # When using external PostgreSQL, set these values

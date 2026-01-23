@@ -1,30 +1,57 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import { FileStack, Package, GitBranch, Container } from 'lucide-svelte';
 
-	const collections = [
-		{
-			name: 'Payments platform',
-			sboms: 6,
-			description: 'Checkout, billing, and ledger workloads under PCI scope.',
-			tag: 'Critical risk surface',
-			accent: 'var(--error)'
-		},
-		{
-			name: 'Customer experience',
-			sboms: 8,
-			description: 'Frontend applications and public APIs served globally.',
-			tag: 'SLO-bound services',
-			accent: 'var(--accent)'
-		},
-		{
-			name: 'Data and analytics',
-			sboms: 5,
-			description: 'Batch pipelines and ML training environments.',
-			tag: 'Regulated datasets',
-			accent: 'var(--info)'
+	// Live stats
+	type Stats = {
+		sbom_count: number;
+		component_count: number;
+		repo_count: number;
+		image_count: number;
+	};
+
+	let stats: Stats = $state({
+		sbom_count: 0,
+		component_count: 0,
+		repo_count: 0,
+		image_count: 0
+	});
+	let statsLoading = $state(true);
+	let statsError = $state('');
+
+	const loadStats = async () => {
+		try {
+			const response = await fetch('/api/stats', { credentials: 'include' });
+			if (response.ok) {
+				stats = await response.json();
+			}
+		} catch {
+			statsError = 'Failed to load stats';
+		} finally {
+			statsLoading = false;
 		}
-	];
+	};
+
+	onMount(() => {
+		if (!browser) return;
+
+		loadStats();
+
+		// Listen for SSE updates
+		const eventSource = new EventSource('/api/app/stream');
+
+		eventSource.addEventListener('sbom_parsed', () => {
+			// Reload stats when an SBOM is parsed
+			loadStats();
+		});
+
+		return () => {
+			eventSource.close();
+		};
+	});
 
 	const sbomRows = [
 		{
@@ -327,17 +354,74 @@
 				Upload SBOM
 			</button>
 		</header>
-		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-			{#each collections as collection}
-				<article class="metric-card p-5 sm:p-6">
-					<div class="flex items-center justify-between gap-3">
-						<h2 class="text-lg font-semibold text-[var(--text-bright)]">{collection.name}</h2>
-						<span class="text-2xl font-bold" style={`color: ${collection.accent}`}>{collection.sboms}</span>
+		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<FileStack class="h-5 w-5 text-[var(--accent)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">SBOMs</h2>
 					</div>
-					<p class="mt-2 text-sm text-[var(--text-secondary)]">{collection.description}</p>
-					<span class="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-tertiary)]">{collection.tag}</span>
-				</article>
-			{/each}
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.sbom_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Total ingested</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<Package class="h-5 w-5 text-[var(--info)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Components</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.component_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Unique dependencies</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<GitBranch class="h-5 w-5 text-[var(--success)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repos</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.repo_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Tracked repositories</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<Container class="h-5 w-5 text-[var(--warning)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Images</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.image_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Container images</p>
+			</article>
 		</div>
 	</section>
 

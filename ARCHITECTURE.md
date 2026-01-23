@@ -9,6 +9,39 @@ It is designed to:
 - Remain auditable
 - Avoid unnecessary infrastructure
 
+Dependency Analysis
+
+  Component View ─────────────────────────────────► Stable, build now
+                                                    (no schema changes)
+
+  Provider Integration ──► Repo Sync ──► Commit Metadata ──► Rich Repo View
+         │                     │              │
+         │                     │              └─ message, author, timestamp
+         │                     └─ auto-discover repos
+         └─ store tokens, configure GitHub/GitLab
+
+  Recommended Order
+
+  Phase A: Component Search (do first - stable foundation)
+
+  - Query interface over existing normalized tables
+  - Won't change when providers are added
+  - Immediate user value
+
+  Phase B: Provider Foundation (do second - enables everything else)
+
+  - Provider table with encrypted credentials
+  - Repo sync jobs that fetch repo lists from GitHub/GitLab
+  - Enrich repo_commit with message/author/timestamp
+  - Provider management UI
+
+  Phase C: Repo Views (do after providers)
+
+  - Much richer with commit messages and auto-discovered repos
+  - Filter by provider
+  - Show sync status
+
+
 ---
 
 ## High-Level Architecture
