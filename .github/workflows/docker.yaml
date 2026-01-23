@@ -148,8 +148,8 @@ jobs:
           for idx, line in enumerate(lines):
               stripped = line.lstrip()
               
-              # Detect if we're in the image section
-              if stripped.startswith("image:"):
+              # Detect if we're in the TOP-LEVEL image section (no indentation before "image:")
+              if line.startswith("image:") and not line.startswith((" ", "\t")):
                   in_image_section = True
                   continue
               
