@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Dialog from '$lib/components/Dialog.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 
 	const collections = [
 		{
@@ -137,6 +138,7 @@
 	let uploadBusy = $state(false);
 	let uploadFile: File | null = $state(null);
 	let repoUrl = $state('');
+	let uploadTarget = $state<'repo' | 'image' | 'none'>('repo');
 	let uploadForm = $state({
 		provider: 'manual',
 		org: '',
@@ -144,6 +146,12 @@
 		commitSha: '',
 		ref: '',
 		format: ''
+	});
+	let imageForm = $state({
+		registry: '',
+		repository: '',
+		digest: '',
+		ref: ''
 	});
 
 	const parseRepoUrl = (url: string) => {
@@ -177,6 +185,41 @@
 		}
 	};
 
+	const parseImageRef = (value: string) => {
+		const raw = value.trim();
+		if (!raw) return;
+
+		const atIndex = raw.indexOf('@');
+		if (atIndex === -1) return;
+
+		const namePart = raw.slice(0, atIndex);
+		const digestPart = raw.slice(atIndex + 1);
+
+		if (digestPart) {
+			imageForm.digest = digestPart;
+		}
+
+		let registry = '';
+		let repository = namePart;
+		const firstSlash = namePart.indexOf('/');
+		if (firstSlash > -1) {
+			const candidate = namePart.slice(0, firstSlash);
+			if (candidate.includes('.') || candidate.includes(':') || candidate === 'localhost') {
+				registry = candidate;
+				repository = namePart.slice(firstSlash + 1);
+			}
+		}
+
+		const lastSlash = repository.lastIndexOf('/');
+		const lastColon = repository.lastIndexOf(':');
+		if (lastColon > lastSlash) {
+			repository = repository.slice(0, lastColon);
+		}
+
+		imageForm.registry = registry;
+		imageForm.repository = repository;
+	};
+
 	const submitUpload = async () => {
 		uploadError = '';
 		uploadSuccess = '';
@@ -185,13 +228,23 @@
 			uploadError = 'Please select an SBOM file.';
 			return;
 		}
-		if (!uploadForm.commitSha.trim()) {
-			uploadError = 'Commit SHA is required.';
-			return;
+
+		if (uploadTarget === 'repo') {
+			if (!uploadForm.commitSha.trim()) {
+				uploadError = 'Commit SHA is required.';
+				return;
+			}
+			if (!uploadForm.org.trim() || !uploadForm.slug.trim()) {
+				uploadError = 'Org and repo name are required.';
+				return;
+			}
 		}
-		if (!uploadForm.org.trim() || !uploadForm.slug.trim()) {
-			uploadError = 'Org and repo name are required.';
-			return;
+
+		if (uploadTarget === 'image') {
+			if (!imageForm.registry.trim() || !imageForm.repository.trim() || !imageForm.digest.trim()) {
+				uploadError = 'Registry, image, and digest are required.';
+				return;
+			}
 		}
 
 		uploadBusy = true;
@@ -199,12 +252,21 @@
 		try {
 			const payload = new FormData();
 			payload.append('sbom_file', uploadFile);
-			payload.append('provider', uploadForm.provider.trim());
-			payload.append('org', uploadForm.org.trim());
-			payload.append('slug', uploadForm.slug.trim());
-			payload.append('commit_sha', uploadForm.commitSha.trim());
-			if (uploadForm.ref.trim()) {
-				payload.append('ref', uploadForm.ref.trim());
+
+			if (uploadTarget === 'repo') {
+				payload.append('provider', uploadForm.provider.trim());
+				payload.append('org', uploadForm.org.trim());
+				payload.append('slug', uploadForm.slug.trim());
+				payload.append('commit_sha', uploadForm.commitSha.trim());
+				if (uploadForm.ref.trim()) {
+					payload.append('ref', uploadForm.ref.trim());
+				}
+			}
+
+			if (uploadTarget === 'image') {
+				payload.append('image_registry', imageForm.registry.trim());
+				payload.append('image_repository', imageForm.repository.trim());
+				payload.append('image_digest', imageForm.digest.trim());
 			}
 			if (uploadForm.format.trim()) {
 				payload.append('format', uploadForm.format.trim());
@@ -225,7 +287,9 @@
 			uploadSuccess = 'SBOM uploaded and queued for parsing.';
 			uploadFile = null;
 			repoUrl = '';
+			uploadTarget = 'repo';
 			uploadForm = { provider: 'manual', org: '', slug: '', commitSha: '', ref: '', format: '' };
+			imageForm = { registry: '', repository: '', digest: '', ref: '' };
 			
 			// Close modal after 1 second
 			setTimeout(() => {
@@ -281,22 +345,42 @@
 		<div class="flex h-full w-full flex-col">
 			<div class="border-b border-[var(--border-color)] p-6">
 				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Upload SBOM</h2>
-				<p class="mt-1 text-sm text-[var(--text-secondary)]">Attach an SBOM to a repo commit and enqueue parsing.</p>
+				<p class="mt-1 text-sm text-[var(--text-secondary)]">
+					{#if uploadTarget === 'repo'}
+						Attach an SBOM to a repo commit and enqueue parsing.
+					{:else if uploadTarget === 'image'}
+						Attach an SBOM to a container image digest and enqueue parsing.
+					{:else}
+						Ingest an SBOM without linking it to a repo or image.
+					{/if}
+				</p>
 			</div>
 
 			<div class="flex-1 p-6">
 				<div class="grid gap-4">
-					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-						Repository URL
-						<input
-							type="text"
-							placeholder="http://git.torden.tech/jonasbg/spam"
-							class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-							bind:value={repoUrl}
-							oninput={() => parseRepoUrl(repoUrl)}
+					<div class="flex justify-center">
+						<TabSelector
+							bind:value={uploadTarget}
+							options={[
+								{ value: 'none', label: 'Unbound' },
+								{ value: 'image', label: 'Image' },
+								{ value: 'repo', label: 'Repo' }
+							]}
 						/>
-						<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a repo URL to auto-fill org, repo, and provider</span>
-					</label>
+					</div>
+					{#if uploadTarget === 'repo'}
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Repository URL
+							<input
+								type="text"
+								placeholder="http://git.torden.tech/jonasbg/spam"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={repoUrl}
+								oninput={() => parseRepoUrl(repoUrl)}
+							/>
+							<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a repo URL to auto-fill org, repo, and provider</span>
+						</label>
+					{/if}
 
 					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 						SBOM file
@@ -311,68 +395,140 @@
 						/>
 					</label>
 
-					<div class="grid gap-4 sm:grid-cols-2">
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Org
-							<input
-								type="text"
-								placeholder="team"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.org}
-							/>
-						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Repo
-							<input
-								type="text"
-								placeholder="service-api"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.slug}
-							/>
-						</label>
-					</div>
+					{#if uploadTarget === 'repo'}
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Org
+								<input
+									type="text"
+									placeholder="team"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.org}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Repo
+								<input
+									type="text"
+									placeholder="service-api"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.slug}
+								/>
+							</label>
+						</div>
 
-					<div class="grid gap-4 sm:grid-cols-2">
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Commit SHA
-							<input
-								type="text"
-								placeholder="Full SHA"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.commitSha}
-							/>
-						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Ref (optional)
-							<input
-								type="text"
-								placeholder="refs/heads/main"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.ref}
-							/>
-						</label>
-					</div>
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Commit SHA
+								<input
+									type="text"
+									placeholder="Full SHA"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.commitSha}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Ref (optional)
+								<input
+									type="text"
+									placeholder="refs/heads/main"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.ref}
+								/>
+							</label>
+						</div>
 
-					<div class="grid gap-4 sm:grid-cols-2">
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Provider
+								<input
+									type="text"
+									placeholder="manual"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.provider}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
+
+					{#if uploadTarget === 'image'}
 						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Provider
+							Image reference
 							<input
 								type="text"
-								placeholder="manual"
+								placeholder="myrepo.com/image:tag@sha256:..."
 								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.provider}
+								bind:value={imageForm.ref}
+								oninput={() => parseImageRef(imageForm.ref)}
 							/>
+							<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a full image reference to auto-fill registry, image, and digest.</span>
 						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Format (optional)
-							<input
-								type="text"
-								placeholder="cyclonedx-json"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.format}
-							/>
-						</label>
-					</div>
+
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Registry
+								<input
+									type="text"
+									placeholder="registry.example.com"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.registry}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Image
+								<input
+									type="text"
+									placeholder="org/service-api"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.repository}
+								/>
+							</label>
+						</div>
+
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Digest
+								<input
+									type="text"
+									placeholder="sha256:..."
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.digest}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
+
+					{#if uploadTarget === 'none'}
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
 
 					{#if uploadError}
 						<p class="text-sm text-[var(--error)]">{uploadError}</p>

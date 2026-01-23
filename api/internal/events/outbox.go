@@ -11,6 +11,7 @@ const (
 	EventJobCreated       = "JOB_CREATED"
 	EventJobStatusChanged = "JOB_STATUS_CHANGED"
 	EventSBOMBound        = "SBOM_BOUND"
+	EventSBOMIngested     = "SBOM_INGESTED"
 	EventSBOMParsed       = "SBOM_PARSED"
 )
 
@@ -34,6 +35,10 @@ func EmitEvent(tx *gorm.DB, eventType, aggregateType, aggregateID string, payloa
 
 func EmitSBOMBound(tx *gorm.DB, sbomID string, payload interface{}) error {
 	return EmitEvent(tx, EventSBOMBound, "sbom", sbomID, payload)
+}
+
+func EmitSBOMIngested(tx *gorm.DB, sbomID string, payload interface{}) error {
+	return EmitEvent(tx, EventSBOMIngested, "sbom", sbomID, payload)
 }
 
 func EmitSBOMParsed(tx *gorm.DB, sbomID string, payload interface{}) error {

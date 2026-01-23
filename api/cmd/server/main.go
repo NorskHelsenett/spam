@@ -55,6 +55,7 @@ func run() error {
 		&auth.UserGroup{},
 		&assets.Repo{},
 		&assets.RepoCommit{},
+		&assets.ImageDigest{},
 		&artifacts.SBOM{},
 		&artifacts.SBOMBinding{},
 		&inventory.Component{},

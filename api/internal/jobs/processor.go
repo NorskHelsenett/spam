@@ -133,14 +133,19 @@ func NextRetryTime(attempts, maxAttempts int, now time.Time) time.Time {
 }
 
 type sbomParsedBroadcast struct {
-	SBOMID       string `json:"sbom_id"`
-	BindingID    string `json:"binding_id"`
-	RepoID       string `json:"repo_id"`
-	RepoCommitID string `json:"repo_commit_id"`
-	CommitSHA    string `json:"commit_sha"`
-	Provider     string `json:"provider"`
-	Org          string `json:"org"`
-	Slug         string `json:"slug"`
+	SBOMID          string `json:"sbom_id"`
+	BindingID       string `json:"binding_id"`
+	AssetType       string `json:"asset_type"`
+	RepoID          string `json:"repo_id"`
+	RepoCommitID    string `json:"repo_commit_id"`
+	CommitSHA       string `json:"commit_sha"`
+	Provider        string `json:"provider"`
+	Org             string `json:"org"`
+	Slug            string `json:"slug"`
+	ImageDigestID   string `json:"image_digest_id"`
+	ImageRegistry   string `json:"image_registry"`
+	ImageRepository string `json:"image_repository"`
+	ImageDigest     string `json:"image_digest"`
 }
 
 func loadSBOMBroadcastInfo(ctx context.Context, db *gorm.DB, bindingID, sbomID string) (sbomParsedBroadcast, error) {
@@ -152,23 +157,45 @@ func loadSBOMBroadcastInfo(ctx context.Context, db *gorm.DB, bindingID, sbomID s
 	if err != nil {
 		return sbomParsedBroadcast{}, err
 	}
-	commit, err := assets.FindRepoCommit(ctx, db, binding.AssetRefID)
-	if err != nil {
-		return sbomParsedBroadcast{}, err
-	}
-	repo, err := assets.FindRepo(ctx, db, commit.RepoID)
-	if err != nil {
-		return sbomParsedBroadcast{}, err
-	}
 
-	return sbomParsedBroadcast{
-		SBOMID:       sbomID,
-		BindingID:    binding.ID,
-		RepoID:       repo.ID,
-		RepoCommitID: commit.ID,
-		CommitSHA:    commit.CommitSHA,
-		Provider:     repo.Provider,
-		Org:          repo.Org,
-		Slug:         repo.Slug,
-	}, nil
+	switch binding.AssetType {
+	case artifacts.AssetTypeRepoCommit:
+		commit, err := assets.FindRepoCommit(ctx, db, binding.AssetRefID)
+		if err != nil {
+			return sbomParsedBroadcast{}, err
+		}
+		repo, err := assets.FindRepo(ctx, db, commit.RepoID)
+		if err != nil {
+			return sbomParsedBroadcast{}, err
+		}
+
+		return sbomParsedBroadcast{
+			SBOMID:       sbomID,
+			BindingID:    binding.ID,
+			AssetType:    binding.AssetType,
+			RepoID:       repo.ID,
+			RepoCommitID: commit.ID,
+			CommitSHA:    commit.CommitSHA,
+			Provider:     repo.Provider,
+			Org:          repo.Org,
+			Slug:         repo.Slug,
+		}, nil
+	case artifacts.AssetTypeImageDigest:
+		image, err := assets.FindImageDigest(ctx, db, binding.AssetRefID)
+		if err != nil {
+			return sbomParsedBroadcast{}, err
+		}
+
+		return sbomParsedBroadcast{
+			SBOMID:          sbomID,
+			BindingID:       binding.ID,
+			AssetType:       binding.AssetType,
+			ImageDigestID:   image.ID,
+			ImageRegistry:   image.Registry,
+			ImageRepository: image.Repository,
+			ImageDigest:     image.Digest,
+		}, nil
+	default:
+		return sbomParsedBroadcast{}, nil
+	}
 }

@@ -2,6 +2,11 @@ package artifacts
 
 import "time"
 
+const (
+	AssetTypeRepoCommit  = "REPO_COMMIT"
+	AssetTypeImageDigest = "IMAGE_DIGEST"
+)
+
 // SBOM stores the raw SBOM document and metadata.
 type SBOM struct {
 	ID               string `gorm:"primaryKey;size:36"`
