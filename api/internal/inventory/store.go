@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type UpsertComponentInput struct {
@@ -22,17 +23,17 @@ func UpsertComponentWithCache(ctx context.Context, db *gorm.DB, input UpsertComp
 		return nil, nil
 	}
 
+	// Derive ecosystem from PURL if not provided
+	ecosystem := input.Ecosystem
+	if ecosystem == "" && input.PURL != "" {
+		ecosystem = ecosystemFromPURL(input.PURL)
+	}
+
 	// Strip version from PURL
 	basePURL := stripPURLVersion(input.PURL)
-	cacheKey := basePURL
-	if cacheKey == "" {
-		// For components without PURL, use name+ecosystem as cache key
-		eco := input.Ecosystem
-		if eco == "" {
-			eco = ecosystemFromPURL(input.PURL)
-		}
-		cacheKey = "name:" + input.Name + "::" + eco
-	}
+
+	// Cache key matches unique constraint: (name, ecosystem, purl)
+	cacheKey := input.Name + "::" + ecosystem + "::" + basePURL
 
 	// Check cache first
 	if cached, ok := cache[cacheKey]; ok {
@@ -42,7 +43,7 @@ func UpsertComponentWithCache(ctx context.Context, db *gorm.DB, input UpsertComp
 	// Not in cache, do the actual upsert
 	component, err := UpsertComponent(ctx, db, input)
 	if err != nil {
-		return nil, fmt.Errorf("cache miss for key=%q input.PURL=%q basePURL=%q: %w", cacheKey, input.PURL, basePURL, err)
+		return nil, err
 	}
 
 	// Store in cache for future lookups
@@ -67,58 +68,35 @@ func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInpu
 	// e.g., "pkg:npm/lodash@4.17.21" -> "pkg:npm/lodash"
 	basePURL := stripPURLVersion(input.PURL)
 
-	var component Component
-
-	// If PURL provided, try to find existing first
-	if basePURL != "" {
-		err := db.WithContext(ctx).Where("purl = ?", basePURL).First(&component).Error
-		if err == nil {
-			return &component, nil
-		}
-		if err != gorm.ErrRecordNotFound {
-			return nil, fmt.Errorf("lookup purl %q: %w", basePURL, err)
-		}
-
-		// Not found, create new
-		component = Component{
-			ID:        uuid.NewString(),
-			Name:      input.Name,
-			PURL:      basePURL,
-			Ecosystem: ecosystem,
-		}
-		if err := db.WithContext(ctx).Create(&component).Error; err != nil {
-			// Debug: check what's actually in the DB
-			var existing Component
-			db.WithContext(ctx).Where("purl = ?", basePURL).First(&existing)
-			return nil, fmt.Errorf("create component purl=%q (input.PURL=%q) name=%q existing.ID=%q existing.PURL=%q: %w",
-				basePURL, input.PURL, input.Name, existing.ID, existing.PURL, err)
-		}
-		return &component, nil
-	}
-
-	// No PURL - look up by name and ecosystem first
-	err := db.WithContext(ctx).
-		Where("name = ? AND ecosystem = ? AND purl = ''", input.Name, ecosystem).
-		First(&component).Error
-	if err == nil {
-		return &component, nil
-	}
-	if err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	// Not found, create new
-	component = Component{
+	// Use ON CONFLICT DO UPDATE to handle race conditions atomically.
+	// The "dummy" update ensures the row is touched even on conflict.
+	component := Component{
 		ID:        uuid.NewString(),
 		Name:      input.Name,
-		PURL:      "",
+		PURL:      basePURL,
 		Ecosystem: ecosystem,
 	}
-	if err := db.WithContext(ctx).Create(&component).Error; err != nil {
-		return nil, err
+
+	result := db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "name"}, {Name: "ecosystem"}, {Name: "purl"}},
+			DoUpdates: clause.AssignmentColumns([]string{"name"}), // No-op update
+		}).
+		Create(&component)
+
+	if result.Error != nil {
+		return nil, fmt.Errorf("upsert component name=%q ecosystem=%q purl=%q: %w", input.Name, ecosystem, basePURL, result.Error)
 	}
 
-	return &component, nil
+	// Fetch the actual record to get the correct ID (may differ on conflict)
+	var existing Component
+	if err := db.WithContext(ctx).
+		Where("name = ? AND ecosystem = ? AND purl = ?", input.Name, ecosystem, basePURL).
+		First(&existing).Error; err != nil {
+		return nil, fmt.Errorf("fetch component name=%q ecosystem=%q purl=%q: %w", input.Name, ecosystem, basePURL, err)
+	}
+
+	return &existing, nil
 }
 
 func UpsertComponentVersion(ctx context.Context, db *gorm.DB, componentID, version string) (*ComponentVersion, error) {
@@ -126,30 +104,36 @@ func UpsertComponentVersion(ctx context.Context, db *gorm.DB, componentID, versi
 		return nil, nil
 	}
 
-	var cv ComponentVersion
-
-	// Try to find existing first
-	err := db.WithContext(ctx).
-		Where("component_id = ? AND version = ?", componentID, version).
-		First(&cv).Error
-	if err == nil {
-		return &cv, nil
-	}
-	if err != gorm.ErrRecordNotFound {
-		return nil, err
-	}
-
-	// Not found, create new
-	cv = ComponentVersion{
+	cv := ComponentVersion{
 		ID:          uuid.NewString(),
 		ComponentID: componentID,
 		Version:     version,
 	}
-	if err := db.WithContext(ctx).Create(&cv).Error; err != nil {
-		return nil, err
+
+	// Use ON CONFLICT DO UPDATE to handle race conditions atomically.
+	// The "dummy" update (id = id) ensures the row is returned even on conflict.
+	// This is more reliable than DO NOTHING + separate SELECT.
+	result := db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "component_id"}, {Name: "version"}},
+			DoUpdates: clause.AssignmentColumns([]string{"component_id"}), // No-op update
+		}).
+		Create(&cv)
+
+	if result.Error != nil {
+		return nil, fmt.Errorf("upsert component version component=%q version=%q: %w", componentID, version, result.Error)
 	}
 
-	return &cv, nil
+	// After ON CONFLICT DO UPDATE, cv.ID might still have our generated UUID.
+	// Fetch the actual record to get the correct ID.
+	var existing ComponentVersion
+	if err := db.WithContext(ctx).
+		Where("component_id = ? AND version = ?", componentID, version).
+		First(&existing).Error; err != nil {
+		return nil, fmt.Errorf("fetch version component=%q version=%q: %w", componentID, version, err)
+	}
+
+	return &existing, nil
 }
 
 func UpsertSBOMComponent(ctx context.Context, db *gorm.DB, sbomID, componentVersionID, scope string) error {
@@ -164,10 +148,21 @@ func UpsertSBOMComponent(ctx context.Context, db *gorm.DB, sbomID, componentVers
 		Scope:              scope,
 	}
 
-	return db.WithContext(ctx).Create(&link).Error
+	// Use ON CONFLICT to make this idempotent.
+	// If the same (sbom_id, component_version_id) already exists, do nothing.
+	// This handles job retries safely.
+	result := db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "sbom_id"}, {Name: "component_version_id"}},
+			DoNothing: true,
+		}).
+		Create(&link)
+
+	return result.Error
 }
 
 // CreateComponentDependency creates a dependency relationship between two component versions.
+// This is idempotent - calling it multiple times with the same arguments has no additional effect.
 func CreateComponentDependency(ctx context.Context, db *gorm.DB, sbomID, dependentID, dependencyID string) error {
 	if sbomID == "" || dependentID == "" || dependencyID == "" {
 		return nil
@@ -180,7 +175,17 @@ func CreateComponentDependency(ctx context.Context, db *gorm.DB, sbomID, depende
 		DependencyID: dependencyID,
 	}
 
-	return db.WithContext(ctx).Create(&dep).Error
+	// Use ON CONFLICT to make this idempotent.
+	// If the same dependency already exists, do nothing.
+	// This handles job retries safely.
+	result := db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "sbom_id"}, {Name: "dependent_id"}, {Name: "dependency_id"}},
+			DoNothing: true,
+		}).
+		Create(&dep)
+
+	return result.Error
 }
 
 func ecosystemFromPURL(purl string) string {

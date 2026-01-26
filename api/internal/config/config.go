@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -66,6 +67,7 @@ func Load() (Config, error) {
 // WorkerConfig captures configuration for the background worker.
 type WorkerConfig struct {
 	DatabaseURL string
+	Concurrency int // Number of concurrent job processors
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -73,6 +75,7 @@ type WorkerConfig struct {
 func LoadWorker() (WorkerConfig, error) {
 	cfg := WorkerConfig{
 		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Concurrency: parseIntEnv("WORKER_CONCURRENCY", 4),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -81,6 +84,11 @@ func LoadWorker() (WorkerConfig, error) {
 			return WorkerConfig{}, err
 		}
 		cfg.DatabaseURL = dsn
+	}
+
+	// Ensure concurrency is at least 1
+	if cfg.Concurrency < 1 {
+		cfg.Concurrency = 1
 	}
 
 	return cfg, nil
@@ -113,6 +121,18 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func parseIntEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func loadOIDCConfig() (OIDCConfig, error) {

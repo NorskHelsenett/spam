@@ -279,7 +279,6 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				return
 			}
 			log.Printf("SBOM upload failed (repo_id=%q provider=%q org=%q slug=%q image_registry=%q image_repository=%q image_digest=%q): %v", repoID, provider, org, slug, imageRegistry, imageRepository, imageDigest, err)
-			log.Printf("SBOM upload failed: %v", err)
 			http.Error(w, "sbom upload failed", http.StatusInternalServerError)
 			return
 		}

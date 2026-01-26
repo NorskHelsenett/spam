@@ -1,12 +1,14 @@
 package uiapi
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -128,6 +130,7 @@ func ComponentsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 		for rows.Next() {
 			var c ComponentSummary
 			if err := rows.Scan(&c.ID, &c.Name, &c.Ecosystem, &c.PURL, &c.CreatedAt, &c.VersionCount, &c.RepoCount, &c.ImageCount); err != nil {
+				log.Printf("components list scan error: %v", err)
 				continue
 			}
 			components = append(components, c)
@@ -153,6 +156,10 @@ func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		componentID := r.PathValue("componentID")
 		if componentID == "" {
 			http.Error(w, "component id required", http.StatusBadRequest)
+			return
+		}
+		if !isValidUUID(componentID) {
+			http.Error(w, "invalid component id format", http.StatusBadRequest)
 			return
 		}
 
@@ -210,6 +217,7 @@ func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		for versionRows.Next() {
 			var v VersionSummary
 			if err := versionRows.Scan(&v.ID, &v.Version, &v.CreatedAt, &v.RepoCount); err != nil {
+				log.Printf("component versions scan error: %v", err)
 				continue
 			}
 			detail.Versions = append(detail.Versions, v)
@@ -230,6 +238,10 @@ func ComponentAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		componentID := r.PathValue("componentID")
 		if componentID == "" {
 			http.Error(w, "component id required", http.StatusBadRequest)
+			return
+		}
+		if !isValidUUID(componentID) {
+			http.Error(w, "invalid component id format", http.StatusBadRequest)
 			return
 		}
 
@@ -292,6 +304,7 @@ func ComponentAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 				&a.ImageRegistry, &a.ImageRepository, &a.ImageDigest,
 				&a.Version, &a.SBOMID, &a.BoundAt,
 			); err != nil {
+				log.Printf("component assets scan error: %v", err)
 				continue
 			}
 			assets = append(assets, a)
@@ -345,4 +358,10 @@ func parsePagination(r *http.Request) (page, pageSize int) {
 	}
 
 	return page, pageSize
+}
+
+// isValidUUID checks if the given string is a valid UUID.
+func isValidUUID(s string) bool {
+	_, err := uuid.Parse(s)
+	return err == nil
 }
