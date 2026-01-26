@@ -193,6 +193,8 @@ func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		}
 
 		// Get versions with repo counts
+		// Sort by semantic version: extract major.minor.patch as integers
+		// Handles formats like "v1.2.3", "1.2.3", "v0.0.0-20180306012644-abc123"
 		versionRows, err := db.WithContext(r.Context()).Raw(`
 			SELECT
 				cv.id,
@@ -204,7 +206,11 @@ func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.Handler
 			LEFT JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
 			WHERE cv.component_id = ?
 			GROUP BY cv.id
-			ORDER BY cv.version DESC
+			ORDER BY
+				COALESCE((regexp_match(cv.version, '^v?(\d+)'))[1]::int, 0) DESC,
+				COALESCE((regexp_match(cv.version, '^v?\d+\.(\d+)'))[1]::int, 0) DESC,
+				COALESCE((regexp_match(cv.version, '^v?\d+\.\d+\.(\d+)'))[1]::int, 0) DESC,
+				cv.version DESC
 			LIMIT 100
 		`, componentID).Rows()
 		if err != nil {
