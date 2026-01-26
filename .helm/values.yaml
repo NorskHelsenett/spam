@@ -86,16 +86,23 @@ podAnnotations: {}
 # For more information checkout: https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/
 podLabels: {}
 
-podSecurityContext: {}
-  # fsGroup: 2000
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
 
-securityContext: {}
-  # capabilities:
-  #   drop:
-  #   - ALL
-  # readOnlyRootFilesystem: true
-  # runAsNonRoot: true
-  # runAsUser: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
 
 # This is for setting up a service more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/
 service:
@@ -173,10 +180,22 @@ postgresql:
 
   # Authentication configuration
   auth:
+    # Use an existing secret instead of creating one (optional)
+    # If set, the chart will NOT create a new secret and will use the specified one
+    # Secret must contain keys: 'password' and 'postgres-password'
+    existingSecret: ""  # e.g., "spam-postgresql-secret"
+    
     username: spam
     database: spam
-    password: ""  # Leave empty to auto-generate a strong password
-    postgresPassword: ""  # Leave empty to auto-generate postgres admin password
+    password: ""  # Leave empty to auto-generate a strong password (ignored if existingSecret is set)
+    postgresPassword: ""  # Leave empty to auto-generate postgres admin password (ignored if existingSecret is set)
+
+# To manually create the PostgreSQL secret, use:
+#   kubectl create secret generic spam-postgresql-secret \
+#     --from-literal=password='$(openssl rand -base64 32)' \
+#     --from-literal=postgres-password='$(openssl rand -base64 32)' \
+#     --namespace spam
+# Then set postgresql.auth.existingSecret="spam-postgresql-secret" above
 
   # Primary instance configuration
   primary:
@@ -196,6 +215,26 @@ postgresql:
       limits:
         memory: 512Mi
         cpu: 500m
+    # Security context for PostgreSQL pod
+    podSecurityContext:
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+      seccompProfile:
+        type: RuntimeDefault
+
+    # Security context for PostgreSQL container
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      readOnlyRootFilesystem: false
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+
 
 # Worker configuration
 # The worker processes background jobs (SBOM parsing, etc.)
