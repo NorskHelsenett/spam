@@ -48,13 +48,16 @@ All contributors (human or AI) must align with this file.
 
 All code must fit into one of these logical modules:
 
-- auth        : OIDC login, groups, RBAC
+- auth        : OIDC login, sessions, users, groups, RBAC
 - assets      : repos, commits, clusters, workloads
 - artifacts   : SBOM storage and bindings
-- inventory   : SBOM parsing, components, licenses
-- jobs        : job queue and workers
-- events      : outbox and SSE streaming
-- ui/api      : HTTP API surface
+- inventory   : SBOM parsing, components, licenses, ecosystems
+- jobs        : job queue, workers, job types, processing
+- events      : outbox, SSE streaming, NOTIFY/LISTEN
+- uiapi       : HTTP handlers for frontend (uploads, admin, queries)
+- server      : router, middleware, health checks
+- config      : environment and runtime configuration
+- db          : database connection and lifecycle
 
 Cross-module coupling should be explicit.
 
@@ -75,6 +78,8 @@ Cross-module coupling should be explicit.
 ### Events
 - Any user-visible state change emits an outbox event.
 - SSE must support replay via Last-Event-ID.
+- NOTIFY/LISTEN is a wake-up hint only; outbox is the source of truth.
+- Event replay should query outbox, not rely on in-memory state.
 
 ### UI
 - UI must be thin.

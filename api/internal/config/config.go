@@ -63,6 +63,29 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// WorkerConfig captures configuration for the background worker.
+type WorkerConfig struct {
+	DatabaseURL string
+}
+
+// LoadWorker reads configuration for the worker process.
+// Only requires database connection - no OIDC or HTTP config needed.
+func LoadWorker() (WorkerConfig, error) {
+	cfg := WorkerConfig{
+		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
+	}
+
+	if cfg.DatabaseURL == "" {
+		dsn, err := buildDSNFromPGEnv()
+		if err != nil {
+			return WorkerConfig{}, err
+		}
+		cfg.DatabaseURL = dsn
+	}
+
+	return cfg, nil
+}
+
 func buildDSNFromPGEnv() (string, error) {
 	host := strings.TrimSpace(os.Getenv("POSTGRES_HOST"))
 	user := strings.TrimSpace(os.Getenv("POSTGRES_USER"))

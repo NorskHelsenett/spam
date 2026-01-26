@@ -55,11 +55,13 @@ func run() error {
 		&auth.UserGroup{},
 		&assets.Repo{},
 		&assets.RepoCommit{},
+		&assets.ImageDigest{},
 		&artifacts.SBOM{},
 		&artifacts.SBOMBinding{},
 		&inventory.Component{},
 		&inventory.ComponentVersion{},
 		&inventory.SBOMComponent{},
+		&inventory.ComponentDependency{},
 		&jobs.Job{},
 		&events.OutboxEvent{},
 	); err != nil {

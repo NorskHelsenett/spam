@@ -215,7 +215,6 @@ postgresql:
       limits:
         memory: 512Mi
         cpu: 500m
-
     # Security context for PostgreSQL pod
     podSecurityContext:
       runAsNonRoot: true
@@ -235,6 +234,20 @@ postgresql:
       runAsNonRoot: true
       runAsUser: 999
       runAsGroup: 999
+
+
+# Worker configuration
+# The worker processes background jobs (SBOM parsing, etc.)
+worker:
+  enabled: true
+  replicaCount: 1
+  resources: {}
+    # limits:
+    #   cpu: 200m
+    #   memory: 256Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
 
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured

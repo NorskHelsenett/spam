@@ -2,17 +2,55 @@ package inventory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type UpsertComponentInput struct {
 	Name      string
 	PURL      string
 	Ecosystem string
+}
+
+// UpsertComponentWithCache upserts a component using an in-memory cache to avoid
+// duplicate database operations within the same transaction.
+func UpsertComponentWithCache(ctx context.Context, db *gorm.DB, input UpsertComponentInput, cache map[string]*Component) (*Component, error) {
+	if input.Name == "" {
+		return nil, nil
+	}
+
+	// Strip version from PURL
+	basePURL := stripPURLVersion(input.PURL)
+	cacheKey := basePURL
+	if cacheKey == "" {
+		// For components without PURL, use name+ecosystem as cache key
+		eco := input.Ecosystem
+		if eco == "" {
+			eco = ecosystemFromPURL(input.PURL)
+		}
+		cacheKey = "name:" + input.Name + "::" + eco
+	}
+
+	// Check cache first
+	if cached, ok := cache[cacheKey]; ok {
+		return cached, nil
+	}
+
+	// Not in cache, do the actual upsert
+	component, err := UpsertComponent(ctx, db, input)
+	if err != nil {
+		return nil, fmt.Errorf("cache miss for key=%q input.PURL=%q basePURL=%q: %w", cacheKey, input.PURL, basePURL, err)
+	}
+
+	// Store in cache for future lookups
+	if component != nil {
+		cache[cacheKey] = component
+	}
+
+	return component, nil
 }
 
 func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInput) (*Component, error) {
@@ -25,44 +63,59 @@ func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInpu
 		ecosystem = ecosystemFromPURL(input.PURL)
 	}
 
+	// Strip version from PURL - Component is version-agnostic
+	// e.g., "pkg:npm/lodash@4.17.21" -> "pkg:npm/lodash"
+	basePURL := stripPURLVersion(input.PURL)
+
 	var component Component
-	if input.PURL != "" {
+
+	// If PURL provided, try to find existing first
+	if basePURL != "" {
+		err := db.WithContext(ctx).Where("purl = ?", basePURL).First(&component).Error
+		if err == nil {
+			return &component, nil
+		}
+		if err != gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("lookup purl %q: %w", basePURL, err)
+		}
+
+		// Not found, create new
 		component = Component{
 			ID:        uuid.NewString(),
 			Name:      input.Name,
-			PURL:      input.PURL,
+			PURL:      basePURL,
 			Ecosystem: ecosystem,
 		}
-		result := db.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "purl"}},
-			DoNothing: true,
-		}).Create(&component)
-		if result.Error != nil {
-			return nil, result.Error
-		}
-		if result.RowsAffected == 0 {
-			if err := db.WithContext(ctx).Where("purl = ?", input.PURL).First(&component).Error; err != nil {
-				return nil, err
-			}
+		if err := db.WithContext(ctx).Create(&component).Error; err != nil {
+			// Debug: check what's actually in the DB
+			var existing Component
+			db.WithContext(ctx).Where("purl = ?", basePURL).First(&existing)
+			return nil, fmt.Errorf("create component purl=%q (input.PURL=%q) name=%q existing.ID=%q existing.PURL=%q: %w",
+				basePURL, input.PURL, input.Name, existing.ID, existing.PURL, err)
 		}
 		return &component, nil
 	}
 
-	if err := db.WithContext(ctx).
-		Where("name = ? AND ecosystem = ?", input.Name, ecosystem).
-		First(&component).Error; err != nil {
-		if err != gorm.ErrRecordNotFound {
-			return nil, err
-		}
-		component = Component{
-			ID:        uuid.NewString(),
-			Name:      input.Name,
-			PURL:      "",
-			Ecosystem: ecosystem,
-		}
-		if err := db.WithContext(ctx).Create(&component).Error; err != nil {
-			return nil, err
-		}
+	// No PURL - look up by name and ecosystem first
+	err := db.WithContext(ctx).
+		Where("name = ? AND ecosystem = ? AND purl = ''", input.Name, ecosystem).
+		First(&component).Error
+	if err == nil {
+		return &component, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	// Not found, create new
+	component = Component{
+		ID:        uuid.NewString(),
+		Name:      input.Name,
+		PURL:      "",
+		Ecosystem: ecosystem,
+	}
+	if err := db.WithContext(ctx).Create(&component).Error; err != nil {
+		return nil, err
 	}
 
 	return &component, nil
@@ -73,25 +126,27 @@ func UpsertComponentVersion(ctx context.Context, db *gorm.DB, componentID, versi
 		return nil, nil
 	}
 
-	cv := ComponentVersion{
+	var cv ComponentVersion
+
+	// Try to find existing first
+	err := db.WithContext(ctx).
+		Where("component_id = ? AND version = ?", componentID, version).
+		First(&cv).Error
+	if err == nil {
+		return &cv, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return nil, err
+	}
+
+	// Not found, create new
+	cv = ComponentVersion{
 		ID:          uuid.NewString(),
 		ComponentID: componentID,
 		Version:     version,
 	}
-
-	result := db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "component_id"}, {Name: "version"}},
-		DoNothing: true,
-	}).Create(&cv)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	if result.RowsAffected == 0 {
-		if err := db.WithContext(ctx).
-			Where("component_id = ? AND version = ?", componentID, version).
-			First(&cv).Error; err != nil {
-			return nil, err
-		}
+	if err := db.WithContext(ctx).Create(&cv).Error; err != nil {
+		return nil, err
 	}
 
 	return &cv, nil
@@ -109,10 +164,23 @@ func UpsertSBOMComponent(ctx context.Context, db *gorm.DB, sbomID, componentVers
 		Scope:              scope,
 	}
 
-	return db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "sbom_id"}, {Name: "component_version_id"}},
-		DoNothing: true,
-	}).Create(&link).Error
+	return db.WithContext(ctx).Create(&link).Error
+}
+
+// CreateComponentDependency creates a dependency relationship between two component versions.
+func CreateComponentDependency(ctx context.Context, db *gorm.DB, sbomID, dependentID, dependencyID string) error {
+	if sbomID == "" || dependentID == "" || dependencyID == "" {
+		return nil
+	}
+
+	dep := ComponentDependency{
+		ID:           uuid.NewString(),
+		SBOMID:       sbomID,
+		DependentID:  dependentID,
+		DependencyID: dependencyID,
+	}
+
+	return db.WithContext(ctx).Create(&dep).Error
 }
 
 func ecosystemFromPURL(purl string) string {
@@ -126,4 +194,30 @@ func ecosystemFromPURL(purl string) string {
 	}
 	parts := strings.SplitN(trimmed, "/", 2)
 	return parts[0]
+}
+
+// stripPURLVersion removes version, qualifiers, and subpath from a PURL.
+// e.g., "pkg:npm/lodash@4.17.21?foo=bar#sub" -> "pkg:npm/lodash"
+func stripPURLVersion(purl string) string {
+	trimmed := strings.TrimSpace(purl)
+	if trimmed == "" {
+		return ""
+	}
+
+	// Remove subpath (#...)
+	if idx := strings.Index(trimmed, "#"); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+
+	// Remove qualifiers (?...)
+	if idx := strings.Index(trimmed, "?"); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+
+	// Remove version (@...)
+	if idx := strings.Index(trimmed, "@"); idx != -1 {
+		trimmed = trimmed[:idx]
+	}
+
+	return trimmed
 }

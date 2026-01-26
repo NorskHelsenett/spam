@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go vet:*)",
+      "Bash(pushd:*)",
+      "Bash(popd)",
+      "Bash(go test:*)"
+    ]
+  }
+}

@@ -93,14 +93,17 @@ Acceptance:
 ---
 
 ### 3.2 SBOM Parsing Worker
-- [ ] Parse components into normalized tables
-- [ ] Handle missing or malformed fields safely
-- [ ] Emit SBOM_PARSED event
-- [ ] Mark job complete
+- [x] Parse components into normalized tables
+- [x] Handle missing or malformed fields safely
+- [x] Emit SBOM_PARSED event
+- [x] Mark job complete
 
 Acceptance:
 - Worker restart does not corrupt data
 - Re-running job produces no duplicates
+
+Note: Implemented in `jobs/processor.go`. Uses upsert patterns with
+unique constraints to ensure idempotency.
 
 ---
 
@@ -113,8 +116,17 @@ Acceptance:
       - component list
 
 ### 4.2 Component Search
-- [ ] Search by name / purl
-- [ ] List impacted repos
+- [x] Search by name / purl
+- [x] List impacted repos
+- [x] Filter by ecosystem
+- [x] Component detail with versions
+- [x] Show repos and images per component
+
+### 4.3 SBOM Upload UI
+- [x] Upload dialog with repo URL parsing
+- [x] Form fields: org, slug, commit SHA, ref, provider, format
+- [x] Auto-detect CycloneDX/SPDX format
+- [x] Success/error feedback
 
 Acceptance:
 - Queries use normalized tables
@@ -125,17 +137,23 @@ Acceptance:
 ## Phase 5 – Live Updates
 
 ### 5.1 SSE Endpoint
-- [ ] Implement `/events`
-- [ ] Support Last-Event-ID replay
-- [ ] Heartbeat every 15–30 seconds
+- [x] Implement `/api/app/stream`
+- [ ] Support Last-Event-ID replay (required by ADR-0004)
+- [x] Heartbeat every 20 seconds
+
+Implementation note: Current SSE broadcasts live events via in-memory
+pub/sub but does NOT support replay. To fulfill ADR-0004:
+- Query `outbox_event` for events after Last-Event-ID on connect
+- Include event ID in SSE `id:` field
+- Consider adding `user_id` column to outbox for scoped replay
 
 ### 5.2 Postgres NOTIFY (Optional Optimization)
-- [ ] NOTIFY on job/event insert
-- [ ] LISTEN in API/worker to wake loops
+- [x] NOTIFY on job/event insert
+- [x] LISTEN in API to wake SSE dispatch
 
 Acceptance:
 - SSE survives pod restarts
-- No event loss after reconnect
+- No event loss after reconnect ← **Currently not met**
 
 ---
 
@@ -203,6 +221,24 @@ Acceptance:
 - Never store secrets in plaintext
 - Never bypass job system for background work
 - Always emit outbox events for visible changes
+
+---
+
+## Technical Debt (from code review 2026-01)
+
+### High Priority
+- [ ] SSE Last-Event-ID replay not implemented (ADR-0004 gap)
+- [ ] Potential race in `events/stream.go` dispatch (channel close during send)
+
+### Medium Priority
+- [ ] Remove duplicate log statements in `uiapi/sboms.go:115-116`
+- [ ] Replace custom `itoa()` with `strconv.FormatUint`
+- [ ] Make job retry backoff configurable (currently hardcoded linear)
+- [ ] Remove unused `db` parameter from admin handlers
+
+### Low Priority
+- [ ] Align Svelte syntax to v5 conventions (`on:click` → `onclick`)
+- [ ] Add client-side error logging in upload dialog
 
 ---
 

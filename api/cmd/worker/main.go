@@ -24,7 +24,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadWorker()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -65,6 +65,8 @@ func run() error {
 				continue
 			}
 
+			log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
+
 			result, err := jobs.ProcessJob(ctx, gormDB, job)
 			if err != nil {
 				next := (*time.Time)(nil)
@@ -73,6 +75,9 @@ func run() error {
 					retryAt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, now)
 					next = &retryAt
 					status = jobs.JobStatusRetry
+					log.Printf("job failed (will retry): id=%s type=%s error=%v retry_at=%s", job.ID, job.Type, err, retryAt.Format(time.RFC3339))
+				} else {
+					log.Printf("job failed (max attempts): id=%s type=%s error=%v", job.ID, job.Type, err)
 				}
 
 				if _, updateErr := jobs.UpdateJobStatus(ctx, gormDB, job.ID, status, nil, err.Error(), next); updateErr != nil {
@@ -80,6 +85,8 @@ func run() error {
 				}
 				continue
 			}
+
+			log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
 
 			if _, updateErr := jobs.UpdateJobStatus(ctx, gormDB, job.ID, jobs.JobStatusSucceeded, result, "", nil); updateErr != nil {
 				log.Printf("update job error: %v", updateErr)

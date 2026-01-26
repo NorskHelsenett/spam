@@ -41,6 +41,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
+
+				// Stats
+				api.Get("/stats", uiapi.StatsHandler(db, authService))
+
+				// Component search and detail
+				api.Get("/components", uiapi.ComponentsListHandler(db, authService))
+				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService))
+				api.Get("/components/{componentID}", uiapi.ComponentDetailHandler(db, authService))
+				api.Get("/components/{componentID}/assets", uiapi.ComponentAssetsHandler(db, authService))
 			}
 		})
 

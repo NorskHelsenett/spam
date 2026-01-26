@@ -21,3 +21,13 @@ type RepoCommit struct {
 	Ref       string `gorm:"size:255"`
 	CreatedAt time.Time
 }
+
+// ImageDigest identifies a container image by digest.
+type ImageDigest struct {
+	ID              string `gorm:"primaryKey;size:36"`
+	Registry        string `gorm:"size:255;not null;uniqueIndex:ux_image_digest_identity"`
+	Repository      string `gorm:"size:512;not null;uniqueIndex:ux_image_digest_identity"`
+	Digest          string `gorm:"size:255;not null;uniqueIndex:ux_image_digest_identity"`
+	CreatedAt       time.Time
+	CreatedByUserID string `gorm:"size:36"`
+}

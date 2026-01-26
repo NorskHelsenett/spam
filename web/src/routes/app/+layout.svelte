@@ -90,7 +90,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound } from 'lucide-svelte';
+import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound, Package } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -99,6 +99,7 @@ let isAdmin = $state(false);
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
 		{ href: '/app/agents', label: 'SBOMs', icon: Boxes },
+		{ href: '/app/components', label: 'Components', icon: Package },
 		{ href: '/app/notifications', label: 'Alerts', icon: BellRing }
 	] as const;
 

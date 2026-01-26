@@ -33,12 +33,18 @@ RUN go mod download && go mod verify
 COPY api/ .
 # Copy built frontend from previous stage into expected path
 COPY --from=frontend /app/web/build ./web/build
-# Build a static binary (CGO disabled - using pure Go PostgreSQL driver)
+# Build static binaries (CGO disabled - using pure Go PostgreSQL driver)
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath \
     -buildvcs=false \
     -ldflags='-w -s -buildid=' \
     -o /go/bin/spam ./cmd/server
+
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+    -trimpath \
+    -buildvcs=false \
+    -ldflags='-w -s -buildid=' \
+    -o /go/bin/worker ./cmd/worker
 
 # 3. Final runtime stage (scratch for minimal size)
 FROM alpine:3.20 AS certs
@@ -60,8 +66,9 @@ COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=certs /etc/ssl/certs /etc/ssl/certs
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-# Copy statically linked binary and prerendered assets
+# Copy statically linked binaries and prerendered assets
 COPY --from=gobuilder /go/bin/spam /app/spam
+COPY --from=gobuilder /go/bin/worker /app/worker
 COPY --from=gobuilder /go/api/web/build /app/web/build
 
 EXPOSE 8080
