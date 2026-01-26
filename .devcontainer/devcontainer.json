@@ -24,6 +24,12 @@
 	"portsAttributes": {
 		"8080": {
 			"onAutoForward": "ignore"
+		},
+		"19999": {
+			"onAutoForward": "silent"
+		},
+		"5178": {
+			"onAutoForward": "silent"
 		}
 	},
 	"runArgs": [

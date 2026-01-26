@@ -3,7 +3,8 @@
     "allow": [
       "Bash(go vet:*)",
       "Bash(pushd:*)",
-      "Bash(popd)"
+      "Bash(popd)",
+      "Bash(go test:*)"
     ]
   }
 }

@@ -54,23 +54,28 @@ func processParseSBOM(ctx context.Context, db *gorm.DB, job *Job) (interface{}, 
 
 	sbom, err := artifacts.FindSBOM(ctx, db, payload.SBOMID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("find sbom %s: %w", payload.SBOMID, err)
 	}
 
-	components, err := inventory.ParseSBOM(sbom.Format, sbom.ContentBytes)
+	parsed, err := inventory.ParseSBOMFull(sbom.Format, sbom.ContentBytes)
 	if err != nil {
 		return nil, err
 	}
 
 	result := parseResult{SBOMID: sbom.ID}
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		for _, entry := range components {
-			component, err := inventory.UpsertComponent(ctx, tx, inventory.UpsertComponentInput{
+		// Cache to avoid duplicate DB operations for same base PURL within this transaction
+		componentCache := make(map[string]*inventory.Component) // basePURL -> Component
+		// Map full PURL (with version) -> ComponentVersionID for dependency resolution
+		purlToVersionID := make(map[string]string)
+
+		for i, entry := range parsed.Components {
+			component, err := inventory.UpsertComponentWithCache(ctx, tx, inventory.UpsertComponentInput{
 				Name: entry.Name,
 				PURL: entry.PURL,
-			})
+			}, componentCache)
 			if err != nil {
-				return err
+				return fmt.Errorf("upsert component[%d] name=%q purl=%q: %w", i, entry.Name, entry.PURL, err)
 			}
 			if component == nil {
 				continue
@@ -79,22 +84,44 @@ func processParseSBOM(ctx context.Context, db *gorm.DB, job *Job) (interface{}, 
 
 			cv, err := inventory.UpsertComponentVersion(ctx, tx, component.ID, entry.Version)
 			if err != nil {
-				return err
+				return fmt.Errorf("upsert component version[%d] component=%q version=%q: %w", i, component.ID, entry.Version, err)
 			}
 			if cv == nil {
 				continue
 			}
 			result.ComponentVers++
 
+			// Track PURL -> ComponentVersionID for dependency resolution
+			if entry.PURL != "" {
+				purlToVersionID[entry.PURL] = cv.ID
+			}
+
 			if err := inventory.UpsertSBOMComponent(ctx, tx, sbom.ID, cv.ID, entry.Scope); err != nil {
-				return err
+				return fmt.Errorf("upsert sbom component[%d] sbom=%q cv=%q: %w", i, sbom.ID, cv.ID, err)
 			}
 			result.Links++
 		}
 
+		// Process dependencies
+		for _, dep := range parsed.Dependencies {
+			dependentID := purlToVersionID[dep.Ref]
+			if dependentID == "" {
+				continue
+			}
+			for _, depPURL := range dep.DependsOn {
+				dependencyID := purlToVersionID[depPURL]
+				if dependencyID == "" {
+					continue
+				}
+				if err := inventory.CreateComponentDependency(ctx, tx, sbom.ID, dependentID, dependencyID); err != nil {
+					return fmt.Errorf("create dependency %q -> %q: %w", dep.Ref, depPURL, err)
+				}
+			}
+		}
+
 		info, err := loadSBOMBroadcastInfo(ctx, tx, payload.BindingID, sbom.ID)
 		if err != nil {
-			return err
+			return fmt.Errorf("load broadcast info: %w", err)
 		}
 
 		if err := events.EmitSBOMParsed(tx, sbom.ID, map[string]interface{}{
@@ -103,12 +130,12 @@ func processParseSBOM(ctx context.Context, db *gorm.DB, job *Job) (interface{}, 
 			"component_versions": result.ComponentVers,
 			"links":              result.Links,
 		}); err != nil {
-			return err
+			return fmt.Errorf("emit sbom parsed event: %w", err)
 		}
 
 		if info.SBOMID != "" {
 			if err := events.NotifyEvent(tx, events.StreamEventSBOMParsed, info); err != nil {
-				return err
+				return fmt.Errorf("notify sbom parsed: %w", err)
 			}
 		}
 

@@ -61,6 +61,7 @@ func run() error {
 		&inventory.Component{},
 		&inventory.ComponentVersion{},
 		&inventory.SBOMComponent{},
+		&inventory.ComponentDependency{},
 		&jobs.Job{},
 		&events.OutboxEvent{},
 	); err != nil {
