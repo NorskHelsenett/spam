@@ -52,9 +52,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 				api.Get("/components/{componentID}/assets", uiapi.ComponentAssetsHandler(db, authService))
 
 				// Provider endpoints (public repos only for now)
+				api.Get("/providers/detect", uiapi.DetectProviderHandler(authService))
 				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
+				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService))
 				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService))
+				api.Get("/providers/gitlab/subgroups", uiapi.GitLabSubgroupsHandler(authService))
 				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService))
+				api.Get("/providers/gitea/repos", uiapi.GiteaReposHandler(authService))
+				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService))
+				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService))
 			}
 		})
 

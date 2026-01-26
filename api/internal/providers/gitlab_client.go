@@ -110,7 +110,7 @@ func (c *GitLabClientImpl) ListPublicOrgs(ctx context.Context, groupPath string,
 	return orgs, pageInfo, nil
 }
 
-// ListPublicProjects lists public projects for a group.
+// ListPublicProjects lists public projects for a group, or all public projects if groupPath is empty.
 func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath string, opts ListOptions) ([]RepoData, PageInfo, error) {
 	if opts.PageSize <= 0 {
 		opts.PageSize = defaultPageSize
@@ -122,11 +122,17 @@ func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath str
 		opts.Page = 1
 	}
 
-	// URL-encode the group path (GitLab uses / in group paths)
-	encodedPath := url.PathEscape(groupPath)
-
-	urlStr := fmt.Sprintf("%s/groups/%s/projects?visibility=public&per_page=%d&page=%d&include_subgroups=%v&order_by=last_activity_at&sort=desc",
-		c.baseURL, encodedPath, opts.PageSize, opts.Page, opts.IncludeSubgroups)
+	var urlStr string
+	if groupPath != "" {
+		// URL-encode the group path (GitLab uses / in group paths)
+		encodedPath := url.PathEscape(groupPath)
+		urlStr = fmt.Sprintf("%s/groups/%s/projects?visibility=public&per_page=%d&page=%d&include_subgroups=%v&order_by=last_activity_at&sort=desc",
+			c.baseURL, encodedPath, opts.PageSize, opts.Page, opts.IncludeSubgroups)
+	} else {
+		// List all public projects on the instance
+		urlStr = fmt.Sprintf("%s/projects?visibility=public&per_page=%d&page=%d&order_by=last_activity_at&sort=desc",
+			c.baseURL, opts.PageSize, opts.Page)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
