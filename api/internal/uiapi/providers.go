@@ -480,7 +480,10 @@ func GitHubRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		readme, _ := client.GetReadme(r.Context(), owner, repo)
+		readme, readmeErr := client.GetReadme(r.Context(), owner, repo)
+		if readmeErr != nil {
+			log.Printf("GitHub README error for %s/%s: %v", owner, repo, readmeErr)
+		}
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
 			Details: details,
@@ -530,7 +533,10 @@ func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		readme, _ := client.GetReadme(r.Context(), projectPath)
+		readme, readmeErr := client.GetReadme(r.Context(), projectPath)
+		if readmeErr != nil {
+			log.Printf("GitLab README error for %s: %v", projectPath, readmeErr)
+		}
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
 			Details: details,

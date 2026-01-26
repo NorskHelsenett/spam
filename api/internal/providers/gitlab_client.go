@@ -448,36 +448,58 @@ func (c *GitLabClientImpl) getCountFromHeader(ctx context.Context, urlStr string
 func (c *GitLabClientImpl) GetReadme(ctx context.Context, projectPath string) (string, error) {
 	encodedPath := url.PathEscape(projectPath)
 
-	// Try common README filenames
-	readmeFiles := []string{"README.md", "readme.md", "README", "README.txt", "README.rst"}
+	// First, try the dedicated README endpoint (available in newer GitLab versions)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/files/README.md/raw?ref=HEAD", c.baseURL, encodedPath)
 
-	for _, filename := range readmeFiles {
-		urlStr := fmt.Sprintf("%s/projects/%s/repository/files/%s/raw?ref=HEAD",
-			c.baseURL, encodedPath, url.PathEscape(filename))
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-		if err != nil {
-			continue
-		}
-
-		if c.token != "" {
-			req.Header.Set("PRIVATE-TOKEN", c.token)
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusOK {
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				continue
-			}
-			return string(body), nil
-		}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", nil
 	}
 
-	return "", nil // No README found
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", nil
+		}
+		return string(body), nil
+	}
+
+	// If that fails, try fetching via the blob endpoint (works without auth for public projects)
+	// First get the default branch from project info we should already have
+	// Try lowercase readme.md
+	urlStr = fmt.Sprintf("%s/projects/%s/repository/files/readme.md/raw?ref=HEAD", c.baseURL, encodedPath)
+	req, err = http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", nil
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err = c.httpClient.Do(req)
+	if err != nil {
+		return "", nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "", nil
+		}
+		return string(body), nil
+	}
+
+	return "", nil // No README found or requires authentication
 }

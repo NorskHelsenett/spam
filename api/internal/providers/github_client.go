@@ -477,8 +477,8 @@ func (c *GitHubClientImpl) GetReadme(ctx context.Context, owner, repo string) (s
 		return "", err
 	}
 
-	// Request raw content
-	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	// Request raw content - use application/vnd.github.raw for raw file content
+	req.Header.Set("Accept", "application/vnd.github.raw")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -494,8 +494,8 @@ func (c *GitHubClientImpl) GetReadme(ctx context.Context, owner, repo string) (s
 		return "", nil // No README
 	}
 
-	if err := c.checkResponse(resp); err != nil {
-		return "", err
+	if resp.StatusCode != http.StatusOK {
+		return "", nil // Other error, skip README
 	}
 
 	body, err := io.ReadAll(resp.Body)
