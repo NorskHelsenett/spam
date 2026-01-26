@@ -1,8 +1,10 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { get } from 'svelte/store';
 	import { Search, GitBranch, Folder, ChevronRight, ExternalLink, Archive, GitFork, Lock, Plus, X, Globe, Loader2 } from 'lucide-svelte';
+	import { providersState, type ProvidersState } from '$lib/stores/providersState';
 
 	type RepoData = {
 		external_id: string;
@@ -114,6 +116,71 @@
 	let cpGroupPath: string[] = $state([]);
 
 	const pageSize = 30;
+
+	// Save state to store when navigating away
+	const saveState = () => {
+		providersState.set({
+			activeTab,
+			ghOwner,
+			ghRepos,
+			ghPage,
+			ghHasNextPage,
+			ghTotalCount,
+			glGroup,
+			glProjects,
+			glSubgroups,
+			glPage,
+			glHasNextPage,
+			glTotalCount,
+			glIncludeSubgroups,
+			glGroupPath,
+			cpGroup,
+			cpProjects,
+			cpSubgroups,
+			cpPage,
+			cpHasNextPage,
+			cpTotalCount,
+			cpIncludeSubgroups,
+			cpGroupPath,
+			customProviders,
+			lastUpdated: Date.now()
+		});
+	};
+
+	// Restore state from store
+	const restoreState = () => {
+		const state = get(providersState);
+		// Only restore if state was saved recently (within 30 minutes)
+		if (state.lastUpdated && Date.now() - state.lastUpdated < 30 * 60 * 1000) {
+			activeTab = state.activeTab;
+			ghOwner = state.ghOwner;
+			ghRepos = state.ghRepos;
+			ghPage = state.ghPage;
+			ghHasNextPage = state.ghHasNextPage;
+			ghTotalCount = state.ghTotalCount;
+			glGroup = state.glGroup;
+			glProjects = state.glProjects;
+			glSubgroups = state.glSubgroups;
+			glPage = state.glPage;
+			glHasNextPage = state.glHasNextPage;
+			glTotalCount = state.glTotalCount;
+			glIncludeSubgroups = state.glIncludeSubgroups;
+			glGroupPath = state.glGroupPath;
+			cpGroup = state.cpGroup;
+			cpProjects = state.cpProjects;
+			cpSubgroups = state.cpSubgroups;
+			cpPage = state.cpPage;
+			cpHasNextPage = state.cpHasNextPage;
+			cpTotalCount = state.cpTotalCount;
+			cpIncludeSubgroups = state.cpIncludeSubgroups;
+			cpGroupPath = state.cpGroupPath;
+			if (state.customProviders.length > 0) {
+				customProviders = state.customProviders;
+			}
+			return true; // State was restored
+		}
+		return false; // No valid state to restore
+	};
 
 	// Load custom providers from localStorage
 	const loadCustomProviders = () => {
@@ -527,6 +594,8 @@
 
 	// Navigate to repo details page
 	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
+		// Save state before navigating
+		saveState();
 		const params = new URLSearchParams({ provider, path });
 		if (baseUrl) params.set('base_url', baseUrl);
 		goto(`/app/providers/repo?${params}`);
@@ -547,7 +616,12 @@
 	onMount(() => {
 		if (browser) {
 			loadCustomProviders();
-			fetchGitHubRepos(1);
+			// Try to restore state from store (when coming back from repo details)
+			const restored = restoreState();
+			if (!restored) {
+				// No state to restore, fetch initial data
+				fetchGitHubRepos(1);
+			}
 		}
 	});
 </script>

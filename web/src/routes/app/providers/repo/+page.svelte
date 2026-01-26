@@ -105,7 +105,9 @@
 
 			if (!response.ok) {
 				if (response.status === 404) {
-					error = 'Repository not found.';
+					error = 'Repository not found. Private instances may require authentication.';
+				} else if (response.status === 401) {
+					error = 'Authentication required. This instance requires a token to access project details.';
 				} else {
 					error = `Failed to fetch repository details (${response.status}).`;
 				}

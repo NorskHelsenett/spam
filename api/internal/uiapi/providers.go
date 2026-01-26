@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -505,14 +506,24 @@ func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		// URL-decode the path since it may contain encoded slashes (%2F)
+		if decoded, err := url.PathUnescape(projectPath); err == nil {
+			projectPath = decoded
+		}
+
 		baseURL := r.URL.Query().Get("base_url")
 		client := providers.NewGitLabClient(baseURL, "")
 
 		details, err := client.GetRepoDetails(r.Context(), projectPath)
 		if err != nil {
-			log.Printf("GitLab project details error for %s: %v", projectPath, err)
+			log.Printf("GitLab project details error for %q (base_url=%q): %v", projectPath, baseURL, err)
 			if errors.Is(err, providers.ErrNotFound) {
-				http.Error(w, "project not found", http.StatusNotFound)
+				// Could be missing or may require authentication for private instances
+				http.Error(w, "project not found (may require authentication for private instances)", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
 				return
 			}
 			http.Error(w, "failed to fetch project details", http.StatusInternalServerError)
