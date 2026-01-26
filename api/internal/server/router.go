@@ -50,6 +50,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService))
 				api.Get("/components/{componentID}", uiapi.ComponentDetailHandler(db, authService))
 				api.Get("/components/{componentID}/assets", uiapi.ComponentAssetsHandler(db, authService))
+
+				// Provider endpoints (public repos only for now)
+				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
+				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService))
+				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService))
 			}
 		})
 
