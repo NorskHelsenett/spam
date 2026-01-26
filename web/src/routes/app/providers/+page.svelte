@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { Search, GitBranch, Folder, ChevronRight, ExternalLink, Archive, GitFork, Lock, Plus, X, Globe, Loader2 } from 'lucide-svelte';
 
 	type RepoData = {
@@ -524,6 +525,13 @@
 		});
 	};
 
+	// Navigate to repo details page
+	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
+		const params = new URLSearchParams({ provider, path });
+		if (baseUrl) params.set('base_url', baseUrl);
+		goto(`/app/providers/repo?${params}`);
+	};
+
 	const switchToCustomTab = (provider: CustomProvider) => {
 		activeTab = provider.id;
 		cpGroup = '';
@@ -656,12 +664,19 @@
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 								{#each ghRepos as repo}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+									<tr
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
+										ondblclick={() => goToRepoDetails('github', repo.full_path)}
+									>
 										<td class="px-5 py-3">
-											<div class="flex items-center gap-2">
+											<button
+												type="button"
+												class="flex items-center gap-2 text-left"
+												onclick={() => goToRepoDetails('github', repo.full_path)}
+											>
 												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)]">{repo.name}</span>
-											</div>
+												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{repo.name}</span>
+											</button>
 											{#if repo.description}
 												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={repo.description}>{repo.description}</p>
 											{/if}
@@ -693,7 +708,7 @@
 											</div>
 										</td>
 										<td class="px-5 py-3 text-right">
-											<a href={repo.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline">
+											<a href={repo.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>
 												View <ExternalLink class="h-3 w-3" />
 											</a>
 										</td>
@@ -778,12 +793,19 @@
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 								{#each glProjects as project}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+									<tr
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
+										ondblclick={() => goToRepoDetails('gitlab', project.full_path)}
+									>
 										<td class="px-5 py-3">
-											<div class="flex items-center gap-2">
+											<button
+												type="button"
+												class="flex items-center gap-2 text-left"
+												onclick={() => goToRepoDetails('gitlab', project.full_path)}
+											>
 												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)]">{project.name}</span>
-											</div>
+												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{project.name}</span>
+											</button>
 											{#if project.description}
 												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={project.description}>{project.description}</p>
 											{/if}
@@ -799,7 +821,7 @@
 											</div>
 										</td>
 										<td class="px-5 py-3 text-right">
-											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline">View <ExternalLink class="h-3 w-3" /></a>
+											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>View <ExternalLink class="h-3 w-3" /></a>
 										</td>
 									</tr>
 								{/each}
@@ -877,12 +899,14 @@
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 						<input type="text" placeholder="Group/organization path" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
 					</div>
-					<label class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-						<input type="checkbox" bind:checked={cpIncludeSubgroups} class="rounded border-[var(--border-color)]" />
-						Include subgroups
-					</label>
-					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={() => handleCustomSearch(provider)} disabled={cpLoading || !cpGroup.trim()}>
-						{cpLoading ? 'Loading...' : 'Fetch Projects'}
+					{#if provider.type === 'gitlab'}
+						<label class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+							<input type="checkbox" bind:checked={cpIncludeSubgroups} class="rounded border-[var(--border-color)]" />
+							Include subgroups
+						</label>
+					{/if}
+					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
+						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
 					</button>
 				</div>
 
@@ -933,12 +957,19 @@
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 								{#each cpProjects as project}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+									<tr
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
+										ondblclick={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
+									>
 										<td class="px-5 py-3">
-											<div class="flex items-center gap-2">
+											<button
+												type="button"
+												class="flex items-center gap-2 text-left"
+												onclick={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
+											>
 												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)]">{project.name}</span>
-											</div>
+												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{project.name}</span>
+											</button>
 											{#if project.description}
 												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={project.description}>{project.description}</p>
 											{/if}
@@ -954,7 +985,7 @@
 											</div>
 										</td>
 										<td class="px-5 py-3 text-right">
-											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline">View <ExternalLink class="h-3 w-3" /></a>
+											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>View <ExternalLink class="h-3 w-3" /></a>
 										</td>
 									</tr>
 								{/each}

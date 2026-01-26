@@ -313,3 +313,195 @@ func extractPageParam(urlStr string) int {
 	}
 	return page
 }
+
+// gitHubRepoDetails represents detailed repo info from GitHub API.
+type gitHubRepoDetails struct {
+	gitHubRepo
+	StargazersCount  int    `json:"stargazers_count"`
+	ForksCount       int    `json:"forks_count"`
+	WatchersCount    int    `json:"watchers_count"`
+	OpenIssuesCount  int    `json:"open_issues_count"`
+	Size             int64  `json:"size"`
+	License          *struct {
+		Name string `json:"name"`
+	} `json:"license"`
+}
+
+// GetRepoDetails fetches detailed information about a repository.
+func (c *GitHubClientImpl) GetRepoDetails(ctx context.Context, owner, repo string) (*RepoDetails, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s", c.baseURL, owner, repo)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var ghRepo gitHubRepoDetails
+	if err := json.Unmarshal(body, &ghRepo); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	// Fetch additional stats
+	stats := RepoStats{
+		Stars:      ghRepo.StargazersCount,
+		Forks:      ghRepo.ForksCount,
+		Watchers:   ghRepo.WatchersCount,
+		OpenIssues: ghRepo.OpenIssuesCount,
+	}
+
+	// Fetch counts in parallel
+	stats.Commits = c.getCommitCount(ctx, owner, repo)
+	stats.Branches = c.getBranchCount(ctx, owner, repo)
+	stats.Releases = c.getReleaseCount(ctx, owner, repo)
+	stats.Contributors = c.getContributorCount(ctx, owner, repo)
+
+	license := ""
+	if ghRepo.License != nil {
+		license = ghRepo.License.Name
+	}
+
+	return &RepoDetails{
+		RepoData: RepoData{
+			ExternalID:    strconv.FormatInt(ghRepo.ID, 10),
+			Name:          ghRepo.Name,
+			FullPath:      ghRepo.FullName,
+			Description:   ghRepo.Description,
+			HTMLURL:       ghRepo.HTMLURL,
+			DefaultBranch: ghRepo.DefaultBranch,
+			Language:      ghRepo.Language,
+			IsPrivate:     ghRepo.Private,
+			IsArchived:    ghRepo.Archived,
+			IsFork:        ghRepo.Fork,
+			Topics:        ghRepo.Topics,
+			CreatedAt:     ghRepo.CreatedAt,
+			UpdatedAt:     ghRepo.UpdatedAt,
+			PushedAt:      ghRepo.PushedAt,
+		},
+		Stats:   stats,
+		License: license,
+		Size:    ghRepo.Size,
+	}, nil
+}
+
+func (c *GitHubClientImpl) getCommitCount(ctx context.Context, owner, repo string) int {
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?per_page=1", c.baseURL, owner, repo)
+	return c.getCountFromLinkHeader(ctx, url)
+}
+
+func (c *GitHubClientImpl) getBranchCount(ctx context.Context, owner, repo string) int {
+	url := fmt.Sprintf("%s/repos/%s/%s/branches?per_page=1", c.baseURL, owner, repo)
+	return c.getCountFromLinkHeader(ctx, url)
+}
+
+func (c *GitHubClientImpl) getReleaseCount(ctx context.Context, owner, repo string) int {
+	url := fmt.Sprintf("%s/repos/%s/%s/releases?per_page=1", c.baseURL, owner, repo)
+	return c.getCountFromLinkHeader(ctx, url)
+}
+
+func (c *GitHubClientImpl) getContributorCount(ctx context.Context, owner, repo string) int {
+	url := fmt.Sprintf("%s/repos/%s/%s/contributors?per_page=1&anon=true", c.baseURL, owner, repo)
+	return c.getCountFromLinkHeader(ctx, url)
+}
+
+func (c *GitHubClientImpl) getCountFromLinkHeader(ctx context.Context, url string) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
+	// Parse Link header to get last page
+	linkHeader := resp.Header.Get("Link")
+	if linkHeader == "" {
+		// No pagination means single page, count the items
+		body, _ := io.ReadAll(resp.Body)
+		var items []interface{}
+		if json.Unmarshal(body, &items) == nil {
+			return len(items)
+		}
+		return 1
+	}
+
+	// Extract last page number
+	for _, link := range strings.Split(linkHeader, ",") {
+		if strings.Contains(link, `rel="last"`) {
+			return extractPageParam(link)
+		}
+	}
+
+	return 1
+}
+
+// GetReadme fetches the README content for a repository.
+func (c *GitHubClientImpl) GetReadme(ctx context.Context, owner, repo string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/%s/readme", c.baseURL, owner, repo)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	// Request raw content
+	req.Header.Set("Accept", "application/vnd.github.raw+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return "", nil // No README
+	}
+
+	if err := c.checkResponse(resp); err != nil {
+		return "", err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}

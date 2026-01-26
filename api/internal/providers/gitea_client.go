@@ -317,3 +317,176 @@ func (c *GiteaClientImpl) parsePageInfo(resp *http.Response, pageSize int, resul
 
 	return info
 }
+
+// giteaRepoDetails represents detailed repo info from Gitea API.
+type giteaRepoDetails struct {
+	giteaRepo
+	StarsCount      int    `json:"stars_count"`
+	ForksCount      int    `json:"forks_count"`
+	WatchersCount   int    `json:"watchers_count"`
+	OpenIssuesCount int    `json:"open_issues_count"`
+	Size            int64  `json:"size"`
+}
+
+// GetRepoDetails fetches detailed information about a repository.
+func (c *GiteaClientImpl) GetRepoDetails(ctx context.Context, owner, repo string) (*RepoDetails, error) {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var gRepo giteaRepoDetails
+	if err := json.Unmarshal(body, &gRepo); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	stats := RepoStats{
+		Stars:      gRepo.StarsCount,
+		Forks:      gRepo.ForksCount,
+		Watchers:   gRepo.WatchersCount,
+		OpenIssues: gRepo.OpenIssuesCount,
+	}
+
+	// Fetch additional counts
+	stats.Commits = c.getCommitCount(ctx, owner, repo)
+	stats.Branches = c.getBranchCount(ctx, owner, repo)
+	stats.Releases = c.getReleaseCount(ctx, owner, repo)
+
+	return &RepoDetails{
+		RepoData: RepoData{
+			ExternalID:    strconv.FormatInt(gRepo.ID, 10),
+			Name:          gRepo.Name,
+			FullPath:      gRepo.FullName,
+			Description:   gRepo.Description,
+			HTMLURL:       gRepo.HTMLURL,
+			DefaultBranch: gRepo.DefaultBranch,
+			Language:      gRepo.Language,
+			IsPrivate:     gRepo.Private,
+			IsArchived:    gRepo.Archived,
+			IsFork:        gRepo.Fork,
+			CreatedAt:     gRepo.CreatedAt,
+			UpdatedAt:     gRepo.UpdatedAt,
+			PushedAt:      gRepo.UpdatedAt,
+		},
+		Stats: stats,
+		Size:  gRepo.Size,
+	}, nil
+}
+
+func (c *GiteaClientImpl) getCommitCount(ctx context.Context, owner, repo string) int {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/commits?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GiteaClientImpl) getBranchCount(ctx context.Context, owner, repo string) int {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/branches?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GiteaClientImpl) getReleaseCount(ctx context.Context, owner, repo string) int {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/releases?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GiteaClientImpl) getCountFromHeader(ctx context.Context, urlStr string) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0
+	}
+
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
+	// Gitea returns X-Total-Count header
+	if total := resp.Header.Get("X-Total-Count"); total != "" {
+		if count, err := strconv.Atoi(total); err == nil {
+			return count
+		}
+	}
+
+	// Fallback: count items
+	body, _ := io.ReadAll(resp.Body)
+	var items []interface{}
+	if json.Unmarshal(body, &items) == nil {
+		return len(items)
+	}
+
+	return 0
+}
+
+// GetReadme fetches the README content for a repository.
+func (c *GiteaClientImpl) GetReadme(ctx context.Context, owner, repo string) (string, error) {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/raw/README.md", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		// Try without .md extension
+		urlStr = fmt.Sprintf("%s/repos/%s/%s/raw/README", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+		req, _ = http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+		if c.token != "" {
+			req.Header.Set("Authorization", "token "+c.token)
+		}
+		resp, err = c.httpClient.Do(req)
+		if err != nil {
+			return "", nil
+		}
+		defer resp.Body.Close()
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(body), nil
+}

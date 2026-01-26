@@ -441,3 +441,135 @@ func tryGiteaDetection(ctx context.Context, client *http.Client, baseURL string)
 		Type: "gitea",
 	}
 }
+
+// RepoDetailsResponse is the response for repo details endpoint.
+type RepoDetailsResponse struct {
+	Details *providers.RepoDetails `json:"details"`
+	Readme  string                 `json:"readme"`
+}
+
+// GitHubRepoDetailsHandler handles fetching GitHub repo details.
+// GET /api/providers/github/{owner}/{repo}/details
+func GitHubRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authService != nil {
+			if _, err := authService.LoadSession(r); err != nil {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		owner := r.PathValue("owner")
+		repo := r.PathValue("repo")
+		if owner == "" || repo == "" {
+			http.Error(w, "owner and repo are required", http.StatusBadRequest)
+			return
+		}
+
+		client := providers.NewGitHubClient("", "")
+
+		details, err := client.GetRepoDetails(r.Context(), owner, repo)
+		if err != nil {
+			log.Printf("GitHub repo details error for %s/%s: %v", owner, repo, err)
+			if errors.Is(err, providers.ErrNotFound) {
+				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
+			return
+		}
+
+		readme, _ := client.GetReadme(r.Context(), owner, repo)
+
+		writeJSON(w, http.StatusOK, RepoDetailsResponse{
+			Details: details,
+			Readme:  readme,
+		})
+	}
+}
+
+// GitLabRepoDetailsHandler handles fetching GitLab project details.
+// GET /api/providers/gitlab/{projectPath}/details?base_url=...
+func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authService != nil {
+			if _, err := authService.LoadSession(r); err != nil {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		projectPath := r.PathValue("projectPath")
+		if projectPath == "" {
+			http.Error(w, "projectPath is required", http.StatusBadRequest)
+			return
+		}
+
+		baseURL := r.URL.Query().Get("base_url")
+		client := providers.NewGitLabClient(baseURL, "")
+
+		details, err := client.GetRepoDetails(r.Context(), projectPath)
+		if err != nil {
+			log.Printf("GitLab project details error for %s: %v", projectPath, err)
+			if errors.Is(err, providers.ErrNotFound) {
+				http.Error(w, "project not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch project details", http.StatusInternalServerError)
+			return
+		}
+
+		readme, _ := client.GetReadme(r.Context(), projectPath)
+
+		writeJSON(w, http.StatusOK, RepoDetailsResponse{
+			Details: details,
+			Readme:  readme,
+		})
+	}
+}
+
+// GiteaRepoDetailsHandler handles fetching Gitea repo details.
+// GET /api/providers/gitea/{owner}/{repo}/details?base_url=...
+func GiteaRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if authService != nil {
+			if _, err := authService.LoadSession(r); err != nil {
+				http.Error(w, "unauthenticated", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		owner := r.PathValue("owner")
+		repo := r.PathValue("repo")
+		if owner == "" || repo == "" {
+			http.Error(w, "owner and repo are required", http.StatusBadRequest)
+			return
+		}
+
+		baseURL := r.URL.Query().Get("base_url")
+		if baseURL == "" {
+			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
+			return
+		}
+
+		client := providers.NewGiteaClient(baseURL, "")
+
+		details, err := client.GetRepoDetails(r.Context(), owner, repo)
+		if err != nil {
+			log.Printf("Gitea repo details error for %s/%s: %v", owner, repo, err)
+			if errors.Is(err, providers.ErrNotFound) {
+				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
+			return
+		}
+
+		readme, _ := client.GetReadme(r.Context(), owner, repo)
+
+		writeJSON(w, http.StatusOK, RepoDetailsResponse{
+			Details: details,
+			Readme:  readme,
+		})
+	}
+}

@@ -297,3 +297,187 @@ func (c *GitLabClientImpl) parsePageInfo(resp *http.Response) PageInfo {
 
 	return info
 }
+
+// gitLabProjectDetails represents detailed project info from GitLab API.
+type gitLabProjectDetails struct {
+	gitLabProject
+	StarCount        int    `json:"star_count"`
+	ForksCount       int    `json:"forks_count"`
+	OpenIssuesCount  int    `json:"open_issues_count"`
+	Statistics       *struct {
+		CommitCount int `json:"commit_count"`
+	} `json:"statistics"`
+	License *struct {
+		Name string `json:"name"`
+	} `json:"license"`
+}
+
+// GetRepoDetails fetches detailed information about a project.
+func (c *GitLabClientImpl) GetRepoDetails(ctx context.Context, projectPath string) (*RepoDetails, error) {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s?statistics=true&license=true", c.baseURL, encodedPath)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var glProject gitLabProjectDetails
+	if err := json.Unmarshal(body, &glProject); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	commitCount := 0
+	if glProject.Statistics != nil {
+		commitCount = glProject.Statistics.CommitCount
+	}
+
+	stats := RepoStats{
+		Stars:      glProject.StarCount,
+		Forks:      glProject.ForksCount,
+		OpenIssues: glProject.OpenIssuesCount,
+		Commits:    commitCount,
+	}
+
+	// Fetch additional counts
+	stats.Branches = c.getBranchCount(ctx, projectPath)
+	stats.Releases = c.getReleaseCount(ctx, projectPath)
+	stats.Contributors = c.getContributorCount(ctx, projectPath)
+
+	license := ""
+	if glProject.License != nil {
+		license = glProject.License.Name
+	}
+
+	return &RepoDetails{
+		RepoData: RepoData{
+			ExternalID:    strconv.FormatInt(glProject.ID, 10),
+			Name:          glProject.Name,
+			FullPath:      glProject.PathWithNamespace,
+			Description:   glProject.Description,
+			HTMLURL:       glProject.WebURL,
+			DefaultBranch: glProject.DefaultBranch,
+			IsPrivate:     glProject.Visibility != "public",
+			IsArchived:    glProject.Archived,
+			IsFork:        glProject.ForkedFromProject != nil,
+			Topics:        glProject.Topics,
+			CreatedAt:     glProject.CreatedAt,
+			UpdatedAt:     glProject.LastActivityAt,
+			PushedAt:      glProject.LastActivityAt,
+		},
+		Stats:   stats,
+		License: license,
+	}, nil
+}
+
+func (c *GitLabClientImpl) getBranchCount(ctx context.Context, projectPath string) int {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/branches?per_page=1", c.baseURL, encodedPath)
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GitLabClientImpl) getReleaseCount(ctx context.Context, projectPath string) int {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/releases?per_page=1", c.baseURL, encodedPath)
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GitLabClientImpl) getContributorCount(ctx context.Context, projectPath string) int {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=1", c.baseURL, encodedPath)
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GitLabClientImpl) getCountFromHeader(ctx context.Context, urlStr string) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+
+	// GitLab returns X-Total header
+	if total := resp.Header.Get("X-Total"); total != "" {
+		if count, err := strconv.Atoi(total); err == nil {
+			return count
+		}
+	}
+
+	// Fallback: count items in response
+	body, _ := io.ReadAll(resp.Body)
+	var items []interface{}
+	if json.Unmarshal(body, &items) == nil {
+		return len(items)
+	}
+
+	return 0
+}
+
+// GetReadme fetches the README content for a project.
+func (c *GitLabClientImpl) GetReadme(ctx context.Context, projectPath string) (string, error) {
+	encodedPath := url.PathEscape(projectPath)
+
+	// Try common README filenames
+	readmeFiles := []string{"README.md", "readme.md", "README", "README.txt", "README.rst"}
+
+	for _, filename := range readmeFiles {
+		urlStr := fmt.Sprintf("%s/projects/%s/repository/files/%s/raw?ref=HEAD",
+			c.baseURL, encodedPath, url.PathEscape(filename))
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			continue
+		}
+
+		if c.token != "" {
+			req.Header.Set("PRIVATE-TOKEN", c.token)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				continue
+			}
+			return string(body), nil
+		}
+	}
+
+	return "", nil // No README found
+}

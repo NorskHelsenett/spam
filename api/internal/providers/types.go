@@ -59,3 +59,23 @@ type PageInfo struct {
 	// HasNextPage indicates if there are more pages
 	HasNextPage bool
 }
+
+// RepoStats represents repository statistics.
+type RepoStats struct {
+	Stars        int `json:"stars"`
+	Forks        int `json:"forks"`
+	Watchers     int `json:"watchers"`
+	OpenIssues   int `json:"open_issues"`
+	Commits      int `json:"commits"`
+	Branches     int `json:"branches"`
+	Releases     int `json:"releases"`
+	Contributors int `json:"contributors"`
+}
+
+// RepoDetails represents detailed repository information.
+type RepoDetails struct {
+	RepoData
+	Stats   RepoStats `json:"stats"`
+	License string    `json:"license"`
+	Size    int64     `json:"size"` // in KB
+}
