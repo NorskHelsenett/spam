@@ -363,6 +363,11 @@ func (c *GitLabClientImpl) GetRepoDetails(ctx context.Context, projectPath strin
 	stats.Releases = c.getReleaseCount(ctx, projectPath)
 	stats.Contributors = c.getContributorCount(ctx, projectPath)
 
+	// If statistics didn't include commit count, fetch via commits API
+	if stats.Commits == 0 {
+		stats.Commits = c.getCommitCount(ctx, projectPath)
+	}
+
 	license := ""
 	if glProject.License != nil {
 		license = glProject.License.Name
@@ -387,6 +392,12 @@ func (c *GitLabClientImpl) GetRepoDetails(ctx context.Context, projectPath strin
 		Stats:   stats,
 		License: license,
 	}, nil
+}
+
+func (c *GitLabClientImpl) getCommitCount(ctx context.Context, projectPath string) int {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/commits?per_page=1", c.baseURL, encodedPath)
+	return c.getCountFromHeader(ctx, urlStr)
 }
 
 func (c *GitLabClientImpl) getBranchCount(ctx context.Context, projectPath string) int {

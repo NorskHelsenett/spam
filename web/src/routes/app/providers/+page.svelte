@@ -1,72 +1,21 @@
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { get } from 'svelte/store';
-	import { Search, GitBranch, Folder, ChevronRight, ExternalLink, Archive, GitFork, Lock, Plus, X, Globe, Loader2 } from 'lucide-svelte';
-	import { providersState, type ProvidersState } from '$lib/stores/providersState';
-
-	type RepoData = {
-		external_id: string;
-		name: string;
-		full_path: string;
-		description: string;
-		html_url: string;
-		default_branch: string;
-		language: string;
-		is_private: boolean;
-		is_archived: boolean;
-		is_fork: boolean;
-		topics: string[];
-		created_at: string;
-		updated_at: string;
-		pushed_at: string;
-	};
-
-	type GroupData = {
-		external_id: string;
-		name: string;
-		path: string;
-		full_path: string;
-		description: string;
-		html_url: string;
-		parent_id: string;
-		visibility: string;
-	};
-
-	type GitHubResponse = {
-		repos: RepoData[];
-		total_count: number;
-		page: number;
-		page_size: number;
-		has_next_page: boolean;
-		next_page: number;
-	};
-
-	type GitLabProjectsResponse = {
-		projects: RepoData[];
-		total_count: number;
-		page: number;
-		page_size: number;
-		has_next_page: boolean;
-		next_page: number;
-	};
-
-	type GitLabGroupsResponse = {
-		groups: GroupData[];
-		total_count: number;
-		page: number;
-		page_size: number;
-		has_next_page: boolean;
-		next_page: number;
-	};
-
-	type CustomProvider = {
-		id: string;
-		name: string;
-		type: 'gitlab' | 'gitea' | 'forgejo';
-		baseUrl: string;
-	};
+	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2 } from 'lucide-svelte';
+	import { providersState } from '$lib/stores/providersState';
+	import RepoTable from '$lib/components/RepoTable.svelte';
+	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
+	import Pagination from '$lib/components/Pagination.svelte';
+	import type {
+		RepoData,
+		GroupData,
+		GitHubResponse,
+		GitLabProjectsResponse,
+		GitLabGroupsResponse,
+		CustomProvider
+	} from '$lib/types/providers';
 
 	const STORAGE_KEY = 'spam-custom-providers';
 
@@ -116,6 +65,23 @@
 	let cpGroupPath: string[] = $state([]);
 
 	const pageSize = 30;
+
+	// Table column definitions
+	const githubColumns = [
+		{ key: 'name', label: 'Repository' },
+		{ key: 'language', label: 'Language' },
+		{ key: 'updated', label: 'Last Updated' },
+		{ key: 'status', label: 'Status', align: 'center' as const },
+		{ key: 'actions', label: '', align: 'right' as const }
+	];
+
+	const gitlabColumns = [
+		{ key: 'name', label: 'Project' },
+		{ key: 'path', label: 'Path' },
+		{ key: 'updated', label: 'Last Activity' },
+		{ key: 'status', label: 'Status', align: 'center' as const },
+		{ key: 'actions', label: '', align: 'right' as const }
+	];
 
 	// Save state to store when navigating away
 	const saveState = () => {
@@ -725,80 +691,25 @@
 				{:else if ghRepos.length === 0 && !ghError}
 					<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
 				{:else if ghRepos.length > 0}
-					<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-								<tr>
-									<th class="px-5 py-3 text-left">Repository</th>
-									<th class="px-5 py-3 text-left">Language</th>
-									<th class="px-5 py-3 text-left">Last Updated</th>
-									<th class="px-5 py-3 text-center">Status</th>
-									<th class="px-5 py-3 text-right"></th>
-								</tr>
-							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-								{#each ghRepos as repo}
-									<tr
-										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
-										ondblclick={() => goToRepoDetails('github', repo.full_path)}
-									>
-										<td class="px-5 py-3">
-											<button
-												type="button"
-												class="flex items-center gap-2 text-left"
-												onclick={() => goToRepoDetails('github', repo.full_path)}
-											>
-												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{repo.name}</span>
-											</button>
-											{#if repo.description}
-												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={repo.description}>{repo.description}</p>
-											{/if}
-											{#if repo.topics && repo.topics.length > 0}
-												<div class="mt-1 flex flex-wrap gap-1">
-													{#each repo.topics.slice(0, 3) as topic}
-														<span class="rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] text-[var(--accent)]">{topic}</span>
-													{/each}
-													{#if repo.topics.length > 3}
-														<span class="text-[10px] text-[var(--text-muted)]">+{repo.topics.length - 3} more</span>
-													{/if}
-												</div>
-											{/if}
-										</td>
-										<td class="px-5 py-3">
-											{#if repo.language}
-												<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{repo.language}</span>
-											{:else}
-												<span class="text-[var(--text-muted)]">—</span>
-											{/if}
-										</td>
-										<td class="px-5 py-3 text-xs">{formatDate(repo.pushed_at || repo.updated_at)}</td>
-										<td class="px-5 py-3 text-center">
-											<div class="flex items-center justify-center gap-1">
-												{#if repo.is_archived}<span title="Archived" class="text-[var(--text-muted)]"><Archive class="h-3.5 w-3.5" /></span>{/if}
-												{#if repo.is_fork}<span title="Fork" class="text-[var(--text-muted)]"><GitFork class="h-3.5 w-3.5" /></span>{/if}
-												{#if repo.is_private}<span title="Private" class="text-[var(--text-muted)]"><Lock class="h-3.5 w-3.5" /></span>{/if}
-												{#if !repo.is_archived && !repo.is_fork && !repo.is_private}<span class="text-[var(--text-muted)]">—</span>{/if}
-											</div>
-										</td>
-										<td class="px-5 py-3 text-right">
-											<a href={repo.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>
-												View <ExternalLink class="h-3 w-3" />
-											</a>
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
+					<RepoTable columns={githubColumns}>
+						{#each ghRepos as repo}
+							<RepoTableRow
+								{repo}
+								{formatDate}
+								onSelect={() => goToRepoDetails('github', repo.full_path)}
+							/>
+						{/each}
+					</RepoTable>
 
-					<div class="flex items-center justify-between pt-2">
-						<p class="text-xs text-[var(--text-muted)]">Page {ghPage} {ghTotalCount > 0 ? `of ${Math.ceil(ghTotalCount / pageSize)}` : ''}</p>
-						<div class="flex gap-2">
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={ghPage <= 1 || ghLoading} onclick={() => fetchGitHubRepos(ghPage - 1)}>Previous</button>
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={!ghHasNextPage || ghLoading} onclick={() => fetchGitHubRepos(ghPage + 1)}>Next</button>
-						</div>
-					</div>
+					<Pagination
+						page={ghPage}
+						totalCount={ghTotalCount}
+						{pageSize}
+						hasNextPage={ghHasNextPage}
+						loading={ghLoading}
+						onPrevious={() => fetchGitHubRepos(ghPage - 1)}
+						onNext={() => fetchGitHubRepos(ghPage + 1)}
+					/>
 				{/if}
 			</div>
 		{/if}
@@ -854,62 +765,26 @@
 				{:else if glProjects.length === 0 && !glError}
 					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
 				{:else if glProjects.length > 0}
-					<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-								<tr>
-									<th class="px-5 py-3 text-left">Project</th>
-									<th class="px-5 py-3 text-left">Path</th>
-									<th class="px-5 py-3 text-left">Last Activity</th>
-									<th class="px-5 py-3 text-center">Status</th>
-									<th class="px-5 py-3 text-right"></th>
-								</tr>
-							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-								{#each glProjects as project}
-									<tr
-										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
-										ondblclick={() => goToRepoDetails('gitlab', project.full_path)}
-									>
-										<td class="px-5 py-3">
-											<button
-												type="button"
-												class="flex items-center gap-2 text-left"
-												onclick={() => goToRepoDetails('gitlab', project.full_path)}
-											>
-												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{project.name}</span>
-											</button>
-											{#if project.description}
-												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={project.description}>{project.description}</p>
-											{/if}
-										</td>
-										<td class="px-5 py-3"><span class="text-xs text-[var(--text-muted)]">{project.full_path}</span></td>
-										<td class="px-5 py-3 text-xs">{formatDate(project.updated_at)}</td>
-										<td class="px-5 py-3 text-center">
-											<div class="flex items-center justify-center gap-1">
-												{#if project.is_archived}<span title="Archived" class="text-[var(--text-muted)]"><Archive class="h-3.5 w-3.5" /></span>{/if}
-												{#if project.is_fork}<span title="Fork" class="text-[var(--text-muted)]"><GitFork class="h-3.5 w-3.5" /></span>{/if}
-												{#if project.is_private}<span title="Private" class="text-[var(--text-muted)]"><Lock class="h-3.5 w-3.5" /></span>{/if}
-												{#if !project.is_archived && !project.is_fork && !project.is_private}<span class="text-[var(--text-muted)]">—</span>{/if}
-											</div>
-										</td>
-										<td class="px-5 py-3 text-right">
-											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>View <ExternalLink class="h-3 w-3" /></a>
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
+					<RepoTable columns={gitlabColumns}>
+						{#each glProjects as project}
+							<RepoTableRow
+								repo={project}
+								showPath
+								{formatDate}
+								onSelect={() => goToRepoDetails('gitlab', project.full_path)}
+							/>
+						{/each}
+					</RepoTable>
 
-					<div class="flex items-center justify-between pt-2">
-						<p class="text-xs text-[var(--text-muted)]">Page {glPage} {glTotalCount > 0 ? `(${glTotalCount} total)` : ''}</p>
-						<div class="flex gap-2">
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={glPage <= 1 || glLoading} onclick={() => fetchGitLabProjects(glPage - 1)}>Previous</button>
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={!glHasNextPage || glLoading} onclick={() => fetchGitLabProjects(glPage + 1)}>Next</button>
-						</div>
-					</div>
+					<Pagination
+						page={glPage}
+						totalCount={glTotalCount}
+						{pageSize}
+						hasNextPage={glHasNextPage}
+						loading={glLoading}
+						onPrevious={() => fetchGitLabProjects(glPage - 1)}
+						onNext={() => fetchGitLabProjects(glPage + 1)}
+					/>
 				{/if}
 			</div>
 		{/if}
@@ -1018,62 +893,26 @@
 				{:else if cpProjects.length === 0 && !cpError}
 					<p class="text-sm text-[var(--text-secondary)]">No public projects found.</p>
 				{:else if cpProjects.length > 0}
-					<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-								<tr>
-									<th class="px-5 py-3 text-left">Project</th>
-									<th class="px-5 py-3 text-left">Path</th>
-									<th class="px-5 py-3 text-left">Last Activity</th>
-									<th class="px-5 py-3 text-center">Status</th>
-									<th class="px-5 py-3 text-right"></th>
-								</tr>
-							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-								{#each cpProjects as project}
-									<tr
-										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
-										ondblclick={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
-									>
-										<td class="px-5 py-3">
-											<button
-												type="button"
-												class="flex items-center gap-2 text-left"
-												onclick={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
-											>
-												<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-												<span class="font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline">{project.name}</span>
-											</button>
-											{#if project.description}
-												<p class="mt-0.5 line-clamp-1 text-xs text-[var(--text-muted)]" title={project.description}>{project.description}</p>
-											{/if}
-										</td>
-										<td class="px-5 py-3"><span class="text-xs text-[var(--text-muted)]">{project.full_path}</span></td>
-										<td class="px-5 py-3 text-xs">{formatDate(project.updated_at)}</td>
-										<td class="px-5 py-3 text-center">
-											<div class="flex items-center justify-center gap-1">
-												{#if project.is_archived}<span title="Archived" class="text-[var(--text-muted)]"><Archive class="h-3.5 w-3.5" /></span>{/if}
-												{#if project.is_fork}<span title="Fork" class="text-[var(--text-muted)]"><GitFork class="h-3.5 w-3.5" /></span>{/if}
-												{#if project.is_private}<span title="Private" class="text-[var(--text-muted)]"><Lock class="h-3.5 w-3.5" /></span>{/if}
-												{#if !project.is_archived && !project.is_fork && !project.is_private}<span class="text-[var(--text-muted)]">—</span>{/if}
-											</div>
-										</td>
-										<td class="px-5 py-3 text-right">
-											<a href={project.html_url} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-xs text-[var(--accent)] hover:underline" onclick={(e) => e.stopPropagation()}>View <ExternalLink class="h-3 w-3" /></a>
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
+					<RepoTable columns={gitlabColumns}>
+						{#each cpProjects as project}
+							<RepoTableRow
+								repo={project}
+								showPath
+								{formatDate}
+								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
+							/>
+						{/each}
+					</RepoTable>
 
-					<div class="flex items-center justify-between pt-2">
-						<p class="text-xs text-[var(--text-muted)]">Page {cpPage} {cpTotalCount > 0 ? `(${cpTotalCount} total)` : ''}</p>
-						<div class="flex gap-2">
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={cpPage <= 1 || cpLoading} onclick={() => fetchCustomProjects(provider, cpPage - 1)}>Previous</button>
-							<button type="button" class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50" disabled={!cpHasNextPage || cpLoading} onclick={() => fetchCustomProjects(provider, cpPage + 1)}>Next</button>
-						</div>
-					</div>
+					<Pagination
+						page={cpPage}
+						totalCount={cpTotalCount}
+						{pageSize}
+						hasNextPage={cpHasNextPage}
+						loading={cpLoading}
+						onPrevious={() => fetchCustomProjects(provider, cpPage - 1)}
+						onNext={() => fetchCustomProjects(provider, cpPage + 1)}
+					/>
 				{/if}
 			</div>
 		{/if}

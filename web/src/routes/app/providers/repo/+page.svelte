@@ -7,6 +7,7 @@
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
 		Package, Clock, Scale
 	} from 'lucide-svelte';
+	import Markdown from '$lib/components/Markdown.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -168,38 +169,6 @@
 		if (browser) {
 			history.back();
 		}
-	};
-
-	// Simple markdown to HTML (basic support)
-	const renderMarkdown = (md: string): string => {
-		if (!md) return '';
-		return md
-			// Code blocks
-			.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code class="language-$1">$2</code></pre>')
-			// Inline code
-			.replace(/`([^`]+)`/g, '<code>$1</code>')
-			// Headers
-			.replace(/^### (.*$)/gm, '<h3>$1</h3>')
-			.replace(/^## (.*$)/gm, '<h2>$1</h2>')
-			.replace(/^# (.*$)/gm, '<h1>$1</h1>')
-			// Bold
-			.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-			// Italic
-			.replace(/\*([^*]+)\*/g, '<em>$1</em>')
-			// Links
-			.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
-			// Images
-			.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="max-w-full" />')
-			// Horizontal rule
-			.replace(/^---$/gm, '<hr />')
-			// Lists
-			.replace(/^\* (.*$)/gm, '<li>$1</li>')
-			.replace(/^- (.*$)/gm, '<li>$1</li>')
-			.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>')
-			// Paragraphs
-			.replace(/\n\n/g, '</p><p>')
-			.replace(/^(?!<[huplo])/gm, '<p>')
-			.replace(/(?<![>\n])$/gm, '</p>');
 	};
 
 	onMount(() => {
@@ -386,83 +355,9 @@
 		<!-- README -->
 		{#if readme}
 			<section class="panel-surface px-6 py-6 sm:px-10">
-				<h2 class="mb-4 text-lg font-semibold text-[var(--text-bright)]">README</h2>
-				<div class="prose prose-invert max-w-none text-[var(--text-secondary)]">
-					{@html renderMarkdown(readme)}
-				</div>
-			</section>
-		{:else}
-			<section class="panel-surface px-6 py-6 text-center sm:px-10">
-				<p class="text-[var(--text-muted)]">No README found for this repository.</p>
+				<Markdown content={readme} class="max-w-none text-[var(--text-secondary)]" />
 			</section>
 		{/if}
 	{/if}
 </div>
 
-<style>
-	.prose {
-		line-height: 1.7;
-	}
-	.prose h1 {
-		font-size: 1.75rem;
-		font-weight: 600;
-		margin-top: 1.5rem;
-		margin-bottom: 0.75rem;
-		color: var(--text-bright);
-	}
-	.prose h2 {
-		font-size: 1.4rem;
-		font-weight: 600;
-		margin-top: 1.25rem;
-		margin-bottom: 0.5rem;
-		color: var(--text-bright);
-	}
-	.prose h3 {
-		font-size: 1.15rem;
-		font-weight: 600;
-		margin-top: 1rem;
-		margin-bottom: 0.5rem;
-		color: var(--text-bright);
-	}
-	.prose p {
-		margin-bottom: 0.75rem;
-	}
-	.prose code {
-		background: var(--hover-bg);
-		padding: 0.125rem 0.375rem;
-		border-radius: 0.25rem;
-		font-size: 0.875rem;
-	}
-	.prose pre {
-		background: var(--hover-bg);
-		padding: 1rem;
-		border-radius: 0.5rem;
-		overflow-x: auto;
-		margin: 1rem 0;
-	}
-	.prose pre code {
-		background: none;
-		padding: 0;
-	}
-	.prose a {
-		color: var(--accent);
-		text-decoration: underline;
-	}
-	.prose ul {
-		list-style: disc;
-		padding-left: 1.5rem;
-		margin: 0.5rem 0;
-	}
-	.prose li {
-		margin: 0.25rem 0;
-	}
-	.prose hr {
-		border-color: var(--border-color);
-		margin: 1.5rem 0;
-	}
-	.prose img {
-		max-width: 100%;
-		border-radius: 0.5rem;
-		margin: 1rem 0;
-	}
-</style>
