@@ -299,11 +299,16 @@ func (c *GitHubClientImpl) parsePageInfo(resp *http.Response, pageSize int) Page
 
 // extractPageParam extracts the page parameter from a URL string.
 func extractPageParam(urlStr string) int {
-	idx := strings.Index(urlStr, "page=")
+	// Look for &page= or ?page= to avoid matching per_page=
+	idx := strings.Index(urlStr, "&page=")
+	if idx < 0 {
+		idx = strings.Index(urlStr, "?page=")
+	}
 	if idx < 0 {
 		return 0
 	}
-	pageStr := urlStr[idx+5:]
+	// Skip the &page= or ?page= prefix (6 chars)
+	pageStr := urlStr[idx+6:]
 	if endIdx := strings.IndexAny(pageStr, "&>"); endIdx > 0 {
 		pageStr = pageStr[:endIdx]
 	}

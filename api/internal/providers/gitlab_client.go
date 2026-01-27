@@ -438,14 +438,21 @@ func (c *GitLabClientImpl) getCountFromHeader(ctx context.Context, urlStr string
 		return 0
 	}
 
-	// GitLab returns X-Total header
+	// GitLab returns X-Total header for total item count
 	if total := resp.Header.Get("X-Total"); total != "" {
 		if count, err := strconv.Atoi(total); err == nil {
 			return count
 		}
 	}
 
-	// Fallback: count items in response
+	// Fallback: X-Total-Pages equals total count when per_page=1
+	if totalPages := resp.Header.Get("X-Total-Pages"); totalPages != "" {
+		if count, err := strconv.Atoi(totalPages); err == nil {
+			return count
+		}
+	}
+
+	// Last fallback: count items in response
 	body, _ := io.ReadAll(resp.Body)
 	var items []interface{}
 	if json.Unmarshal(body, &items) == nil {
