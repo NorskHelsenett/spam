@@ -22,7 +22,7 @@ fi
 
 echo "Using container runtime: $CONTAINER_CMD"
 echo "Building runner image..."
-$CONTAINER_CMD build -t spam-runner:local "$SCRIPT_DIR"
+$CONTAINER_CMD build --build-arg TARGETARCH=amd64 -t spam-runner:local "$SCRIPT_DIR"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -53,7 +53,40 @@ $CONTAINER_CMD run --rm \
     spam-runner:local
 
 echo ""
+echo "=========================================="
 echo "Test complete!"
-echo "Results saved to:"
-echo "  - $OUTPUT_DIR/sbom.json"
-echo "  - $OUTPUT_DIR/gitleaks.json"
+echo "=========================================="
+echo ""
+
+# Check if files were created and show summary
+if [ -f "$OUTPUT_DIR/sbom.json" ]; then
+    SBOM_SIZE=$(du -h "$OUTPUT_DIR/sbom.json" | cut -f1)
+    echo "✓ SBOM generated: $OUTPUT_DIR/sbom.json ($SBOM_SIZE)"
+    
+    # Show component count if jq is available
+    if command -v jq &> /dev/null; then
+        COMP_COUNT=$(jq '.components | length' "$OUTPUT_DIR/sbom.json" 2>/dev/null || echo "?")
+        echo "  - Components found: $COMP_COUNT"
+    fi
+else
+    echo "✗ SBOM not found: $OUTPUT_DIR/sbom.json"
+fi
+
+if [ -f "$OUTPUT_DIR/gitleaks.json" ]; then
+    GITLEAKS_SIZE=$(du -h "$OUTPUT_DIR/gitleaks.json" | cut -f1)
+    echo "✓ Gitleaks scan: $OUTPUT_DIR/gitleaks.json ($GITLEAKS_SIZE)"
+    
+    # Show secrets count if jq is available
+    if command -v jq &> /dev/null; then
+        SECRET_COUNT=$(jq '. | length' "$OUTPUT_DIR/gitleaks.json" 2>/dev/null || echo "?")
+        if [ "$SECRET_COUNT" = "0" ]; then
+            echo "  - No secrets found ✓"
+        else
+            echo "  - Secrets found: $SECRET_COUNT ⚠️"
+        fi
+    fi
+else
+    echo "✓ Gitleaks scan: No secrets file (none found)"
+fi
+
+echo ""
