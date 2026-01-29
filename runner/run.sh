@@ -72,7 +72,8 @@ if [ "$WORKER_URL" != "local" ]; then
     WS_URL=$(echo "$WORKER_URL" | sed 's|^http|ws|')/runner/ws?token="$RUN_TOKEN"
 
     # Start WebSocket connection: read from WS_OUT pipe, write responses to WS_IN
-    cat "$WS_OUT" | websocat -n "$WS_URL" > "$WS_IN" 2>/dev/null &
+    # Use exec to avoid subshell and open both pipes together to prevent deadlock
+    websocat -n "$WS_URL" < "$WS_OUT" > "$WS_IN" 2>/dev/null &
     WS_PID=$!
 
     # Start cancellation monitor
