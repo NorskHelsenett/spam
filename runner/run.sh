@@ -4,6 +4,10 @@ set -e
 # Required env: WORKER_URL, RUN_ID, RUN_TOKEN, REPO_CLONE_URL
 # Optional env: REPO_REF
 
+# Force unbuffered output for real-time logs
+exec 1> >(stdbuf -o0 cat)
+exec 2> >(stdbuf -o0 cat >&2)
+
 # Extract repo name from clone URL (e.g., https://github.com/org/repo.git -> repo)
 REPO_NAME=$(basename "$REPO_CLONE_URL" .git)
 WORK_DIR="/work/$REPO_NAME"
