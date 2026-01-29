@@ -13,8 +13,11 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/runner"
 	"gorm.io/gorm"
 )
+
+var runExecutor *runner.RunExecutor
 
 func main() {
 	if err := run(); err != nil {
@@ -40,6 +43,33 @@ func run() error {
 			log.Printf("database close error: %v", closeErr)
 		}
 	}()
+
+	// Auto-migrate runner tables
+	if cfg.Runner.Enabled {
+		if err := gormDB.AutoMigrate(&runner.RunLog{}, &runner.RunSecret{}); err != nil {
+			return fmt.Errorf("migrate runner tables: %w", err)
+		}
+	}
+
+	// Start runner server if enabled
+	if cfg.Runner.Enabled {
+		runnerServer := runner.NewServer(cfg.Runner, gormDB)
+
+		// Create run executor
+		runExecutor, err = runner.NewRunExecutor(cfg.Runner, runnerServer)
+		if err != nil {
+			return fmt.Errorf("create run executor: %w", err)
+		}
+
+		// Start runner HTTP server in background
+		go func() {
+			if err := runnerServer.Start(ctx); err != nil {
+				log.Printf("runner server error: %v", err)
+			}
+		}()
+
+		log.Printf("runner server enabled on port %d (local_mode=%v)", cfg.Runner.HTTPPort, cfg.Runner.LocalMode)
+	}
 
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
 	pollInterval := 2 * time.Second
@@ -116,7 +146,7 @@ func run() error {
 func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
 
-	result, err := jobs.ProcessJob(ctx, db, job)
+	result, err := jobs.ProcessJob(ctx, db, job, runExecutor)
 	now := time.Now()
 
 	if err != nil {

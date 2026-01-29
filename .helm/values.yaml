@@ -249,6 +249,44 @@ worker:
     #   cpu: 100m
     #   memory: 128Mi
 
+# Runner configuration
+# The runner executes scans (SBOM generation, secret scanning) in Kubernetes jobs
+runner:
+  enabled: false
+
+  # Runner container image
+  image:
+    repository: spam-runner
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # HTTP port for runner callbacks (internal)
+  httpPort: 8081
+
+  # HMAC key for signing run tokens (auto-generated if empty)
+  hmacKey: ""
+
+  # ServiceAccount for runner jobs
+  serviceAccount:
+    create: true
+    name: ""  # Defaults to {{ .Release.Name }}-runner
+
+  # Resource limits for runner jobs
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  # Job lifecycle settings
+  ttlSecondsAfterFinished: 3600  # TTL for completed jobs (1 hour)
+  activeDeadlineSeconds: 1800   # Maximum runtime for jobs (30 minutes)
+
+  # Local mode for testing (uses Docker instead of K8s jobs)
+  localMode: false
+
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
 # When using external PostgreSQL, set these values

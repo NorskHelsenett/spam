@@ -34,6 +34,9 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.runner.enabled }}
+      serviceAccountName: {{ .Release.Name }}-worker
+      {{- end }}
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
@@ -47,6 +50,12 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/app/worker"]
+          {{- if .Values.runner.enabled }}
+          ports:
+            - name: runner-http
+              containerPort: {{ .Values.runner.httpPort | default 8081 }}
+              protocol: TCP
+          {{- end }}
           {{- with .Values.worker.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -83,6 +92,33 @@ spec:
               value: {{ .Values.postgresqlConnection.port | quote }}
             - name: POSTGRES_SSLMODE
               value: {{ .Values.postgresqlConnection.sslmode | quote }}
+            {{- end }}
+            {{- if .Values.runner.enabled }}
+            - name: RUNNER_ENABLED
+              value: "true"
+            - name: RUNNER_HMAC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-runner
+                  key: RUNNER_HMAC_KEY
+            - name: RUNNER_IMAGE
+              value: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag }}"
+            - name: RUNNER_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: RUNNER_SERVICE_ACCOUNT
+              value: {{ .Values.runner.serviceAccount.name | default (printf "%s-runner" .Release.Name) | quote }}
+            - name: RUNNER_WORKER_URL
+              value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
+            - name: RUNNER_HTTP_PORT
+              value: {{ .Values.runner.httpPort | default 8081 | quote }}
+            - name: RUNNER_TTL_SECONDS
+              value: {{ .Values.runner.ttlSecondsAfterFinished | default 3600 | quote }}
+            - name: RUNNER_ACTIVE_DEADLINE
+              value: {{ .Values.runner.activeDeadlineSeconds | default 1800 | quote }}
+            {{- if .Values.runner.localMode }}
+            - name: RUNNER_LOCAL_MODE
+              value: "true"
+            {{- end }}
             {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

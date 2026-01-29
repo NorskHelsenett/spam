@@ -6,3 +6,4 @@ server/server
 api/server
 **/.gocache/*
 .env
+runner/output/

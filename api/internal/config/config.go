@@ -68,6 +68,23 @@ func Load() (Config, error) {
 type WorkerConfig struct {
 	DatabaseURL string
 	Concurrency int // Number of concurrent job processors
+	Runner      RunnerConfig
+}
+
+// RunnerConfig captures configuration for the Kubernetes runner system.
+type RunnerConfig struct {
+	Enabled           bool          // Enable runner functionality
+	HMACKey           []byte        // Key for signing run tokens
+	Image             string        // Runner container image
+	Namespace         string        // Kubernetes namespace for runner jobs
+	ServiceAccount    string        // ServiceAccount for runner jobs
+	WorkerURL         string        // Internal callback URL (http://worker:8081)
+	HTTPPort          int           // Worker runner HTTP port (default 8081)
+	TTLSeconds        int32         // TTL for completed K8s jobs
+	ActiveDeadline    int64         // Maximum runtime for K8s jobs in seconds
+	LocalMode         bool          // Skip K8s, run Docker inline for testing
+	DockerSocket      string        // Docker socket path for local mode
+	KubeconfigPath    string        // Path to kubeconfig (empty for in-cluster)
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -91,7 +108,65 @@ func LoadWorker() (WorkerConfig, error) {
 		cfg.Concurrency = 1
 	}
 
+	// Load runner config
+	runnerCfg, err := loadRunnerConfig()
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf("runner config: %w", err)
+	}
+	cfg.Runner = runnerCfg
+
 	return cfg, nil
+}
+
+func loadRunnerConfig() (RunnerConfig, error) {
+	enabled := parseBoolEnv("RUNNER_ENABLED", false)
+	if !enabled {
+		return RunnerConfig{}, nil
+	}
+
+	cfg := RunnerConfig{
+		Enabled:        true,
+		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
+		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
+		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
+		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
+		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
+		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
+		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
+		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
+		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
+	}
+
+	// HMAC key is required when runner is enabled
+	hmacKeyStr := strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
+	if hmacKeyStr == "" {
+		return RunnerConfig{}, errors.New("RUNNER_HMAC_KEY must be set when RUNNER_ENABLED=true")
+	}
+
+	// Try base64 decode first, fall back to raw string
+	hmacKey, err := base64.StdEncoding.DecodeString(hmacKeyStr)
+	if err != nil {
+		hmacKey = []byte(hmacKeyStr)
+	}
+	if len(hmacKey) < 32 {
+		return RunnerConfig{}, errors.New("RUNNER_HMAC_KEY must be at least 32 bytes")
+	}
+	cfg.HMACKey = hmacKey
+
+	return cfg, nil
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := parseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func buildDSNFromPGEnv() (string, error) {

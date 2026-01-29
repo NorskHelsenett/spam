@@ -26,14 +26,56 @@ type parseResult struct {
 	Links         int    `json:"links"`
 }
 
+// CreateRunPayload is the payload for CREATE_RUN jobs.
+type CreateRunPayload struct {
+	RepoID    string `json:"repo_id,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	CloneURL  string `json:"clone_url"`
+	Ref       string `json:"ref,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+}
+
+// RunExecutor is the interface for executing runs.
+type RunExecutor interface {
+	ExecuteRun(ctx context.Context, runID string, payload interface{}) error
+}
+
 // ProcessJob executes job-specific handlers.
-func ProcessJob(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {
+func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {
 	switch job.Type {
 	case JobTypeParseSBOM:
 		return processParseSBOM(ctx, db, job)
+	case JobTypeCreateRun:
+		return processCreateRun(ctx, db, job, runExecutor)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
+}
+
+func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {
+	if runExecutor == nil {
+		return nil, errors.New("runner not enabled")
+	}
+
+	var payload CreateRunPayload
+	if len(job.Payload) == 0 {
+		return nil, errors.New("missing job payload")
+	}
+	if err := json.Unmarshal(job.Payload, &payload); err != nil {
+		return nil, fmt.Errorf("unmarshal payload: %w", err)
+	}
+	if payload.CloneURL == "" {
+		return nil, errors.New("missing clone_url in payload")
+	}
+
+	if err := runExecutor.ExecuteRun(ctx, job.ID, payload); err != nil {
+		return nil, fmt.Errorf("execute run: %w", err)
+	}
+
+	return map[string]string{
+		"status": "started",
+		"run_id": job.ID,
+	}, nil
 }
 
 func processParseSBOM(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {

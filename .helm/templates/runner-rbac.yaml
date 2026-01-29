@@ -1,0 +1,14 @@
+{{- if .Values.runner.enabled }}
+{{- if .Values.runner.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.runner.serviceAccount.name | default (printf "%s-runner" .Release.Name) }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-runner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/managed-by: Helm
+{{- end }}
+{{- end }}
