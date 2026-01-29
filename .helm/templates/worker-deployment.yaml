@@ -123,6 +123,15 @@ spec:
             - name: RUNNER_POD_ANNOTATIONS
               value: {{ include "spam.runnerPodAnnotations" . | quote }}
             {{- end }}
+            # Downward API: inject pod metadata for annotation inheritance
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

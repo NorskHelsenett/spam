@@ -272,10 +272,11 @@ runner:
     name: ""  # Defaults to {{ .Release.Name }}-runner
 
   # Annotations to apply to runner pods
-  # Useful for ArgoCD tracking and other metadata inheritance
-  # Example for ArgoCD:
+  # Runner jobs automatically inherit annotations from the worker pod (e.g., ArgoCD tracking)
+  # Additional annotations can be specified here if needed
+  # Example:
   #   podAnnotations:
-  #     argocd.argoproj.io/tracking-id: "spam:/Deployment:default/spam-worker"
+  #     custom-annotation: "value"
   podAnnotations: {}
 
   # Resource limits for runner jobs

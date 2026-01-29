@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/config"
@@ -47,10 +49,60 @@ func NewK8sClient(cfg config.RunnerConfig) (*K8sClient, error) {
 		return nil, fmt.Errorf("failed to create k8s clientset: %w", err)
 	}
 
-	return &K8sClient{
+	client := &K8sClient{
 		clientset: clientset,
 		cfg:       cfg,
-	}, nil
+	}
+
+	// Auto-discover annotations from current pod if running in cluster
+	if cfg.KubeconfigPath == "" {
+		if err := client.discoverPodAnnotations(); err != nil {
+			log.Printf("warning: failed to discover pod annotations: %v", err)
+			// Non-fatal, continue without inherited annotations
+		}
+	}
+
+	return client, nil
+}
+
+// discoverPodAnnotations queries the current pod's annotations and merges them into config.
+func (k *K8sClient) discoverPodAnnotations() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Get pod name and namespace from downward API env vars
+	podName := os.Getenv("POD_NAME")
+	namespace := os.Getenv("POD_NAMESPACE")
+
+	if podName == "" || namespace == "" {
+		return fmt.Errorf("POD_NAME or POD_NAMESPACE not set")
+	}
+
+	pod, err := k.clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get pod: %w", err)
+	}
+
+	// Filter annotations to inherit (exclude K8s internal ones)
+	if k.cfg.PodAnnotations == nil {
+		k.cfg.PodAnnotations = make(map[string]string)
+	}
+
+	for key, value := range pod.Annotations {
+		// Skip Kubernetes internal annotations
+		if strings.HasPrefix(key, "kubernetes.io/") ||
+			strings.HasPrefix(key, "k8s.io/") ||
+			strings.HasPrefix(key, "kubectl.kubernetes.io/") {
+			continue
+		}
+		// Add annotation if not already configured
+		if _, exists := k.cfg.PodAnnotations[key]; !exists {
+			k.cfg.PodAnnotations[key] = value
+			log.Printf("inherited annotation: %s=%s", key, value)
+		}
+	}
+
+	return nil
 }
 
 // CreateRunJob creates a Kubernetes job for a run.

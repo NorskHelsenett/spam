@@ -85,7 +85,7 @@ type RunnerConfig struct {
 	LocalMode      bool              // Skip K8s, run Docker inline for testing
 	DockerSocket   string            // Docker socket path for local mode
 	KubeconfigPath string            // Path to kubeconfig (empty for in-cluster)
-	PodAnnotations map[string]string // Annotations to apply to runner pods (e.g., for ArgoCD tracking)
+	PodAnnotations map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
 }
 
 // LoadWorker reads configuration for the worker process.
