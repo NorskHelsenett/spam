@@ -110,13 +110,23 @@ if [ -n "$REPO_REF" ]; then
     CLONE_ARGS="$CLONE_ARGS --branch $REPO_REF"
 fi
 
-if ! git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" 2>&1 | while IFS= read -r line; do
-    log "$line"
-done; then
+# Clone and capture output
+CLONE_LOG="$WORK_DIR/clone.log"
+if git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1; then
+    # Log the output
+    while IFS= read -r line; do
+        log "$line"
+    done < "$CLONE_LOG"
+else
+    # Log errors
+    while IFS= read -r line; do
+        log "$line"
+    done < "$CLONE_LOG"
     log "ERROR: Failed to clone repository"
     send_done 1
     exit 1
 fi
+rm -f "$CLONE_LOG"
 
 [ $CANCELLED -eq 1 ] && exit 130
 
@@ -129,26 +139,19 @@ SBOM_FAILED=0
 log "Running SBOM scan with $SBOM_TOOL..."
 case "$SBOM_TOOL" in
     syft)
-        {
-            syft . -o cyclonedx-json="$WORK_DIR/sbom.json" 2>&1
-            echo $? > "$WORK_DIR/sbom_exit"
-        } | while IFS= read -r line; do
-            log "$line"
-        done
+        syft . -o cyclonedx-json="$WORK_DIR/sbom.json" > "$WORK_DIR/sbom.log" 2>&1
+        SBOM_EXIT=$?
+        while IFS= read -r line; do log "$line"; done < "$WORK_DIR/sbom.log"
         ;;
     trivy|*)
         TRIVY_ARGS=""
         [ -n "$TRIVY_SKIP_DIRS" ] && TRIVY_ARGS="--skip-dirs $TRIVY_SKIP_DIRS"
-        {
-            trivy fs --format cyclonedx --output "$WORK_DIR/sbom.json" $TRIVY_ARGS . 2>&1
-            echo $? > "$WORK_DIR/sbom_exit"
-        } | while IFS= read -r line; do
-            log "$line"
-        done
+        trivy fs --format cyclonedx --output "$WORK_DIR/sbom.json" $TRIVY_ARGS . > "$WORK_DIR/sbom.log" 2>&1
+        SBOM_EXIT=$?
+        while IFS= read -r line; do log "$line"; done < "$WORK_DIR/sbom.log"
         ;;
 esac
 
-SBOM_EXIT=$(cat "$WORK_DIR/sbom_exit" 2>/dev/null || echo "1")
 if [ "$SBOM_EXIT" -ne 0 ]; then
     log "WARNING: $SBOM_TOOL scan failed with exit code $SBOM_EXIT"
     SBOM_FAILED=1
@@ -171,17 +174,18 @@ which gitleaks >/dev/null 2>&1 || {
 # Run Gitleaks scan
 log "Running Gitleaks scan..."
 # Gitleaks returns exit code 1 when secrets are found, which is expected
-if gitleaks detect --source . --report-format json --report-path "$WORK_DIR/gitleaks.json" 2>&1 | while IFS= read -r line; do
+gitleaks detect --source . --report-format json --report-path "$WORK_DIR/gitleaks.json" > "$WORK_DIR/gitleaks.log" 2>&1
+GITLEAKS_EXIT=$?
+while IFS= read -r line; do
     log "$line"
-done; then
+done < "$WORK_DIR/gitleaks.log"
+
+if [ $GITLEAKS_EXIT -eq 0 ]; then
     log "Gitleaks: No secrets detected"
+elif [ $GITLEAKS_EXIT -eq 1 ]; then
+    log "Gitleaks: Potential secrets detected"
 else
-    GITLEAKS_EXIT=$?
-    if [ $GITLEAKS_EXIT -eq 1 ]; then
-        log "Gitleaks: Potential secrets detected"
-    else
-        log "WARNING: Gitleaks scan encountered errors"
-    fi
+    log "WARNING: Gitleaks scan encountered errors"
 fi
 
 [ $CANCELLED -eq 1 ] && exit 130
