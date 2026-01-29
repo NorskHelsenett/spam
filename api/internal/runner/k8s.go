@@ -95,6 +95,16 @@ func (k *K8sClient) discoverPodAnnotations() error {
 			strings.HasPrefix(key, "kubectl.kubernetes.io/") {
 			continue
 		}
+		// Skip ArgoCD tracking annotations (should be unique per resource)
+		if strings.HasPrefix(key, "argocd.argoproj.io/tracking-id") ||
+			strings.HasPrefix(key, "argocd.argoproj.io/instance") {
+			continue
+		}
+		// Skip other identity-specific annotations
+		if strings.HasPrefix(key, "deployment.kubernetes.io/") ||
+			strings.HasPrefix(key, "replicaset.kubernetes.io/") {
+			continue
+		}
 		// Add annotation if not already configured
 		if _, exists := k.cfg.PodAnnotations[key]; !exists {
 			k.cfg.PodAnnotations[key] = value

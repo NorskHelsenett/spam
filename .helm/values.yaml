@@ -272,7 +272,9 @@ runner:
     name: ""  # Defaults to {{ .Release.Name }}-runner
 
   # Annotations to apply to runner pods
-  # Runner jobs automatically inherit annotations from the worker pod (e.g., ArgoCD tracking)
+  # Runner jobs automatically inherit most annotations from the worker pod
+  # Excludes: kubernetes.io/*, argocd tracking IDs, and other identity-specific annotations
+  # ArgoCD will automatically discover runner jobs via labels without copied annotations
   # Additional annotations can be specified here if needed
   # Example:
   #   podAnnotations:
