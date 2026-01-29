@@ -32,6 +32,12 @@ WS_OUT="$WORK_DIR/ws_out.fifo"
 WS_IN="$WORK_DIR/ws_in.fifo"
 mkfifo "$WS_OUT" "$WS_IN"
 
+# Open pipes on file descriptors to prevent blocking
+# Keep write end of WS_OUT open so readers don't block
+exec 3> "$WS_OUT"
+# Keep read end of WS_IN open so writers don't block  
+exec 4< "$WS_IN"
+
 # Helper: send log line to stdout and WebSocket
 log() {
     local line="$1"
