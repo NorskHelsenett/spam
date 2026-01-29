@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale
+		Package, Clock, Scale, Play, Loader2
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 
@@ -171,6 +171,51 @@
 		}
 	};
 
+	// Scan functionality
+	let scanning = $state(false);
+	let scanError = $state('');
+	let scanSuccess = $state('');
+
+	const triggerScan = async () => {
+		if (!details) return;
+
+		const { provider, path, baseUrl } = getParams();
+		scanning = true;
+		scanError = '';
+		scanSuccess = '';
+
+		try {
+			const response = await fetch('/api/runs', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					provider,
+					repo_path: path,
+					base_url: baseUrl || undefined,
+					ref: details.default_branch || undefined
+				})
+			});
+
+			if (!response.ok) {
+				const text = await response.text();
+				throw new Error(text || 'Failed to create scan');
+			}
+
+			const data = await response.json();
+			scanSuccess = `Scan queued! Run ID: ${data.id.substring(0, 8)}`;
+
+			// Clear success message after 5 seconds
+			setTimeout(() => {
+				scanSuccess = '';
+			}, 5000);
+		} catch (err) {
+			scanError = err instanceof Error ? err.message : 'Failed to trigger scan';
+		} finally {
+			scanning = false;
+		}
+	};
+
 	onMount(() => {
 		if (browser) {
 			fetchRepoDetails();
@@ -229,16 +274,44 @@
 						</div>
 					{/if}
 				</div>
-				<a
-					href={details.html_url}
-					target="_blank"
-					rel="noopener noreferrer"
-					class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-				>
-					View on {getParams().provider === 'github' ? 'GitHub' : getParams().provider === 'gitlab' ? 'GitLab' : 'Gitea'}
-					<ExternalLink class="h-4 w-4" />
-				</a>
+				<div class="flex flex-col gap-2 sm:flex-row sm:items-center">
+					<button
+						type="button"
+						class="flex items-center gap-2 rounded-xl border border-[var(--success)] bg-[var(--success)]/10 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/20 disabled:opacity-50"
+						onclick={triggerScan}
+						disabled={scanning}
+					>
+						{#if scanning}
+							<Loader2 class="h-4 w-4 animate-spin" />
+							Scanning...
+						{:else}
+							<Play class="h-4 w-4" />
+							Scan Repository
+						{/if}
+					</button>
+					<a
+						href={details.html_url}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+					>
+						View on {getParams().provider === 'github' ? 'GitHub' : getParams().provider === 'gitlab' ? 'GitLab' : 'Gitea'}
+						<ExternalLink class="h-4 w-4" />
+					</a>
+				</div>
 			</div>
+
+			{#if scanSuccess}
+				<div class="rounded-xl border border-[var(--success)]/30 bg-[var(--success)]/10 px-4 py-2 text-sm text-[var(--success)]">
+					{scanSuccess}
+					<a href="/app/runs" class="ml-2 underline hover:no-underline">View runs</a>
+				</div>
+			{/if}
+			{#if scanError}
+				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-2 text-sm text-[var(--error)]">
+					{scanError}
+				</div>
+			{/if}
 
 			<!-- Quick stats row -->
 			<div class="flex flex-wrap gap-4 border-t border-[var(--border-color)]/60 pt-4 text-sm text-[var(--text-secondary)]">

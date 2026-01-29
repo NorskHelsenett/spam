@@ -64,6 +64,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService))
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService))
+
+				// Runs endpoints
+				api.Get("/runs", uiapi.RunsListHandler(db, authService))
+				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
+				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 			}
 		})
 
