@@ -19,6 +19,7 @@ type Server struct {
 	cfg        config.RunnerConfig
 	db         *gorm.DB
 	httpServer *http.Server
+	k8sClient  *K8sClient
 
 	// WebSocket connections for active runs (runID -> connection)
 	wsConnsMu sync.RWMutex
@@ -36,12 +37,13 @@ type LogEvent struct {
 }
 
 // NewServer creates a new runner server.
-func NewServer(cfg config.RunnerConfig, db *gorm.DB) *Server {
+func NewServer(cfg config.RunnerConfig, db *gorm.DB, k8sClient *K8sClient) *Server {
 	return &Server{
-		cfg:     cfg,
-		db:      db,
-		wsConns: make(map[string]*WSConn),
-		sseSubs: make(map[string]map[chan LogEvent]struct{}),
+		cfg:       cfg,
+		db:        db,
+		k8sClient: k8sClient,
+		wsConns:   make(map[string]*WSConn),
+		sseSubs:   make(map[string]map[chan LogEvent]struct{}),
 	}
 }
 
@@ -72,6 +74,9 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Get("/{id}", s.handleGetRun)
 		r.Get("/{id}/logs", s.handleStreamLogs)
 		r.Post("/{id}/cancel", s.handleCancelRun)
+		// Kubernetes API endpoints
+		r.Get("/{id}/k8s-logs", s.handleGetK8sLogs)
+		r.Get("/{id}/k8s-status", s.handleGetK8sStatus)
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
@@ -173,4 +178,80 @@ func (s *Server) SendCancel(runID string) error {
 		return fmt.Errorf("no active connection for run %s", runID)
 	}
 	return conn.SendCancel()
+}
+
+// handleGetK8sLogs retrieves logs directly from the Kubernetes pod.
+func (s *Server) handleGetK8sLogs(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "id")
+	if runID == "" {
+		http.Error(w, "missing run ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get run from database
+	var run Run
+	if err := s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	if run.K8sJobName == "" || run.K8sNamespace == "" {
+		http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
+		return
+	}
+
+	// Parse tail parameter (default 1000 lines)
+	tailLines := int64(1000)
+	if tailStr := r.URL.Query().Get("tail"); tailStr != "" {
+		if n, err := fmt.Sscanf(tailStr, "%d", &tailLines); err == nil && n == 1 && tailLines > 0 {
+			// parsed successfully
+		}
+	}
+
+	// Get logs from Kubernetes
+	logs, err := s.k8sClient.GetPodLogs(r.Context(), run.K8sJobName, run.K8sNamespace, &tailLines)
+	if err != nil {
+		log.Printf("failed to get pod logs: %v", err)
+		http.Error(w, fmt.Sprintf("failed to retrieve logs: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(logs))
+}
+
+// handleGetK8sStatus retrieves the Kubernetes job status.
+func (s *Server) handleGetK8sStatus(w http.ResponseWriter, r *http.Request) {
+	runID := chi.URLParam(r, "id")
+	if runID == "" {
+		http.Error(w, "missing run ID", http.StatusBadRequest)
+		return
+	}
+
+	// Get run from database
+	var run Run
+	if err := s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	if run.K8sJobName == "" || run.K8sNamespace == "" {
+		http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
+		return
+	}
+
+	// Get job status from Kubernetes
+	job, err := s.k8sClient.GetJobStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+	if err != nil {
+		log.Printf("failed to get job status: %v", err)
+		http.Error(w, fmt.Sprintf("failed to retrieve job status: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return simplified status
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	fmt.Fprintf(w, `{"job_name":"%s","namespace":"%s","active":%d,"succeeded":%d,"failed":%d}`,
+		job.Name, job.Namespace, job.Status.Active, job.Status.Succeeded, job.Status.Failed)
 }

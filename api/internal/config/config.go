@@ -73,18 +73,19 @@ type WorkerConfig struct {
 
 // RunnerConfig captures configuration for the Kubernetes runner system.
 type RunnerConfig struct {
-	Enabled           bool          // Enable runner functionality
-	HMACKey           []byte        // Key for signing run tokens
-	Image             string        // Runner container image
-	Namespace         string        // Kubernetes namespace for runner jobs
-	ServiceAccount    string        // ServiceAccount for runner jobs
-	WorkerURL         string        // Internal callback URL (http://worker:8081)
-	HTTPPort          int           // Worker runner HTTP port (default 8081)
-	TTLSeconds        int32         // TTL for completed K8s jobs
-	ActiveDeadline    int64         // Maximum runtime for K8s jobs in seconds
-	LocalMode         bool          // Skip K8s, run Docker inline for testing
-	DockerSocket      string        // Docker socket path for local mode
-	KubeconfigPath    string        // Path to kubeconfig (empty for in-cluster)
+	Enabled        bool              // Enable runner functionality
+	HMACKey        []byte            // Key for signing run tokens
+	Image          string            // Runner container image
+	Namespace      string            // Kubernetes namespace for runner jobs
+	ServiceAccount string            // ServiceAccount for runner jobs
+	WorkerURL      string            // Internal callback URL (http://worker:8081)
+	HTTPPort       int               // Worker runner HTTP port (default 8081)
+	TTLSeconds     int32             // TTL for completed K8s jobs
+	ActiveDeadline int64             // Maximum runtime for K8s jobs in seconds
+	LocalMode      bool              // Skip K8s, run Docker inline for testing
+	DockerSocket   string            // Docker socket path for local mode
+	KubeconfigPath string            // Path to kubeconfig (empty for in-cluster)
+	PodAnnotations map[string]string // Annotations to apply to runner pods (e.g., for ArgoCD tracking)
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -136,6 +137,7 @@ func loadRunnerConfig() (RunnerConfig, error) {
 		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
 		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
+		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
 	}
 
 	// HMAC key is required when runner is enabled
@@ -332,4 +334,27 @@ func parseBool(raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean: %q", raw)
 	}
+}
+
+// parseMapEnv parses a comma-separated key=value environment variable.
+// Example: "key1=value1,key2=value2" -> map[string]string{"key1": "value1", "key2": "value2"}
+func parseMapEnv(key string) map[string]string {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return nil
+	}
+
+	result := make(map[string]string)
+	pairs := strings.Split(val, ",")
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
 }

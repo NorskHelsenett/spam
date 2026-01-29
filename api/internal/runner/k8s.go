@@ -95,6 +95,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 						"app.kubernetes.io/part-of": "spam",
 						"spam.io/run-id":            runID,
 					},
+					Annotations: k.cfg.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyNever,
@@ -187,6 +188,65 @@ func (k *K8sClient) DeleteJob(ctx context.Context, jobName, namespace string) er
 	return k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
 		PropagationPolicy: &propagationPolicy,
 	})
+}
+
+// GetJobStatus returns the status of a Kubernetes job.
+func (k *K8sClient) GetJobStatus(ctx context.Context, jobName, namespace string) (*batchv1.Job, error) {
+	if k.cfg.LocalMode {
+		return nil, fmt.Errorf("job status not available in local mode")
+	}
+
+	return k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+}
+
+// GetPodLogs retrieves logs from the runner pod associated with a job.
+func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, tailLines *int64) (string, error) {
+	if k.cfg.LocalMode {
+		return "", fmt.Errorf("pod logs not available in local mode")
+	}
+
+	// Find the pod created by this job
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
+	})
+	if err != nil {
+		return "", fmt.Errorf("list pods: %w", err)
+	}
+
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no pods found for job %s", jobName)
+	}
+
+	// Get logs from the first pod (jobs typically have one pod)
+	pod := pods.Items[0]
+	opts := &corev1.PodLogOptions{
+		Container: "runner",
+	}
+	if tailLines != nil {
+		opts.TailLines = tailLines
+	}
+
+	req := k.clientset.CoreV1().Pods(namespace).GetLogs(pod.Name, opts)
+	logs, err := req.Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("stream logs: %w", err)
+	}
+	defer logs.Close()
+
+	// Read all logs
+	var result []byte
+	buf := make([]byte, 2048)
+	for {
+		n, err := logs.Read(buf)
+		if n > 0 {
+			result = append(result, buf[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	return string(result), nil
 }
 
 // RunExecutor handles creating and managing runs.

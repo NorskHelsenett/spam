@@ -90,7 +90,7 @@ func run() error {
 	}
 
 	shutdownCh := make(chan struct{})
-	router := server.NewRouter(gormDB, authService, shutdownCh)
+	router := server.NewRouter(gormDB, authService, shutdownCh, nil)
 
 	addr := cfg.HTTPPort
 	if !strings.HasPrefix(addr, ":") {

@@ -7,14 +7,21 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
+	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"gorm.io/gorm"
 )
 
+// RouterOptions contains optional dependencies for the router.
+type RouterOptions struct {
+	K8sClient   *runner.K8sClient
+	RunExecutor *runner.RunExecutor
+}
+
 // NewRouter wires the HTTP routes and middleware for the API server.
-func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{}) http.Handler {
+func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{}, opts *RouterOptions) http.Handler {
 	r := chi.NewRouter()
 
 	// Health check endpoint without middleware to avoid noise in logs
@@ -69,6 +76,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{})
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
+
+				// Kubernetes integration endpoints (only available if runner is enabled)
+				if opts != nil && opts.K8sClient != nil {
+					api.Get("/runs/{id}/k8s-logs", uiapi.RunLogsHandler(db, authService, opts.K8sClient))
+					api.Get("/runs/{id}/k8s-status", uiapi.RunJobStatusHandler(db, authService, opts.K8sClient))
+				}
+				if opts != nil && opts.RunExecutor != nil {
+					api.Post("/runs/{id}/cancel", uiapi.RunCancelHandler(db, authService, opts.RunExecutor))
+				}
 			}
 		})
 

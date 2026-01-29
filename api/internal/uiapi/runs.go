@@ -4,27 +4,29 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
 // RunResponse represents a run in the API response.
 type RunResponse struct {
-	ID          string     `json:"id"`
-	Status      string     `json:"status"`
-	CloneURL    string     `json:"clone_url"`
-	Provider    string     `json:"provider"`
-	RepoPath    string     `json:"repo_path"`
-	Ref         string     `json:"ref,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	StartedAt   *time.Time `json:"started_at,omitempty"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	K8sJobName  string     `json:"k8s_job_name,omitempty"`
+	ID         string     `json:"id"`
+	Status     string     `json:"status"`
+	CloneURL   string     `json:"clone_url"`
+	Provider   string     `json:"provider"`
+	RepoPath   string     `json:"repo_path"`
+	Ref        string     `json:"ref,omitempty"`
+	Error      string     `json:"error,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	StartedAt  *time.Time `json:"started_at,omitempty"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	K8sJobName string     `json:"k8s_job_name,omitempty"`
 }
 
 // RunsListResponse is the response for listing runs.
@@ -37,9 +39,9 @@ type RunsListResponse struct {
 
 // CreateRunRequest is the request to create a new run.
 type CreateRunRequest struct {
-	Provider string `json:"provider"` // github, gitlab, gitea
-	RepoPath string `json:"repo_path"` // owner/repo or group/project
-	Ref      string `json:"ref,omitempty"` // branch or tag
+	Provider string `json:"provider"`           // github, gitlab, gitea
+	RepoPath string `json:"repo_path"`          // owner/repo or group/project
+	Ref      string `json:"ref,omitempty"`      // branch or tag
 	BaseURL  string `json:"base_url,omitempty"` // for gitlab/gitea custom instances
 }
 
@@ -303,4 +305,153 @@ func indexByte(s string, c byte) int {
 		}
 	}
 	return -1
+}
+
+// RunLogsHandler retrieves logs from a run's Kubernetes pod.
+// GET /api/runs/:id/k8s-logs?tail=100
+func RunLogsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get run from database
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		if run.K8sJobName == "" || run.K8sNamespace == "" {
+			http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
+			return
+		}
+
+		// Parse tail parameter
+		var tailLines *int64
+		if tailStr := r.URL.Query().Get("tail"); tailStr != "" {
+			if tail, err := strconv.ParseInt(tailStr, 10, 64); err == nil && tail > 0 {
+				tailLines = &tail
+			}
+		}
+
+		// Get logs from Kubernetes
+		logs, err := k8sClient.GetPodLogs(r.Context(), run.K8sJobName, run.K8sNamespace, tailLines)
+		if err != nil {
+			log.Printf("failed to get pod logs: %v", err)
+			http.Error(w, "failed to retrieve logs from Kubernetes", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(logs))
+	}
+}
+
+// RunCancelHandler cancels a running job via Kubernetes API.
+// POST /api/runs/:id/cancel
+func RunCancelHandler(db *gorm.DB, authService *auth.Service, executor *runner.RunExecutor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get run from database
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		// Check if run is cancellable
+		if run.Status != runner.RunStatusQueued && run.Status != runner.RunStatusRunning {
+			http.Error(w, "run cannot be cancelled in current state", http.StatusBadRequest)
+			return
+		}
+
+		// Cancel the run
+		if err := executor.CancelRun(r.Context(), runID, run.K8sJobName, run.K8sNamespace); err != nil {
+			log.Printf("failed to cancel run: %v", err)
+			http.Error(w, "failed to cancel run", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{
+			"message": "run cancelled successfully",
+		})
+	}
+}
+
+// RunJobStatusHandler gets the Kubernetes job status for a run.
+// GET /api/runs/:id/k8s-status
+func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get run from database
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		if run.K8sJobName == "" || run.K8sNamespace == "" {
+			http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
+			return
+		}
+
+		// Get job status from Kubernetes
+		job, err := k8sClient.GetJobStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+		if err != nil {
+			log.Printf("failed to get job status: %v", err)
+			http.Error(w, "failed to retrieve job status from Kubernetes", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"job_name":        job.Name,
+			"namespace":       job.Namespace,
+			"active":          job.Status.Active,
+			"succeeded":       job.Status.Succeeded,
+			"failed":          job.Status.Failed,
+			"start_time":      job.Status.StartTime,
+			"completion_time": job.Status.CompletionTime,
+			"conditions":      job.Status.Conditions,
+		})
+	}
 }

@@ -53,7 +53,13 @@ func run() error {
 
 	// Start runner server if enabled
 	if cfg.Runner.Enabled {
-		runnerServer := runner.NewServer(cfg.Runner, gormDB)
+		// Create K8s client
+		k8sClient, err := runner.NewK8sClient(cfg.Runner)
+		if err != nil {
+			return fmt.Errorf("create k8s client: %w", err)
+		}
+
+		runnerServer := runner.NewServer(cfg.Runner, gormDB, k8sClient)
 
 		// Create run executor
 		runExecutor, err = runner.NewRunExecutor(cfg.Runner, runnerServer)

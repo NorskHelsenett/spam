@@ -119,6 +119,10 @@ spec:
             - name: RUNNER_LOCAL_MODE
               value: "true"
             {{- end }}
+            {{- if .Values.runner.podAnnotations }}
+            - name: RUNNER_POD_ANNOTATIONS
+              value: {{ include "spam.runnerPodAnnotations" . | quote }}
+            {{- end }}
             {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
