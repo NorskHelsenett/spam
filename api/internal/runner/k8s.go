@@ -124,6 +124,15 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 									corev1.ResourceMemory: resource.MustParse("2Gi"),
 								},
 							},
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: &[]bool{false}[0],
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeRuntimeDefault,
+								},
+							},
 						},
 					},
 				},
@@ -179,7 +188,6 @@ func (k *K8sClient) DeleteJob(ctx context.Context, jobName, namespace string) er
 		PropagationPolicy: &propagationPolicy,
 	})
 }
-
 
 // RunExecutor handles creating and managing runs.
 type RunExecutor struct {

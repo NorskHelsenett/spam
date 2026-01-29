@@ -20,6 +20,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/inventory"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
 
@@ -63,6 +64,7 @@ func run() error {
 		&inventory.SBOMComponent{},
 		&inventory.ComponentDependency{},
 		&jobs.Job{},
+		&runner.Run{},
 		&events.OutboxEvent{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
