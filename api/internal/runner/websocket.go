@@ -21,10 +21,10 @@ var upgrader = websocket.Upgrader{
 
 // WSMessage represents a WebSocket message.
 type WSMessage struct {
-	Type     string    `json:"type"`
-	Line     string    `json:"line,omitempty"`
+	Type      string    `json:"type"`
+	Line      string    `json:"line,omitempty"`
 	Timestamp time.Time `json:"ts,omitempty"`
-	ExitCode int       `json:"exit_code,omitempty"`
+	ExitCode  int       `json:"exit_code,omitempty"`
 }
 
 // WSConn wraps a WebSocket connection for a run.
@@ -133,7 +133,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				log.Printf("failed to update run status: %v", err)
 			}
 			// Broadcast completion to SSE subscribers
-			s.broadcastStatus(claims.RunID, status)
+			s.broadcastStatus(claims.RunID)
 			return
 		}
 	}
@@ -156,11 +156,12 @@ func (s *Server) updateRunStatus(ctx context.Context, runID string, status RunSt
 		"updated_at": time.Now(),
 	}
 
-	if status == RunStatusRunning {
+	switch status {
+	case RunStatusRunning:
 		now := time.Now()
 		updates["locked_at"] = now
 		updates["last_attempted_at"] = now
-	} else if status == RunStatusSucceeded || status == RunStatusFailed || status == RunStatusCancelled {
+	case RunStatusSucceeded, RunStatusFailed, RunStatusCancelled:
 		now := time.Now()
 		updates["finished_at"] = now
 	}
@@ -168,7 +169,7 @@ func (s *Server) updateRunStatus(ctx context.Context, runID string, status RunSt
 	return s.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(updates).Error
 }
 
-func (s *Server) broadcastStatus(runID string, status RunStatus) {
+func (s *Server) broadcastStatus(runID string) {
 	// Send a special status event to SSE subscribers
 	s.sseSubsMu.RLock()
 	subs, ok := s.sseSubs[runID]

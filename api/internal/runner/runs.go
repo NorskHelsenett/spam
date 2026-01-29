@@ -143,7 +143,7 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Broadcast cancellation to SSE subscribers
-	s.broadcastStatus(runID, RunStatusCancelled)
+	s.broadcastStatus(runID)
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"cancelled"}`))

@@ -368,7 +368,7 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 		"data":   string(data),
 	})
 
-	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/upload", bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/results", bytes.NewReader(reqBody))
 	if err != nil {
 		return err
 	}
