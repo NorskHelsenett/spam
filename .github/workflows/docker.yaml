@@ -160,7 +160,7 @@ jobs:
         id: build-runner-image
         with:
           context: ./runner
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64 #,linux/arm64
           push: true
           tags: ${{ steps.runner-meta.outputs.tags }}
           labels: ${{ steps.runner-meta.outputs.labels }}

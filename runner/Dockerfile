@@ -8,28 +8,20 @@ RUN go mod download
 COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o runner ./cmd/main.go
 
+# Get syft binary
+FROM ghcr.io/anchore/syft:latest AS syft
+
+# Get gitleaks binary
+FROM ghcr.io/gitleaks/gitleaks:latest AS gitleaks
+
 # Runtime stage
 FROM alpine:3.20
 
 RUN apk add --no-cache git ca-certificates
 
-# Detect architecture for binary downloads
-ARG TARGETARCH
-RUN echo "Building for architecture: $TARGETARCH"
-
-# Install Syft
-ARG SYFT_VERSION=1.40.1
-RUN wget -qO- https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v${SYFT_VERSION}
-
-# Install Gitleaks
-ARG GITLEAKS_VERSION=8.30.0
-RUN case "$TARGETARCH" in \
-        amd64) GITLEAKS_ARCH="x64" ;; \
-        arm64) GITLEAKS_ARCH="arm64" ;; \
-        *) echo "Unsupported architecture: $TARGETARCH" && exit 1 ;; \
-    esac && \
-    wget -qO- "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" | \
-    tar xzf - -C /usr/local/bin gitleaks && chmod +x /usr/local/bin/gitleaks
+# Copy binaries from official images
+COPY --from=syft /syft /usr/local/bin/syft
+COPY --from=gitleaks /usr/bin/gitleaks /usr/local/bin/gitleaks
 
 # Copy Go binary from builder
 COPY --from=builder /build/runner /usr/local/bin/runner
