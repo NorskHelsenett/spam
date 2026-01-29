@@ -236,15 +236,8 @@ func (r *Runner) runPipeline() int {
 	// Run SBOM generation
 	r.log("Running syft for SBOM generation...")
 	sbomPath := filepath.Join(r.workDir, "sbom.json")
-	if err := r.runCommand("syft", "scan", "-o", "cyclonedx-json="+sbomPath, r.workDir); err != nil {
+	if err := r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir); err != nil {
 		r.log(fmt.Sprintf("Syft failed: %v", err))
-		return 1
-	}
-
-	// Run vulnerability scan
-	r.log("Running trivy for vulnerability scan...")
-	if err := r.runCommand("trivy", "fs", "--scanners", "vuln", "--format", "cyclonedx", "--output", sbomPath, r.workDir); err != nil {
-		r.log(fmt.Sprintf("Trivy failed: %v", err))
 		return 1
 	}
 

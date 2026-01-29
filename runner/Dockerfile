@@ -17,10 +17,6 @@ RUN apk add --no-cache git ca-certificates
 ARG TARGETARCH
 RUN echo "Building for architecture: $TARGETARCH"
 
-# Install Trivy
-ARG TRIVY_VERSION=0.58.2
-RUN wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin v${TRIVY_VERSION}
-
 # Install Syft
 ARG SYFT_VERSION=1.40.1
 RUN wget -qO- https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin v${SYFT_VERSION}
