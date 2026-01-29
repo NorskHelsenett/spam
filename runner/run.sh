@@ -159,6 +159,11 @@ fi
 
 [ $CANCELLED -eq 1 ] && exit 130
 
+which gitleaks >/dev/null 2>&1 || {
+    echo "ERROR: gitleaks not found in PATH"
+    exit 1
+}
+
 # Run Gitleaks scan
 log "Running Gitleaks scan..."
 # Gitleaks returns exit code 1 when secrets are found, which is expected
