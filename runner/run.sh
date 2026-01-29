@@ -27,16 +27,18 @@ handle_cancel() {
 }
 trap handle_cancel USR1
 
-# Create named pipe for WebSocket output
-WS_OUT="$WORK_DIR/ws_out.fifo"
-WS_IN="$WORK_DIR/ws_in.fifo"
-mkfifo "$WS_OUT" "$WS_IN"
+# Create named pipe for WebSocket output (only for non-local mode)
+if [ "$WORKER_URL" != "local" ]; then
+    WS_OUT="$WORK_DIR/ws_out.fifo"
+    WS_IN="$WORK_DIR/ws_in.fifo"
+    mkfifo "$WS_OUT" "$WS_IN"
 
-# Open pipes on file descriptors to prevent blocking
-# Keep write end of WS_OUT open so readers don't block
-exec 3> "$WS_OUT"
-# Keep read end of WS_IN open so writers don't block  
-exec 4< "$WS_IN"
+    # Open pipes on file descriptors to prevent blocking
+    # Keep write end of WS_OUT open so readers don't block
+    exec 3> "$WS_OUT"
+    # Keep read end of WS_IN open so writers don't block  
+    exec 4< "$WS_IN"
+fi
 
 # Helper: send log line to stdout and WebSocket
 log() {
@@ -44,7 +46,7 @@ log() {
     local ts
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     echo "$line"
-    if [ -p "$WS_OUT" ] && [ "$WORKER_URL" != "local" ]; then
+    if [ "$WORKER_URL" != "local" ] && [ -p "$WS_OUT" ]; then
         # Escape special characters for JSON
         local escaped
         escaped=$(printf '%s' "$line" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g')
@@ -55,7 +57,7 @@ log() {
 # Helper: send done message
 send_done() {
     local exit_code="$1"
-    if [ -p "$WS_OUT" ] && [ "$WORKER_URL" != "local" ]; then
+    if [ "$WORKER_URL" != "local" ] && [ -p "$WS_OUT" ]; then
         printf '{"type":"done","exit_code":%d}\n' "$exit_code" > "$WS_OUT" 2>/dev/null || true
         sleep 1  # Allow WebSocket to flush
     fi
