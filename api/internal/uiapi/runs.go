@@ -60,11 +60,16 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		page, pageSize := parsePagination(r)
 		status := r.URL.Query().Get("status")
+		repoPath := r.URL.Query().Get("repo_path")
 
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
 		if status != "" {
 			query = query.Where("status = ?", status)
+		}
+		if repoPath != "" {
+			// Search in payload JSON for matching repo path
+			query = query.Where("payload::text LIKE ?", "%"+repoPath+"%")
 		}
 		query.Count(&total)
 

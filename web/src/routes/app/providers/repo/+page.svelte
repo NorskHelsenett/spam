@@ -174,7 +174,35 @@
 	// Scan functionality
 	let scanning = $state(false);
 	let scanError = $state('');
-	let scanSuccess = $state('');
+	let activeRunId = $state<string | null>(null);
+	let activeRunStatus = $state<string | null>(null);
+
+	// Check for active scans on this repo
+	const checkActiveScans = async () => {
+		const { path } = getParams();
+		if (!path) return;
+
+		try {
+			const response = await fetch(`/api/runs?repo_path=${encodeURIComponent(path)}&page_size=1`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				if (data.runs && data.runs.length > 0) {
+					const latestRun = data.runs[0];
+					if (latestRun.status === 'QUEUED' || latestRun.status === 'RUNNING') {
+						activeRunId = latestRun.id;
+						activeRunStatus = latestRun.status;
+					} else {
+						activeRunId = null;
+						activeRunStatus = null;
+					}
+				}
+			}
+		} catch {
+			// Ignore errors
+		}
+	};
 
 	const triggerScan = async () => {
 		if (!details) return;
@@ -182,7 +210,6 @@
 		const { provider, path, baseUrl } = getParams();
 		scanning = true;
 		scanError = '';
-		scanSuccess = '';
 
 		try {
 			const response = await fetch('/api/runs', {
@@ -203,12 +230,13 @@
 			}
 
 			const data = await response.json();
-			scanSuccess = `Scan queued! Run ID: ${data.id.substring(0, 8)}`;
+			activeRunId = data.id;
+			activeRunStatus = 'QUEUED';
 
-			// Clear success message after 5 seconds
-			setTimeout(() => {
-				scanSuccess = '';
-			}, 5000);
+			// Navigate to the run page
+			if (browser) {
+				window.location.href = `/app/runs/${data.id}`;
+			}
 		} catch (err) {
 			scanError = err instanceof Error ? err.message : 'Failed to trigger scan';
 		} finally {
@@ -216,9 +244,20 @@
 		}
 	};
 
+	const goToActiveRun = () => {
+		if (activeRunId && browser) {
+			window.location.href = `/app/runs/${activeRunId}`;
+		}
+	};
+
 	onMount(() => {
 		if (browser) {
 			fetchRepoDetails();
+			checkActiveScans();
+
+			// Periodically check for active scans
+			const interval = setInterval(checkActiveScans, 10000);
+			return () => clearInterval(interval);
 		}
 	});
 </script>
@@ -275,20 +314,31 @@
 					{/if}
 				</div>
 				<div class="flex flex-col gap-2 sm:flex-row sm:items-center">
-					<button
-						type="button"
-						class="flex items-center gap-2 rounded-xl border border-[var(--success)] bg-[var(--success)]/10 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/20 disabled:opacity-50"
-						onclick={triggerScan}
-						disabled={scanning}
-					>
-						{#if scanning}
+					{#if activeRunId}
+						<button
+							type="button"
+							class="flex items-center gap-2 rounded-xl border border-[var(--info)] bg-[var(--info)]/10 px-4 py-2 text-sm font-medium text-[var(--info)] transition hover:bg-[var(--info)]/20"
+							onclick={goToActiveRun}
+						>
 							<Loader2 class="h-4 w-4 animate-spin" />
-							Scanning...
-						{:else}
-							<Play class="h-4 w-4" />
-							Scan Repository
-						{/if}
-					</button>
+							View {activeRunStatus} Scan
+						</button>
+					{:else}
+						<button
+							type="button"
+							class="flex items-center gap-2 rounded-xl border border-[var(--success)] bg-[var(--success)]/10 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/20 disabled:opacity-50"
+							onclick={triggerScan}
+							disabled={scanning}
+						>
+							{#if scanning}
+								<Loader2 class="h-4 w-4 animate-spin" />
+								Starting...
+							{:else}
+								<Play class="h-4 w-4" />
+								Scan Repository
+							{/if}
+						</button>
+					{/if}
 					<a
 						href={details.html_url}
 						target="_blank"
@@ -301,12 +351,6 @@
 				</div>
 			</div>
 
-			{#if scanSuccess}
-				<div class="rounded-xl border border-[var(--success)]/30 bg-[var(--success)]/10 px-4 py-2 text-sm text-[var(--success)]">
-					{scanSuccess}
-					<a href="/app/runs" class="ml-2 underline hover:no-underline">View runs</a>
-				</div>
-			{/if}
 			{#if scanError}
 				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-2 text-sm text-[var(--error)]">
 					{scanError}
