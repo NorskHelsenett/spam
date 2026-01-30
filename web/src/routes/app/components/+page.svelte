@@ -196,7 +196,7 @@
 									{/if}
 								</td>
 								<td class="px-5 py-3 text-center">
-									<span class="inline-flex items-center rounded-full bg-[var(--accent)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--accent)]">
+									<span class="inline-flex items-center px-2.5 py-0.5 text-xs font-semibold">
 										{dep.version_count}
 									</span>
 								</td>
