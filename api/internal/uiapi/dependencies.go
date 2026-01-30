@@ -146,7 +146,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					AND s.version = m.version 
 					AND s.ecosystem = m.ecosystem
 			)
-			SELECT * FROM merged
+			SELECT name, version, ecosystem, purl, sources, direct, scope, sbom_count, repo_count FROM merged
 		`
 
 		// Apply source filter if specified
