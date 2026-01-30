@@ -178,7 +178,7 @@
 		{#if dependencies.length === 0 && !loading}
 			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
 		{:else if dependencies.length > 0}
-			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40" class:opacity-60={loading}>
+			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>

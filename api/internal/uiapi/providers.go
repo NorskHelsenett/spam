@@ -61,6 +61,8 @@ func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
 		}
 
 		page, pageSize := parsePagination(r)
+		sortColumn := r.URL.Query().Get("sort")
+		sortOrder := r.URL.Query().Get("order")
 
 		client := providers.NewGitHubClient("", "")
 		repos, pageInfo, err := client.ListPublicRepos(r.Context(), owner, providers.ListOptions{
@@ -79,6 +81,11 @@ func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
 			}
 			http.Error(w, "failed to fetch repos", http.StatusInternalServerError)
 			return
+		}
+
+		// Apply sorting if requested
+		if sortColumn != "" {
+			sortRepos(repos, sortColumn, sortOrder)
 		}
 
 		writeJSON(w, http.StatusOK, GitHubReposResponse{
@@ -109,6 +116,8 @@ func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
 		page, pageSize := parsePagination(r)
 		includeSubgroups := r.URL.Query().Get("include_subgroups") == "true"
 		baseURL := r.URL.Query().Get("base_url") // Custom instance URL
+		sortColumn := r.URL.Query().Get("sort")
+		sortOrder := r.URL.Query().Get("order")
 
 		client := providers.NewGitLabClient(baseURL, "")
 		projects, pageInfo, err := client.ListPublicProjects(r.Context(), group, providers.ListOptions{
@@ -128,6 +137,11 @@ func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
 			}
 			http.Error(w, "failed to fetch projects", http.StatusInternalServerError)
 			return
+		}
+
+		// Apply sorting if requested
+		if sortColumn != "" {
+			sortRepos(projects, sortColumn, sortOrder)
 		}
 
 		writeJSON(w, http.StatusOK, GitLabProjectsResponse{
@@ -588,5 +602,90 @@ func GiteaRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			Details: details,
 			Readme:  readme,
 		})
+	}
+}
+
+// sortRepos sorts a slice of RepoData by the specified column and order.
+func sortRepos(repos []providers.RepoData, sortColumn, sortOrder string) {
+	if sortColumn == "" || len(repos) == 0 {
+		return
+	}
+
+	// Default to ascending if order is not specified or invalid
+	ascending := sortOrder != "desc"
+
+	switch sortColumn {
+	case "name":
+		sortByName(repos, ascending)
+	case "language":
+		sortByLanguage(repos, ascending)
+	case "updated", "updated_at":
+		sortByUpdated(repos, ascending)
+	case "path", "full_path":
+		sortByPath(repos, ascending)
+	}
+}
+
+func sortByName(repos []providers.RepoData, ascending bool) {
+	for i := 0; i < len(repos)-1; i++ {
+		for j := i + 1; j < len(repos); j++ {
+			swap := false
+			if ascending {
+				swap = repos[i].Name > repos[j].Name
+			} else {
+				swap = repos[i].Name < repos[j].Name
+			}
+			if swap {
+				repos[i], repos[j] = repos[j], repos[i]
+			}
+		}
+	}
+}
+
+func sortByLanguage(repos []providers.RepoData, ascending bool) {
+	for i := 0; i < len(repos)-1; i++ {
+		for j := i + 1; j < len(repos); j++ {
+			swap := false
+			if ascending {
+				swap = repos[i].Language > repos[j].Language
+			} else {
+				swap = repos[i].Language < repos[j].Language
+			}
+			if swap {
+				repos[i], repos[j] = repos[j], repos[i]
+			}
+		}
+	}
+}
+
+func sortByUpdated(repos []providers.RepoData, ascending bool) {
+	for i := 0; i < len(repos)-1; i++ {
+		for j := i + 1; j < len(repos); j++ {
+			swap := false
+			if ascending {
+				swap = repos[i].UpdatedAt.Before(repos[j].UpdatedAt)
+			} else {
+				swap = repos[i].UpdatedAt.After(repos[j].UpdatedAt)
+			}
+			if swap {
+				repos[i], repos[j] = repos[j], repos[i]
+			}
+		}
+	}
+}
+
+func sortByPath(repos []providers.RepoData, ascending bool) {
+	for i := 0; i < len(repos)-1; i++ {
+		for j := i + 1; j < len(repos); j++ {
+			swap := false
+			if ascending {
+				swap = repos[i].FullPath > repos[j].FullPath
+			} else {
+				swap = repos[i].FullPath < repos[j].FullPath
+			}
+			if swap {
+				repos[i], repos[j] = repos[j], repos[i]
+			}
+		}
 	}
 }

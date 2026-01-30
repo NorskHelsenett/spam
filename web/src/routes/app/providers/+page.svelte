@@ -288,6 +288,10 @@
 				page: String(page),
 				page_size: String(pageSize)
 			});
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
 
 			const response = await fetch(`/api/providers/github/${encodeURIComponent(ghOwner)}/repos?${params}`, {
 				credentials: 'include'
@@ -333,6 +337,10 @@
 				page_size: String(pageSize),
 				include_subgroups: String(glIncludeSubgroups)
 			});
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
 
 			const response = await fetch(`/api/providers/gitlab/${encodeURIComponent(glGroup)}/projects?${params}`, {
 				credentials: 'include'
@@ -398,6 +406,10 @@
 				page_size: String(pageSize),
 				base_url: provider.baseUrl
 			});
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
 
 			const groupPath = cpGroup.trim();
 			let url: string;
@@ -570,75 +582,21 @@
 			sortColumn = column;
 			sortDirection = 'asc';
 		}
+		// Reset to page 1 and reload data with new sort
+		if (activeTab === 'github' && ghRepos.length > 0) {
+			ghPage = 1;
+			fetchGitHubRepos(1);
+		} else if (activeTab === 'gitlab' && glProjects.length > 0) {
+			glPage = 1;
+			fetchGitLabProjects(1);
+		} else if (getActiveCustomProvider() && cpProjects.length > 0) {
+			const provider = getActiveCustomProvider();
+			if (provider) {
+				cpPage = 1;
+				fetchCustomProjects(provider, 1);
+			}
+		}
 	};
-
-	// Sort repos (GitHub)
-	const sortedGhRepos = $derived.by(() => {
-		if (!sortColumn) return ghRepos;
-		return [...ghRepos].sort((a, b) => {
-			let aVal: any, bVal: any;
-			
-			if (sortColumn === 'name') {
-				aVal = a.name.toLowerCase();
-				bVal = b.name.toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'language') {
-				aVal = (a.language || '').toLowerCase();
-				bVal = (b.language || '').toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'updated') {
-				aVal = new Date(a.updated_at || 0).getTime();
-				bVal = new Date(b.updated_at || 0).getTime();
-				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
-			}
-			return 0;
-		});
-	});
-
-	// Sort projects (GitLab and custom)
-	const sortedGlProjects = $derived.by(() => {
-		if (!sortColumn) return glProjects;
-		return [...glProjects].sort((a, b) => {
-			let aVal: any, bVal: any;
-			
-			if (sortColumn === 'name') {
-				aVal = a.name.toLowerCase();
-				bVal = b.name.toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'path') {
-				aVal = (a.full_path || '').toLowerCase();
-				bVal = (b.full_path || '').toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'updated') {
-				aVal = new Date(a.updated_at || 0).getTime();
-				bVal = new Date(b.updated_at || 0).getTime();
-				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
-			}
-			return 0;
-		});
-	});
-
-	const sortedCpProjects = $derived.by(() => {
-		if (!sortColumn) return cpProjects;
-		return [...cpProjects].sort((a, b) => {
-			let aVal: any, bVal: any;
-			
-			if (sortColumn === 'name') {
-				aVal = a.name.toLowerCase();
-				bVal = b.name.toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'path') {
-				aVal = (a.full_path || '').toLowerCase();
-				bVal = (b.full_path || '').toLowerCase();
-				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-			} else if (sortColumn === 'updated') {
-				aVal = new Date(a.updated_at || 0).getTime();
-				bVal = new Date(b.updated_at || 0).getTime();
-				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
-			}
-			return 0;
-		});
-	});
 
 	// Navigate to repo details page
 	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
@@ -651,6 +609,8 @@
 
 	const switchToCustomTab = (provider: CustomProvider) => {
 		activeTab = provider.id;
+		sortColumn = '';
+		sortDirection = 'asc';
 		cpGroup = '';
 		cpProjects = [];
 		cpSubgroups = [];
@@ -692,7 +652,7 @@
 				class="px-4 py-2 text-sm font-medium transition {activeTab === 'github'
 					? 'border-b-2 border-[var(--accent)] text-[var(--accent)]'
 					: 'text-[var(--text-secondary)] hover:text-[var(--text-bright)]'}"
-				onclick={() => { activeTab = 'github'; showAddForm = false; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
+				onclick={() => { activeTab = 'github'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
 			>
 				GitHub
 			</button>
@@ -701,7 +661,7 @@
 				class="px-4 py-2 text-sm font-medium transition {activeTab === 'gitlab'
 					? 'border-b-2 border-[var(--accent)] text-[var(--accent)]'
 					: 'text-[var(--text-secondary)] hover:text-[var(--text-bright)]'}"
-				onclick={() => { activeTab = 'gitlab'; showAddForm = false; if (glProjects.length === 0) { fetchGitLabProjects(1); fetchGitLabSubgroups(); } }}
+				onclick={() => { activeTab = 'gitlab'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; if (glProjects.length === 0) { fetchGitLabProjects(1); fetchGitLabSubgroups(); } }}
 			>
 				GitLab
 			</button>
@@ -768,13 +728,11 @@
 					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{ghError}</div>
 				{/if}
 
-				{#if ghLoading}
-					<p class="text-sm text-[var(--text-secondary)]">Loading repositories...</p>
-				{:else if ghRepos.length === 0 && !ghError}
+				{#if ghRepos.length === 0 && !ghLoading && !ghError}
 					<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
 				{:else if ghRepos.length > 0}
 					<RepoTable columns={githubColumns} {sortColumn} {sortDirection} onSort={handleSort}>
-						{#each sortedGhRepos as repo}
+						{#each ghRepos as repo}
 							<RepoTableRow
 								{repo}
 								{formatDate}
@@ -842,13 +800,11 @@
 					</div>
 				{/if}
 
-				{#if glLoading}
-					<p class="text-sm text-[var(--text-secondary)]">Loading projects...</p>
-				{:else if glProjects.length === 0 && !glError}
+				{#if glProjects.length === 0 && !glLoading && !glError}
 					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
 				{:else if glProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
-						{#each sortedGlProjects as project}
+						{#each glProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath
@@ -970,13 +926,11 @@
 					</div>
 				{/if}
 
-				{#if cpLoading}
-					<p class="text-sm text-[var(--text-secondary)]">Loading projects...</p>
-				{:else if cpProjects.length === 0 && !cpError}
+				{#if cpProjects.length === 0 && !cpLoading && !cpError}
 					<p class="text-sm text-[var(--text-secondary)]">No public projects found.</p>
 				{:else if cpProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
-						{#each sortedCpProjects as project}
+						{#each cpProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath
