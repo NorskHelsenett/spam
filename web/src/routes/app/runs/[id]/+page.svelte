@@ -16,6 +16,8 @@
 		started_at?: string;
 		finished_at?: string;
 		k8s_job_name?: string;
+		sbom_id?: string;
+		secret_id?: string;
 	};
 
 	let run: Run | null = $state(null);
@@ -208,6 +210,56 @@
 			{#if run.k8s_job_name}
 				<div class="text-xs text-[var(--text-muted)]">
 					K8s Job: {run.k8s_job_name}
+				</div>
+			{/if}
+
+			<!-- Results Section -->
+			{#if run.status === 'SUCCEEDED' && (run.sbom_id || run.secret_id)}
+				<div class="space-y-4">
+					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Results</h2>
+					
+					<div class="grid gap-4 sm:grid-cols-2">
+						{#if run.sbom_id}
+							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+								<div class="flex items-center justify-between">
+									<div>
+										<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">SBOM</p>
+										<p class="mt-1 text-sm text-[var(--text-secondary)]">Software Bill of Materials</p>
+									</div>
+									<CheckCircle class="h-8 w-8 text-[var(--success)]" />
+								</div>
+								<div class="mt-3">
+									<a
+										href="/api/sboms/{run.sbom_id}/download"
+										download
+										class="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-sm text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+									>
+										Download SBOM
+									</a>
+								</div>
+							</div>
+						{/if}
+
+						{#if run.secret_id}
+							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+								<div class="flex items-center justify-between">
+									<div>
+										<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Secret Scan</p>
+										<p class="mt-1 text-sm text-[var(--text-secondary)]">Gitleaks Results</p>
+									</div>
+									<CheckCircle class="h-8 w-8 text-[var(--success)]" />
+								</div>
+								<div class="mt-3">
+									<a
+										href="/api/runs/{run.id}/secrets"
+										class="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-sm text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+									>
+										View Secrets
+									</a>
+								</div>
+							</div>
+						{/if}
+					</div>
 				</div>
 			{/if}
 

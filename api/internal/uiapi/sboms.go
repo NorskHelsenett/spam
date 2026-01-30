@@ -327,6 +327,37 @@ func detectSBOMFormat(payload []byte) string {
 	return ""
 }
 
+// SBOMDownloadHandler downloads an SBOM by ID.
+// GET /api/sboms/{id}/download
+func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		sbomID := r.PathValue("id")
+		if sbomID == "" {
+			http.Error(w, "sbom ID required", http.StatusBadRequest)
+			return
+		}
+
+		sbom, err := artifacts.FindSBOM(r.Context(), db, sbomID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "sbom not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch sbom", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", "attachment; filename=sbom.json")
+		w.Write(sbom.ContentBytes)
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -46,6 +46,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
 				api.Get("/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
 				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
+				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
 
@@ -76,6 +77,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
+				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
 				// Kubernetes integration endpoints (only available if runner is enabled)
 				if opts != nil && opts.K8sClient != nil {

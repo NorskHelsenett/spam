@@ -479,3 +479,38 @@ func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runn
 		})
 	}
 }
+
+// RunSecretsHandler retrieves gitleaks findings for a run.
+// GET /api/runs/{id}/secrets
+func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID required", http.StatusBadRequest)
+			return
+		}
+
+		var secret runner.RunSecret
+		if err := db.WithContext(r.Context()).Where("run_id = ?", runID).First(&secret).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				// Return empty array if no secrets found
+				writeJSON(w, http.StatusOK, map[string]interface{}{
+					"id":            "",
+					"run_id":        runID,
+					"findings":      []interface{}{},
+					"finding_count": 0,
+				})
+				return
+			}
+			http.Error(w, "failed to fetch secrets", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, secret)
+	}
+}
