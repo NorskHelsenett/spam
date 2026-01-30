@@ -139,17 +139,9 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 		var response sbomUploadResponse
 		err = db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-			sbom, err := artifacts.UpsertSBOM(r.Context(), tx, artifacts.SBOMInput{
-				Format:           format,
-				ContentHash:      hash[:],
-				ContentBytes:     content,
-				IngestedByUserID: session.UserID,
-			})
-			if err != nil {
-				return err
-			}
+			var bindingInput *artifacts.BindingInput
+			var assetRefID string
 
-			var binding *artifacts.SBOMBinding
 			if repoProvided {
 				repo, err := resolveRepo(r.Context(), tx, repoID, provider, org, slug, session.UserID)
 				if err != nil {
@@ -165,32 +157,13 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					return err
 				}
 
-				binding, err = artifacts.UpsertBinding(r.Context(), tx, artifacts.BindingInput{
+				bindingInput = &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeRepoCommit,
 					AssetRefID:      commit.ID,
-					SBOMID:          sbom.ID,
 					Source:          sbomSourceUpload,
 					CreatedByUserID: session.UserID,
-				})
-				if err != nil {
-					return err
 				}
-
-				if err := events.EmitSBOMBound(tx, sbom.ID, sbomBoundPayload{
-					SBOMID:       sbom.ID,
-					BindingID:    binding.ID,
-					AssetType:    artifacts.AssetTypeRepoCommit,
-					RepoID:       repo.ID,
-					RepoCommitID: commit.ID,
-					CommitSHA:    commit.CommitSHA,
-					Provider:     repo.Provider,
-					Org:          repo.Org,
-					Slug:         repo.Slug,
-					Source:       sbomSourceUpload,
-				}); err != nil {
-					return err
-				}
-
+				assetRefID = commit.ID
 				response.RepoID = repo.ID
 				response.RepoCommitID = commit.ID
 			}
@@ -206,61 +179,92 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					return err
 				}
 
-				binding, err = artifacts.UpsertBinding(r.Context(), tx, artifacts.BindingInput{
+				bindingInput = &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeImageDigest,
 					AssetRefID:      image.ID,
-					SBOMID:          sbom.ID,
 					Source:          sbomSourceUpload,
 					CreatedByUserID: session.UserID,
-				})
-				if err != nil {
-					return err
 				}
-
-				if err := events.EmitSBOMBound(tx, sbom.ID, sbomBoundPayload{
-					SBOMID:          sbom.ID,
-					BindingID:       binding.ID,
-					AssetType:       artifacts.AssetTypeImageDigest,
-					ImageDigestID:   image.ID,
-					ImageRegistry:   image.Registry,
-					ImageRepository: image.Repository,
-					ImageDigest:     image.Digest,
-					Source:          sbomSourceUpload,
-				}); err != nil {
-					return err
-				}
-
+				assetRefID = image.ID
 				response.ImageDigestID = image.ID
 			}
 
-			if binding == nil {
-				if err := events.EmitSBOMIngested(tx, sbom.ID, sbomIngestedPayload{
-					SBOMID: sbom.ID,
-					Source: sbomSourceUpload,
-				}); err != nil {
-					return err
-				}
-			}
-
-			payload := map[string]string{
-				"sbom_id": sbom.ID,
-			}
-			if binding != nil {
-				payload["binding_id"] = binding.ID
-			}
-
-			job, err := jobs.CreateJobTx(r.Context(), tx, jobs.CreateJobInput{
-				Type:    jobs.JobTypeParseSBOM,
-				Payload: payload,
-			})
+			sbomID, bindingID, jobID, err := artifacts.StoreSBOMWithParseJob(
+				r.Context(), tx,
+				artifacts.SBOMInput{
+					Format:           format,
+					ContentHash:      hash[:],
+					ContentBytes:     content,
+					IngestedByUserID: session.UserID,
+				},
+				bindingInput,
+				func(ctx context.Context, tx *gorm.DB, sbomID, bindingID string) (string, error) {
+					payload := map[string]string{"sbom_id": sbomID}
+					if bindingID != "" {
+						payload["binding_id"] = bindingID
+					}
+					job, err := jobs.CreateJobTx(ctx, tx, jobs.CreateJobInput{
+						Type:    jobs.JobTypeParseSBOM,
+						Payload: payload,
+					})
+					if err != nil {
+						return "", err
+					}
+					return job.ID, nil
+				},
+			)
 			if err != nil {
 				return err
 			}
 
-			response.SBOMID = sbom.ID
-			response.JobID = job.ID
-			if binding != nil {
-				response.BindingID = binding.ID
+			response.SBOMID = sbomID
+			response.JobID = jobID
+			if bindingID != "" {
+				response.BindingID = bindingID
+			}
+
+			// Emit appropriate events
+			if bindingInput != nil {
+				if repoProvided {
+					repo, _ := resolveRepo(r.Context(), tx, repoID, provider, org, slug, session.UserID)
+					commit, _ := assets.FindRepoCommit(r.Context(), tx, assetRefID)
+					if err := events.EmitSBOMBound(tx, sbomID, sbomBoundPayload{
+						SBOMID:       sbomID,
+						BindingID:    bindingID,
+						AssetType:    artifacts.AssetTypeRepoCommit,
+						RepoID:       repo.ID,
+						RepoCommitID: commit.ID,
+						CommitSHA:    commit.CommitSHA,
+						Provider:     repo.Provider,
+						Org:          repo.Org,
+						Slug:         repo.Slug,
+						Source:       sbomSourceUpload,
+					}); err != nil {
+						return err
+					}
+				}
+				if imageProvided {
+					image, _ := assets.FindImageDigest(r.Context(), tx, assetRefID)
+					if err := events.EmitSBOMBound(tx, sbomID, sbomBoundPayload{
+						SBOMID:          sbomID,
+						BindingID:       bindingID,
+						AssetType:       artifacts.AssetTypeImageDigest,
+						ImageDigestID:   image.ID,
+						ImageRegistry:   image.Registry,
+						ImageRepository: image.Repository,
+						ImageDigest:     image.Digest,
+						Source:          sbomSourceUpload,
+					}); err != nil {
+						return err
+					}
+				}
+			} else {
+				if err := events.EmitSBOMIngested(tx, sbomID, sbomIngestedPayload{
+					SBOMID: sbomID,
+					Source: sbomSourceUpload,
+				}); err != nil {
+					return err
+				}
 			}
 
 			return nil

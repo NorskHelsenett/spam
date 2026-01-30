@@ -3,6 +3,7 @@ package artifacts
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -83,4 +84,30 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 	}
 
 	return &binding, nil
+}
+
+// StoreSBOMWithParseJob stores an SBOM and creates a PARSE_SBOM job in a single transaction.
+// Use this helper to ensure components are always extracted from ingested SBOMs.
+func StoreSBOMWithParseJob(ctx context.Context, tx *gorm.DB, sbomInput SBOMInput, bindingInput *BindingInput, createJob func(context.Context, *gorm.DB, string, string) (string, error)) (sbomID, bindingID, jobID string, err error) {
+	sbom, err := UpsertSBOM(ctx, tx, sbomInput)
+	if err != nil {
+		return "", "", "", fmt.Errorf("upsert sbom: %w", err)
+	}
+	sbomID = sbom.ID
+
+	if bindingInput != nil {
+		bindingInput.SBOMID = sbom.ID
+		binding, err := UpsertBinding(ctx, tx, *bindingInput)
+		if err != nil {
+			return "", "", "", fmt.Errorf("upsert binding: %w", err)
+		}
+		bindingID = binding.ID
+	}
+
+	jobID, err = createJob(ctx, tx, sbomID, bindingID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("create parse job: %w", err)
+	}
+
+	return sbomID, bindingID, jobID, nil
 }

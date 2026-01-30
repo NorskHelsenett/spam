@@ -1,15 +1,19 @@
 package inventory
 
-import "time"
+import (
+	"database/sql"
+	"time"
+)
 
 // Component describes a unique software component.
 // PURL is the base PURL without version (e.g., "pkg:npm/lodash" not "pkg:npm/lodash@4.17.21").
 // Components are uniquely identified by (name, ecosystem, purl).
+// PURL can be NULL when not available - use sql.NullString for proper NULL handling.
 type Component struct {
-	ID        string `gorm:"primaryKey;size:36"`
-	PURL      string `gorm:"column:purl;size:1024;not null;default:'';uniqueIndex:ux_component_identity"`
-	Name      string `gorm:"size:255;not null;uniqueIndex:ux_component_identity"`
-	Ecosystem string `gorm:"size:64;not null;default:'';uniqueIndex:ux_component_identity"`
+	ID        string         `gorm:"primaryKey;size:36"`
+	PURL      sql.NullString `gorm:"column:purl;type:varchar(1024);uniqueIndex:ux_component_identity"`
+	Name      string         `gorm:"size:255;not null;uniqueIndex:ux_component_identity"`
+	Ecosystem string         `gorm:"size:64;not null;default:'';uniqueIndex:ux_component_identity"`
 	CreatedAt time.Time
 }
 

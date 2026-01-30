@@ -68,6 +68,11 @@ func parseCycloneDX(payload []byte) (*ParsedSBOM, error) {
 		if component.Name == "" {
 			continue
 		}
+		// Skip components without PURL (e.g., file references from Syft)
+		// These are not actual software dependencies
+		if component.PURL == "" {
+			continue
+		}
 		result.Components = append(result.Components, ParsedComponent{
 			Name:    component.Name,
 			Version: component.Version,

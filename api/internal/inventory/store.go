@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -33,7 +34,12 @@ func UpsertComponentWithCache(ctx context.Context, db *gorm.DB, input UpsertComp
 	basePURL := stripPURLVersion(input.PURL)
 
 	// Cache key matches unique constraint: (name, ecosystem, purl)
-	cacheKey := input.Name + "::" + ecosystem + "::" + basePURL
+	// Use "<NULL>" as placeholder for empty PURL in cache key
+	purlKey := basePURL
+	if purlKey == "" {
+		purlKey = "<NULL>"
+	}
+	cacheKey := input.Name + "::" + ecosystem + "::" + purlKey
 
 	// Check cache first
 	if cached, ok := cache[cacheKey]; ok {
@@ -68,12 +74,18 @@ func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInpu
 	// e.g., "pkg:npm/lodash@4.17.21" -> "pkg:npm/lodash"
 	basePURL := stripPURLVersion(input.PURL)
 
+	// Convert to sql.NullString - empty string becomes NULL
+	var purlNull sql.NullString
+	if basePURL != "" {
+		purlNull = sql.NullString{String: basePURL, Valid: true}
+	}
+
 	// Use ON CONFLICT DO UPDATE to handle race conditions atomically.
 	// The "dummy" update ensures the row is touched even on conflict.
 	component := Component{
 		ID:        uuid.NewString(),
 		Name:      input.Name,
-		PURL:      basePURL,
+		PURL:      purlNull,
 		Ecosystem: ecosystem,
 	}
 
@@ -90,9 +102,15 @@ func UpsertComponent(ctx context.Context, db *gorm.DB, input UpsertComponentInpu
 
 	// Fetch the actual record to get the correct ID (may differ on conflict)
 	var existing Component
-	if err := db.WithContext(ctx).
-		Where("name = ? AND ecosystem = ? AND purl = ?", input.Name, ecosystem, basePURL).
-		First(&existing).Error; err != nil {
+	query := db.WithContext(ctx).Where("name = ? AND ecosystem = ?", input.Name, ecosystem)
+
+	if basePURL == "" {
+		query = query.Where("purl IS NULL")
+	} else {
+		query = query.Where("purl = ?", basePURL)
+	}
+
+	if err := query.First(&existing).Error; err != nil {
 		return nil, fmt.Errorf("fetch component name=%q ecosystem=%q purl=%q: %w", input.Name, ecosystem, basePURL, err)
 	}
 
