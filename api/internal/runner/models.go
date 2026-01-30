@@ -25,6 +25,7 @@ type Run struct {
 	Payload         datatypes.JSON `gorm:"type:jsonb" json:"payload"`
 	Result          datatypes.JSON `gorm:"type:jsonb" json:"result,omitempty"`
 	Error           string         `gorm:"type:text" json:"error,omitempty"`
+	CommitHash      string         `gorm:"size:64;index" json:"commit_hash,omitempty"`
 	Attempts        int            `gorm:"not null;default:0" json:"attempts"`
 	MaxAttempts     int            `gorm:"not null;default:3" json:"max_attempts"`
 	RunAt           time.Time      `gorm:"index" json:"run_at"`

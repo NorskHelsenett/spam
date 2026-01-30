@@ -45,6 +45,7 @@ type Runner struct {
 	logChan      chan string
 	localMode    bool
 	sbomScanner  string // "trivy" or "syft"
+	commitHash   string
 }
 
 func main() {
@@ -242,19 +243,27 @@ func (r *Runner) runPipeline() int {
 		return 1
 	}
 
+	// Capture the actual commit hash that was cloned
+	commitHashCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "rev-parse", "HEAD")
+	commitHashOut, commitErr := commitHashCmd.Output()
+	if commitErr == nil {
+		r.commitHash = strings.TrimSpace(string(commitHashOut))
+		r.log(fmt.Sprintf("Commit hash: %s", r.commitHash))
+	}
+
 	// Run SBOM generation
 	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
 	sbomPath := filepath.Join(r.workDir, "sbom.json")
 
-	var err error
+	var sbomErr error
 	if r.sbomScanner == "trivy" {
-		err = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
+		sbomErr = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
 	} else {
-		err = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
+		sbomErr = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
 	}
 
-	if err != nil {
-		r.log(fmt.Sprintf("SBOM generation failed: %v", err))
+	if sbomErr != nil {
+		r.log(fmt.Sprintf("SBOM generation failed: %v", sbomErr))
 		return 1
 	}
 
@@ -417,6 +426,13 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 	// Add run_id field
 	if err := writer.WriteField("run_id", r.runID); err != nil {
 		return err
+	}
+
+	// Add commit_hash field if available
+	if r.commitHash != "" {
+		if err := writer.WriteField("commit_hash", r.commitHash); err != nil {
+			return err
+		}
 	}
 
 	// Add file field (use "sbom" or "secrets" based on fileType)

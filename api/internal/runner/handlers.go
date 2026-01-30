@@ -95,6 +95,9 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get commit_hash if provided
+	commitHash := r.FormValue("commit_hash")
+
 	// Get run to find repo_id
 	var run Run
 	if err := s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
@@ -223,6 +226,13 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+	}
+
+	// Update run with commit hash if provided
+	if commitHash != "" {
+		if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", runID).Update("commit_hash", commitHash).Error; err != nil {
+			log.Printf("failed to update commit hash: %v", err)
 		}
 	}
 
