@@ -27,6 +27,8 @@ type RunResponse struct {
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 	K8sJobName string     `json:"k8s_job_name,omitempty"`
+	SBOMID     string     `json:"sbom_id,omitempty"`
+	SecretID   string     `json:"secret_id,omitempty"`
 }
 
 // RunsListResponse is the response for listing runs.
@@ -238,7 +240,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			json.Unmarshal(job.Payload, &payload)
 		}
 
-		writeJSON(w, http.StatusOK, RunResponse{
+		response := RunResponse{
 			ID:         job.ID,
 			Status:     job.Status,
 			CloneURL:   payload.CloneURL,
@@ -250,7 +252,29 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			StartedAt:  job.LockedAt,
 			FinishedAt: job.FinishedAt,
 			K8sJobName: job.K8sJobName,
-		})
+		}
+
+		// Look up associated SBOM
+		var sbomBinding struct {
+			SBOMID string
+		}
+		if err := db.WithContext(r.Context()).Table("sbom_bindings").
+			Where("asset_ref_id = ? AND source = ?", payload.RepoID, "spam-runner").
+			Select("sbom_id").First(&sbomBinding).Error; err == nil {
+			response.SBOMID = sbomBinding.SBOMID
+		}
+
+		// Look up associated secrets
+		var secret struct {
+			ID string
+		}
+		if err := db.WithContext(r.Context()).Table("run_secrets").
+			Where("run_id = ?", runID).
+			Select("id").First(&secret).Error; err == nil {
+			response.SecretID = secret.ID
+		}
+
+		writeJSON(w, http.StatusOK, response)
 	}
 }
 

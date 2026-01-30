@@ -1,12 +1,14 @@
 package runner
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/google/uuid"
 )
 
@@ -110,9 +112,35 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("failed to read sbom: %v", err)
 		} else {
-			// TODO: Store SBOM via artifacts package
-			// For now, just log it
-			log.Printf("received SBOM for run %s: %d bytes", runID, len(sbomData))
+			// Calculate content hash
+			hash := sha256.Sum256(sbomData)
+			
+			// Store SBOM
+			sbom, err := artifacts.UpsertSBOM(r.Context(), s.db, artifacts.SBOMInput{
+				Format:           "cyclonedx-json",
+				ContentHash:      hash[:],
+				ContentBytes:     sbomData,
+				IngestedByUserID: "system",
+			})
+			if err != nil {
+				log.Printf("failed to store sbom: %v", err)
+			} else {
+				log.Printf("stored SBOM %s for run %s (%d bytes)", sbom.ID, runID, len(sbomData))
+				
+				// Create binding if we have repo info
+				if payload.RepoID != "" {
+					_, err := artifacts.UpsertBinding(r.Context(), s.db, artifacts.BindingInput{
+						AssetType:       artifacts.AssetTypeRepoCommit,
+						AssetRefID:      payload.RepoID,
+						SBOMID:          sbom.ID,
+						Source:          "spam-runner",
+						CreatedByUserID: "system",
+					})
+					if err != nil {
+						log.Printf("failed to create binding: %v", err)
+					}
+				}
+			}
 		}
 	}
 
