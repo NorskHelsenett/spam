@@ -39,12 +39,16 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			perPage = 20
 		}
 		repoID := r.URL.Query().Get("repo_id")
+		runID := r.URL.Query().Get("run_id")
 
 		// Count total
 		var total int64
 		countQuery := db.WithContext(r.Context()).Model(&manifests.Manifest{})
 		if repoID != "" {
 			countQuery = countQuery.Where("repo_id = ?", repoID)
+		}
+		if runID != "" {
+			countQuery = countQuery.Where("run_id = ?", runID)
 		}
 		if err := countQuery.Count(&total).Error; err != nil {
 			log.Printf("manifests count error: %v", err)
@@ -58,13 +62,21 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			FROM manifests m
 			LEFT JOIN manifest_dependencies d ON d.manifest_id = m.id
 		`
+		args := []interface{}{}
+		whereClause := ""
 		if repoID != "" {
-			query += " WHERE m.repo_id = ?"
+			whereClause = " WHERE m.repo_id = ?"
+			args = append(args, repoID)
+		} else if runID != "" {
+			whereClause = " WHERE m.run_id = ?"
+			args = append(args, runID)
 		}
-		query += " GROUP BY m.id ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
+		query += whereClause + " GROUP BY m.id ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
 
 		offset := (page - 1) * perPage
-		rows, err := db.WithContext(r.Context()).Raw(query, repoID, perPage, offset).Rows()
+		args = append(args, perPage, offset)
+		
+		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("manifests query error: %v", err)
 			http.Error(w, "database error", http.StatusInternalServerError)

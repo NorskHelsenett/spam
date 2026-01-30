@@ -105,7 +105,7 @@
 				const secretsResponse = await fetch(`/api/runs/${runId}/secrets`, { credentials: 'include' });
 				if (secretsResponse.ok) {
 					const secretsData = await secretsResponse.json();
-					const secretCount = Array.isArray(secretsData) ? secretsData.length : 0;
+					const secretCount = secretsData.finding_count || 0;
 					
 					artifactsList.push({
 						type: 'secrets',
