@@ -20,8 +20,13 @@
 		image_repository?: string;
 		image_digest?: string;
 		version: string;
-		sbom_id: string;
-		bound_at: string;
+		sbom_id?: string;
+		bound_at?: string;
+		source?: string;
+		manifest_path?: string;
+		manifest_type?: string;
+		direct?: boolean;
+		scope?: string;
 	};
 
 	type ComponentDetail = {
@@ -57,44 +62,36 @@
 	// Load component detail when dialog opens
 	$effect(() => {
 		if (open && name && ecosystem) {
-			loadComponentByName(name, ecosystem);
+			loadDependencyDetail(name, ecosystem);
 		}
 	});
 
-	const loadComponentByName = async (name: string, ecosystem: string) => {
+	const loadDependencyDetail = async (name: string, ecosystem: string) => {
 		loading = true;
 		try {
 			const params = new URLSearchParams({ name, ecosystem });
-			const response = await fetch(`/api/components?${params}&page_size=1`, { credentials: 'include' });
+			const response = await fetch(`/api/dependencies/detail?${params}`, { credentials: 'include' });
 			if (response.ok) {
-				const data = await response.json();
-				if (data.components && data.components.length > 0) {
-					const comp = data.components[0];
-					// Load full details
-					const detailResponse = await fetch(`/api/components/${comp.id}`, { credentials: 'include' });
-					if (detailResponse.ok) {
-						componentDetail = await detailResponse.json();
-						componentDetail!.sources = sources;
-						selectedVersion = '';
-						loadComponentAssets(comp.id, '');
-					}
-				}
+				componentDetail = await response.json();
+				componentDetail!.sources = sources;
+				selectedVersion = '';
+				loadDependencyAssets(name, ecosystem, '');
 			}
 		} catch (e) {
-			console.error('Failed to load component:', e);
+			console.error('Failed to load dependency:', e);
 		} finally {
 			loading = false;
 		}
 	};
 
-	const loadComponentAssets = async (componentId: string, version: string) => {
+	const loadDependencyAssets = async (name: string, ecosystem: string, version: string) => {
 		assetsLoading = true;
 		try {
-			const params = new URLSearchParams();
+			const params = new URLSearchParams({ name, ecosystem });
 			if (version) params.set('version', version);
 			params.set('page_size', '100');
 
-			const response = await fetch(`/api/components/${componentId}/assets?${params}`, { credentials: 'include' });
+			const response = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });
 			if (response.ok) {
 				const data = await response.json();
 				componentAssets = data.assets || [];
@@ -108,9 +105,7 @@
 
 	const handleVersionFilter = (version: string) => {
 		selectedVersion = version;
-		if (componentDetail) {
-			loadComponentAssets(componentDetail.id, version);
-		}
+		loadDependencyAssets(name, ecosystem, version);
 	};
 
 	const getSourceBadge = (sources: string[]) => {
@@ -251,13 +246,34 @@
 															{asset.org}/{asset.slug}
 														</span>
 														<span class="shrink-0 text-xs text-[var(--text-muted)]">({asset.provider})</span>
+														{#if asset.source}
+															<span class="shrink-0 rounded-full px-2 py-0.5 text-xs {asset.source === 'sbom' ? 'bg-blue-500/10 text-blue-400' : 'bg-purple-500/10 text-purple-400'}">
+																{asset.source}
+															</span>
+														{/if}
 													</div>
-													<p class="mt-1 text-xs text-[var(--text-muted)]">
-														Commit: <code class="rounded bg-[var(--hover-bg)] px-1 py-0.5">{asset.commit_sha?.substring(0, 8)}</code>
-													</p>
+													{#if asset.commit_sha}
+														<p class="mt-1 text-xs text-[var(--text-muted)]">
+															Commit: <code class="rounded bg-[var(--hover-bg)] px-1 py-0.5">{asset.commit_sha.substring(0, 8)}</code>
+														</p>
+													{/if}
+													{#if asset.manifest_path}
+														<p class="mt-1 text-xs text-[var(--text-muted)]">
+															Manifest: <code class="rounded bg-[var(--hover-bg)] px-1 py-0.5">{asset.manifest_path}</code>
+															{#if asset.manifest_type}
+																<span class="ml-1">({asset.manifest_type})</span>
+															{/if}
+														</p>
+													{/if}
 													{#if asset.version}
 														<p class="mt-0.5 text-xs text-[var(--text-tertiary)]">
 															Version: {asset.version}
+															{#if asset.direct}
+																<span class="ml-1 text-green-400">(direct)</span>
+															{/if}
+															{#if asset.scope}
+																<span class="ml-1">• {asset.scope}</span>
+															{/if}
 														</p>
 													{/if}
 												</div>

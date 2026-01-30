@@ -230,3 +230,329 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		})
 	}
 }
+
+// DependencyDetail represents detailed information about a dependency from both SBOM and manifest sources
+type DependencyDetail struct {
+	Name         string                  `json:"name"`
+	Ecosystem    string                  `json:"ecosystem"`
+	PURL         string                  `json:"purl,omitempty"`
+	VersionCount int                     `json:"version_count"`
+	RepoCount    int                     `json:"repo_count"`
+	ImageCount   int                     `json:"image_count"`
+	Sources      []string                `json:"sources"`
+	Versions     []DependencyVersionInfo `json:"versions"`
+}
+
+// DependencyVersionInfo describes a specific version of a dependency
+type DependencyVersionInfo struct {
+	Version   string   `json:"version"`
+	RepoCount int      `json:"repo_count"`
+	Sources   []string `json:"sources"` // "sbom", "manifest", or both
+}
+
+// DependencyAsset describes where a dependency is used (from SBOM or manifest)
+type DependencyAsset struct {
+	AssetType    string `json:"asset_type"` // "REPO_COMMIT" only for now
+	RepoID       string `json:"repo_id,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Org          string `json:"org,omitempty"`
+	Slug         string `json:"slug,omitempty"`
+	CommitSHA    string `json:"commit_sha,omitempty"`
+	Version      string `json:"version"`
+	Source       string `json:"source"` // "sbom" or "manifest"
+	ManifestPath string `json:"manifest_path,omitempty"`
+	ManifestType string `json:"manifest_type,omitempty"`
+	Direct       bool   `json:"direct,omitempty"`
+	Scope        string `json:"scope,omitempty"`
+}
+
+type dependencyAssetsResponse struct {
+	Assets   []DependencyAsset `json:"assets"`
+	Total    int64             `json:"total"`
+	Page     int               `json:"page"`
+	PageSize int               `json:"page_size"`
+}
+
+// DependencyDetailHandler returns detailed information about a dependency by name and ecosystem
+func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		name := r.URL.Query().Get("name")
+		ecosystem := r.URL.Query().Get("ecosystem")
+
+		if name == "" || ecosystem == "" {
+			http.Error(w, "name and ecosystem required", http.StatusBadRequest)
+			return
+		}
+
+		// Query for component from SBOM
+		var componentID sql.NullString
+		var purl sql.NullString
+		componentQuery := `
+			SELECT c.id, c.purl
+			FROM components c
+			WHERE c.name = ? AND c.ecosystem = ?
+			LIMIT 1
+		`
+		_ = db.WithContext(r.Context()).Raw(componentQuery, name, ecosystem).Row().Scan(&componentID, &purl)
+
+		// Aggregate versions from both SBOM and manifest sources
+		versionsQuery := `
+			WITH sbom_versions AS (
+				SELECT 
+					cv.version,
+					COUNT(DISTINCT sb.asset_ref_id) as repo_count,
+					'sbom' as source
+				FROM component_versions cv
+				JOIN sbom_components sc ON sc.component_version_id = cv.id
+				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
+				JOIN components c ON c.id = cv.component_id
+				WHERE c.name = ? AND c.ecosystem = ?
+				  AND sb.asset_type = 'REPO_COMMIT'
+				GROUP BY cv.version
+			),
+			manifest_versions AS (
+				SELECT 
+					md.version,
+					COUNT(DISTINCT m.repo_id) as repo_count,
+					'manifest' as source
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				WHERE md.name = ? AND md.ecosystem = ?
+				GROUP BY md.version
+			),
+			merged_versions AS (
+				SELECT 
+					COALESCE(s.version, m.version) as version,
+					COALESCE(s.repo_count, 0) + COALESCE(m.repo_count, 0) as repo_count,
+					CASE 
+						WHEN s.version IS NOT NULL AND m.version IS NOT NULL THEN 'both'
+						WHEN s.version IS NOT NULL THEN 'sbom'
+						ELSE 'manifest'
+					END as sources
+				FROM sbom_versions s
+				FULL OUTER JOIN manifest_versions m ON s.version = m.version
+			)
+			SELECT version, repo_count, sources
+			FROM merged_versions
+			ORDER BY repo_count DESC, version DESC
+			LIMIT 100
+		`
+
+		rows, err := db.WithContext(r.Context()).Raw(versionsQuery, name, ecosystem, name, ecosystem).Rows()
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		versions := make([]DependencyVersionInfo, 0)
+		totalRepoCount := 0
+		for rows.Next() {
+			var v DependencyVersionInfo
+			var sources string
+			if err := rows.Scan(&v.Version, &v.RepoCount, &sources); err != nil {
+				log.Printf("version scan error: %v", err)
+				continue
+			}
+			v.Sources = []string{sources}
+			versions = append(versions, v)
+			if v.RepoCount > totalRepoCount {
+				totalRepoCount = v.RepoCount
+			}
+		}
+
+		// Determine sources
+		sources := make([]string, 0)
+		hasSBOM := componentID.Valid
+		hasManifest := false
+
+		// Check if exists in manifests
+		var manifestCount int64
+		db.WithContext(r.Context()).Raw(`
+			SELECT COUNT(DISTINCT id)
+			FROM manifest_dependencies
+			WHERE name = ? AND ecosystem = ?
+		`, name, ecosystem).Scan(&manifestCount)
+		hasManifest = manifestCount > 0
+
+		if hasSBOM && hasManifest {
+			sources = []string{"both"}
+		} else if hasSBOM {
+			sources = []string{"sbom"}
+		} else if hasManifest {
+			sources = []string{"manifest"}
+		}
+
+		if len(versions) == 0 && !hasSBOM && !hasManifest {
+			http.Error(w, "dependency not found", http.StatusNotFound)
+			return
+		}
+
+		detail := DependencyDetail{
+			Name:         name,
+			Ecosystem:    ecosystem,
+			PURL:         purl.String,
+			VersionCount: len(versions),
+			RepoCount:    totalRepoCount,
+			ImageCount:   0, // Images only from SBOMs, we can calculate this if needed
+			Sources:      sources,
+			Versions:     versions,
+		}
+
+		writeJSON(w, http.StatusOK, detail)
+	}
+}
+
+// DependencyAssetsHandler returns repos/images using a dependency by name and ecosystem
+func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		name := r.URL.Query().Get("name")
+		ecosystem := r.URL.Query().Get("ecosystem")
+		version := r.URL.Query().Get("version")
+
+		if name == "" || ecosystem == "" {
+			http.Error(w, "name and ecosystem required", http.StatusBadRequest)
+			return
+		}
+
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+		if pageSize < 1 || pageSize > 200 {
+			pageSize = 100
+		}
+
+		// Query assets from both SBOM and manifest sources
+		assetsQuery := `
+			WITH sbom_assets AS (
+				SELECT 
+					'REPO_COMMIT' as asset_type,
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					rc.commit_sha,
+					cv.version,
+					'sbom' as source,
+					NULL as manifest_path,
+					NULL as manifest_type,
+					false as direct,
+					sc.scope,
+					sb.created_at
+				FROM components c
+				JOIN component_versions cv ON cv.component_id = c.id
+				JOIN sbom_components sc ON sc.component_version_id = cv.id
+				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
+				JOIN repo_commits rc ON sb.asset_type = 'REPO_COMMIT' AND rc.id = sb.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				WHERE c.name = ? AND c.ecosystem = ?
+				  AND (? = '' OR cv.version = ?)
+			),
+			manifest_assets AS (
+				SELECT 
+					'REPO_COMMIT' as asset_type,
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					'' as commit_sha,
+					md.version,
+					'manifest' as source,
+					m.path as manifest_path,
+					m.type as manifest_type,
+					md.direct,
+					md.scope,
+					m.created_at
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				JOIN repos r ON r.id = m.repo_id
+				WHERE md.name = ? AND md.ecosystem = ?
+				  AND (? = '' OR md.version = ?)
+			),
+			combined_assets AS (
+				SELECT * FROM sbom_assets
+				UNION ALL
+				SELECT * FROM manifest_assets
+			)
+			SELECT 
+				asset_type, repo_id, provider, org, slug, commit_sha,
+				version, source, manifest_path, manifest_type, direct, scope
+			FROM combined_assets
+			ORDER BY created_at DESC
+		`
+
+		// Count total
+		countQuery := `
+			WITH sbom_assets AS (
+				SELECT sb.id
+				FROM components c
+				JOIN component_versions cv ON cv.component_id = c.id
+				JOIN sbom_components sc ON sc.component_version_id = cv.id
+				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
+				WHERE c.name = ? AND c.ecosystem = ?
+				  AND (? = '' OR cv.version = ?)
+				  AND sb.asset_type = 'REPO_COMMIT'
+			),
+			manifest_assets AS (
+				SELECT md.id
+				FROM manifest_dependencies md
+				WHERE md.name = ? AND md.ecosystem = ?
+				  AND (? = '' OR md.version = ?)
+			)
+			SELECT (SELECT COUNT(*) FROM sbom_assets) + (SELECT COUNT(*) FROM manifest_assets)
+		`
+
+		var total int64
+		if err := db.WithContext(r.Context()).Raw(countQuery, name, ecosystem, version, version, name, ecosystem, version, version).Scan(&total).Error; err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Apply pagination
+		assetsQuery += ` LIMIT ? OFFSET ?`
+		rows, err := db.WithContext(r.Context()).Raw(
+			assetsQuery,
+			name, ecosystem, version, version,
+			name, ecosystem, version, version,
+			pageSize, (page-1)*pageSize,
+		).Rows()
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		assets := make([]DependencyAsset, 0)
+		for rows.Next() {
+			var a DependencyAsset
+			if err := rows.Scan(
+				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
+				&a.CommitSHA, &a.Version, &a.Source, &a.ManifestPath,
+				&a.ManifestType, &a.Direct, &a.Scope,
+			); err != nil {
+				log.Printf("asset scan error: %v", err)
+				continue
+			}
+			assets = append(assets, a)
+		}
+
+		writeJSON(w, http.StatusOK, dependencyAssetsResponse{
+			Assets:   assets,
+			Total:    total,
+			Page:     page,
+			PageSize: pageSize,
+		})
+	}
+}
