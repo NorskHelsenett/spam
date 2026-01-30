@@ -121,8 +121,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			// Store log in database
 			s.storeLog(r.Context(), claims.RunID, msg.Line, ts)
-			// Broadcast to SSE subscribers
-			s.BroadcastLog(claims.RunID, msg.Line, ts)
 
 		case "commit_hash":
 			log.Printf("received commit hash for run %s: %s", claims.RunID, msg.CommitHash)
@@ -140,8 +138,6 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if err := s.updateRunStatus(r.Context(), claims.RunID, status); err != nil {
 				log.Printf("failed to update run status: %v", err)
 			}
-			// Broadcast completion to SSE subscribers
-			s.broadcastStatus(claims.RunID)
 			return
 		}
 	}
@@ -175,23 +171,4 @@ func (s *Server) updateRunStatus(ctx context.Context, runID string, status RunSt
 	}
 
 	return s.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(updates).Error
-}
-
-func (s *Server) broadcastStatus(runID string) {
-	// Send a special status event to SSE subscribers
-	s.sseSubsMu.RLock()
-	subs, ok := s.sseSubs[runID]
-	s.sseSubsMu.RUnlock()
-
-	if !ok {
-		return
-	}
-
-	// Close all subscriber channels to signal completion
-	s.sseSubsMu.Lock()
-	for ch := range subs {
-		close(ch)
-	}
-	delete(s.sseSubs, runID)
-	s.sseSubsMu.Unlock()
 }

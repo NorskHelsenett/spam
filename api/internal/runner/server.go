@@ -24,16 +24,6 @@ type Server struct {
 	// WebSocket connections for active runs (runID -> connection)
 	wsConnsMu sync.RWMutex
 	wsConns   map[string]*WSConn
-
-	// SSE subscribers for log streaming (runID -> subscribers)
-	sseSubsMu sync.RWMutex
-	sseSubs   map[string]map[chan LogEvent]struct{}
-}
-
-// LogEvent represents a log event sent via SSE.
-type LogEvent struct {
-	Line      string    `json:"line"`
-	Timestamp time.Time `json:"ts"`
 }
 
 // NewServer creates a new runner server.
@@ -43,7 +33,6 @@ func NewServer(cfg config.RunnerConfig, db *gorm.DB, k8sClient *K8sClient) *Serv
 		db:        db,
 		k8sClient: k8sClient,
 		wsConns:   make(map[string]*WSConn),
-		sseSubs:   make(map[string]map[chan LogEvent]struct{}),
 	}
 }
 
@@ -68,17 +57,6 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Post("/results", s.handleResults)
 	})
 
-	// Client/API endpoints
-	r.Route("/runs", func(r chi.Router) {
-		r.Get("/", s.handleListRuns)
-		r.Get("/{id}", s.handleGetRun)
-		r.Get("/{id}/logs", s.handleStreamLogs)
-		r.Post("/{id}/cancel", s.handleCancelRun)
-		// Kubernetes API endpoints
-		r.Get("/{id}/k8s-logs", s.handleGetK8sLogs)
-		r.Get("/{id}/k8s-status", s.handleGetK8sStatus)
-	})
-
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.httpServer = &http.Server{
 		Addr:    addr,
@@ -98,56 +76,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 	return nil
-}
-
-// BroadcastLog sends a log line to all SSE subscribers for a run.
-func (s *Server) BroadcastLog(runID string, line string, ts time.Time) {
-	s.sseSubsMu.RLock()
-	subs, ok := s.sseSubs[runID]
-	s.sseSubsMu.RUnlock()
-
-	if !ok {
-		return
-	}
-
-	event := LogEvent{Line: line, Timestamp: ts}
-
-	s.sseSubsMu.RLock()
-	for ch := range subs {
-		select {
-		case ch <- event:
-		default:
-			// Channel full, skip
-		}
-	}
-	s.sseSubsMu.RUnlock()
-}
-
-// SubscribeLogs subscribes to log events for a run.
-func (s *Server) SubscribeLogs(runID string) chan LogEvent {
-	ch := make(chan LogEvent, 100)
-
-	s.sseSubsMu.Lock()
-	if s.sseSubs[runID] == nil {
-		s.sseSubs[runID] = make(map[chan LogEvent]struct{})
-	}
-	s.sseSubs[runID][ch] = struct{}{}
-	s.sseSubsMu.Unlock()
-
-	return ch
-}
-
-// UnsubscribeLogs unsubscribes from log events for a run.
-func (s *Server) UnsubscribeLogs(runID string, ch chan LogEvent) {
-	s.sseSubsMu.Lock()
-	if subs, ok := s.sseSubs[runID]; ok {
-		delete(subs, ch)
-		if len(subs) == 0 {
-			delete(s.sseSubs, runID)
-		}
-	}
-	s.sseSubsMu.Unlock()
-	close(ch)
 }
 
 // GetWSConn returns the WebSocket connection for a run.
