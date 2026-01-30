@@ -168,13 +168,6 @@
 						{/if}
 					</div>
 				</div>
-				<button
-					type="button"
-					class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={() => { open = false; }}
-				>
-					<X class="h-5 w-5" />
-				</button>
 			</div>
 		</div>
 
