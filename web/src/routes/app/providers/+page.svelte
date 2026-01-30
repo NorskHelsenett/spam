@@ -30,6 +30,7 @@
 	let newProviderUrl = $state('');
 	let detecting = $state(false);
 	let detectError = $state('');
+	let addProviderInput: HTMLInputElement | undefined = $state();
 
 	// GitHub state
 	let ghOwner = $state('NorskHelsenett');
@@ -692,7 +693,13 @@
 				class="flex items-center gap-1 px-3 py-2 text-sm font-medium transition {showAddForm
 					? 'text-[var(--accent)]'
 					: 'text-[var(--text-secondary)] hover:text-[var(--accent)]'}"
-				onclick={() => { showAddForm = !showAddForm; activeTab = 'add'; }}
+				onclick={() => { 
+					showAddForm = !showAddForm; 
+					activeTab = 'add'; 
+					if (showAddForm) {
+						setTimeout(() => addProviderInput?.focus(), 0);
+					}
+				}}
 				title="Add custom provider"
 			>
 				<Plus class="h-4 w-4" />
@@ -838,8 +845,7 @@
 
 				<div class="mt-6 w-full max-w-md">
 					<div class="flex gap-2">
-						<input
-							type="url"
+						<input						bind:this={addProviderInput}							type="url"
 							placeholder="https://gitlab.example.com"
 							class="flex-1 rounded-xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none"
 							bind:value={newProviderUrl}

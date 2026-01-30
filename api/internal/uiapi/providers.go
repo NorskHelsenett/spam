@@ -325,9 +325,9 @@ type DetectProviderResponse struct {
 	Version string `json:"version"` // Version if detected
 }
 
-// DetectProviderHandler probes a URL and detects the provider type.
+// ProvidersDetectHandler probes a URL and detects the provider type.
 // GET /api/providers/detect?url=https://gitlab.example.com
-func DetectProviderHandler(authService *auth.Service) http.HandlerFunc {
+func ProvidersDetectHandler(authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if authService != nil {
 			if _, err := authService.LoadSession(r); err != nil {
