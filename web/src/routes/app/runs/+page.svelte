@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { Play, CheckCircle, XCircle, Clock, Loader2, RefreshCw } from 'lucide-svelte';
 
 	type Run = {
@@ -171,7 +172,7 @@
 					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 						{#each runs as run}
 							{@const StatusIcon = getStatusIcon(run.status)}
-							<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" onclick={() => window.location.href = `/app/runs/${run.id}`}>
+					<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" onclick={() => goto(`/app/runs/${run.id}`)}>
 								<td class="px-5 py-3">
 									<span class="flex items-center gap-2" style={`color: ${getStatusColor(run.status)}`}>
 										<StatusIcon size={16} class={run.status === 'RUNNING' ? 'animate-spin' : ''} />
