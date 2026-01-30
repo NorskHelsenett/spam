@@ -1,6 +1,7 @@
 package uiapi
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -185,14 +186,30 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		for rows.Next() {
 			var dep UnifiedDependency
 			var sources string
+			var purl sql.NullString
+			var direct sql.NullBool
+			var scope sql.NullString
+			
 			if err := rows.Scan(
-				&dep.Name, &dep.Version, &dep.Ecosystem, &dep.PURL,
-				&sources, &dep.Direct, &dep.Scope,
+				&dep.Name, &dep.Version, &dep.Ecosystem, &purl,
+				&sources, &direct, &scope,
 				&dep.SBOMCount, &dep.RepoCount,
 			); err != nil {
 				log.Printf("scan error: %v", err)
 				continue
 			}
+			
+			if purl.Valid {
+				dep.PURL = purl.String
+			}
+			if direct.Valid {
+				b := direct.Bool
+				dep.Direct = &b
+			}
+			if scope.Valid {
+				dep.Scope = scope.String
+			}
+			
 			dep.Sources = []string{sources}
 			deps = append(deps, dep)
 		}
