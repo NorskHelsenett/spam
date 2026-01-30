@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
@@ -362,18 +363,39 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 		return err
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{
-		"run_id": r.runID,
-		"type":   fileType,
-		"data":   string(data),
-	})
+	// Create multipart form
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
 
-	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/results", bytes.NewReader(reqBody))
+	// Add run_id field
+	if err := writer.WriteField("run_id", r.runID); err != nil {
+		return err
+	}
+
+	// Add file field (use "sbom" or "secrets" based on fileType)
+	fieldName := fileType
+	if fileType == "gitleaks" {
+		fieldName = "secrets"
+	}
+
+	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(data); err != nil {
+		return err
+	}
+
+	if err := writer.Close(); err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/results", body)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+r.runToken)
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
