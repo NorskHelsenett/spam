@@ -64,9 +64,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/manifests/{id}", uiapi.ManifestGetHandler(db, authService))
 				api.Get("/dependencies/search", uiapi.DependencySearchHandler(db, authService))
 
-				// Provider endpoints (public repos only for now)
-				api.Get("/providers/detect", uiapi.DetectProviderHandler(authService))
-				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
+				// Unified dependencies (SBOM + Manifest merged view)
+				api.Get("/dependencies", uiapi.UnifiedDependenciesHandler(db, authService))
 				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService))
 				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService))
 				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService))
