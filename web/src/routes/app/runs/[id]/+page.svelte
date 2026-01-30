@@ -1,8 +1,8 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, RefreshCw, GitBranch, Package, Shield, FileCode, Eye, Download } from 'lucide-svelte';
+	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download } from 'lucide-svelte';
 
 	type Run = {
 		id: string;
@@ -38,8 +38,10 @@
 	let showRawDialog = $state(false);
 	let rawDialogTitle = $state('');
 	let rawDialogData = $state('');
+	let eventSource: EventSource | null = null;
+	let lastStatus = $state('');
 
-	const loadRun = async () => {
+	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
 		if (!id) return;
 
@@ -55,10 +57,13 @@
 				}
 				return;
 			}
-			run = await response.json();
+			const newRun = await response.json();
+			const statusChanged = lastStatus && lastStatus !== newRun.status;
+			run = newRun;
+			lastStatus = newRun.status;
 			
-			// Load artifacts after getting run details
-			if (run) {
+			// Load artifacts after getting run details, or when status changes to completed
+			if (shouldLoadArtifacts && run && (run.status === 'SUCCEEDED' || run.status === 'FAILED' || statusChanged)) {
 				await loadArtifacts(id, run);
 			}
 		} catch (e) {
@@ -149,18 +154,75 @@
 		showRawDialog = true;
 	};
 
-	onMount(() => {
-		if (!browser) return;
-		loadRun();
+	const connectSSE = () => {
+		const id = $page.params.id;
+		if (!id || !browser) return;
 
-		// Refresh every 3 seconds if run is active
+		// Try to connect to SSE endpoint for real-time updates
+		// Note: This assumes runner SSE is available at /api/runs/{id}/stream
+		// If not available, fall back to polling
+		try {
+			eventSource = new EventSource(`/api/runs/${id}/stream`, { withCredentials: true });
+			
+			eventSource.addEventListener('status', (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					if (run && data.status && data.status !== run.status) {
+						// Status changed, reload run data and artifacts
+						loadRun(true);
+					}
+				} catch (e) {
+					console.error('Failed to parse status event:', e);
+				}
+			});
+
+			eventSource.addEventListener('log', () => {
+				// Log events received (could display in UI later)
+			});
+
+			eventSource.onerror = () => {
+				// SSE not available or connection failed, close and fall back to polling
+				if (eventSource) {
+					eventSource.close();
+					eventSource = null;
+				}
+				setupPolling();
+			};
+		} catch (e) {
+			console.log('SSE not available, using polling');
+			setupPolling();
+		}
+	};
+
+	const setupPolling = () => {
+		// Fallback: poll every 3 seconds if run is active
 		const interval = setInterval(() => {
 			if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
-				loadRun();
+				loadRun(false); // Don't reload artifacts on every poll
+			} else {
+				// Run completed, stop polling
+				clearInterval(interval);
 			}
 		}, 3000);
 
 		return () => clearInterval(interval);
+	};
+
+	onMount(() => {
+		if (!browser) return;
+		
+		// Initial load
+		loadRun(true);
+
+		// Try SSE first, fall back to polling if not available
+		connectSSE();
+	});
+
+	onDestroy(() => {
+		if (eventSource) {
+			eventSource.close();
+			eventSource = null;
+		}
 	});
 
 	const getStatusIcon = (status: string) => {
@@ -246,7 +308,7 @@
 
 		<section class="panel-surface space-y-6 px-6 py-8 sm:px-10">
 			<div class="flex items-start justify-between gap-4">
-				<div>
+				<div class="flex-1">
 					<div class="flex items-center gap-3">
 						<StatusIcon
 							class="h-6 w-6 {run.status === 'RUNNING' ? 'animate-spin' : ''}"
@@ -270,14 +332,6 @@
 						{/if}
 					</p>
 				</div>
-				<button
-					type="button"
-					class="flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-					onclick={loadRun}
-				>
-					<RefreshCw size={16} class={loading ? 'animate-spin' : ''} />
-					Refresh
-				</button>
 			</div>
 
 			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
