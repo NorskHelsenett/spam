@@ -23,6 +23,7 @@ type SSEStatusEvent struct {
 	SBOMID        string `json:"sbom_id,omitempty"`
 	SecretID      string `json:"secret_id,omitempty"`
 	ManifestCount int    `json:"manifest_count,omitempty"`
+	CommitHash    string `json:"commit_hash,omitempty"`
 }
 
 // handleStreamLogs streams logs for a run via SSE.
@@ -80,7 +81,8 @@ func (s *Server) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 	// If run is already complete, send status and close
 	if run.Status == RunStatusSucceeded || run.Status == RunStatusFailed || run.Status == RunStatusCancelled {
 		statusEvent := SSEStatusEvent{
-			Status: string(run.Status),
+			Status:     string(run.Status),
+			CommitHash: run.CommitHash,
 		}
 
 		// Look up associated artifacts
@@ -128,7 +130,8 @@ func (s *Server) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 				// Fetch final status with artifact IDs
 				s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run)
 				statusEvent := SSEStatusEvent{
-					Status: string(run.Status),
+					Status:     string(run.Status),
+					CommitHash: run.CommitHash,
 				}
 
 				// Look up associated artifacts

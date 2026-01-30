@@ -21,10 +21,11 @@ var upgrader = websocket.Upgrader{
 
 // WSMessage represents a WebSocket message.
 type WSMessage struct {
-	Type      string    `json:"type"`
-	Line      string    `json:"line,omitempty"`
-	Timestamp time.Time `json:"ts,omitempty"`
-	ExitCode  int       `json:"exit_code,omitempty"`
+	Type       string    `json:"type"`
+	Line       string    `json:"line,omitempty"`
+	Timestamp  time.Time `json:"ts,omitempty"`
+	ExitCode   int       `json:"exit_code,omitempty"`
+	CommitHash string    `json:"commit_hash,omitempty"`
 }
 
 // WSConn wraps a WebSocket connection for a run.
@@ -122,6 +123,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.storeLog(r.Context(), claims.RunID, msg.Line, ts)
 			// Broadcast to SSE subscribers
 			s.BroadcastLog(claims.RunID, msg.Line, ts)
+
+		case "commit_hash":
+			log.Printf("received commit hash for run %s: %s", claims.RunID, msg.CommitHash)
+			// Store commit hash in database
+			if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", claims.RunID).Update("commit_hash", msg.CommitHash).Error; err != nil {
+				log.Printf("failed to update commit hash: %v", err)
+			}
 
 		case "done":
 			log.Printf("run completed: run_id=%s exit_code=%d", claims.RunID, msg.ExitCode)

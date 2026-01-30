@@ -11,6 +11,7 @@
 		provider: string;
 		repo_path: string;
 		ref?: string;
+		commit_hash?: string;
 		error?: string;
 		created_at: string;
 		started_at?: string;
@@ -174,8 +175,7 @@
 						
 						// If SSE includes artifact IDs, update them immediately
 						if (data.sbom_id) run.sbom_id = data.sbom_id;
-						if (data.secret_id) run.secret_id = data.secret_id;
-						
+						if (data.secret_id) run.secret_id = data.secret_id;					if (data.commit_hash) run.commit_hash = data.commit_hash;						
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
 						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
@@ -340,6 +340,11 @@
 						{run.repo_path || run.clone_url}
 						{#if run.ref}
 							<span class="text-[var(--text-muted)]">({run.ref})</span>
+						{/if}
+						{#if run.commit_hash}
+							<span class="font-mono text-xs text-[var(--text-muted)]" title="Commit Hash">
+								@ {run.commit_hash.substring(0, 7)}
+							</span>
 						{/if}
 					</p>
 				</div>

@@ -22,10 +22,11 @@ import (
 )
 
 type LogMessage struct {
-	Type     string `json:"type"`
-	Line     string `json:"line,omitempty"`
-	Ts       string `json:"ts,omitempty"`
-	ExitCode int    `json:"exit_code,omitempty"`
+	Type       string `json:"type"`
+	Line       string `json:"line,omitempty"`
+	Ts         string `json:"ts,omitempty"`
+	ExitCode   int    `json:"exit_code,omitempty"`
+	CommitHash string `json:"commit_hash,omitempty"`
 }
 
 type TokenResponse struct {
@@ -249,6 +250,16 @@ func (r *Runner) runPipeline() int {
 	if commitErr == nil {
 		r.commitHash = strings.TrimSpace(string(commitHashOut))
 		r.log(fmt.Sprintf("Commit hash: %s", r.commitHash))
+		// Send commit hash via WebSocket
+		if !r.localMode {
+			msg := LogMessage{
+				Type:       "commit_hash",
+				CommitHash: r.commitHash,
+			}
+			if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
+				r.log(fmt.Sprintf("Failed to send commit hash: %v", err))
+			}
+		}
 	}
 
 	// Run SBOM generation
