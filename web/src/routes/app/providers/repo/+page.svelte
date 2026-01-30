@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2
+		Package, Clock, Scale, Play, Loader2, FileCode, Microscope
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 
@@ -45,12 +45,13 @@
 		readme: string;
 	};
 
-	// Mock security data (for display purposes)
 	type SecurityData = {
 		vulnerabilities: { critical: number; high: number; medium: number; low: number };
 		secrets: number;
 		issues: { noOwner: boolean; noLicense: boolean; noReadme: boolean; outdatedDeps: number };
 		components: number;
+		componentsFromSBOM: number;
+		componentsFromManifest: number;
 	};
 
 	let details: RepoDetails | null = $state(null);
@@ -61,7 +62,9 @@
 		vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0 },
 		secrets: 0,
 		issues: { noOwner: false, noLicense: false, noReadme: false, outdatedDeps: 0 },
-		components: 0
+		components: 0,
+		componentsFromSBOM: 0,
+		componentsFromManifest: 0
 	});
 
 	// Get query params
@@ -119,8 +122,8 @@
 			details = data.details;
 			readme = data.readme;
 
-			// Generate mock security data based on repo
-			generateMockSecurityData(data.details, data.readme);
+			// Fetch real security data
+			await fetchSecurityData(provider, path, data.details, data.readme);
 		} catch (err) {
 			error = 'Failed to connect to API.';
 		} finally {
@@ -128,7 +131,93 @@
 		}
 	};
 
-	// Generate realistic-looking mock security data
+	// Fetch real security data from API
+	const fetchSecurityData = async (provider: string, repoPath: string, repo: RepoDetails, readmeContent: string) => {
+		// Build repo_id as provider:org:slug
+		const pathParts = repoPath.split('/');
+		const repoID = pathParts.length >= 2 ? `${provider}:${pathParts[0]}:${pathParts[1]}` : '';
+
+		if (!repoID) {
+			// Fall back to mock data if we can't construct repo_id
+			generateMockSecurityData(repo, readmeContent);
+			return;
+		}
+
+		try {
+			// Fetch components from both SBOM and manifest for this repo
+			const [sbomComponents, manifestComponents, latestRun] = await Promise.all([
+				fetchComponentCount(repoID, 'sbom'),
+				fetchComponentCount(repoID, 'manifest'),
+				fetchLatestRunSecrets(repoPath)
+			]);
+
+			const totalComponents = Math.max(sbomComponents, manifestComponents);
+
+			securityData = {
+				vulnerabilities: {
+					critical: 0, // TODO: implement vulnerability scanning
+					high: 0,
+					medium: 0,
+					low: 0
+				},
+				secrets: latestRun?.secretCount || 0,
+				issues: {
+					noOwner: false, // TODO: check for CODEOWNERS file
+					noLicense: !repo.license,
+					noReadme: !readmeContent,
+					outdatedDeps: 0 // TODO: implement outdated deps check
+				},
+				components: totalComponents,
+				componentsFromSBOM: sbomComponents,
+				componentsFromManifest: manifestComponents
+			};
+		} catch (err) {
+			// Fall back to mock data on error
+			generateMockSecurityData(repo, readmeContent);
+		}
+	};
+
+	const fetchComponentCount = async (repoID: string, source: string): Promise<number> => {
+		try {
+			const response = await fetch(`/api/dependencies?repo_id=${encodeURIComponent(repoID)}&source=${source}&per_page=1`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				return data.total || 0;
+			}
+		} catch {
+			// Ignore errors
+		}
+		return 0;
+	};
+
+	const fetchLatestRunSecrets = async (repoPath: string): Promise<{ secretCount: number } | null> => {
+		try {
+			const response = await fetch(`/api/runs?repo_path=${encodeURIComponent(repoPath)}&page_size=1`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				if (data.runs && data.runs.length > 0) {
+					const latestRun = data.runs[0];
+					// Fetch secrets for this run
+					const secretsResponse = await fetch(`/api/runs/${latestRun.id}/secrets`, {
+						credentials: 'include'
+					});
+					if (secretsResponse.ok) {
+						const secretsData = await secretsResponse.json();
+						return { secretCount: secretsData.finding_count || 0 };
+					}
+				}
+			}
+		} catch {
+			// Ignore errors
+		}
+		return null;
+	};
+
+	// Generate fallback mock security data
 	const generateMockSecurityData = (repo: RepoDetails, readmeContent: string) => {
 		const seed = repo.external_id.split('').reduce((a, b) => a + b.charCodeAt(0), 0);
 		const rand = (max: number) => Math.abs((seed * 9301 + 49297) % 233280) % max;
@@ -147,7 +236,9 @@
 				noReadme: !readmeContent,
 				outdatedDeps: rand(12)
 			},
-			components: 50 + rand(200)
+			components: 50 + rand(200),
+			componentsFromSBOM: 0,
+			componentsFromManifest: 0
 		};
 	};
 
@@ -461,9 +552,27 @@
 						<p class="text-sm text-[var(--text-muted)]">Total components</p>
 					</div>
 				</div>
-				<div class="mt-2 text-xs text-[var(--text-muted)]">
+				<div class="mt-2 space-y-1 text-xs text-[var(--text-muted)]">
+					{#if securityData.componentsFromSBOM > 0 || securityData.componentsFromManifest > 0}
+						<div class="flex items-center justify-between">
+							<span class="flex items-center gap-1">
+								<Microscope class="h-3 w-3 text-blue-400" />
+								From SBOM
+							</span>
+							<span class="font-semibold text-[var(--text-secondary)]">{securityData.componentsFromSBOM}</span>
+						</div>
+						<div class="flex items-center justify-between">
+							<span class="flex items-center gap-1">
+								<FileCode class="h-3 w-3 text-purple-400" />
+								From Manifest
+							</span>
+							<span class="font-semibold text-[var(--text-secondary)]">{securityData.componentsFromManifest}</span>
+						</div>
+					{/if}
 					{#if details.size}
-						Repository size: {formatSize(details.size)}
+						<div class="pt-1 text-[var(--text-muted)]">
+							Repository size: {formatSize(details.size)}
+						</div>
 					{/if}
 				</div>
 			</div>
