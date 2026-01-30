@@ -44,6 +44,7 @@ type Runner struct {
 	wsConn       *websocket.Conn
 	logChan      chan string
 	localMode    bool
+	sbomScanner  string // "trivy" or "syft"
 }
 
 func main() {
@@ -52,9 +53,15 @@ func main() {
 	runToken := os.Getenv("RUN_TOKEN")
 	repoCloneURL := os.Getenv("REPO_CLONE_URL")
 	repoRef := os.Getenv("REPO_REF")
+	sbomScanner := os.Getenv("SBOM_SCANNER")
 
 	if workerURL == "" || runID == "" || repoCloneURL == "" {
 		log.Fatal("Missing required environment variables")
+	}
+
+	// Default to syft if not specified
+	if sbomScanner == "" {
+		sbomScanner = "syft"
 	}
 
 	// Extract repo name from clone URL
@@ -75,6 +82,7 @@ func main() {
 		cancel:       cancel,
 		logChan:      make(chan string, 100),
 		localMode:    workerURL == "local",
+		sbomScanner:  sbomScanner,
 	}
 
 	// Setup cleanup
@@ -235,10 +243,36 @@ func (r *Runner) runPipeline() int {
 	}
 
 	// Run SBOM generation
-	r.log("Running syft for SBOM generation...")
+	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
 	sbomPath := filepath.Join(r.workDir, "sbom.json")
-	if err := r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir); err != nil {
-		r.log(fmt.Sprintf("Syft failed: %v", err))
+	
+	// Find .csproj files and build them for NuGet detection
+	csprojFiles := r.findCsprojFiles()
+	if len(csprojFiles) > 0 {
+		r.log(fmt.Sprintf("Found %d .csproj file(s), running dotnet build for NuGet detection", len(csprojFiles)))
+		for _, csproj := range csprojFiles {
+			// Use --no-restore to skip restore, just build to generate assets
+			if err := r.runCommand("dotnet", "build", csproj, "--configuration", "Release", "--no-restore"); err != nil {
+				r.log(fmt.Sprintf("dotnet build failed, trying with restore: %v", err))
+				// If no-restore fails, try with restore
+				if err := r.runCommand("dotnet", "build", csproj, "--configuration", "Release"); err != nil {
+					r.log(fmt.Sprintf("Warning: dotnet build failed for %s: %v", csproj, err))
+					// Continue anyway - will scan what we can
+				}
+			}
+		}
+	}
+	
+	var err error
+	if r.sbomScanner == "trivy" {
+		err = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
+	} else {
+		// Syft with all catalogers explicitly enabled (includes dotnet)
+		err = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
+	}
+	
+	if err != nil {
+		r.log(fmt.Sprintf("SBOM generation failed: %v", err))
 		return 1
 	}
 
@@ -407,6 +441,26 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 		return fmt.Errorf("upload failed: %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func (r *Runner) findCsprojFiles() []string {
+	var csprojFiles []string
+	
+	err := filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // Skip errors
+		}
+		if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".csproj") {
+			csprojFiles = append(csprojFiles, path)
+		}
+		return nil
+	})
+	
+	if err != nil {
+		r.log(fmt.Sprintf("Error searching for .csproj files: %v", err))
+	}
+	
+	return csprojFiles
 }
 
 func (r *Runner) copyFile(src, dst string) error {
