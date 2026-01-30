@@ -56,7 +56,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				SELECT 
 					c.name,
 					c.ecosystem,
-					MIN(REGEXP_REPLACE(c.purl, '@[^?]+', '')) as purl_base,
+					MIN(REGEXP_REPLACE(c.purl, '@[^\x3F]+', '')) as purl_base,
 					'sbom' as source,
 					COUNT(DISTINCT cv.version) as version_count,
 					COUNT(DISTINCT sc.sbom_id) as sbom_count,
@@ -69,22 +69,18 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		`
 
 		args := []interface{}{}
-		argIdx := 1
 
 		if search != "" {
-			query += ` AND c.name ILIKE $` + strconv.Itoa(argIdx)
+			query += ` AND c.name ILIKE ?`
 			args = append(args, "%"+search+"%")
-			argIdx++
 		}
 		if ecosystem != "" {
-			query += ` AND c.ecosystem = $` + strconv.Itoa(argIdx)
+			query += ` AND c.ecosystem = ?`
 			args = append(args, ecosystem)
-			argIdx++
 		}
 		if repoID != "" {
-			query += ` AND sb.asset_ref_id = $` + strconv.Itoa(argIdx)
+			query += ` AND sb.asset_ref_id = ?`
 			args = append(args, repoID)
-			argIdx++
 		}
 
 		query += `
@@ -105,19 +101,18 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				WHERE 1=1
 		`
 
-		// Reapply filters for manifest side (reusing same parameter indices)
-		manifestArgIdx := 1
+		// Apply filters for manifest side (continue parameter numbering)
 		if search != "" {
-			query += ` AND md.name ILIKE $` + strconv.Itoa(manifestArgIdx)
-			manifestArgIdx++
+			query += ` AND md.name ILIKE ?`
+			args = append(args, "%"+search+"%")
 		}
 		if ecosystem != "" {
-			query += ` AND md.ecosystem = $` + strconv.Itoa(manifestArgIdx)
-			manifestArgIdx++
+			query += ` AND md.ecosystem = ?`
+			args = append(args, ecosystem)
 		}
 		if repoID != "" {
-			query += ` AND m.repo_id = $` + strconv.Itoa(manifestArgIdx)
-			manifestArgIdx++
+			query += ` AND m.repo_id = ?`
+			args = append(args, repoID)
 		}
 
 		query += `
@@ -148,14 +143,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		// Apply source filter if specified
 		if source != "" {
-			query += ` WHERE sources = $` + strconv.Itoa(argIdx)
+			query += ` WHERE sources = ?`
 			args = append(args, source)
-			argIdx++
 		}
 
 		query += ` ORDER BY repo_count DESC, name ASC`
 
-		// Count total
+		// Count total (before adding pagination to query/args)
 		countQuery := `SELECT COUNT(*) FROM (` + query + `) t`
 		var total int64
 		if err := db.WithContext(r.Context()).Raw(countQuery, args...).Scan(&total).Error; err != nil {
@@ -166,10 +160,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		// Apply pagination
 		offset := (page - 1) * perPage
-		query += ` LIMIT $` + strconv.Itoa(argIdx) + ` OFFSET $` + strconv.Itoa(argIdx+1)
-		args = append(args, perPage, offset)
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, interface{}(perPage), interface{}(offset))
 
 		// Execute query
+		log.Printf("DEBUG: query params - args length: %d, args: %v", len(args), args)
+		log.Printf("DEBUG: Full query:\n%s", query)
+		
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("unified deps query error: %v", err)
