@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, RefreshCw, GitBranch } from 'lucide-svelte';
+	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, RefreshCw, GitBranch, Package, Shield, FileCode, Eye, Download } from 'lucide-svelte';
 
 	type Run = {
 		id: string;
@@ -20,9 +20,24 @@
 		secret_id?: string;
 	};
 
+	type Artifact = {
+		type: string;
+		name: string;
+		count: number;
+		icon: any;
+		color: string;
+		view_url?: string;
+		download_url?: string;
+		raw_data?: any;
+	};
+
 	let run: Run | null = $state(null);
+	let artifacts: Artifact[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let showRawDialog = $state(false);
+	let rawDialogTitle = $state('');
+	let rawDialogData = $state('');
 
 	const loadRun = async () => {
 		const id = $page.params.id;
@@ -41,11 +56,97 @@
 				return;
 			}
 			run = await response.json();
+			
+			// Load artifacts after getting run details
+			if (run) {
+				await loadArtifacts(id, run);
+			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load run';
 		} finally {
 			loading = false;
 		}
+	};
+
+	const loadArtifacts = async (runId: string, runData: Run) => {
+		const artifactsList: Artifact[] = [];
+
+		// Load SBOM info
+		if (runData.sbom_id) {
+			try {
+				const sbomResponse = await fetch(`/api/sboms/${runData.sbom_id}`, { credentials: 'include' });
+				if (sbomResponse.ok) {
+					const sbomData = await sbomResponse.json();
+					const componentCount = sbomData.components?.length || 0;
+					
+					artifactsList.push({
+						type: 'sbom',
+						name: 'Software Bill of Materials (SBOM)',
+						count: componentCount,
+						icon: Package,
+						color: 'var(--success)',
+						download_url: `/api/sboms/${runData.sbom_id}/download`,
+						raw_data: sbomData
+					});
+				}
+			} catch (e) {
+				console.error('Failed to load SBOM:', e);
+			}
+		}
+
+		// Load secrets info
+		if (runData.secret_id) {
+			try {
+				const secretsResponse = await fetch(`/api/runs/${runId}/secrets`, { credentials: 'include' });
+				if (secretsResponse.ok) {
+					const secretsData = await secretsResponse.json();
+					const secretCount = Array.isArray(secretsData) ? secretsData.length : 0;
+					
+					artifactsList.push({
+						type: 'secrets',
+						name: 'Secret Scan Results',
+						count: secretCount,
+						icon: Shield,
+						color: secretCount > 0 ? 'var(--warning)' : 'var(--success)',
+						view_url: `/api/runs/${runId}/secrets`,
+						raw_data: secretsData
+					});
+				}
+			} catch (e) {
+				console.error('Failed to load secrets:', e);
+			}
+		}
+
+		// Load manifests info (if available)
+		try {
+			const manifestsResponse = await fetch(`/api/manifests?run_id=${runId}`, { credentials: 'include' });
+			if (manifestsResponse.ok) {
+				const manifestsData = await manifestsResponse.json();
+				const manifestCount = manifestsData.manifests?.length || 0;
+				
+				if (manifestCount > 0) {
+					artifactsList.push({
+						type: 'manifests',
+						name: 'Dependency Manifests',
+						count: manifestCount,
+						icon: FileCode,
+						color: 'var(--accent)',
+						raw_data: manifestsData.manifests
+					});
+				}
+			}
+		} catch (e) {
+			// Manifests might not be available for older runs
+			console.log('No manifests found for this run');
+		}
+
+		artifacts = artifactsList;
+	};
+
+	const showRaw = (artifact: Artifact) => {
+		rawDialogTitle = artifact.name;
+		rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+		showRawDialog = true;
 	};
 
 	onMount(() => {
@@ -214,51 +315,87 @@
 			{/if}
 
 			<!-- Results Section -->
-			{#if run.status === 'SUCCEEDED' && (run.sbom_id || run.secret_id)}
+			{#if run.status === 'SUCCEEDED' && artifacts.length > 0}
 				<div class="space-y-4">
-					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Results</h2>
+					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Artifacts</h2>
 					
-					<div class="grid gap-4 sm:grid-cols-2">
-						{#if run.sbom_id}
-							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-								<div class="flex items-center justify-between">
-									<div>
-										<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">SBOM</p>
-										<p class="mt-1 text-sm text-[var(--text-secondary)]">Software Bill of Materials</p>
-									</div>
-									<CheckCircle class="h-8 w-8 text-[var(--success)]" />
-								</div>
-								<div class="mt-3">
-									<a
-										href="/api/sboms/{run.sbom_id}/download"
-										download
-										class="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-sm text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-									>
-										Download SBOM
-									</a>
-								</div>
-							</div>
-						{/if}
-
-						{#if run.secret_id}
-							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-								<div class="flex items-center justify-between">
-									<div>
-										<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Secret Scan</p>
-										<p class="mt-1 text-sm text-[var(--text-secondary)]">Gitleaks Results</p>
-									</div>
-									<CheckCircle class="h-8 w-8 text-[var(--success)]" />
-								</div>
-								<div class="mt-3">
-									<a
-										href="/api/runs/{run.id}/secrets"
-										class="inline-flex items-center gap-2 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-sm text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-									>
-										View Secrets
-									</a>
-								</div>
-							</div>
-						{/if}
+					<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60">
+						<table class="min-w-full text-sm">
+							<thead class="border-b border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+								<tr class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+									<th class="px-5 py-3 text-left">Type</th>
+									<th class="px-5 py-3 text-center">Count</th>
+									<th class="px-5 py-3 text-right">Actions</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-[var(--border-color)]/40 bg-[var(--card-bg)]/20">
+								{#each artifacts as artifact}
+									{@const Icon = artifact.icon}
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+										<td class="px-5 py-4">
+											<div class="flex items-center gap-3">
+												<div style="color: {artifact.color}">
+													<Icon class="h-5 w-5" />
+												</div>
+												<div>
+													<p class="font-medium text-[var(--text-bright)]">{artifact.name}</p>
+													<p class="text-xs text-[var(--text-muted)]">{artifact.type}</p>
+												</div>
+											</div>
+										</td>
+										<td class="px-5 py-4 text-center">
+											<span 
+												class="inline-flex items-center rounded-full px-2.5 py-0.5 text-sm font-semibold"
+												style="background: {artifact.color}20; color: {artifact.color}"
+											>
+												{artifact.count}
+												{#if artifact.type === 'sbom'}
+													component{artifact.count !== 1 ? 's' : ''}
+												{:else if artifact.type === 'secrets'}
+													secret{artifact.count !== 1 ? 's' : ''}
+												{:else if artifact.type === 'manifests'}
+													file{artifact.count !== 1 ? 's' : ''}
+												{/if}
+											</span>
+										</td>
+										<td class="px-5 py-4 text-right">
+											<div class="flex items-center justify-end gap-2">
+												{#if artifact.raw_data}
+													<button
+														type="button"
+														class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-color)] px-3 py-1.5 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+														onclick={() => showRaw(artifact)}
+													>
+														<Eye class="h-3.5 w-3.5" />
+														View Raw
+													</button>
+												{/if}
+												{#if artifact.download_url}
+													<a
+														href={artifact.download_url}
+														download
+														class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-color)] px-3 py-1.5 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+													>
+														<Download class="h-3.5 w-3.5" />
+														Download
+													</a>
+												{/if}
+												{#if artifact.view_url && artifact.type === 'secrets'}
+													<a
+														href={artifact.view_url}
+														target="_blank"
+														class="inline-flex items-center gap-1.5 rounded-lg bg-[var(--accent)]/10 px-3 py-1.5 text-xs text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+													>
+														<Eye class="h-3.5 w-3.5" />
+														View Details
+													</a>
+												{/if}
+											</div>
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
 					</div>
 				</div>
 			{/if}
@@ -269,3 +406,38 @@
 		</section>
 	{/if}
 </div>
+
+<!-- Raw Data Dialog -->
+{#if showRawDialog}
+	<div 
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" 
+		onclick={() => { showRawDialog = false; }}
+		role="button"
+		tabindex="0"
+		aria-label="Close dialog"
+		onkeydown={(e) => { if (e.key === 'Escape') showRawDialog = false; }}
+	>
+		<div 
+			class="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl" 
+			role="dialog" 
+			aria-modal="true"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+		>
+			<div class="flex items-center justify-between border-b border-[var(--border-color)] p-6">
+				<h3 class="text-lg font-semibold text-[var(--text-bright)]">{rawDialogTitle}</h3>
+				<button
+					type="button"
+					class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+					onclick={() => { showRawDialog = false; }}
+				>
+					<XCircle class="h-5 w-5" />
+				</button>
+			</div>
+			<div class="overflow-auto p-6" style="max-height: calc(90vh - 80px);">
+				<pre class="overflow-x-auto rounded-lg bg-[var(--hover-bg)] p-4 text-xs text-[var(--text-secondary)]"><code>{rawDialogData}</code></pre>
+			</div>
+		</div>
+	</div>
+{/if}
