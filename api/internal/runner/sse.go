@@ -18,8 +18,11 @@ type SSELogEvent struct {
 
 // SSEStatusEvent is the status event sent via SSE.
 type SSEStatusEvent struct {
-	Status   string `json:"status"`
-	ExitCode int    `json:"exit_code,omitempty"`
+	Status        string `json:"status"`
+	ExitCode      int    `json:"exit_code,omitempty"`
+	SBOMID        string `json:"sbom_id,omitempty"`
+	SecretID      string `json:"secret_id,omitempty"`
+	ManifestCount int    `json:"manifest_count,omitempty"`
 }
 
 // handleStreamLogs streams logs for a run via SSE.
@@ -79,6 +82,30 @@ func (s *Server) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 		statusEvent := SSEStatusEvent{
 			Status: string(run.Status),
 		}
+
+		// Look up associated artifacts
+		var sbomBinding struct{ SBOMID string }
+		if err := s.db.WithContext(r.Context()).Table("sbom_bindings").
+			Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
+			Select("sbom_id").First(&sbomBinding).Error; err == nil {
+			statusEvent.SBOMID = sbomBinding.SBOMID
+		}
+
+		var secret struct{ ID string }
+		if err := s.db.WithContext(r.Context()).Table("run_secrets").
+			Where("run_id = ?", runID).
+			Select("id").First(&secret).Error; err == nil {
+			statusEvent.SecretID = secret.ID
+		}
+
+		// Count manifests
+		var manifestCount int64
+		if err := s.db.WithContext(r.Context()).Table("manifests").
+			Where("run_id = ?", runID).
+			Count(&manifestCount).Error; err == nil {
+			statusEvent.ManifestCount = int(manifestCount)
+		}
+
 		data, _ := json.Marshal(statusEvent)
 		fmt.Fprintf(w, "event: status\n")
 		fmt.Fprintf(w, "data: %s\n\n", data)
@@ -98,11 +125,35 @@ func (s *Server) handleStreamLogs(w http.ResponseWriter, r *http.Request) {
 		case event, ok := <-ch:
 			if !ok {
 				// Channel closed, run completed
-				// Fetch final status
+				// Fetch final status with artifact IDs
 				s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run)
 				statusEvent := SSEStatusEvent{
 					Status: string(run.Status),
 				}
+
+				// Look up associated artifacts
+				var sbomBinding struct{ SBOMID string }
+				if err := s.db.WithContext(r.Context()).Table("sbom_bindings").
+					Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
+					Select("sbom_id").First(&sbomBinding).Error; err == nil {
+					statusEvent.SBOMID = sbomBinding.SBOMID
+				}
+
+				var secret struct{ ID string }
+				if err := s.db.WithContext(r.Context()).Table("run_secrets").
+					Where("run_id = ?", runID).
+					Select("id").First(&secret).Error; err == nil {
+					statusEvent.SecretID = secret.ID
+				}
+
+				// Count manifests
+				var manifestCount int64
+				if err := s.db.WithContext(r.Context()).Table("manifests").
+					Where("run_id = ?", runID).
+					Count(&manifestCount).Error; err == nil {
+					statusEvent.ManifestCount = int(manifestCount)
+				}
+
 				data, _ := json.Marshal(statusEvent)
 				fmt.Fprintf(w, "event: status\n")
 				fmt.Fprintf(w, "data: %s\n\n", data)

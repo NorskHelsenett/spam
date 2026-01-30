@@ -167,9 +167,20 @@
 			eventSource.addEventListener('status', (event) => {
 				try {
 					const data = JSON.parse(event.data);
-					if (run && data.status && data.status !== run.status) {
-						// Status changed, reload run data and artifacts
-						loadRun(true);
+					if (run && data.status !== run.status) {
+						// Status changed - update run and load artifacts
+						run.status = data.status;
+						lastStatus = data.status;
+						
+						// If SSE includes artifact IDs, update them immediately
+						if (data.sbom_id) run.sbom_id = data.sbom_id;
+						if (data.secret_id) run.secret_id = data.secret_id;
+						
+						// Load artifacts with the new IDs
+						// The manifest count is included in the SSE event, frontend will fetch details
+						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
+							loadArtifacts(id, run);
+						}
 					}
 				} catch (e) {
 					console.error('Failed to parse status event:', e);
