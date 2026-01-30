@@ -227,8 +227,10 @@ func stripPURLVersion(purl string) string {
 		return ""
 	}
 
-	// Remove subpath (#...)
+	// Extract subpath if present (#...) - we need to preserve this
+	subpath := ""
 	if idx := strings.Index(trimmed, "#"); idx != -1 {
+		subpath = trimmed[idx:] // Keep the # and everything after
 		trimmed = trimmed[:idx]
 	}
 
@@ -242,5 +244,6 @@ func stripPURLVersion(purl string) string {
 		trimmed = trimmed[:idx]
 	}
 
-	return trimmed
+	// Re-append subpath after stripping version
+	return trimmed + subpath
 }
