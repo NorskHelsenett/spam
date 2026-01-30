@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle } from 'lucide-svelte';
+	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
 
 	type UnifiedDependency = {
 		name: string;
@@ -25,6 +26,10 @@
 	let page = $state(1);
 	let totalCount = $state(0);
 	let pageSize = $state(50);
+
+	// Detail dialog
+	let detailOpen = $state(false);
+	let selectedDependency: UnifiedDependency | null = $state(null);
 
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -83,6 +88,11 @@
 	const handleSourceChange = () => {
 		page = 1;
 		loadComponents();
+	};
+
+	const openDetail = (dep: UnifiedDependency) => {
+		selectedDependency = dep;
+		detailOpen = true;
 	};
 
 	const totalPages = $derived(Math.ceil(totalCount / pageSize));
@@ -165,7 +175,7 @@
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 						{#each dependencies as dep}
-							<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+							<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]" onclick={() => openDetail(dep)}>
 								<td class="px-5 py-3">
 									<div class="flex items-center gap-2">
 										<Package class="h-4 w-4 text-[var(--accent)]" />
@@ -261,3 +271,14 @@
 		{/if}
 	</section>
 </div>
+
+<!-- Dependency Detail Dialog -->
+{#if selectedDependency}
+	<DependencyDetail 
+		bind:open={detailOpen}
+		name={selectedDependency.name}
+		version={selectedDependency.version}
+		ecosystem={selectedDependency.ecosystem}
+		sources={selectedDependency.sources}
+	/>
+{/if}
