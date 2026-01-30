@@ -3,13 +3,16 @@ package runner
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // TokenExchangeRequest is the request body for token exchange.
@@ -115,21 +118,23 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 			// Calculate content hash
 			hash := sha256.Sum256(sbomData)
 			
-			// Store SBOM
-			sbom, err := artifacts.UpsertSBOM(r.Context(), s.db, artifacts.SBOMInput{
-				Format:           "cyclonedx-json",
-				ContentHash:      hash[:],
-				ContentBytes:     sbomData,
-				IngestedByUserID: "system",
-			})
-			if err != nil {
-				log.Printf("failed to store sbom: %v", err)
-			} else {
+			// Store SBOM and create parse job in a transaction
+			err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+				sbom, err := artifacts.UpsertSBOM(r.Context(), tx, artifacts.SBOMInput{
+					Format:           "cyclonedx-json",
+					ContentHash:      hash[:],
+					ContentBytes:     sbomData,
+					IngestedByUserID: "system",
+				})
+				if err != nil {
+					return fmt.Errorf("store sbom: %w", err)
+				}
 				log.Printf("stored SBOM %s for run %s (%d bytes)", sbom.ID, runID, len(sbomData))
 				
 				// Create binding if we have repo info
+				var bindingID string
 				if payload.RepoID != "" {
-					_, err := artifacts.UpsertBinding(r.Context(), s.db, artifacts.BindingInput{
+					binding, err := artifacts.UpsertBinding(r.Context(), tx, artifacts.BindingInput{
 						AssetType:       artifacts.AssetTypeRepoCommit,
 						AssetRefID:      payload.RepoID,
 						SBOMID:          sbom.ID,
@@ -137,9 +142,32 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 						CreatedByUserID: "system",
 					})
 					if err != nil {
-						log.Printf("failed to create binding: %v", err)
+						return fmt.Errorf("create binding: %w", err)
 					}
+					bindingID = binding.ID
 				}
+				
+				// Create PARSE_SBOM job to extract components
+				jobPayload := map[string]string{
+					"sbom_id": sbom.ID,
+				}
+				if bindingID != "" {
+					jobPayload["binding_id"] = bindingID
+				}
+				
+				job, err := jobs.CreateJobTx(r.Context(), tx, jobs.CreateJobInput{
+					Type:    jobs.JobTypeParseSBOM,
+					Payload: jobPayload,
+				})
+				if err != nil {
+					return fmt.Errorf("create parse job: %w", err)
+				}
+				log.Printf("created PARSE_SBOM job %s for SBOM %s", job.ID, sbom.ID)
+				
+				return nil
+			})
+			if err != nil {
+				log.Printf("failed to process sbom: %v", err)
 			}
 		}
 	}
