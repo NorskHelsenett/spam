@@ -56,7 +56,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				SELECT 
 					c.name,
 					c.ecosystem,
-					MIN(REGEXP_REPLACE(c.purl, '@[^\x3F]+', '')) as purl_base,
+					MIN(SPLIT_PART(c.purl, '@', 1)) as purl_base,
 					'sbom' as source,
 					COUNT(DISTINCT cv.version) as version_count,
 					COUNT(DISTINCT sc.sbom_id) as sbom_count,
@@ -164,9 +164,6 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		args = append(args, interface{}(perPage), interface{}(offset))
 
 		// Execute query
-		log.Printf("DEBUG: query params - args length: %d, args: %v", len(args), args)
-		log.Printf("DEBUG: Full query:\n%s", query)
-		
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("unified deps query error: %v", err)
