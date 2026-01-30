@@ -289,28 +289,18 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
-		// Query for component from SBOM
-		var componentID sql.NullString
-		var purl sql.NullString
-		componentQuery := `
-			SELECT c.id, c.purl
-			FROM components c
-			WHERE c.name = ? AND c.ecosystem = ?
-			LIMIT 1
-		`
-		_ = db.WithContext(r.Context()).Raw(componentQuery, name, ecosystem).Row().Scan(&componentID, &purl)
-
 		// Aggregate versions from both SBOM and manifest sources
+		// For SBOMs: find all SBOMs containing this dependency, then count bound assets
 		versionsQuery := `
 			WITH sbom_versions AS (
 				SELECT 
 					cv.version,
 					COUNT(DISTINCT sb.asset_ref_id) as repo_count,
 					'sbom' as source
-				FROM component_versions cv
+				FROM components c
+				JOIN component_versions cv ON cv.component_id = c.id
 				JOIN sbom_components sc ON sc.component_version_id = cv.id
 				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
-				JOIN components c ON c.id = cv.component_id
 				WHERE c.name = ? AND c.ecosystem = ?
 				  AND sb.asset_type = 'REPO_COMMIT'
 				GROUP BY cv.version
@@ -366,19 +356,24 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			}
 		}
 
-		// Determine sources
+		// Determine sources from versions
 		sources := make([]string, 0)
-		hasSBOM := componentID.Valid
+		hasSBOM := false
 		hasManifest := false
 
-		// Check if exists in manifests
-		var manifestCount int64
-		db.WithContext(r.Context()).Raw(`
-			SELECT COUNT(DISTINCT id)
-			FROM manifest_dependencies
-			WHERE name = ? AND ecosystem = ?
-		`, name, ecosystem).Scan(&manifestCount)
-		hasManifest = manifestCount > 0
+		for _, v := range versions {
+			if len(v.Sources) > 0 {
+				switch v.Sources[0] {
+				case "sbom":
+					hasSBOM = true
+				case "manifest":
+					hasManifest = true
+				case "both":
+					hasSBOM = true
+					hasManifest = true
+				}
+			}
+		}
 
 		if hasSBOM && hasManifest {
 			sources = []string{"both"}
@@ -388,10 +383,19 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			sources = []string{"manifest"}
 		}
 
-		if len(versions) == 0 && !hasSBOM && !hasManifest {
+		if len(versions) == 0 {
 			http.Error(w, "dependency not found", http.StatusNotFound)
 			return
 		}
+
+		// Get PURL if available (for display)
+		var purl sql.NullString
+		db.WithContext(r.Context()).Raw(`
+			SELECT c.purl
+			FROM components c
+			WHERE c.name = ? AND c.ecosystem = ?
+			LIMIT 1
+		`, name, ecosystem).Row().Scan(&purl)
 
 		detail := DependencyDetail{
 			Name:         name,
@@ -435,6 +439,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		}
 
 		// Query assets from both SBOM and manifest sources
+		// Simplified approach: find SBOMs containing this dependency, then find bound assets
 		assetsQuery := `
 			WITH sbom_assets AS (
 				SELECT 
@@ -454,8 +459,8 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				FROM components c
 				JOIN component_versions cv ON cv.component_id = c.id
 				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
-				JOIN repo_commits rc ON sb.asset_type = 'REPO_COMMIT' AND rc.id = sb.asset_ref_id
+				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id AND sb.asset_type = 'REPO_COMMIT'
+				JOIN repo_commits rc ON rc.id = sb.asset_ref_id
 				JOIN repos r ON r.id = rc.repo_id
 				WHERE c.name = ? AND c.ecosystem = ?
 				  AND (? = '' OR cv.version = ?)
@@ -493,17 +498,16 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			ORDER BY created_at DESC
 		`
 
-		// Count total
+		// Count total - simpler: count SBOMs with this dependency, then count bound assets
 		countQuery := `
 			WITH sbom_assets AS (
-				SELECT sb.id
+				SELECT DISTINCT sb.id
 				FROM components c
 				JOIN component_versions cv ON cv.component_id = c.id
 				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
+				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id AND sb.asset_type = 'REPO_COMMIT'
 				WHERE c.name = ? AND c.ecosystem = ?
 				  AND (? = '' OR cv.version = ?)
-				  AND sb.asset_type = 'REPO_COMMIT'
 			),
 			manifest_assets AS (
 				SELECT md.id
