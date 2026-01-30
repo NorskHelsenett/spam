@@ -244,18 +244,18 @@ type DependencyVersionInfo struct {
 
 // DependencyAsset describes where a dependency is used (from SBOM or manifest)
 type DependencyAsset struct {
-	AssetType    string `json:"asset_type"` // "REPO_COMMIT" only for now
-	RepoID       string `json:"repo_id,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Org          string `json:"org,omitempty"`
-	Slug         string `json:"slug,omitempty"`
-	CommitSHA    string `json:"commit_sha,omitempty"`
-	Version      string `json:"version"`
-	Source       string `json:"source"` // "sbom" or "manifest"
-	ManifestPath string `json:"manifest_path,omitempty"`
-	ManifestType string `json:"manifest_type,omitempty"`
-	Direct       bool   `json:"direct,omitempty"`
-	Scope        string `json:"scope,omitempty"`
+	AssetType    string  `json:"asset_type"` // "REPO_COMMIT" only for now
+	RepoID       string  `json:"repo_id,omitempty"`
+	Provider     string  `json:"provider,omitempty"`
+	Org          string  `json:"org,omitempty"`
+	Slug         string  `json:"slug,omitempty"`
+	CommitSHA    *string `json:"commit_sha,omitempty"`
+	Version      string  `json:"version"`
+	Source       string  `json:"source"` // "sbom" or "manifest"
+	ManifestPath *string `json:"manifest_path,omitempty"`
+	ManifestType *string `json:"manifest_type,omitempty"`
+	Direct       bool    `json:"direct,omitempty"`
+	Scope        *string `json:"scope,omitempty"`
 }
 
 type dependencyAssetsResponse struct {
@@ -533,14 +533,35 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		assets := make([]DependencyAsset, 0)
 		for rows.Next() {
 			var a DependencyAsset
+			var commitSHA, manifestPath, manifestType, scope sql.NullString
+
 			if err := rows.Scan(
 				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
-				&a.CommitSHA, &a.Version, &a.Source, &a.ManifestPath,
-				&a.ManifestType, &a.Direct, &a.Scope,
+				&commitSHA, &a.Version, &a.Source, &manifestPath,
+				&manifestType, &a.Direct, &scope,
 			); err != nil {
 				log.Printf("asset scan error: %v", err)
 				continue
 			}
+
+			// Convert sql.NullString to *string (create copies to avoid pointer issues)
+			if commitSHA.Valid {
+				val := commitSHA.String
+				a.CommitSHA = &val
+			}
+			if manifestPath.Valid {
+				val := manifestPath.String
+				a.ManifestPath = &val
+			}
+			if manifestType.Valid {
+				val := manifestType.String
+				a.ManifestType = &val
+			}
+			if scope.Valid {
+				val := scope.String
+				a.Scope = &val
+			}
+
 			assets = append(assets, a)
 		}
 

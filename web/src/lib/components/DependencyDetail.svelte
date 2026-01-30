@@ -252,7 +252,7 @@
 															</span>
 														{/if}
 													</div>
-													{#if asset.commit_sha}
+													{#if asset.commit_sha && typeof asset.commit_sha === 'string'}
 														<p class="mt-1 text-xs text-[var(--text-muted)]">
 															Commit: <code class="rounded bg-[var(--hover-bg)] px-1 py-0.5">{asset.commit_sha.substring(0, 8)}</code>
 														</p>
