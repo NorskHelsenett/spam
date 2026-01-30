@@ -66,6 +66,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 				// Unified dependencies (SBOM + Manifest merged view)
 				api.Get("/dependencies", uiapi.UnifiedDependenciesHandler(db, authService))
+				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
 				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService))
 				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService))
 				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService))
