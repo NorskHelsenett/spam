@@ -11,6 +11,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -189,6 +190,37 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 					log.Printf("failed to store secrets: %v", err)
 				} else {
 					log.Printf("stored %d secret findings for run %s", len(findings), runID)
+				}
+			}
+		}
+	}
+
+	// Process manifests file
+	manifestsFile, _, err := r.FormFile("manifests")
+	if err == nil {
+		defer manifestsFile.Close()
+		manifestsData, err := io.ReadAll(manifestsFile)
+		if err != nil {
+			log.Printf("failed to read manifests: %v", err)
+		} else {
+			// Parse and store manifests
+			manifests, deps, err := manifests.ParseManifests(runID, payload.RepoID, manifestsData)
+			if err != nil {
+				log.Printf("failed to parse manifests: %v", err)
+			} else if len(manifests) > 0 {
+				if err := s.db.WithContext(r.Context()).Create(&manifests).Error; err != nil {
+					log.Printf("failed to store manifests: %v", err)
+				} else {
+					log.Printf("stored %d manifest files for run %s", len(manifests), runID)
+
+					// Store dependencies
+					if len(deps) > 0 {
+						if err := s.db.WithContext(r.Context()).Create(&deps).Error; err != nil {
+							log.Printf("failed to store manifest dependencies: %v", err)
+						} else {
+							log.Printf("stored %d dependencies from manifests", len(deps))
+						}
+					}
 				}
 			}
 		}
