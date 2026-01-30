@@ -56,7 +56,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				SELECT 
 					c.name,
 					c.ecosystem,
-					REGEXP_REPLACE(c.purl, '@[^?]+', '') as purl_base,
+					MIN(REGEXP_REPLACE(c.purl, '@[^?]+', '')) as purl_base,
 					'sbom' as source,
 					COUNT(DISTINCT cv.version) as version_count,
 					COUNT(DISTINCT sc.sbom_id) as sbom_count,
