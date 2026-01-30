@@ -13,7 +13,7 @@ type Manifest struct {
 	RepoID    string         `gorm:"size:36;index" json:"repo_id"`
 	Path      string         `gorm:"size:512" json:"path"`       // Relative path in repo
 	Type      string         `gorm:"size:64;index" json:"type"`  // csproj, package.json, pom.xml, etc.
-	Content   datatypes.JSON `gorm:"type:jsonb" json:"content"`  // Original file content
+	Content   string         `gorm:"type:text" json:"content"`   // Original file content as text
 	Metadata  datatypes.JSON `gorm:"type:jsonb" json:"metadata"` // Parsed metadata
 	CreatedAt time.Time      `json:"created_at"`
 }

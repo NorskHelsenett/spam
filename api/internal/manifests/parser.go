@@ -36,7 +36,7 @@ func ParseManifests(runID, repoID string, manifestsJSON []byte) ([]Manifest, []M
 			RepoID:  repoID,
 			Path:    file.Path,
 			Type:    manifestType,
-			Content: []byte(file.Content),
+			Content: file.Content,
 		}
 
 		// Parse dependencies based on type
