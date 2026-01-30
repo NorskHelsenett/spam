@@ -245,35 +245,28 @@ func (r *Runner) runPipeline() int {
 	// Run SBOM generation
 	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
 	sbomPath := filepath.Join(r.workDir, "sbom.json")
-	
-	// Find .csproj files and build them for NuGet detection
-	csprojFiles := r.findCsprojFiles()
-	if len(csprojFiles) > 0 {
-		r.log(fmt.Sprintf("Found %d .csproj file(s), running dotnet build for NuGet detection", len(csprojFiles)))
-		for _, csproj := range csprojFiles {
-			// Use --no-restore to skip restore, just build to generate assets
-			if err := r.runCommand("dotnet", "build", csproj, "--configuration", "Release", "--no-restore"); err != nil {
-				r.log(fmt.Sprintf("dotnet build failed, trying with restore: %v", err))
-				// If no-restore fails, try with restore
-				if err := r.runCommand("dotnet", "build", csproj, "--configuration", "Release"); err != nil {
-					r.log(fmt.Sprintf("Warning: dotnet build failed for %s: %v", csproj, err))
-					// Continue anyway - will scan what we can
-				}
-			}
-		}
-	}
-	
+
 	var err error
 	if r.sbomScanner == "trivy" {
 		err = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
 	} else {
-		// Syft with all catalogers explicitly enabled (includes dotnet)
 		err = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
 	}
-	
+
 	if err != nil {
 		r.log(fmt.Sprintf("SBOM generation failed: %v", err))
 		return 1
+	}
+
+	// Collect dependency manifest files for upload
+	r.log("Collecting dependency manifest files...")
+	manifestFiles := r.findDependencyManifests()
+	if len(manifestFiles) > 0 {
+		r.log(fmt.Sprintf("Found %d dependency manifest file(s)", len(manifestFiles)))
+		manifests := filepath.Join(r.workDir, "manifests.json")
+		if err := r.createManifestsArchive(manifestFiles, manifests); err != nil {
+			r.log(fmt.Sprintf("Warning: failed to create manifests archive: %v", err))
+		}
 	}
 
 	// Run secret scan
@@ -304,6 +297,16 @@ func (r *Runner) runPipeline() int {
 			r.log(fmt.Sprintf("Failed to upload gitleaks: %v", err))
 			return 1
 		}
+
+		// Upload manifests if they exist
+		manifestsPath := filepath.Join(r.workDir, "manifests.json")
+		if _, err := os.Stat(manifestsPath); err == nil {
+			r.log("Uploading dependency manifests...")
+			if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
+				r.log(fmt.Sprintf("Warning: failed to upload manifests: %v", err))
+				// Not fatal - continue
+			}
+		}
 	} else {
 		// Local mode: copy results to output directory
 		outputDir := os.Getenv("OUTPUT_DIR")
@@ -326,6 +329,16 @@ func (r *Runner) runPipeline() int {
 				r.log(fmt.Sprintf("Failed to copy gitleaks: %v", err))
 			} else {
 				r.log("✓ Gitleaks results saved")
+			}
+
+			// Copy manifests if they exist
+			manifestsPath := filepath.Join(r.workDir, "manifests.json")
+			if _, err := os.Stat(manifestsPath); err == nil {
+				if err := r.copyFile(manifestsPath, filepath.Join(outputDir, "manifests.json")); err != nil {
+					r.log(fmt.Sprintf("Failed to copy manifests: %v", err))
+				} else {
+					r.log("✓ Dependency manifests saved")
+				}
 			}
 		}
 	}
@@ -445,7 +458,7 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 
 func (r *Runner) findCsprojFiles() []string {
 	var csprojFiles []string
-	
+
 	err := filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return nil // Skip errors
@@ -455,12 +468,93 @@ func (r *Runner) findCsprojFiles() []string {
 		}
 		return nil
 	})
-	
+
 	if err != nil {
 		r.log(fmt.Sprintf("Error searching for .csproj files: %v", err))
 	}
-	
+
 	return csprojFiles
+}
+
+func (r *Runner) findDependencyManifests() []string {
+	var manifests []string
+
+	// Patterns for dependency manifest files
+	patterns := []string{
+		"*.csproj", "packages.config", "*.fsproj", "*.vbproj", // .NET
+		"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", // Node.js
+		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", // Java
+		"requirements.txt", "Pipfile", "Pipfile.lock", "poetry.lock", "pyproject.toml", // Python
+		"go.mod", "go.sum", // Go
+		"Cargo.toml", "Cargo.lock", // Rust
+		"Gemfile", "Gemfile.lock", // Ruby
+		"composer.json", "composer.lock", // PHP
+		"pubspec.yaml", "pubspec.lock", // Dart
+		"mix.exs", "mix.lock", // Elixir
+	}
+
+	err := filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			// Skip common directories that shouldn't have manifests
+			name := info.Name()
+			if name == "node_modules" || name == "vendor" || name == ".git" ||
+				name == "bin" || name == "obj" || name == "target" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		fileName := info.Name()
+		for _, pattern := range patterns {
+			matched, _ := filepath.Match(pattern, fileName)
+			if matched {
+				manifests = append(manifests, path)
+				break
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		r.log(fmt.Sprintf("Error searching for manifest files: %v", err))
+	}
+
+	return manifests
+}
+
+func (r *Runner) createManifestsArchive(files []string, outputPath string) error {
+	// Create JSON structure with file paths and contents
+	type ManifestFile struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+
+	var manifests []ManifestFile
+	for _, file := range files {
+		content, err := os.ReadFile(file)
+		if err != nil {
+			r.log(fmt.Sprintf("Warning: failed to read %s: %v", file, err))
+			continue
+		}
+
+		// Make path relative to workDir
+		relPath, _ := filepath.Rel(r.workDir, file)
+		manifests = append(manifests, ManifestFile{
+			Path:    relPath,
+			Content: string(content),
+		})
+	}
+
+	// Write as JSON
+	data, err := json.MarshalIndent(manifests, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(outputPath, data, 0644)
 }
 
 func (r *Runner) copyFile(src, dst string) error {

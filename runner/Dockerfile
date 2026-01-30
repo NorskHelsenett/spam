@@ -17,22 +17,15 @@ FROM aquasec/trivy:latest AS trivy
 # Get gitleaks binary
 FROM ghcr.io/gitleaks/gitleaks:latest AS gitleaks
 
-# Get .NET SDK
-FROM mcr.microsoft.com/dotnet/sdk:10.0-alpine AS dotnet
-
 # Runtime stage
 FROM alpine:3.20
 
-RUN apk add --no-cache git ca-certificates icu-libs libgcc libintl libssl3 libstdc++ zlib
+RUN apk add --no-cache git ca-certificates
 
 # Copy binaries from official images
 COPY --from=syft /syft /usr/local/bin/syft
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=gitleaks /usr/bin/gitleaks /usr/local/bin/gitleaks
-
-# Copy .NET SDK from official image
-COPY --from=dotnet /usr/share/dotnet /usr/share/dotnet
-RUN ln -s /usr/share/dotnet/dotnet /usr/local/bin/dotnet
 
 # Copy Go binary from builder
 COPY --from=builder /build/runner /usr/local/bin/runner
