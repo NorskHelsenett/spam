@@ -99,7 +99,7 @@ let isAdmin = $state(false);
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
 		{ href: '/app/agents', label: 'SBOMs', icon: Boxes },
-		{ href: '/app/components', label: 'Components', icon: Package },
+		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
 		{ href: '/app/runs', label: 'Runs', icon: Play },
 		{ href: '/app/notifications', label: 'Alerts', icon: BellRing }

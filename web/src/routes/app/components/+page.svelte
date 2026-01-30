@@ -1,62 +1,30 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Search, Package, GitBranch, Container, ChevronRight, X } from 'lucide-svelte';
-	import Dialog from '$lib/components/Dialog.svelte';
+	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle } from 'lucide-svelte';
 
-	type ComponentSummary = {
-		id: string;
+	type UnifiedDependency = {
 		name: string;
+		version: string;
 		ecosystem: string;
 		purl?: string;
-		version_count: number;
+		sources: string[];
+		direct?: boolean;
+		scope?: string;
+		sbom_count: number;
 		repo_count: number;
-		image_count: number;
-		created_at: string;
 	};
 
-	type VersionSummary = {
-		id: string;
-		version: string;
-		repo_count: number;
-		created_at: string;
-	};
-
-	type ComponentDetail = ComponentSummary & {
-		versions: VersionSummary[];
-	};
-
-	type ComponentAsset = {
-		asset_type: string;
-		repo_id?: string;
-		provider?: string;
-		org?: string;
-		slug?: string;
-		commit_sha?: string;
-		image_registry?: string;
-		image_repository?: string;
-		image_digest?: string;
-		version: string;
-		sbom_id: string;
-		bound_at: string;
-	};
-
-	let components: ComponentSummary[] = $state([]);
+	let dependencies: UnifiedDependency[] = $state([]);
 	let ecosystems: string[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let searchQuery = $state('');
 	let selectedEcosystem = $state('');
+	let selectedSource = $state(''); // 'sbom', 'manifest', or ''
 	let page = $state(1);
 	let totalCount = $state(0);
 	let pageSize = $state(50);
-
-	// Detail dialog state
-	let detailOpen = $state(false);
-	let selectedComponent: ComponentDetail | null = $state(null);
-	let componentAssets: ComponentAsset[] = $state([]);
-	let assetsLoading = $state(false);
-	let selectedVersion = $state('');
 
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 
@@ -79,55 +47,23 @@
 			const params = new URLSearchParams();
 			if (searchQuery) params.set('q', searchQuery);
 			if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
+			if (selectedSource) params.set('source', selectedSource);
 			params.set('page', String(page));
-			params.set('page_size', String(pageSize));
+			params.set('per_page', String(pageSize));
 
-			const response = await fetch(`/api/components?${params}`, { credentials: 'include' });
+			const response = await fetch(`/api/dependencies?${params}`, { credentials: 'include' });
 			if (!response.ok) {
-				error = response.status === 401 ? 'Please log in.' : 'Failed to load components.';
-				components = [];
+				error = response.status === 401 ? 'Please log in.' : 'Failed to load dependencies.';
+				dependencies = [];
 				return;
 			}
 			const data = await response.json();
-			components = data.components || [];
+			dependencies = data.dependencies || [];
 			totalCount = data.total || 0;
 		} catch {
-			error = 'Failed to load components.';
+			error = 'Failed to load dependencies.';
 		} finally {
 			loading = false;
-		}
-	};
-
-	const loadComponentDetail = async (componentId: string) => {
-		try {
-			const response = await fetch(`/api/components/${componentId}`, { credentials: 'include' });
-			if (response.ok) {
-				selectedComponent = await response.json();
-				selectedVersion = '';
-				detailOpen = true;
-				loadComponentAssets(componentId, '');
-			}
-		} catch {
-			error = 'Failed to load component details.';
-		}
-	};
-
-	const loadComponentAssets = async (componentId: string, version: string) => {
-		assetsLoading = true;
-		try {
-			const params = new URLSearchParams();
-			if (version) params.set('version', version);
-			params.set('page_size', '50');
-
-			const response = await fetch(`/api/components/${componentId}/assets?${params}`, { credentials: 'include' });
-			if (response.ok) {
-				const data = await response.json();
-				componentAssets = data.assets || [];
-			}
-		} catch {
-			componentAssets = [];
-		} finally {
-			assetsLoading = false;
 		}
 	};
 
@@ -144,11 +80,9 @@
 		loadComponents();
 	};
 
-	const handleVersionFilter = (version: string) => {
-		selectedVersion = version;
-		if (selectedComponent) {
-			loadComponentAssets(selectedComponent.id, version);
-		}
+	const handleSourceChange = () => {
+		page = 1;
+		loadComponents();
 	};
 
 	const totalPages = $derived(Math.ceil(totalCount / pageSize));
@@ -162,15 +96,15 @@
 </script>
 
 <svelte:head>
-	<title>Components - SPAM</title>
+	<title>Dependencies - SPAM</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Components</h1>
-				<p class="text-sm text-[var(--text-tertiary)]">Search dependencies across all your SBOMs.</p>
+				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Dependencies</h1>
+				<p class="text-sm text-[var(--text-tertiary)]">Search dependencies from SBOMs and manifest files.</p>
 			</div>
 		</header>
 
@@ -196,6 +130,16 @@
 					<option value={eco}>{eco}</option>
 				{/each}
 			</select>
+			<select
+				class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] transition focus:border-[var(--accent)] focus:outline-none"
+				bind:value={selectedSource}
+				onchange={handleSourceChange}
+			>
+				<option value="">All sources</option>
+				<option value="sbom">SBOM only</option>
+				<option value="manifest">Manifest only</option>
+				<option value="both">Both (verified)</option>
+			</select>
 		</div>
 
 		{#if error}
@@ -203,65 +147,84 @@
 		{/if}
 
 		{#if loading}
-			<p class="text-sm text-[var(--text-secondary)]">Loading components...</p>
-		{:else if components.length === 0}
-			<p class="text-sm text-[var(--text-secondary)]">No components found.</p>
+			<p class="text-sm text-[var(--text-secondary)]">Loading dependencies...</p>
+		{:else if dependencies.length === 0}
+			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
 		{:else}
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>
 							<th class="px-5 py-3 text-left">Name</th>
+							<th class="px-5 py-3 text-left">Version</th>
 							<th class="px-5 py-3 text-left">Ecosystem</th>
-							<th class="px-5 py-3 text-center">Versions</th>
+							<th class="px-5 py-3 text-center">Source</th>
 							<th class="px-5 py-3 text-center">Repos</th>
-							<th class="px-5 py-3 text-center">Images</th>
-							<th class="px-5 py-3 text-right"></th>
+							<th class="px-5 py-3 text-center">SBOMs</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-						{#each components as component}
-							<tr
-								class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
-								onclick={() => loadComponentDetail(component.id)}
-							>
+						{#each dependencies as dep}
+							<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
 								<td class="px-5 py-3">
 									<div class="flex items-center gap-2">
 										<Package class="h-4 w-4 text-[var(--accent)]" />
-										<span class="font-semibold text-[var(--text-bright)]">{component.name}</span>
+										<span class="font-semibold text-[var(--text-bright)]">{dep.name}</span>
 									</div>
-									{#if component.purl}
-										<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={component.purl}>{component.purl}</p>
+									{#if dep.purl}
+										<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={dep.purl}>{dep.purl}</p>
+									{/if}
+									{#if dep.direct !== undefined || dep.scope}
+										<div class="mt-1 flex gap-2">
+											{#if dep.direct}
+												<span class="text-xs text-[var(--text-muted)]">direct</span>
+											{/if}
+											{#if dep.scope}
+												<span class="text-xs text-[var(--text-muted)]">{dep.scope}</span>
+											{/if}
+										</div>
 									{/if}
 								</td>
+								<td class="px-5 py-3 text-[var(--text-secondary)]">{dep.version || '—'}</td>
 								<td class="px-5 py-3">
 									<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
-										{component.ecosystem || '—'}
+										{dep.ecosystem || '—'}
 									</span>
 								</td>
-								<td class="px-5 py-3 text-center">{component.version_count}</td>
 								<td class="px-5 py-3 text-center">
-									{#if component.repo_count > 0}
+									{#if dep.sources[0] === 'both'}
+										<span class="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-xs text-green-400" title="Found in both SBOM and manifest">
+											<CheckCircle class="h-3 w-3" />
+											Both
+										</span>
+									{:else if dep.sources[0] === 'sbom'}
+										<span class="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-0.5 text-xs text-blue-400" title="From SBOM scanner">
+											<Microscope class="h-3 w-3" />
+											SBOM
+										</span>
+									{:else}
+										<span class="inline-flex items-center gap-1 rounded-full bg-purple-500/10 px-2 py-0.5 text-xs text-purple-400" title="From manifest file">
+											<FileCode class="h-3 w-3" />
+											Manifest
+										</span>
+									{/if}
+								</td>
+								<td class="px-5 py-3 text-center">
+									{#if dep.repo_count > 0}
 										<span class="inline-flex items-center gap-1">
 											<GitBranch class="h-3 w-3" />
-											{component.repo_count}
+											{dep.repo_count}
 										</span>
 									{:else}
 										—
 									{/if}
 								</td>
 								<td class="px-5 py-3 text-center">
-									{#if component.image_count > 0}
-										<span class="inline-flex items-center gap-1">
-											<Container class="h-3 w-3" />
-											{component.image_count}
-										</span>
+									{#if dep.sbom_count > 0}
+										{dep.sbom_count}
 									{:else}
 										—
 									{/if}
-								</td>
-								<td class="px-5 py-3 text-right">
-									<ChevronRight class="inline h-4 w-4 text-[var(--text-muted)]" />
 								</td>
 							</tr>
 						{/each}
@@ -298,106 +261,3 @@
 		{/if}
 	</section>
 </div>
-
-<!-- Component Detail Dialog -->
-<Dialog bind:open={detailOpen}>
-	{#if selectedComponent}
-		<div class="flex h-full w-full flex-col">
-			<div class="flex items-start justify-between border-b border-[var(--border-color)] p-6">
-				<div class="flex-1">
-					<div class="flex items-center gap-2">
-						<Package class="h-5 w-5 text-[var(--accent)]" />
-						<h2 class="text-xl font-semibold text-[var(--text-bright)]">{selectedComponent.name}</h2>
-					</div>
-					{#if selectedComponent.purl}
-						<p class="mt-1 text-xs text-[var(--text-muted)]">{selectedComponent.purl}</p>
-					{/if}
-					<div class="mt-2 flex flex-wrap gap-2">
-						<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
-							{selectedComponent.ecosystem || 'Unknown'}
-						</span>
-						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
-							{selectedComponent.version_count} versions
-						</span>
-						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
-							<GitBranch class="h-3 w-3" /> {selectedComponent.repo_count} repos
-						</span>
-						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
-							<Container class="h-3 w-3" /> {selectedComponent.image_count} images
-						</span>
-					</div>
-				</div>
-			</div>
-
-			<div class="flex flex-1 flex-col gap-4 overflow-hidden p-6 md:flex-row">
-				<!-- Versions list -->
-				<div class="w-full shrink-0 md:w-48">
-					<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Versions</h3>
-					<div class="max-h-64 space-y-1 overflow-y-auto md:max-h-full">
-						<button
-							type="button"
-							class="w-full rounded-lg px-3 py-2 text-left text-sm transition {selectedVersion === '' ? 'bg-[var(--hover-bg)] text-[var(--text-bright)]' : 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]'}"
-							onclick={() => handleVersionFilter('')}
-						>
-							All versions
-						</button>
-						{#each selectedComponent.versions as v}
-							<button
-								type="button"
-								class="w-full rounded-lg px-3 py-2 text-left text-sm transition {selectedVersion === v.version ? 'bg-[var(--hover-bg)] text-[var(--text-bright)]' : 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]'}"
-								onclick={() => handleVersionFilter(v.version)}
-							>
-								{v.version || '(no version)'}
-								<span class="ml-1 text-xs text-[var(--text-muted)]">({v.repo_count})</span>
-							</button>
-						{/each}
-					</div>
-				</div>
-
-				<!-- Assets list -->
-				<div class="flex-1 overflow-hidden">
-					<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-						Used in {selectedVersion ? `(${selectedVersion})` : ''}
-					</h3>
-					{#if assetsLoading}
-						<p class="text-sm text-[var(--text-secondary)]">Loading...</p>
-					{:else if componentAssets.length === 0}
-						<p class="text-sm text-[var(--text-secondary)]">No assets found.</p>
-					{:else}
-						<div class="max-h-96 space-y-2 overflow-y-auto">
-							{#each componentAssets as asset}
-								<div class="rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
-									{#if asset.asset_type === 'REPO_COMMIT'}
-										<div class="flex items-center gap-2">
-											<GitBranch class="h-4 w-4 text-[var(--accent)]" />
-											<span class="font-medium text-[var(--text-bright)]">
-												{asset.org}/{asset.slug}
-											</span>
-											<span class="text-xs text-[var(--text-muted)]">({asset.provider})</span>
-										</div>
-										<p class="mt-1 text-xs text-[var(--text-muted)]">
-											Commit: {asset.commit_sha?.substring(0, 8)}
-										</p>
-									{:else if asset.asset_type === 'IMAGE_DIGEST'}
-										<div class="flex items-center gap-2">
-											<Container class="h-4 w-4 text-[var(--accent)]" />
-											<span class="font-medium text-[var(--text-bright)]">
-												{asset.image_repository}
-											</span>
-										</div>
-										<p class="mt-1 text-xs text-[var(--text-muted)]">
-											{asset.image_registry} @ {asset.image_digest?.substring(0, 16)}...
-										</p>
-									{/if}
-									<p class="mt-1 text-xs text-[var(--text-tertiary)]">
-										Version: {asset.version || '—'}
-									</p>
-								</div>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</div>
-		</div>
-	{/if}
-</Dialog>
