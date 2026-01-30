@@ -301,10 +301,10 @@ func (c *GitLabClientImpl) parsePageInfo(resp *http.Response) PageInfo {
 // gitLabProjectDetails represents detailed project info from GitLab API.
 type gitLabProjectDetails struct {
 	gitLabProject
-	StarCount        int    `json:"star_count"`
-	ForksCount       int    `json:"forks_count"`
-	OpenIssuesCount  int    `json:"open_issues_count"`
-	Statistics       *struct {
+	StarCount       int `json:"star_count"`
+	ForksCount      int `json:"forks_count"`
+	OpenIssuesCount int `json:"open_issues_count"`
+	Statistics      *struct {
 		CommitCount int `json:"commit_count"`
 	} `json:"statistics"`
 	License *struct {

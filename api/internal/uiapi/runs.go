@@ -22,6 +22,7 @@ type RunResponse struct {
 	Provider   string     `json:"provider"`
 	RepoPath   string     `json:"repo_path"`
 	Ref        string     `json:"ref,omitempty"`
+	CommitSHA  string     `json:"commit_sha,omitempty"`
 	Error      string     `json:"error,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
@@ -82,6 +83,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Status     string
 			Payload    []byte
 			Error      string
+			CommitHash string
 			CreatedAt  time.Time
 			LockedAt   *time.Time
 			FinishedAt *time.Time
@@ -89,7 +91,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, created_at, locked_at, finished_at, k8s_job_name").
+		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name").
 			Order("created_at DESC").
 			Offset(offset).
 			Limit(pageSize).
@@ -113,6 +115,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				Provider:   payload.Provider,
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
+				CommitSHA:  job.CommitHash,
 				Error:      job.Error,
 				CreatedAt:  job.CreatedAt,
 				StartedAt:  job.LockedAt,
@@ -218,6 +221,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Status     string
 			Payload    []byte
 			Error      string
+			CommitHash string
 			CreatedAt  time.Time
 			LockedAt   *time.Time
 			FinishedAt *time.Time
@@ -247,6 +251,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Provider:   payload.Provider,
 			RepoPath:   extractRepoPath(payload.CloneURL),
 			Ref:        payload.Ref,
+			CommitSHA:  job.CommitHash,
 			Error:      job.Error,
 			CreatedAt:  job.CreatedAt,
 			StartedAt:  job.LockedAt,

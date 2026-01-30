@@ -321,11 +321,11 @@ func (c *GiteaClientImpl) parsePageInfo(resp *http.Response, pageSize int, resul
 // giteaRepoDetails represents detailed repo info from Gitea API.
 type giteaRepoDetails struct {
 	giteaRepo
-	StarsCount      int    `json:"stars_count"`
-	ForksCount      int    `json:"forks_count"`
-	WatchersCount   int    `json:"watchers_count"`
-	OpenIssuesCount int    `json:"open_issues_count"`
-	Size            int64  `json:"size"`
+	StarsCount      int   `json:"stars_count"`
+	ForksCount      int   `json:"forks_count"`
+	WatchersCount   int   `json:"watchers_count"`
+	OpenIssuesCount int   `json:"open_issues_count"`
+	Size            int64 `json:"size"`
 }
 
 // GetRepoDetails fetches detailed information about a repository.

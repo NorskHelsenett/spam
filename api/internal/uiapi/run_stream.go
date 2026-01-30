@@ -1,0 +1,199 @@
+package uiapi
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/runner"
+	"gorm.io/gorm"
+)
+
+// RunStreamHandler streams logs for a run via SSE.
+// GET /api/runs/{id}/stream
+func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "missing run ID", http.StatusBadRequest)
+			return
+		}
+
+		// Get the run to check it exists
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		// Set SSE headers
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		// Get last_id parameter for resuming
+		lastID, _ := strconv.ParseInt(r.URL.Query().Get("last_id"), 10, 64)
+
+		// Send historical logs
+		var logs []runner.RunLog
+		query := db.WithContext(r.Context()).Where("run_id = ?", runID)
+		if lastID > 0 {
+			query = query.Where("id > ?", lastID)
+		}
+		if err := query.Order("id ASC").Find(&logs).Error; err != nil {
+			log.Printf("failed to fetch logs: %v", err)
+		}
+
+		for _, logEntry := range logs {
+			event := map[string]interface{}{
+				"line": logEntry.Line,
+				"ts":   logEntry.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			}
+			data, _ := json.Marshal(event)
+			fmt.Fprintf(w, "id: %d\n", logEntry.ID)
+			fmt.Fprintf(w, "event: log\n")
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+		flusher.Flush()
+
+		// If run is already complete, send status and close
+		if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
+			statusEvent := map[string]interface{}{
+				"status":      string(run.Status),
+				"commit_hash": run.CommitHash,
+			}
+
+			// Look up associated SBOM
+			var sbomBinding struct{ SBOMID string }
+			if err := db.WithContext(r.Context()).Table("sbom_bindings").
+				Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
+				Select("sbom_id").First(&sbomBinding).Error; err == nil {
+				statusEvent["sbom_id"] = sbomBinding.SBOMID
+			}
+
+			// Look up associated secrets
+			var secret struct{ ID string }
+			if err := db.WithContext(r.Context()).Table("run_secrets").
+				Where("run_id = ?", runID).
+				Select("id").First(&secret).Error; err == nil {
+				statusEvent["secret_id"] = secret.ID
+			}
+
+			// Count manifests
+			var manifestCount int64
+			if err := db.WithContext(r.Context()).Table("manifests").
+				Where("run_id = ?", runID).
+				Count(&manifestCount).Error; err == nil {
+				statusEvent["manifest_count"] = manifestCount
+			}
+
+			data, _ := json.Marshal(statusEvent)
+			fmt.Fprintf(w, "event: status\n")
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			return
+		}
+
+		// For running jobs, poll for new logs every 2 seconds
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+
+		var lastLogID int64
+		if len(logs) > 0 {
+			lastLogID = logs[len(logs)-1].ID
+		}
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				// Fetch new logs
+				var newLogs []runner.RunLog
+				if err := db.WithContext(r.Context()).
+					Where("run_id = ? AND id > ?", runID, lastLogID).
+					Order("id ASC").
+					Find(&newLogs).Error; err != nil {
+					log.Printf("failed to fetch new logs: %v", err)
+					continue
+				}
+
+				// Send new logs
+				for _, logEntry := range newLogs {
+					event := map[string]interface{}{
+						"line": logEntry.Line,
+						"ts":   logEntry.CreatedAt.Format("2006-01-02T15:04:05Z"),
+					}
+					data, _ := json.Marshal(event)
+					fmt.Fprintf(w, "id: %d\n", logEntry.ID)
+					fmt.Fprintf(w, "event: log\n")
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					lastLogID = logEntry.ID
+				}
+				if len(newLogs) > 0 {
+					flusher.Flush()
+				}
+
+				// Check if run completed
+				if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err == nil {
+					if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
+						// Send final status
+						statusEvent := map[string]interface{}{
+							"status":      string(run.Status),
+							"commit_hash": run.CommitHash,
+						}
+
+						// Look up associated artifacts
+						var sbomBinding struct{ SBOMID string }
+						if err := db.WithContext(r.Context()).Table("sbom_bindings").
+							Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
+							Select("sbom_id").First(&sbomBinding).Error; err == nil {
+							statusEvent["sbom_id"] = sbomBinding.SBOMID
+						}
+
+						var secret struct{ ID string }
+						if err := db.WithContext(r.Context()).Table("run_secrets").
+							Where("run_id = ?", runID).
+							Select("id").First(&secret).Error; err == nil {
+							statusEvent["secret_id"] = secret.ID
+						}
+
+						// Count manifests
+						var manifestCount int64
+						if err := db.WithContext(r.Context()).Table("manifests").
+							Where("run_id = ?", runID).
+							Count(&manifestCount).Error; err == nil {
+							statusEvent["manifest_count"] = manifestCount
+						}
+
+						data, _ := json.Marshal(statusEvent)
+						fmt.Fprintf(w, "event: status\n")
+						fmt.Fprintf(w, "data: %s\n\n", data)
+						flusher.Flush()
+						return
+					}
+				}
+			}
+		}
+	}
+}

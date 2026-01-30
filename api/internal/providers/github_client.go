@@ -322,12 +322,12 @@ func extractPageParam(urlStr string) int {
 // gitHubRepoDetails represents detailed repo info from GitHub API.
 type gitHubRepoDetails struct {
 	gitHubRepo
-	StargazersCount  int    `json:"stargazers_count"`
-	ForksCount       int    `json:"forks_count"`
-	WatchersCount    int    `json:"watchers_count"`
-	OpenIssuesCount  int    `json:"open_issues_count"`
-	Size             int64  `json:"size"`
-	License          *struct {
+	StargazersCount int   `json:"stargazers_count"`
+	ForksCount      int   `json:"forks_count"`
+	WatchersCount   int   `json:"watchers_count"`
+	OpenIssuesCount int   `json:"open_issues_count"`
+	Size            int64 `json:"size"`
+	License         *struct {
 		Name string `json:"name"`
 	} `json:"license"`
 }

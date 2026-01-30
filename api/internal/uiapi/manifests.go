@@ -75,7 +75,7 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 
 		offset := (page - 1) * perPage
 		args = append(args, perPage, offset)
-		
+
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("manifests query error: %v", err)
