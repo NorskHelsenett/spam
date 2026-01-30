@@ -20,6 +20,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/inventory"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
@@ -63,6 +64,8 @@ func run() error {
 		&inventory.ComponentVersion{},
 		&inventory.SBOMComponent{},
 		&inventory.ComponentDependency{},
+		&manifests.Manifest{},
+		&manifests.ManifestDependency{},
 		&jobs.Job{},
 		&runner.Run{},
 		&events.OutboxEvent{},
