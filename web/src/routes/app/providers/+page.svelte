@@ -66,6 +66,10 @@
 
 	const pageSize = 30;
 
+	// Sorting state
+	let sortColumn = $state<string>('');
+	let sortDirection = $state<'asc' | 'desc'>('asc');
+
 	// Table column definitions
 	const githubColumns = [
 		{ key: 'name', label: 'Repository' },
@@ -558,6 +562,84 @@
 		});
 	};
 
+	// Handle column sorting
+	const handleSort = (column: string) => {
+		if (sortColumn === column) {
+			sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortColumn = column;
+			sortDirection = 'asc';
+		}
+	};
+
+	// Sort repos (GitHub)
+	const sortedGhRepos = $derived.by(() => {
+		if (!sortColumn) return ghRepos;
+		return [...ghRepos].sort((a, b) => {
+			let aVal: any, bVal: any;
+			
+			if (sortColumn === 'name') {
+				aVal = a.name.toLowerCase();
+				bVal = b.name.toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'language') {
+				aVal = (a.language || '').toLowerCase();
+				bVal = (b.language || '').toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'updated') {
+				aVal = new Date(a.updated_at || 0).getTime();
+				bVal = new Date(b.updated_at || 0).getTime();
+				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+			}
+			return 0;
+		});
+	});
+
+	// Sort projects (GitLab and custom)
+	const sortedGlProjects = $derived.by(() => {
+		if (!sortColumn) return glProjects;
+		return [...glProjects].sort((a, b) => {
+			let aVal: any, bVal: any;
+			
+			if (sortColumn === 'name') {
+				aVal = a.name.toLowerCase();
+				bVal = b.name.toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'path') {
+				aVal = (a.full_path || '').toLowerCase();
+				bVal = (b.full_path || '').toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'updated') {
+				aVal = new Date(a.updated_at || 0).getTime();
+				bVal = new Date(b.updated_at || 0).getTime();
+				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+			}
+			return 0;
+		});
+	});
+
+	const sortedCpProjects = $derived.by(() => {
+		if (!sortColumn) return cpProjects;
+		return [...cpProjects].sort((a, b) => {
+			let aVal: any, bVal: any;
+			
+			if (sortColumn === 'name') {
+				aVal = a.name.toLowerCase();
+				bVal = b.name.toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'path') {
+				aVal = (a.full_path || '').toLowerCase();
+				bVal = (b.full_path || '').toLowerCase();
+				return sortDirection === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+			} else if (sortColumn === 'updated') {
+				aVal = new Date(a.updated_at || 0).getTime();
+				bVal = new Date(b.updated_at || 0).getTime();
+				return sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+			}
+			return 0;
+		});
+	});
+
 	// Navigate to repo details page
 	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
 		// Save state before navigating
@@ -691,8 +773,8 @@
 				{:else if ghRepos.length === 0 && !ghError}
 					<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
 				{:else if ghRepos.length > 0}
-					<RepoTable columns={githubColumns}>
-						{#each ghRepos as repo}
+					<RepoTable columns={githubColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+						{#each sortedGhRepos as repo}
 							<RepoTableRow
 								{repo}
 								{formatDate}
@@ -765,8 +847,8 @@
 				{:else if glProjects.length === 0 && !glError}
 					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
 				{:else if glProjects.length > 0}
-					<RepoTable columns={gitlabColumns}>
-						{#each glProjects as project}
+					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+						{#each sortedGlProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath
@@ -893,8 +975,8 @@
 				{:else if cpProjects.length === 0 && !cpError}
 					<p class="text-sm text-[var(--text-secondary)]">No public projects found.</p>
 				{:else if cpProjects.length > 0}
-					<RepoTable columns={gitlabColumns}>
-						{#each cpProjects as project}
+					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+						{#each sortedCpProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath

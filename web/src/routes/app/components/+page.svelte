@@ -27,6 +27,10 @@
 	let totalCount = $state(0);
 	let pageSize = $state(50);
 
+	// Sorting
+	let sortColumn = $state<string>('');
+	let sortDirection = $state<'asc' | 'desc'>('asc');
+
 	// Detail dialog
 	let detailOpen = $state(false);
 	let selectedDependency: UnifiedDependency | null = $state(null);
@@ -53,6 +57,10 @@
 			if (searchQuery) params.set('q', searchQuery);
 			if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
 			if (selectedSource) params.set('source', selectedSource);
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
 			params.set('page', String(page));
 			params.set('per_page', String(pageSize));
 
@@ -87,6 +95,17 @@
 
 	const handleSourceChange = () => {
 		page = 1;
+		loadComponents();
+	};
+
+	const handleSort = (column: string) => {
+		if (sortColumn === column) {
+			sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortColumn = column;
+			sortDirection = 'asc';
+		}
+		page = 1; // Reset to first page when sorting changes
 		loadComponents();
 	};
 
@@ -156,21 +175,54 @@
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{error}</div>
 		{/if}
 
-		{#if loading}
-			<p class="text-sm text-[var(--text-secondary)]">Loading dependencies...</p>
-		{:else if dependencies.length === 0}
+		{#if dependencies.length === 0 && !loading}
 			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
-		{:else}
-			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+		{:else if dependencies.length > 0}
+			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40" class:opacity-60={loading}>
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>
-							<th class="px-5 py-3 text-left">Name</th>
-							<th class="px-5 py-3 text-center">Versions</th>
-							<th class="px-5 py-3 text-left">Ecosystem</th>
+							<th class="px-5 py-3 text-left cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('name')}>
+								<span class="flex items-center gap-1">
+									Name
+									<span class="w-3 text-center" class:text-[var(--accent)]={sortColumn === 'name'} class:text-transparent={sortColumn !== 'name'}>
+										{sortColumn === 'name' ? (sortDirection === 'asc' ? '↑' : '↓') : '↑'}
+									</span>
+								</span>
+							</th>
+							<th class="px-5 py-3 text-center cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('version_count')}>
+								<span class="inline-flex items-center gap-1">
+									Versions
+									<span class="w-3 text-center" class:text-[var(--accent)]={sortColumn === 'version_count'} class:text-transparent={sortColumn !== 'version_count'}>
+										{sortColumn === 'version_count' ? (sortDirection === 'asc' ? '↑' : '↓') : '↑'}
+									</span>
+								</span>
+							</th>
+							<th class="px-5 py-3 text-left cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('ecosystem')}>
+								<span class="flex items-center gap-1">
+									Ecosystem
+									<span class="w-3 text-center" class:text-[var(--accent)]={sortColumn === 'ecosystem'} class:text-transparent={sortColumn !== 'ecosystem'}>
+										{sortColumn === 'ecosystem' ? (sortDirection === 'asc' ? '↑' : '↓') : '↑'}
+									</span>
+								</span>
+							</th>
 							<th class="px-5 py-3 text-center">Source</th>
-							<th class="px-5 py-3 text-center">Repos</th>
-							<th class="px-5 py-3 text-center">SBOMs</th>
+							<th class="px-5 py-3 text-center cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('repo_count')}>
+								<span class="inline-flex items-center gap-1">
+									Repos
+									<span class="w-3 text-center" class:text-[var(--accent)]={sortColumn === 'repo_count'} class:text-transparent={sortColumn !== 'repo_count'}>
+										{sortColumn === 'repo_count' ? (sortDirection === 'asc' ? '↑' : '↓') : '↑'}
+									</span>
+								</span>
+							</th>
+							<th class="px-5 py-3 text-center cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('sbom_count')}>
+								<span class="inline-flex items-center gap-1">
+									SBOMs
+									<span class="w-3 text-center" class:text-[var(--accent)]={sortColumn === 'sbom_count'} class:text-transparent={sortColumn !== 'sbom_count'}>
+										{sortColumn === 'sbom_count' ? (sortDirection === 'asc' ? '↑' : '↓') : '↑'}
+									</span>
+								</span>
+							</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">

@@ -49,6 +49,31 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		ecosystem := r.URL.Query().Get("ecosystem")
 		repoID := r.URL.Query().Get("repo_id")
 		source := r.URL.Query().Get("source") // "sbom", "manifest", or empty for both
+		sortColumn := r.URL.Query().Get("sort")
+		sortOrder := r.URL.Query().Get("order") // "asc" or "desc"
+
+		// Validate and set defaults for sorting
+		if sortColumn == "" {
+			sortColumn = "repo_count"
+			sortOrder = "desc"
+		}
+		if sortOrder != "asc" && sortOrder != "desc" {
+			sortOrder = "asc"
+		}
+
+		// Map frontend column names to SQL column names
+		validSortColumns := map[string]string{
+			"name":          "name",
+			"ecosystem":     "ecosystem",
+			"version_count": "version_count",
+			"sbom_count":    "sbom_count",
+			"repo_count":    "repo_count",
+		}
+		sqlSortColumn, ok := validSortColumns[sortColumn]
+		if !ok {
+			sqlSortColumn = "repo_count"
+			sortOrder = "desc"
+		}
 
 		// Build unified query - group by name+ecosystem
 		query := `
@@ -147,7 +172,14 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			args = append(args, source)
 		}
 
-		query += ` ORDER BY repo_count DESC, name ASC`
+		// Apply sorting
+		if sortOrder == "desc" {
+			query += ` ORDER BY ` + sqlSortColumn + ` DESC`
+		} else {
+			query += ` ORDER BY ` + sqlSortColumn + ` ASC`
+		}
+		// Secondary sort by name for consistency
+		query += `, name ASC`
 
 		// Count total (before adding pagination to query/args)
 		countQuery := `SELECT COUNT(*) FROM (` + query + `) t`
