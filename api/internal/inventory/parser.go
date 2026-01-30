@@ -134,12 +134,16 @@ func parseSPDX(payload []byte) (*ParsedSBOM, error) {
 				break
 			}
 		}
+		// Skip components without PURL (e.g., file references from Syft)
+		if purl == "" {
+			continue
+		}
 		result.Components = append(result.Components, ParsedComponent{
 			Name:    pkg.Name,
 			Version: pkg.VersionInfo,
 			PURL:    purl,
 		})
-		if pkg.SPDXID != "" && purl != "" {
+		if pkg.SPDXID != "" {
 			spdxToPURL[pkg.SPDXID] = purl
 		}
 	}
