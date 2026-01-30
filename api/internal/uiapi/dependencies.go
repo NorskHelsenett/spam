@@ -105,21 +105,19 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				WHERE 1=1
 		`
 
-		// Reapply filters for manifest side
+		// Reapply filters for manifest side (reusing same parameter indices)
+		manifestArgIdx := 1
 		if search != "" {
-			query += ` AND md.name ILIKE $` + strconv.Itoa(argIdx)
-			args = append(args, "%"+search+"%")
-			argIdx++
+			query += ` AND md.name ILIKE $` + strconv.Itoa(manifestArgIdx)
+			manifestArgIdx++
 		}
 		if ecosystem != "" {
-			query += ` AND md.ecosystem = $` + strconv.Itoa(argIdx)
-			args = append(args, ecosystem)
-			argIdx++
+			query += ` AND md.ecosystem = $` + strconv.Itoa(manifestArgIdx)
+			manifestArgIdx++
 		}
 		if repoID != "" {
-			query += ` AND m.repo_id = $` + strconv.Itoa(argIdx)
-			args = append(args, repoID)
-			argIdx++
+			query += ` AND m.repo_id = $` + strconv.Itoa(manifestArgIdx)
+			manifestArgIdx++
 		}
 
 		query += `
