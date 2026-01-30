@@ -39,13 +39,11 @@
 	let { 
 		open = $bindable(false),
 		name,
-		version,
 		ecosystem,
 		sources
 	}: {
 		open: boolean;
 		name: string;
-		version: string;
 		ecosystem: string;
 		sources: string[];
 	} = $props();
@@ -77,8 +75,8 @@
 					if (detailResponse.ok) {
 						componentDetail = await detailResponse.json();
 						componentDetail!.sources = sources;
-						selectedVersion = version;
-						loadComponentAssets(comp.id, version);
+						selectedVersion = '';
+						loadComponentAssets(comp.id, '');
 					}
 				}
 			}
@@ -151,8 +149,9 @@
 							{ecosystem}
 						</span>
 						{#if sourceBadge}
+							{@const Icon = sourceBadge.icon}
 							<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs {sourceBadge.class}" title={sourceBadge.title}>
-								<svelte:component this={sourceBadge.icon} class="h-3 w-3" />
+								<Icon class="h-3 w-3" />
 								{sourceBadge.label}
 							</span>
 						{/if}

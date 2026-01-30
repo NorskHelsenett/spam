@@ -13,15 +13,15 @@ import (
 
 // UnifiedDependency combines data from SBOMs and manifests
 type UnifiedDependency struct {
-	Name      string   `json:"name"`
-	Version   string   `json:"version"`
-	Ecosystem string   `json:"ecosystem"`
-	PURL      string   `json:"purl,omitempty"`
-	Sources   []string `json:"sources"`          // ["sbom", "manifest", "both"]
-	Direct    *bool    `json:"direct,omitempty"` // nil if unknown
-	Scope     string   `json:"scope,omitempty"`
-	SBOMCount int      `json:"sbom_count"` // How many SBOMs contain this
-	RepoCount int      `json:"repo_count"` // How many repos use this
+	Name         string   `json:"name"`
+	Ecosystem    string   `json:"ecosystem"`
+	PURL         string   `json:"purl,omitempty"`   // PURL without version
+	Sources      []string `json:"sources"`          // ["sbom", "manifest", "both"]
+	VersionCount int      `json:"version_count"`    // How many different versions
+	SBOMCount    int      `json:"sbom_count"`       // How many SBOMs contain this
+	RepoCount    int      `json:"repo_count"`       // How many repos use this
+	HasDirect    bool     `json:"has_direct"`       // At least one version is direct
+	Scopes       []string `json:"scopes,omitempty"` // All unique scopes across versions
 }
 
 // UnifiedDependenciesResponse is the API response
@@ -50,15 +50,15 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		repoID := r.URL.Query().Get("repo_id")
 		source := r.URL.Query().Get("source") // "sbom", "manifest", or empty for both
 
-		// Build unified query
+		// Build unified query - group by name+ecosystem
 		query := `
 			WITH sbom_deps AS (
 				SELECT 
 					c.name,
-					cv.version,
 					c.ecosystem,
-					c.purl,
+					REGEXP_REPLACE(c.purl, '@[^?]+', '') as purl_base,
 					'sbom' as source,
+					COUNT(DISTINCT cv.version) as version_count,
 					COUNT(DISTINCT sc.sbom_id) as sbom_count,
 					COUNT(DISTINCT sb.asset_ref_id) as repo_count
 				FROM components c
@@ -88,19 +88,18 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		}
 
 		query += `
-				GROUP BY c.name, cv.version, c.ecosystem, c.purl
+				GROUP BY c.name, c.ecosystem
 			),
 			manifest_deps AS (
 				SELECT 
 					md.name,
-					md.version,
 					md.ecosystem,
-					NULL as purl,
 					'manifest' as source,
-					md.direct,
-					md.scope,
+					COUNT(DISTINCT md.version) as version_count,
 					COUNT(DISTINCT m.id) as manifest_count,
-					COUNT(DISTINCT m.repo_id) as repo_count
+					COUNT(DISTINCT m.repo_id) as repo_count,
+					BOOL_OR(md.direct) as has_direct,
+					ARRAY_AGG(DISTINCT md.scope) FILTER (WHERE md.scope IS NOT NULL) as scopes
 				FROM manifest_dependencies md
 				JOIN manifests m ON m.id = md.manifest_id
 				WHERE 1=1
@@ -124,30 +123,29 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		}
 
 		query += `
-				GROUP BY md.name, md.version, md.ecosystem, md.direct, md.scope
+				GROUP BY md.name, md.ecosystem
 			),
 			merged AS (
 				SELECT 
 					COALESCE(s.name, m.name) as name,
-					COALESCE(s.version, m.version) as version,
 					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
-					s.purl,
+					s.purl_base as purl,
 					CASE 
 						WHEN s.name IS NOT NULL AND m.name IS NOT NULL THEN 'both'
 						WHEN s.name IS NOT NULL THEN 'sbom'
 						ELSE 'manifest'
 					END as sources,
-					m.direct,
-					m.scope,
+					GREATEST(COALESCE(s.version_count, 0), COALESCE(m.version_count, 0)) as version_count,
 					COALESCE(s.sbom_count, 0) as sbom_count,
-					COALESCE(s.repo_count, m.repo_count, 0) as repo_count
+					COALESCE(s.repo_count, m.repo_count, 0) as repo_count,
+					COALESCE(m.has_direct, false) as has_direct,
+					m.scopes
 				FROM sbom_deps s
 				FULL OUTER JOIN manifest_deps m 
 					ON s.name = m.name 
-					AND s.version = m.version 
 					AND s.ecosystem = m.ecosystem
 			)
-			SELECT name, version, ecosystem, purl, sources, direct, scope, sbom_count, repo_count FROM merged
+			SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes FROM merged
 		`
 
 		// Apply source filter if specified
@@ -187,29 +185,32 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			var dep UnifiedDependency
 			var sources string
 			var purl sql.NullString
-			var direct sql.NullBool
-			var scope sql.NullString
-			
+			var scopes interface{}
+
 			if err := rows.Scan(
-				&dep.Name, &dep.Version, &dep.Ecosystem, &purl,
-				&sources, &direct, &scope,
+				&dep.Name, &dep.Ecosystem, &purl,
+				&sources, &dep.VersionCount,
 				&dep.SBOMCount, &dep.RepoCount,
+				&dep.HasDirect, &scopes,
 			); err != nil {
 				log.Printf("scan error: %v", err)
 				continue
 			}
-			
+
 			if purl.Valid {
 				dep.PURL = purl.String
 			}
-			if direct.Valid {
-				b := direct.Bool
-				dep.Direct = &b
+
+			// Parse scopes array from PostgreSQL
+			if scopes != nil {
+				if scopesBytes, ok := scopes.([]byte); ok {
+					var scopeList []string
+					if err := json.Unmarshal(scopesBytes, &scopeList); err == nil {
+						dep.Scopes = scopeList
+					}
+				}
 			}
-			if scope.Valid {
-				dep.Scope = scope.String
-			}
-			
+
 			dep.Sources = []string{sources}
 			deps = append(deps, dep)
 		}

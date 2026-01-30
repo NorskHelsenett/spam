@@ -6,14 +6,14 @@
 
 	type UnifiedDependency = {
 		name: string;
-		version: string;
 		ecosystem: string;
 		purl?: string;
 		sources: string[];
-		direct?: boolean;
-		scope?: string;
+		version_count: number;
 		sbom_count: number;
 		repo_count: number;
+		has_direct?: boolean;
+		scopes?: string[];
 	};
 
 	let dependencies: UnifiedDependency[] = $state([]);
@@ -166,7 +166,7 @@
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>
 							<th class="px-5 py-3 text-left">Name</th>
-							<th class="px-5 py-3 text-left">Version</th>
+							<th class="px-5 py-3 text-center">Versions</th>
 							<th class="px-5 py-3 text-left">Ecosystem</th>
 							<th class="px-5 py-3 text-center">Source</th>
 							<th class="px-5 py-3 text-center">Repos</th>
@@ -184,18 +184,22 @@
 									{#if dep.purl}
 										<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={dep.purl}>{dep.purl}</p>
 									{/if}
-									{#if dep.direct !== undefined || dep.scope}
+									{#if dep.has_direct || (dep.scopes && dep.scopes.length > 0)}
 										<div class="mt-1 flex gap-2">
-											{#if dep.direct}
+											{#if dep.has_direct}
 												<span class="text-xs text-[var(--text-muted)]">direct</span>
 											{/if}
-											{#if dep.scope}
-												<span class="text-xs text-[var(--text-muted)]">{dep.scope}</span>
+											{#if dep.scopes && dep.scopes.length > 0}
+												<span class="text-xs text-[var(--text-muted)]">{dep.scopes.join(', ')}</span>
 											{/if}
 										</div>
 									{/if}
 								</td>
-								<td class="px-5 py-3 text-[var(--text-secondary)]">{dep.version || '—'}</td>
+								<td class="px-5 py-3 text-center">
+									<span class="inline-flex items-center rounded-full bg-[var(--accent)]/10 px-2.5 py-0.5 text-xs font-semibold text-[var(--accent)]">
+										{dep.version_count}
+									</span>
+								</td>
 								<td class="px-5 py-3">
 									<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
 										{dep.ecosystem || '—'}
@@ -277,7 +281,6 @@
 	<DependencyDetail 
 		bind:open={detailOpen}
 		name={selectedDependency.name}
-		version={selectedDependency.version}
 		ecosystem={selectedDependency.ecosystem}
 		sources={selectedDependency.sources}
 	/>
