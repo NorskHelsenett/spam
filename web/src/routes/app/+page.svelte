@@ -226,7 +226,7 @@
 
 	{#if summary}
 		<div class="grid gap-6 lg:grid-cols-3 lg:grid-rows-2">
-			<section class="panel-surface rounded-2xl border border-[var(--border-color)]/60 p-6 lg:row-span-2">
+			<section class="panel-surface rounded-2xl p-6 lg:row-span-2">
 				<div class="flex items-center justify-between">
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">SBOM activity</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">latest</span>
@@ -265,7 +265,7 @@
 				</div>
 			</section>
 
-			<section class="panel-surface rounded-2xl border border-[var(--border-color)]/60 p-6 lg:row-span-2">
+			<section class="panel-surface rounded-2xl p-6 lg:row-span-2">
 				<div class="flex items-center justify-between">
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Top components</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">by SBOM coverage</span>
@@ -297,7 +297,7 @@
 				</div>
 			</section>
 
-			<section class="panel-surface rounded-2xl border border-[var(--border-color)]/60 p-6">
+			<section class="panel-surface rounded-2xl p-6">
 				<DonutChart
 					title="License distribution"
 					total={summary.counts.component_count}
@@ -305,7 +305,7 @@
 				/>
 			</section>
 
-			<section class="panel-surface rounded-2xl border border-[var(--border-color)]/60 p-6">
+			<section class="panel-surface rounded-2xl p-6">
 			<DonutChart
 				title="Scanner mix"
 				total={totalScans()}
