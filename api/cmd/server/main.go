@@ -73,6 +73,20 @@ func run() error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
+	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
+	if seedSQLPath != "" {
+		if err := db.RunSeedSQL(ctx, gormDB, seedSQLPath); err != nil {
+			return fmt.Errorf("seed database: %w", err)
+		}
+		seedSBOMPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SBOM"))
+		if seedSBOMPath == "" {
+			seedSBOMPath = "sbom.cdx.json"
+		}
+		if err := db.SeedSBOMComponentsFromFile(ctx, gormDB, seedSBOMPath, "cyclonedx-json"); err != nil {
+			return fmt.Errorf("seed sbom components: %w", err)
+		}
+	}
+
 	events.StartNotificationListener(ctx, cfg.DatabaseURL)
 
 	authService, err := auth.NewService(ctx, auth.Config{

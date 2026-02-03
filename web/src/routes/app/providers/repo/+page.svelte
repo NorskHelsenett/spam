@@ -54,10 +54,49 @@
 		componentsFromManifest: number;
 	};
 
+	type RepoMetadataRun = {
+		id: string;
+		status: string;
+		started_at?: string;
+		finished_at?: string;
+		duration_ms?: number;
+		commit_sha?: string;
+		artifacts?: string[];
+	};
+
+	type RepoMetadataResponse = {
+		runs: {
+			total: number;
+			latest?: RepoMetadataRun;
+			timeline: RepoMetadataRun[];
+		};
+		sbom: {
+			latest?: {
+				id: string;
+				created_at?: string;
+				format?: string;
+				component_count?: number;
+				download_url?: string;
+			};
+		};
+		dependencies: {
+			total?: number;
+			from_sbom?: number;
+			from_manifest?: number;
+		};
+		secrets: {
+			latest_count?: number;
+			latest_run_id?: string;
+			last_scanned_at?: string;
+		};
+	};
+
 	let details: RepoDetails | null = $state(null);
 	let readme = $state('');
 	let loading = $state(true);
 	let error = $state('');
+	let runTimeline: RepoMetadataRun[] = $state([]);
+	let totalRuns = $state(0);
 	let securityData: SecurityData = $state({
 		vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0 },
 		secrets: 0,
@@ -143,15 +182,10 @@
 			return;
 		}
 
-		const repoCounts = await fetchRepoSecurityCounts(repoID);
-		let manifestComponents = 0;
-		try {
-			manifestComponents = await fetchComponentCount(repoID, 'manifest');
-		} catch {
-			manifestComponents = 0;
-		}
-
-		const totalComponents = Math.max(repoCounts.sbomDependencies, manifestComponents);
+		const metadata = await fetchRepoMetadata(repoID);
+		const sbomComponents = metadata?.dependencies?.from_sbom || 0;
+		const manifestComponents = metadata?.dependencies?.from_manifest || 0;
+		const totalComponents = Math.max(sbomComponents, manifestComponents);
 
 		securityData = {
 			vulnerabilities: {
@@ -160,7 +194,7 @@
 				medium: 0,
 				low: 0
 			},
-			secrets: repoCounts.secrets,
+			secrets: metadata?.secrets?.latest_count || 0,
 			issues: {
 				noOwner: false, // TODO: check for CODEOWNERS file
 				noLicense: !repo.license,
@@ -168,42 +202,26 @@
 				outdatedDeps: 0 // TODO: implement outdated deps check
 			},
 			components: totalComponents,
-			componentsFromSBOM: repoCounts.sbomDependencies,
+			componentsFromSBOM: sbomComponents,
 			componentsFromManifest: manifestComponents
 		};
+
+		runTimeline = metadata?.runs?.timeline || [];
+		totalRuns = metadata?.runs?.total || 0;
 	};
 
-	const fetchComponentCount = async (repoID: string, source: string): Promise<number> => {
+	const fetchRepoMetadata = async (repoID: string): Promise<RepoMetadataResponse | null> => {
 		try {
-			const response = await fetch(`/api/dependencies?repo_id=${encodeURIComponent(repoID)}&source=${source}&per_page=1`, {
+			const response = await fetch(`/api/repos/metadata?repo_id=${encodeURIComponent(repoID)}`, {
 				credentials: 'include'
 			});
 			if (response.ok) {
-				const data = await response.json();
-				return data.total || 0;
+				return await response.json();
 			}
 		} catch {
 			// Ignore errors
 		}
-		return 0;
-	};
-
-	const fetchRepoSecurityCounts = async (repoID: string): Promise<{ sbomDependencies: number; secrets: number }> => {
-		try {
-			const response = await fetch(`/api/repos/security?repo_id=${encodeURIComponent(repoID)}`, {
-				credentials: 'include'
-			});
-			if (response.ok) {
-				const data = await response.json();
-				return {
-					sbomDependencies: data.sbom_dependency_count || 0,
-					secrets: data.secrets_count || 0
-				};
-			}
-		} catch {
-			// Ignore errors
-		}
-		return { sbomDependencies: 0, secrets: 0 };
+		return null;
 	};
 
 	// Generate fallback mock security data
@@ -238,6 +256,25 @@
 			month: 'short',
 			day: 'numeric'
 		});
+	};
+
+	const formatDateTime = (dateStr?: string) => {
+		if (!dateStr) return '';
+		return new Date(dateStr).toLocaleString('en-US', {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit'
+		});
+	};
+
+	const formatDuration = (ms?: number) => {
+		if (!ms || ms <= 0) return '';
+		const seconds = Math.round(ms / 1000);
+		if (seconds < 60) return `${seconds}s`;
+		const minutes = Math.round(seconds / 60);
+		return `${minutes}m`;
 	};
 
 	const formatSize = (kb: number) => {
@@ -566,6 +603,49 @@
 				</div>
 			</div>
 		</div>
+
+		<!-- Recent Runs -->
+		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+			<div class="flex items-center justify-between">
+				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Runs</h2>
+				{#if totalRuns > 0}
+					<span class="text-xs text-[var(--text-muted)]">{totalRuns} total</span>
+				{/if}
+			</div>
+			{#if runTimeline.length === 0}
+				<p class="text-sm text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
+			{:else}
+				<div class="space-y-3">
+					{#each runTimeline as run}
+						<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+							<div class="min-w-0 space-y-1">
+								<div class="flex items-center gap-2">
+									<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
+										{run.status}
+									</span>
+									<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
+									{#if run.duration_ms}
+										<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
+									{/if}
+								</div>
+								{#if run.commit_sha}
+									<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
+								{/if}
+							</div>
+							{#if run.artifacts && run.artifacts.length > 0}
+								<div class="flex flex-wrap gap-2 text-xs">
+									{#each run.artifacts as artifact}
+										<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
+											{artifact.toUpperCase()}
+										</span>
+									{/each}
+								</div>
+							{/if}
+						</div>
+					{/each}
+				</div>
+			{/if}
+		</section>
 
 		<!-- README -->
 		{#if readme}

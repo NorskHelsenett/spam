@@ -106,60 +106,13 @@ func processParseSBOM(ctx context.Context, db *gorm.DB, job *Job) (interface{}, 
 
 	result := parseResult{SBOMID: sbom.ID}
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Cache to avoid duplicate DB operations for same base PURL within this transaction
-		componentCache := make(map[string]*inventory.Component) // basePURL -> Component
-		// Map full PURL (with version) -> ComponentVersionID for dependency resolution
-		purlToVersionID := make(map[string]string)
-
-		for i, entry := range parsed.Components {
-			component, err := inventory.UpsertComponentWithCache(ctx, tx, inventory.UpsertComponentInput{
-				Name: entry.Name,
-				PURL: entry.PURL,
-			}, componentCache)
-			if err != nil {
-				return fmt.Errorf("upsert component[%d] name=%q purl=%q: %w", i, entry.Name, entry.PURL, err)
-			}
-			if component == nil {
-				continue
-			}
-			result.Components++
-
-			cv, err := inventory.UpsertComponentVersion(ctx, tx, component.ID, entry.Version)
-			if err != nil {
-				return fmt.Errorf("upsert component version[%d] component=%q version=%q: %w", i, component.ID, entry.Version, err)
-			}
-			if cv == nil {
-				continue
-			}
-			result.ComponentVers++
-
-			// Track PURL -> ComponentVersionID for dependency resolution
-			if entry.PURL != "" {
-				purlToVersionID[entry.PURL] = cv.ID
-			}
-
-			if err := inventory.UpsertSBOMComponent(ctx, tx, sbom.ID, cv.ID, entry.Scope); err != nil {
-				return fmt.Errorf("upsert sbom component[%d] sbom=%q cv=%q: %w", i, sbom.ID, cv.ID, err)
-			}
-			result.Links++
+		stats, err := inventory.UpsertParsedSBOM(ctx, tx, sbom.ID, parsed)
+		if err != nil {
+			return err
 		}
-
-		// Process dependencies
-		for _, dep := range parsed.Dependencies {
-			dependentID := purlToVersionID[dep.Ref]
-			if dependentID == "" {
-				continue
-			}
-			for _, depPURL := range dep.DependsOn {
-				dependencyID := purlToVersionID[depPURL]
-				if dependencyID == "" {
-					continue
-				}
-				if err := inventory.CreateComponentDependency(ctx, tx, sbom.ID, dependentID, dependencyID); err != nil {
-					return fmt.Errorf("create dependency %q -> %q: %w", dep.Ref, depPURL, err)
-				}
-			}
-		}
+		result.Components = stats.Components
+		result.ComponentVers = stats.ComponentVersions
+		result.Links = stats.Links
 
 		info, err := loadSBOMBroadcastInfo(ctx, tx, payload.BindingID, sbom.ID)
 		if err != nil {

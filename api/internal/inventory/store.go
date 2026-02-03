@@ -3,6 +3,7 @@ package inventory
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,76 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+type ParsedSBOMStats struct {
+	Components        int
+	ComponentVersions int
+	Links             int
+}
+
+// UpsertParsedSBOM persists parsed SBOM components and dependencies.
+func UpsertParsedSBOM(ctx context.Context, db *gorm.DB, sbomID string, parsed *ParsedSBOM) (ParsedSBOMStats, error) {
+	if sbomID == "" {
+		return ParsedSBOMStats{}, errors.New("sbom id required")
+	}
+	if parsed == nil {
+		return ParsedSBOMStats{}, nil
+	}
+
+	stats := ParsedSBOMStats{}
+	componentCache := make(map[string]*Component)
+	purlToVersionID := make(map[string]string)
+
+	for i, entry := range parsed.Components {
+		component, err := UpsertComponentWithCache(ctx, db, UpsertComponentInput{
+			Name: entry.Name,
+			PURL: entry.PURL,
+		}, componentCache)
+		if err != nil {
+			return stats, fmt.Errorf("upsert component[%d] name=%q purl=%q: %w", i, entry.Name, entry.PURL, err)
+		}
+		if component == nil {
+			continue
+		}
+		stats.Components++
+
+		cv, err := UpsertComponentVersion(ctx, db, component.ID, entry.Version)
+		if err != nil {
+			return stats, fmt.Errorf("upsert component version[%d] component=%q version=%q: %w", i, component.ID, entry.Version, err)
+		}
+		if cv == nil {
+			continue
+		}
+		stats.ComponentVersions++
+
+		if entry.PURL != "" {
+			purlToVersionID[entry.PURL] = cv.ID
+		}
+
+		if err := UpsertSBOMComponent(ctx, db, sbomID, cv.ID, entry.Scope); err != nil {
+			return stats, fmt.Errorf("upsert sbom component[%d] sbom=%q cv=%q: %w", i, sbomID, cv.ID, err)
+		}
+		stats.Links++
+	}
+
+	for _, dep := range parsed.Dependencies {
+		dependentID := purlToVersionID[dep.Ref]
+		if dependentID == "" {
+			continue
+		}
+		for _, depPURL := range dep.DependsOn {
+			dependencyID := purlToVersionID[depPURL]
+			if dependencyID == "" {
+				continue
+			}
+			if err := CreateComponentDependency(ctx, db, sbomID, dependentID, dependencyID); err != nil {
+				return stats, fmt.Errorf("create dependency %q -> %q: %w", dep.Ref, depPURL, err)
+			}
+		}
+	}
+
+	return stats, nil
+}
 
 type UpsertComponentInput struct {
 	Name      string

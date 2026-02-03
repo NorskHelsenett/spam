@@ -80,12 +80,30 @@ func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.Hand
 		}
 
 		var secretsCount int64
-		if err := db.WithContext(r.Context()).Table("run_secrets").
+		repoDBID := ""
+		if parts := strings.SplitN(repoID, ":", 3); len(parts) == 3 {
+			var repo struct {
+				ID string
+			}
+			if err := db.WithContext(r.Context()).Table("repos").
+				Select("id").
+				Where("provider = ? AND org = ? AND slug = ?", parts[0], parts[1], parts[2]).
+				First(&repo).Error; err == nil {
+				repoDBID = repo.ID
+			}
+		}
+
+		secretsQuery := db.WithContext(r.Context()).Table("run_secrets").
 			Select("finding_count").
-			Where("repo_id = ?", repoID).
 			Order("created_at DESC").
-			Limit(1).
-			Scan(&secretsCount).Error; err != nil {
+			Limit(1)
+		if repoDBID != "" {
+			secretsQuery = secretsQuery.Where("repo_id = ?", repoDBID)
+		} else {
+			secretsQuery = secretsQuery.Where("repo_id = ?", repoID)
+		}
+
+		if err := secretsQuery.Scan(&secretsCount).Error; err != nil {
 			http.Error(w, "failed to fetch secrets count", http.StatusInternalServerError)
 			return
 		}
