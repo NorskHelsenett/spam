@@ -52,6 +52,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
+				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService))
 
 				// Component search and detail
 				api.Get("/components", uiapi.ComponentsListHandler(db, authService))
