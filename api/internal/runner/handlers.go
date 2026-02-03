@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/google/uuid"
@@ -121,17 +122,31 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		} else {
 			hash := sha256.Sum256(sbomData)
 
-			var binding *artifacts.BindingInput
-			if payload.RepoID != "" {
-				binding = &artifacts.BindingInput{
-					AssetType:       artifacts.AssetTypeRepoCommit,
-					AssetRefID:      payload.RepoID,
-					Source:          "spam-runner",
-					CreatedByUserID: "system",
-				}
+			commitSHA := commitHash
+			if commitSHA == "" {
+				commitSHA = payload.CommitSHA
 			}
 
 			err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+				var binding *artifacts.BindingInput
+				if payload.RepoID != "" && commitSHA != "" {
+					commit, err := assets.UpsertRepoCommit(r.Context(), tx, assets.RepoCommitInput{
+						RepoID:    payload.RepoID,
+						CommitSHA: commitSHA,
+						Ref:       payload.Ref,
+					})
+					if err != nil {
+						log.Printf("failed to upsert repo commit: %v", err)
+					} else {
+						binding = &artifacts.BindingInput{
+							AssetType:       artifacts.AssetTypeRepoCommit,
+							AssetRefID:      commit.ID,
+							Source:          "spam-runner",
+							CreatedByUserID: "system",
+						}
+					}
+				}
+
 				sbomID, _, jobID, err := artifacts.StoreSBOMWithParseJob(
 					r.Context(), tx,
 					artifacts.SBOMInput{

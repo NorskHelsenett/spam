@@ -7,6 +7,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${workspaceFolder}/api/cmd/server",
+            "cwd": "${workspaceFolder}/api/",
             "env": {
                 "HTTP_PORT": "8080",
                 "POSTGRES_HOST": "localhost",
@@ -20,7 +21,7 @@
                 "OIDC_CLIENT_SECRET": "replace-me",
                 "OIDC_REDIRECT_URL": "http://localhost:5178/api/auth/callback",
                 "OIDC_SCOPES": "openid profile email",
-                "SESSION_COOKIE_HASH_KEY": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+                "SESSION_COOKIE_HASH_KEY": "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=",
                 "SESSION_COOKIE_BLOCK_KEY": "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=",
                 "SESSION_TTL": "8h",
                 "COOKIE_SECURE": "false"

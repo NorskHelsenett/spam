@@ -5,8 +5,10 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/runner"
@@ -160,8 +162,27 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		org := ""
+		slug := req.RepoPath
+		if parts := strings.Split(req.RepoPath, "/"); len(parts) > 1 {
+			org = parts[0]
+			slug = parts[len(parts)-1]
+		}
+
+		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
+			Provider: req.Provider,
+			Org:      org,
+			Slug:     slug,
+		})
+		if err != nil {
+			log.Printf("failed to upsert repo: %v", err)
+			http.Error(w, "failed to create run", http.StatusInternalServerError)
+			return
+		}
+
 		// Create job payload
 		payload := jobs.CreateRunPayload{
+			RepoID:   repo.ID,
 			Provider: req.Provider,
 			CloneURL: cloneURL,
 			Ref:      req.Ref,
