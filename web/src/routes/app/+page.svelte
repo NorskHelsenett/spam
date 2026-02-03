@@ -133,11 +133,19 @@
 
 	const licenseSegments = (): DonutSegment[] => {
 		if (!summary) return [];
-		return summary.top_licenses.map((license, index) => ({
+		const segments = summary.top_licenses.map((license, index) => ({
 			label: license.license,
 			value: license.count,
 			color: licensePalette[index % licensePalette.length]
 		}));
+		if (summary.counts.missing_license_count > 0) {
+			segments.push({
+				label: 'Missing',
+				value: summary.counts.missing_license_count,
+				color: 'var(--error)'
+			});
+		}
+		return segments;
 	};
 
 	const scannerPalette = [
@@ -223,33 +231,33 @@
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">SBOM activity</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">latest</span>
 				</div>
-				<div class="mt-4 overflow-hidden rounded-2xl border border-[var(--border-color)]/60">
-					<table class="w-full text-sm">
-						<thead class="bg-[var(--card-bg)]">
-							<tr class="text-xs uppercase tracking-[0.22em] text-[var(--text-muted)]">
-								<th class="px-4 py-3 text-left">Asset</th>
-								<th class="px-4 py-3 text-left">Scanner</th>
-								<th class="px-4 py-3 text-left">Components</th>
-								<th class="px-4 py-3 text-left">Timestamp</th>
+				<div class="mt-4 max-h-[400px] overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+							<tr>
+								<th class="px-5 py-3 text-left">Asset</th>
+								<th class="px-5 py-3 text-left">Scanner</th>
+								<th class="px-5 py-3 text-left">Components</th>
+								<th class="px-5 py-3 text-left">Timestamp</th>
 							</tr>
 						</thead>
-						<tbody>
+						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 							{#each summary.recent_sboms as sbom}
 								<tr
-									class="cursor-pointer border-t border-[var(--border-color)]/60 transition hover:bg-[var(--hover-bg-subtle)]"
+									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 									on:click={() => goto(`/app/agents?sbom_id=${sbom.sbom_id}`)}
 								>
-									<td class="px-4 py-3">
+									<td class="px-5 py-3">
 										<p class="font-semibold text-[var(--text-bright)]">{sbomLabel(sbom)}</p>
 										<p class="text-xs text-[var(--text-tertiary)]">
 											{sbom.commit_sha ? `commit ${shortSHA(sbom.commit_sha)}` : sbom.asset_type}
 										</p>
 									</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">
+									<td class="px-5 py-3 text-xs">
 										{sbom.scanner_name} {sbom.scanner_version}
 									</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">{sbom.component_count}</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">{formatDate(sbom.created_at)}</td>
+									<td class="px-5 py-3">{sbom.component_count}</td>
+									<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{formatDate(sbom.created_at)}</td>
 								</tr>
 							{/each}
 						</tbody>
@@ -262,28 +270,26 @@
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Top components</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">by SBOM coverage</span>
 				</div>
-				<div class="mt-4 overflow-hidden rounded-2xl border border-[var(--border-color)]/60">
-					<table class="w-full text-sm">
-						<thead class="bg-[var(--card-bg)]">
-							<tr class="text-xs uppercase tracking-[0.22em] text-[var(--text-muted)]">
-								<th class="px-4 py-3 text-left">Component</th>
-								<th class="px-4 py-3 text-left">Ecosystem</th>
-								<th class="px-4 py-3 text-left">SBOMs</th>
-								<th class="px-4 py-3 text-left">Versions</th>
+				<div class="mt-4 max-h-[400px] overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+							<tr>
+								<th class="px-5 py-3 text-left">Component</th>
+								<th class="px-5 py-3 text-left">Ecosystem</th>
+								<th class="px-5 py-3 text-left">SBOMs</th>
+								<th class="px-5 py-3 text-left">Versions</th>
 							</tr>
 						</thead>
-						<tbody>
+						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 							{#each summary.top_components as comp}
 								<tr
-									class="cursor-pointer border-t border-[var(--border-color)]/60 transition hover:bg-[var(--hover-bg-subtle)]"
+									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 									on:click={() => goto(`/app/components?ecosystem=${comp.kind}&q=${encodeURIComponent(comp.package_name)}`)}
 								>
-									<td class="px-4 py-3">
-										<p class="font-semibold text-[var(--text-bright)]">{comp.package_name}</p>
-									</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">{comp.kind}</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">{comp.sbom_count}</td>
-									<td class="px-4 py-3 text-xs text-[var(--text-tertiary)]">{comp.version_count}</td>
+									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{comp.package_name}</td>
+									<td class="px-5 py-3">{comp.kind}</td>
+									<td class="px-5 py-3">{comp.sbom_count}</td>
+									<td class="px-5 py-3">{comp.version_count}</td>
 								</tr>
 							{/each}
 						</tbody>
@@ -294,7 +300,7 @@
 			<section class="panel-surface rounded-2xl border border-[var(--border-color)]/60 p-6">
 				<DonutChart
 					title="License distribution"
-					total={summary.counts.license_count}
+					total={summary.counts.component_count}
 					segments={licenseSegments()}
 				/>
 			</section>

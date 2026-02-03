@@ -21,7 +21,17 @@
 
 	const clamp = (num: number, min: number, max: number) => Math.min(Math.max(num, min), max);
 
-	const getSegmentData = () => {
+	const handleMouseMove = (e: MouseEvent) => {
+		const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
+		tooltipX = e.clientX - rect.left;
+		tooltipY = e.clientY - rect.top;
+	};
+
+	$: segmentTotal = segments.reduce((sum, s) => sum + s.value, 0);
+	$: otherValue = total - segmentTotal;
+	$: otherPercent = total > 0 ? (otherValue / total) * 100 : 0;
+
+	$: segmentData = (() => {
 		if (total <= 0 || segments.length === 0) {
 			return [];
 		}
@@ -39,22 +49,10 @@
 				dashOffset: -(offset / 100) * circumference
 			};
 		});
-	};
-
-	$: segmentTotal = segments.reduce((sum, s) => sum + s.value, 0);
-	$: otherValue = total - segmentTotal;
-	$: otherPercent = total > 0 ? (otherValue / total) * 100 : 0;
-
-	const handleMouseMove = (e: MouseEvent) => {
-		const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
-		tooltipX = e.clientX - rect.left;
-		tooltipY = e.clientY - rect.top;
-	};
-
-	$: segmentData = getSegmentData();
+	})();
 </script>
 
-<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/20 p-5">
+<div class="rounded-2xl p-0 bg-[var(--card-bg)]/20 p-5" style="padding: 0">
 	<div class="flex items-center justify-between">
 		<p class="text-sm uppercase tracking-[0.22em] text-[var(--text-muted)]">{title}</p>
 		<p class="text-xs text-[var(--text-tertiary)]">{total.toLocaleString()} components</p>
@@ -143,7 +141,7 @@
 			{#each segmentData as seg (seg.index)}
 				<button
 					type="button"
-					class="flex w-full items-center justify-between rounded-xl border border-[var(--border-color)]/60 px-3 py-2 text-left text-xs text-[var(--text-tertiary)] transition"
+					class="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-xs text-[var(--text-tertiary)] transition"
 					class:bg-[var(--hover-bg)]={hoveredIndex === seg.index}
 					class:bg-[var(--card-bg)]={hoveredIndex !== seg.index}
 					on:mouseenter={() => (hoveredIndex = seg.index)}
