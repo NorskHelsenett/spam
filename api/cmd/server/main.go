@@ -74,8 +74,8 @@ func run() error {
 	}
 
 	if err := db.EnsureViews(ctx, gormDB,
-		"api/migrations/20260203_create_sbom_component_view.sql",
-		"api/migrations/20260203_create_sbom_metadata_view.sql",
+		"migrations/20260203_create_sbom_component_view.sql",
+		"migrations/20260203_create_sbom_metadata_view.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
