@@ -73,6 +73,13 @@ func run() error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
+	if err := db.EnsureViews(ctx, gormDB,
+		"api/migrations/20260203_create_sbom_component_view.sql",
+		"api/migrations/20260203_create_sbom_metadata_view.sql",
+	); err != nil {
+		return fmt.Errorf("bootstrap views: %w", err)
+	}
+
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
 		if err := db.RunSeedSQL(ctx, gormDB, seedSQLPath); err != nil {
