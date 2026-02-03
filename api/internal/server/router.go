@@ -68,6 +68,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies", uiapi.UnifiedDependenciesHandler(db, authService))
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
+				api.Get("/repos/security", uiapi.RepoSecurityCountsHandler(db, authService))
 				api.Get("/providers/detect", uiapi.ProvidersDetectHandler(authService))
 				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
 				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService))

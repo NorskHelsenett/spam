@@ -143,38 +143,34 @@
 			return;
 		}
 
+		const repoCounts = await fetchRepoSecurityCounts(repoID);
+		let manifestComponents = 0;
 		try {
-			// Fetch components from both SBOM and manifest for this repo
-			const [sbomComponents, manifestComponents, latestRun] = await Promise.all([
-				fetchComponentCount(repoID, 'sbom'),
-				fetchComponentCount(repoID, 'manifest'),
-				fetchLatestRunSecrets(repoPath)
-			]);
-
-			const totalComponents = Math.max(sbomComponents, manifestComponents);
-
-			securityData = {
-				vulnerabilities: {
-					critical: 0, // TODO: implement vulnerability scanning
-					high: 0,
-					medium: 0,
-					low: 0
-				},
-				secrets: latestRun?.secretCount || 0,
-				issues: {
-					noOwner: false, // TODO: check for CODEOWNERS file
-					noLicense: !repo.license,
-					noReadme: !readmeContent,
-					outdatedDeps: 0 // TODO: implement outdated deps check
-				},
-				components: totalComponents,
-				componentsFromSBOM: sbomComponents,
-				componentsFromManifest: manifestComponents
-			};
-		} catch (err) {
-			// Fall back to mock data on error
-			generateMockSecurityData(repo, readmeContent);
+			manifestComponents = await fetchComponentCount(repoID, 'manifest');
+		} catch {
+			manifestComponents = 0;
 		}
+
+		const totalComponents = Math.max(repoCounts.sbomDependencies, manifestComponents);
+
+		securityData = {
+			vulnerabilities: {
+				critical: 0, // TODO: implement vulnerability scanning
+				high: 0,
+				medium: 0,
+				low: 0
+			},
+			secrets: repoCounts.secrets,
+			issues: {
+				noOwner: false, // TODO: check for CODEOWNERS file
+				noLicense: !repo.license,
+				noReadme: !readmeContent,
+				outdatedDeps: 0 // TODO: implement outdated deps check
+			},
+			components: totalComponents,
+			componentsFromSBOM: repoCounts.sbomDependencies,
+			componentsFromManifest: manifestComponents
+		};
 	};
 
 	const fetchComponentCount = async (repoID: string, source: string): Promise<number> => {
@@ -192,29 +188,22 @@
 		return 0;
 	};
 
-	const fetchLatestRunSecrets = async (repoPath: string): Promise<{ secretCount: number } | null> => {
+	const fetchRepoSecurityCounts = async (repoID: string): Promise<{ sbomDependencies: number; secrets: number }> => {
 		try {
-			const response = await fetch(`/api/runs?repo_path=${encodeURIComponent(repoPath)}&page_size=1`, {
+			const response = await fetch(`/api/repos/security?repo_id=${encodeURIComponent(repoID)}`, {
 				credentials: 'include'
 			});
 			if (response.ok) {
 				const data = await response.json();
-				if (data.runs && data.runs.length > 0) {
-					const latestRun = data.runs[0];
-					// Fetch secrets for this run
-					const secretsResponse = await fetch(`/api/runs/${latestRun.id}/secrets`, {
-						credentials: 'include'
-					});
-					if (secretsResponse.ok) {
-						const secretsData = await secretsResponse.json();
-						return { secretCount: secretsData.finding_count || 0 };
-					}
-				}
+				return {
+					sbomDependencies: data.sbom_dependency_count || 0,
+					secrets: data.secrets_count || 0
+				};
 			}
 		} catch {
 			// Ignore errors
 		}
-		return null;
+		return { sbomDependencies: 0, secrets: 0 };
 	};
 
 	// Generate fallback mock security data
@@ -229,14 +218,14 @@
 				medium: rand(15),
 				low: rand(25)
 			},
-			secrets: rand(3),
+			secrets: 0,
 			issues: {
 				noOwner: rand(10) > 7,
 				noLicense: !repo.license,
 				noReadme: !readmeContent,
 				outdatedDeps: rand(12)
 			},
-			components: 50 + rand(200),
+			components: 0,
 			componentsFromSBOM: 0,
 			componentsFromManifest: 0
 		};
@@ -586,4 +575,3 @@
 		{/if}
 	{/if}
 </div>
-
