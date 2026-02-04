@@ -13,6 +13,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -25,6 +26,7 @@ type ScanAllRequest struct {
 	Group            string `json:"group"`             // For GitLab
 	BaseURL          string `json:"base_url"`          // For custom instances
 	IncludeSubgroups bool   `json:"include_subgroups"` // For GitLab
+	ProviderID       string `json:"provider_id"`       // Optional provider instance id
 }
 
 // ScanAllResponse is the response for scan all operation.
@@ -61,11 +63,11 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		switch req.Provider {
 		case "github":
-			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner)
+			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID)
 		case "gitlab":
-			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups)
+			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID)
 		case "gitea", "forgejo":
-			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL)
+			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID)
 		default:
 			http.Error(w, fmt.Sprintf("unsupported provider: %s", req.Provider), http.StatusBadRequest)
 			return
@@ -79,7 +81,7 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 }
 
 // scanAllGitHub fetches all GitHub repos and queues them for scanning.
-func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string) (int, []string) {
+func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string) (int, []string) {
 	if owner == "" {
 		return 0, []string{"owner is required"}
 	}
@@ -111,12 +113,12 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string) (int, []strin
 	}
 
 	// Queue all repos
-	queued := queueRepos(ctx, db, allRepos, "github", "", &errors)
+	queued := queueRepos(ctx, db, allRepos, "github", "", providerID, &errors)
 	return queued, errors
 }
 
 // scanAllGitLab fetches all GitLab projects and queues them for scanning.
-func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool) (int, []string) {
+func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string) (int, []string) {
 	client := providers.NewGitLabClient(baseURL, "")
 	var allProjects []providers.RepoData
 	var errors []string
@@ -145,12 +147,12 @@ func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL strin
 	}
 
 	// Queue all projects
-	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, &errors)
+	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, providerID, &errors)
 	return queued, errors
 }
 
 // scanAllGitea fetches all Gitea/Forgejo repos and queues them for scanning.
-func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string) (int, []string) {
+func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string) (int, []string) {
 	if baseURL == "" {
 		return 0, []string{"base_url is required for Gitea/Forgejo"}
 	}
@@ -182,12 +184,12 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string
 	}
 
 	// Queue all repos
-	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, &errors)
+	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, providerID, &errors)
 	return queued, errors
 }
 
 // queueRepos creates jobs for all repos in parallel batches.
-func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, errors *[]string) int {
+func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, errors *[]string) int {
 	const batchSize = 10
 	var mu sync.Mutex
 	var queued int
@@ -235,9 +237,17 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 					return
 				}
 
+				resolvedProviderID := providerID
+				if resolvedProviderID == "" {
+					if match, err := providerconfig.FindProviderMatch(ctx, db, provider, baseURL, r.FullPath); err == nil && match != nil {
+						resolvedProviderID = match.ID
+					}
+				}
+
 				// Create job payload
 				payload := jobs.CreateRunPayload{
 					RepoID:   repoRecord.ID,
+					ProviderID: resolvedProviderID,
 					Provider: provider,
 					CloneURL: cloneURL,
 					Ref:      r.DefaultBranch,

@@ -15,6 +15,7 @@ type Config struct {
 	HTTPPort    string
 	DatabaseURL string
 	OIDC        OIDCConfig
+	ProviderSecretsKey []byte
 }
 
 // OIDCConfig captures configuration for the OIDC login flow and session cookies.
@@ -61,6 +62,12 @@ func Load() (Config, error) {
 	}
 	cfg.OIDC = oidcCfg
 
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
 	return cfg, nil
 }
 
@@ -75,6 +82,7 @@ type WorkerConfig struct {
 type RunnerConfig struct {
 	Enabled        bool              // Enable runner functionality
 	HMACKey        []byte            // Key for signing run tokens
+	ProviderSecretsKey []byte        // Key for encrypting provider secrets
 	Image          string            // Runner container image
 	Namespace      string            // Kubernetes namespace for runner jobs
 	ServiceAccount string            // ServiceAccount for runner jobs
@@ -156,6 +164,12 @@ func loadRunnerConfig() (RunnerConfig, error) {
 	}
 	cfg.HMACKey = hmacKey
 
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return RunnerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
 	return cfg, nil
 }
 
@@ -191,6 +205,12 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 		}
 		cfg.HMACKey = hmacKey
 	}
+
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return RunnerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
 
 	return cfg, nil
 }
@@ -370,6 +390,26 @@ func parseBool(raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean: %q", raw)
 	}
+}
+
+func parseSecretKeyEnv(key string) ([]byte, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err == nil {
+		if len(decoded) < 32 {
+			return nil, errors.New("PROVIDER_SECRETS_KEY must be at least 32 bytes")
+		}
+		return decoded, nil
+	}
+
+	if len(value) < 32 {
+		return nil, errors.New("PROVIDER_SECRETS_KEY must be at least 32 bytes")
+	}
+	return []byte(value), nil
 }
 
 // parseMapEnv parses a comma-separated key=value environment variable.

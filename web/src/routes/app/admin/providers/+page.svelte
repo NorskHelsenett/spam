@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { fade, slide } from 'svelte/transition';
+	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Trash2, Eye, EyeOff } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff } from 'lucide-svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -28,8 +28,6 @@
 		errors: string[];
 	};
 
-	const STORAGE_KEY = 'spam-admin-providers-mock-v1';
-
 	let providers: ProviderRow[] = $state([]);
 	let providerUrl = $state('');
 	let providerTypeMode: ProviderTypeMode = $state('auto');
@@ -37,38 +35,27 @@
 	let pat = $state('');
 	let preview: ProviderPreview = $state({ errors: [] });
 	let formError = $state('');
+	let error = $state('');
+	let loading = $state(true);
+	let saving = $state(false);
 	let rotatePat = $state('');
 	let rotatingId = $state<string | null>(null);
 	let showPat = $state(false);
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 
-	const nowIso = () => new Date().toISOString();
-
-	const buildDefaultProviders = () => {
-		const createdAt = nowIso();
-		return [
-			{
-				id: crypto.randomUUID(),
-				providerUrl: 'https://github.com/NorskHelsenett',
-				baseUrl: 'https://github.com',
-				ownerPath: 'NorskHelsenett',
-				type: 'github',
-				displayName: 'github.com/NorskHelsenett',
-				enabled: true,
-				createdAt
-			},
-			{
-				id: crypto.randomUUID(),
-				providerUrl: 'https://gitlab.com',
-				baseUrl: 'https://gitlab.com',
-				ownerPath: '',
-				type: 'gitlab',
-				displayName: 'gitlab.com',
-				enabled: true,
-				createdAt
-			}
-		];
+	type ApiProvider = {
+		id: string;
+		provider_url: string;
+		base_url: string;
+		owner_path: string;
+		type: ProviderType;
+		display_name: string;
+		token_fingerprint?: string;
+		enabled: boolean;
+		created_at: string;
+		updated_at?: string;
+		last_rotated_at?: string;
 	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
@@ -137,13 +124,6 @@
 		formError = '';
 	};
 
-	const maskToken = (value: string) => {
-		const trimmed = value.trim();
-		if (!trimmed) return undefined;
-		const last = trimmed.slice(-4);
-		return `****${last}`;
-	};
-
 	const resetForm = () => {
 		providerUrl = '';
 		displayName = '';
@@ -154,64 +134,105 @@
 		updatePreview();
 	};
 
-	const saveProviders = () => {
-		if (!browser) return;
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(providers));
-	};
+	const mapProvider = (entry: ApiProvider): ProviderRow => ({
+		id: entry.id,
+		providerUrl: entry.provider_url,
+		baseUrl: entry.base_url,
+		ownerPath: entry.owner_path || '',
+		type: entry.type,
+		displayName: entry.display_name,
+		tokenFingerprint: entry.token_fingerprint,
+		enabled: entry.enabled,
+		createdAt: entry.created_at,
+		updatedAt: entry.updated_at,
+		lastRotatedAt: entry.last_rotated_at
+	});
 
-	const loadProviders = () => {
-		if (!browser) return;
-		const stored = localStorage.getItem(STORAGE_KEY);
-		if (stored) {
-			try {
-				providers = JSON.parse(stored) as ProviderRow[];
-			} catch {
+	const loadProviders = async () => {
+		loading = true;
+		error = '';
+		try {
+			const response = await fetch('/api/admin/providers', {
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				error = response.status === 403 ? 'Admin access required.' : 'Failed to load providers.';
 				providers = [];
+				return;
 			}
-		}
-		if (!stored || providers.length === 0) {
-			providers = buildDefaultProviders();
-			saveProviders();
+			const data: ApiProvider[] = await response.json();
+			providers = data.map(mapProvider);
+		} catch {
+			error = 'Failed to load providers.';
+		} finally {
+			loading = false;
 		}
 	};
 
-	const addProvider = () => {
+	const addProvider = async () => {
 		showValidation = true;
 		const nextPreview = parseProviderUrl(providerUrl, providerTypeMode);
 		if (nextPreview.errors.length > 0) {
 			formError = '';
 			return;
 		}
+		saving = true;
+		formError = '';
+		try {
+			const payload = {
+				provider_url: ensureScheme(providerUrl).trim(),
+				display_name: displayName.trim() || undefined,
+				pat: pat.trim() || undefined,
+				type: providerTypeMode === 'auto' ? undefined : providerTypeMode
+			};
 
-		const type = nextPreview.type as ProviderType;
-		const baseUrl = nextPreview.baseUrl as string;
-		const ownerPath = nextPreview.ownerPath ?? '';
-		const defaultDisplayName = ownerPath ? `${baseUrl}/${ownerPath}` : baseUrl;
+			const response = await fetch('/api/admin/providers', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
 
-		const entry: ProviderRow = {
-			id: crypto.randomUUID(),
-			providerUrl: ensureScheme(providerUrl).trim(),
-			baseUrl,
-			ownerPath,
-			type,
-			displayName: displayName.trim() || defaultDisplayName,
-			tokenFingerprint: maskToken(pat),
-			enabled: true,
-			createdAt: nowIso()
-		};
+			if (!response.ok) {
+				const text = await response.text();
+				formError = text || 'Failed to create provider.';
+				return;
+			}
 
-		providers = [entry, ...providers];
-		saveProviders();
-		resetForm();
+			const created: ApiProvider = await response.json();
+			providers = [mapProvider(created), ...providers];
+			resetForm();
+			showAddProvider = false;
+		} catch {
+			formError = 'Failed to create provider.';
+		} finally {
+			saving = false;
+		}
 	};
 
-	const toggleEnabled = (entry: ProviderRow) => {
-		providers = providers.map((provider) =>
-			provider.id === entry.id
-				? { ...provider, enabled: !provider.enabled, updatedAt: nowIso() }
-				: provider
-		);
-		saveProviders();
+	const toggleEnabled = async (entry: ProviderRow) => {
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+				method: 'PATCH',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ enabled: !entry.enabled })
+			});
+
+			if (!response.ok) {
+				formError = 'Failed to update provider.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+		} catch {
+			formError = 'Failed to update provider.';
+		} finally {
+			saving = false;
+		}
 	};
 
 	const startRotate = (entry: ProviderRow) => {
@@ -225,35 +246,55 @@
 		rotatePat = '';
 	};
 
-	const submitRotate = (entry: ProviderRow) => {
+	const submitRotate = async (entry: ProviderRow) => {
 		if (!rotatePat.trim()) {
 			formError = 'New PAT is required.';
 			return;
 		}
-		providers = providers.map((provider) =>
-			provider.id === entry.id
-				? {
-						...provider,
-						tokenFingerprint: maskToken(rotatePat),
-						lastRotatedAt: nowIso(),
-						updatedAt: nowIso()
-					}
-				: provider
-		);
-		saveProviders();
-		cancelRotate();
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}/rotate`, {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ pat: rotatePat })
+			});
+
+			if (!response.ok) {
+				formError = 'Failed to rotate token.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+			cancelRotate();
+		} catch {
+			formError = 'Failed to rotate token.';
+		} finally {
+			saving = false;
+		}
 	};
 
-	const removeProvider = (entry: ProviderRow) => {
+	const removeProvider = async (entry: ProviderRow) => {
 		if (!confirm(`Remove ${entry.displayName}?`)) return;
-		providers = providers.filter((provider) => provider.id !== entry.id);
-		saveProviders();
-	};
-
-	const resetMockData = () => {
-		if (!confirm('Clear all mock providers?')) return;
-		providers = [];
-		saveProviders();
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+				method: 'DELETE',
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				formError = 'Failed to delete provider.';
+				return;
+			}
+			providers = providers.filter((provider) => provider.id !== entry.id);
+		} catch {
+			formError = 'Failed to delete provider.';
+		} finally {
+			saving = false;
+		}
 	};
 
 	const toggleAddProvider = () => {
@@ -301,26 +342,19 @@
 			<div>
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Admin Providers</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">
-					Mock configuration UI for admin-managed provider tokens.
+					Configure provider tokens that power the Git providers view.
 				</p>
 			</div>
 			<div class="flex flex-wrap items-center gap-2">
-				<button
-					type="button"
-					class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={updatePreview}
-				>
-					<RefreshCw size={16} />
-					Refresh
-				</button>
-				<button
-					type="button"
-					class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={resetMockData}
-				>
-					<Trash2 size={16} />
-					Reset Mock Data
-				</button>
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={loadProviders}
+				disabled={loading}
+			>
+				<RefreshCw size={16} />
+				Refresh
+			</button>
 			</div>
 		</header>
 
@@ -359,11 +393,15 @@
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<div>
 				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Configured Providers</h2>
-				<p class="text-sm text-[var(--text-tertiary)]">Mock list stored in localStorage.</p>
+				<p class="text-sm text-[var(--text-tertiary)]">Stored in the database and encrypted at rest.</p>
 			</div>
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				class={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
+					showAddProvider
+						? 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]'
+						: 'border-amber-300 bg-amber-300 text-amber-950 hover:bg-amber-200'
+				}`}
 				onclick={toggleAddProvider}
 			>
 				{showAddProvider ? 'Close' : 'Add Provider'}
@@ -468,7 +506,16 @@
 			</div>
 		{/if}
 
-		{#if providers.length === 0}
+		{#if error}
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{error}</div>
+		{/if}
+		{#if formError && !showAddProvider}
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{formError}</div>
+		{/if}
+
+		{#if loading}
+			<p class="text-sm text-[var(--text-secondary)]">Loading providers...</p>
+		{:else if providers.length === 0}
 			<p class="text-sm text-[var(--text-secondary)]">No providers configured yet.</p>
 		{:else}
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">

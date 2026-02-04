@@ -21,6 +21,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/inventory"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
@@ -68,9 +69,15 @@ func run() error {
 		&manifests.ManifestDependency{},
 		&jobs.Job{},
 		&runner.Run{},
+		&providerconfig.ProviderInstance{},
+		&providerconfig.ProviderSecret{},
 		&events.OutboxEvent{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+
+	if err := providerconfig.EnsureDefaults(ctx, gormDB); err != nil {
+		return fmt.Errorf("seed provider defaults: %w", err)
 	}
 
 	if err := db.EnsureViews(ctx, gormDB,
@@ -110,6 +117,12 @@ func run() error {
 			log.Printf("K8s client enabled for API server")
 		}
 	}
+
+	if routerOpts == nil {
+		routerOpts = &server.RouterOptions{}
+	}
+
+	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

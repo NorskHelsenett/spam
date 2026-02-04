@@ -164,7 +164,8 @@ func (c *GitHubClientImpl) getLanguages(ctx context.Context, fullPath string) []
 	return result
 }
 
-// ListPublicRepos lists public repositories for a user or organization.
+// ListPublicRepos lists repositories for a user or organization.
+// If authenticated, private repositories may be included.
 func (c *GitHubClientImpl) ListPublicRepos(ctx context.Context, owner string, opts ListOptions) ([]RepoData, PageInfo, error) {
 	if opts.PageSize <= 0 {
 		opts.PageSize = defaultPageSize
@@ -189,14 +190,22 @@ func (c *GitHubClientImpl) ListPublicRepos(ctx context.Context, owner string, op
 }
 
 func (c *GitHubClientImpl) listOrgRepos(ctx context.Context, org string, opts ListOptions) ([]RepoData, PageInfo, error) {
-	url := fmt.Sprintf("%s/orgs/%s/repos?type=public&per_page=%d&page=%d",
-		c.baseURL, org, opts.PageSize, opts.Page)
+	repoType := "public"
+	if c.token != "" {
+		repoType = "all"
+	}
+	url := fmt.Sprintf("%s/orgs/%s/repos?type=%s&per_page=%d&page=%d",
+		c.baseURL, org, repoType, opts.PageSize, opts.Page)
 	return c.fetchRepos(ctx, url, opts.PageSize)
 }
 
 func (c *GitHubClientImpl) listUserRepos(ctx context.Context, username string, opts ListOptions) ([]RepoData, PageInfo, error) {
-	url := fmt.Sprintf("%s/users/%s/repos?type=public&per_page=%d&page=%d",
-		c.baseURL, username, opts.PageSize, opts.Page)
+	repoType := "public"
+	if c.token != "" {
+		repoType = "all"
+	}
+	url := fmt.Sprintf("%s/users/%s/repos?type=%s&per_page=%d&page=%d",
+		c.baseURL, username, repoType, opts.PageSize, opts.Page)
 	return c.fetchRepos(ctx, url, opts.PageSize)
 }
 

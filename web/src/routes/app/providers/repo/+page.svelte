@@ -109,17 +109,18 @@
 
 	// Get query params
 	const getParams = () => {
-		if (!browser) return { provider: '', path: '', baseUrl: '' };
+		if (!browser) return { provider: '', path: '', baseUrl: '', providerId: '' };
 		const params = $page.url.searchParams;
 		return {
 			provider: params.get('provider') || 'github',
 			path: params.get('path') || '',
-			baseUrl: params.get('base_url') || ''
+			baseUrl: params.get('base_url') || '',
+			providerId: params.get('provider_id') || ''
 		};
 	};
 
 	const fetchRepoDetails = async () => {
-		const { provider, path, baseUrl } = getParams();
+		const { provider, path, baseUrl, providerId } = getParams();
 		if (!path) {
 			error = 'No repository path specified.';
 			loading = false;
@@ -133,10 +134,12 @@
 			let url: string;
 			const params = new URLSearchParams();
 			if (baseUrl) params.set('base_url', baseUrl);
+			if (providerId) params.set('provider_id', providerId);
 
 			if (provider === 'github') {
 				// path is owner/repo
-				url = `/api/providers/github/${path}/details`;
+				const query = params.toString();
+				url = `/api/providers/github/${path}/details${query ? `?${query}` : ''}`;
 			} else if (provider === 'gitlab') {
 				// path is full project path (url encoded)
 				url = `/api/providers/gitlab/${encodeURIComponent(path)}/details?${params}`;
@@ -325,7 +328,7 @@
 	const triggerScan = async () => {
 		if (!details) return;
 
-		const { provider, path, baseUrl } = getParams();
+		const { provider, path, baseUrl, providerId } = getParams();
 		scanning = true;
 		scanError = '';
 
@@ -338,6 +341,7 @@
 					provider,
 					repo_path: path,
 					base_url: baseUrl || undefined,
+					provider_id: providerId || undefined,
 					ref: details.default_branch || undefined
 				})
 			});

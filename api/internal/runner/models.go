@@ -77,6 +77,7 @@ func (RunSecret) TableName() string {
 // CreateRunPayload is the payload for CREATE_RUN jobs.
 type CreateRunPayload struct {
 	RepoID    string `json:"repo_id,omitempty"`
+	ProviderID string `json:"provider_id,omitempty"`
 	Provider  string `json:"provider,omitempty"`
 	CloneURL  string `json:"clone_url"`
 	Ref       string `json:"ref,omitempty"`

@@ -17,7 +17,6 @@
 		CustomProvider
 	} from '$lib/types/providers';
 
-	const ADMIN_STORAGE_KEY = 'spam-admin-providers-mock-v1';
 	const USER_STORAGE_KEY = 'spam-custom-providers';
 
 	// Tab state
@@ -36,6 +35,7 @@
 
 	// GitHub state
 	let ghOwner = $state('NorskHelsenett');
+	let ghProviderId = $state<string | null>(null);
 	let ghRepos: RepoData[] = $state([]);
 	let ghLoading = $state(false);
 	let ghError = $state('');
@@ -161,9 +161,9 @@
 	};
 
 	// Load custom providers from localStorage or admin-managed list
-	const loadCustomProviders = () => {
+	const loadCustomProviders = async () => {
 		if (!browser) return;
-		const managed = loadManagedProviders();
+		const managed = await loadManagedProviders();
 		if (managed.length > 0) {
 			customProviders = managed;
 			managedProvidersEnabled = true;
@@ -171,6 +171,8 @@
 		}
 
 		managedProvidersEnabled = false;
+		ghProviderId = null;
+		customProviders = [];
 		try {
 			const stored = localStorage.getItem(USER_STORAGE_KEY);
 			if (stored) {
@@ -220,81 +222,34 @@
 		return value === 'github' || value === 'gitlab' || value === 'gitea' || value === 'forgejo';
 	};
 
-	const seedManagedProviders = () => {
-		const createdAt = new Date().toISOString();
-		const defaults = [
-			{
-				id: crypto.randomUUID(),
-				providerUrl: 'https://github.com/NorskHelsenett',
-				baseUrl: 'https://github.com',
-				ownerPath: 'NorskHelsenett',
-				type: 'github',
-				displayName: 'github.com/NorskHelsenett',
-				enabled: true,
-				createdAt
-			},
-			{
-				id: crypto.randomUUID(),
-				providerUrl: 'https://gitlab.com',
-				baseUrl: 'https://gitlab.com',
-				ownerPath: '',
-				type: 'gitlab',
-				displayName: 'gitlab.com',
-				enabled: true,
-				createdAt
-			}
-		];
-		localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(defaults));
-		return defaults;
+	type ManagedProvider = {
+		id: string;
+		name: string;
+		type: CustomProvider['type'];
+		base_url: string;
+		owner_path?: string;
+		is_public: boolean;
 	};
 
-	const mapManagedEntries = (entries: unknown[]): CustomProvider[] => {
-		return entries
-			.map((raw) => {
-				if (!raw || typeof raw !== 'object') return null;
-				const entry = raw as Record<string, unknown>;
-				if (entry.enabled === false) return null;
-				const type = typeof entry.type === 'string' && isProviderType(entry.type) ? entry.type : null;
-				const baseUrl = typeof entry.baseUrl === 'string' ? entry.baseUrl : '';
-				const id = typeof entry.id === 'string' ? entry.id : crypto.randomUUID();
-				const name =
-					typeof entry.displayName === 'string'
-						? entry.displayName
-						: typeof entry.providerUrl === 'string'
-							? entry.providerUrl
-							: baseUrl;
-				if (!type || !baseUrl) return null;
-				const ownerPath = typeof entry.ownerPath === 'string' ? entry.ownerPath : '';
-				const tokenFingerprint = typeof entry.tokenFingerprint === 'string' ? entry.tokenFingerprint : '';
-				const isPublic = tokenFingerprint.length === 0;
-				return {
-					id,
-					name,
-					type,
-					baseUrl,
-					ownerPath,
-					isPublic
-				} satisfies CustomProvider;
-			})
-			.filter((entry): entry is CustomProvider => Boolean(entry));
-	};
-
-	const loadManagedProviders = (): CustomProvider[] => {
+	const loadManagedProviders = async (): Promise<CustomProvider[]> => {
 		if (!browser) return [];
-		const stored = localStorage.getItem(ADMIN_STORAGE_KEY);
-		let parsed: unknown = stored ? null : seedManagedProviders();
-
 		try {
-			if (stored) {
-				parsed = JSON.parse(stored);
-			}
-			if (!Array.isArray(parsed) || parsed.length === 0) {
-				parsed = seedManagedProviders();
-			}
-			return mapManagedEntries(parsed);
+			const response = await fetch('/api/providers/instances', { credentials: 'include' });
+			if (!response.ok) return [];
+			const data: ManagedProvider[] = await response.json();
+			if (!Array.isArray(data)) return [];
+			return data
+				.filter((entry) => entry && isProviderType(entry.type))
+				.map((entry) => ({
+					id: entry.id,
+					name: entry.name,
+					type: entry.type,
+					baseUrl: entry.base_url,
+					ownerPath: entry.owner_path || '',
+					isPublic: entry.is_public
+				}));
 		} catch {
-			const defaults = seedManagedProviders();
-			return mapManagedEntries(defaults);
+			return [];
 		}
 	};
 
@@ -377,7 +332,8 @@
 
 	// GitHub functions
 	const fetchGitHubRepos = async (page = 1) => {
-		if (!ghOwner.trim()) return;
+		const owner = ghOwner.trim();
+		if (!owner) return;
 
 		ghLoading = true;
 		ghError = '';
@@ -387,12 +343,15 @@
 				page: String(page),
 				page_size: String(pageSize)
 			});
+			if (ghProviderId) {
+				params.set('provider_id', ghProviderId);
+			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
 			}
 
-			const response = await fetch(`/api/providers/github/${encodeURIComponent(ghOwner)}/repos?${params}`, {
+			const response = await fetch(`/api/providers/github/${encodeURIComponent(owner)}/repos?${params}`, {
 				credentials: 'include'
 			});
 
@@ -511,6 +470,9 @@
 				page_size: String(pageSize),
 				base_url: provider.baseUrl
 			});
+			if (managedProvidersEnabled) {
+				params.set('provider_id', provider.id);
+			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
@@ -575,6 +537,9 @@
 				page_size: '50',
 				base_url: provider.baseUrl
 			});
+			if (managedProvidersEnabled) {
+				params.set('provider_id', provider.id);
+			}
 
 			const groupPath = cpGroup.trim();
 			const url = groupPath
@@ -641,6 +606,7 @@
 	};
 
 	const handleGitHubSearch = () => {
+		ghProviderId = null;
 		ghPage = 1;
 		fetchGitHubRepos(1);
 	};
@@ -654,6 +620,7 @@
 
 	const handleCustomSearch = (provider: CustomProvider) => {
 		if (provider.type === 'github') {
+			ghProviderId = managedProvidersEnabled ? provider.id : null;
 			ghPage = 1;
 			ghOwner = provider.ownerPath || ghOwner;
 			fetchGitHubRepos(1);
@@ -702,9 +669,12 @@
 		} else if (activeTab === 'gitlab' && glProjects.length > 0) {
 			glPage = 1;
 			fetchGitLabProjects(1);
-		} else if (getActiveCustomProvider() && cpProjects.length > 0) {
+		} else if (getActiveCustomProvider()) {
 			const provider = getActiveCustomProvider();
-			if (provider) {
+			if (provider?.type === 'github' && ghRepos.length > 0) {
+				ghPage = 1;
+				fetchGitHubRepos(1);
+			} else if (provider && cpProjects.length > 0) {
 				cpPage = 1;
 				fetchCustomProjects(provider, 1);
 			}
@@ -712,16 +682,24 @@
 	};
 
 	// Navigate to repo details page
-	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
+	const goToRepoDetails = (provider: string, path: string, baseUrl?: string, providerId?: string) => {
 		// Save state before navigating
 		saveState();
 		const params = new URLSearchParams({ provider, path });
 		if (baseUrl) params.set('base_url', baseUrl);
+		if (providerId) params.set('provider_id', providerId);
 		goto(`/app/providers/repo?${params}`);
 	};
 
 	// Trigger SBOM scan for all repos (including paginated results)
-	const queueAllRepos = async (provider: string, owner: string, group: string, baseUrl?: string, includeSubgroups: boolean = false) => {
+	const queueAllRepos = async (
+		provider: string,
+		owner: string,
+		group: string,
+		baseUrl?: string,
+		includeSubgroups: boolean = false,
+		providerId?: string
+	) => {
 		if (queueing) return;
 
 		queueing = true;
@@ -737,7 +715,8 @@
 					owner: owner || undefined,
 					group: group || undefined,
 					base_url: baseUrl || undefined,
-					include_subgroups: includeSubgroups
+					include_subgroups: includeSubgroups,
+					provider_id: providerId || undefined
 				})
 			});
 
@@ -768,6 +747,7 @@
 		sortColumn = '';
 		sortDirection = 'asc';
 		if (provider.type === 'github') {
+			ghProviderId = managedProvidersEnabled ? provider.id : null;
 			ghOwner = provider.ownerPath || ghOwner;
 			ghRepos = [];
 			ghPage = 1;
@@ -780,6 +760,7 @@
 			return;
 		}
 
+		ghProviderId = null;
 		cpGroup = provider.ownerPath || '';
 		cpProjects = [];
 		cpSubgroups = [];
@@ -791,12 +772,20 @@
 	};
 
 	onMount(() => {
-		if (browser) {
-			loadCustomProviders();
+		if (!browser) return;
+		const init = async () => {
+			await loadCustomProviders();
 			// Try to restore state from store (when coming back from repo details)
 			const restored = restoreState(managedProvidersEnabled);
 			if (managedProvidersEnabled) {
-				const activeExists = customProviders.some((provider) => provider.id === activeTab);
+				const activeProvider = customProviders.find((provider) => provider.id === activeTab);
+				if (activeProvider?.type === 'github') {
+					ghProviderId = activeProvider.id;
+					ghOwner = activeProvider.ownerPath || ghOwner;
+				} else {
+					ghProviderId = null;
+				}
+				const activeExists = Boolean(activeProvider);
 				if (!activeExists && customProviders.length > 0) {
 					switchToCustomTab(customProviders[0]);
 				} else if (!restored && customProviders.length > 0) {
@@ -809,7 +798,8 @@
 				// No state to restore, fetch initial data
 				fetchGitHubRepos(1);
 			}
-		}
+		};
+		init();
 	});
 </script>
 
@@ -821,7 +811,7 @@
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header>
 			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Git Providers</h1>
-			<p class="text-sm text-[var(--text-tertiary)]">Browse public repositories from GitHub, GitLab, and custom instances.</p>
+			<p class="text-sm text-[var(--text-tertiary)]">Browse repositories from GitHub, GitLab, and custom instances.</p>
 		</header>
 
 		<!-- Tabs -->
@@ -832,7 +822,7 @@
 				class="px-4 py-2 text-sm font-medium transition {activeTab === 'github'
 					? 'border-b-2 border-[var(--accent)] text-[var(--accent)]'
 					: 'text-[var(--text-secondary)] hover:text-[var(--text-bright)]'}"
-				onclick={() => { activeTab = 'github'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
+				onclick={() => { activeTab = 'github'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; ghProviderId = null; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
 			>
 				GitHub
 			</button>
@@ -1162,7 +1152,7 @@
 						<button
 							type="button"
 							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false)}
+							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
 							disabled={queueing || !provider.ownerPath}
 							title="Queue SBOM generation for all projects from {provider.name}"
 						>
@@ -1205,11 +1195,11 @@
 					{:else if ghError}
 						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{ghError}</div>
 					{:else if ghRepos.length === 0 && !ghLoading}
-						<p class="text-sm text-[var(--text-secondary)]">No public repositories found.</p>
+						<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
 					{:else if ghRepos.length > 0}
 						<RepoTable columns={githubColumns} {sortColumn} {sortDirection} onSort={handleSort}>
 							{#each ghRepos as repo}
-								<RepoTableRow repo={repo} {formatDate} onSelect={() => goToRepoDetails('github', repo.full_path)} />
+								<RepoTableRow repo={repo} {formatDate} onSelect={() => goToRepoDetails('github', repo.full_path, undefined, managedProvidersEnabled ? provider.id : undefined)} />
 							{/each}
 						</RepoTable>
 
@@ -1248,7 +1238,7 @@
 					<button
 						type="button"
 						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups)}
+						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
 						disabled={queueing}
 						title="Queue SBOM generation for all projects from {provider.name}"
 					>
@@ -1314,7 +1304,7 @@
 				{/if}
 
 				{#if cpProjects.length === 0 && !cpLoading && !cpError}
-					<p class="text-sm text-[var(--text-secondary)]">No public projects found.</p>
+					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
 				{:else if cpProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
 						{#each cpProjects as project}
@@ -1322,7 +1312,7 @@
 								repo={project}
 								showPath
 								{formatDate}
-								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
+								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl, managedProvidersEnabled ? provider.id : undefined)}
 							/>
 						{/each}
 					</RepoTable>

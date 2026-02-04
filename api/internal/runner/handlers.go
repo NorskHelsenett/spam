@@ -13,6 +13,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -58,10 +59,31 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Look up PAT for the repository based on run payload
-	// For now, return empty token (public repos only)
+	// Load run payload for provider metadata
+	var run Run
+	if err := s.db.WithContext(r.Context()).Where("id = ?", req.RunID).First(&run).Error; err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	var payload CreateRunPayload
+	if len(run.Payload) > 0 {
+		_ = json.Unmarshal(run.Payload, &payload)
+	}
+
+	providerToken := ""
+	if payload.ProviderID != "" {
+		pat, err := providerconfig.GetActiveToken(r.Context(), s.db, payload.ProviderID, s.cfg.ProviderSecretsKey)
+		if err != nil {
+			log.Printf("token exchange failed: %v", err)
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		providerToken = pat
+	}
+
 	resp := TokenExchangeResponse{
-		Token: "", // Empty means public repo
+		Token: providerToken,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
