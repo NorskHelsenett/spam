@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { fade, slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Trash2 } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, RefreshCw, Trash2, Eye, EyeOff } from 'lucide-svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -40,8 +41,35 @@
 	let rotatingId = $state<string | null>(null);
 	let showPat = $state(false);
 	let showValidation = $state(false);
+	let showAddProvider = $state(false);
 
 	const nowIso = () => new Date().toISOString();
+
+	const buildDefaultProviders = () => {
+		const createdAt = nowIso();
+		return [
+			{
+				id: crypto.randomUUID(),
+				providerUrl: 'https://github.com/NorskHelsenett',
+				baseUrl: 'https://github.com',
+				ownerPath: 'NorskHelsenett',
+				type: 'github',
+				displayName: 'github.com/NorskHelsenett',
+				enabled: true,
+				createdAt
+			},
+			{
+				id: crypto.randomUUID(),
+				providerUrl: 'https://gitlab.com',
+				baseUrl: 'https://gitlab.com',
+				ownerPath: '',
+				type: 'gitlab',
+				displayName: 'gitlab.com',
+				enabled: true,
+				createdAt
+			}
+		];
+	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
 		if (host === 'github.com') return 'github';
@@ -134,14 +162,16 @@
 	const loadProviders = () => {
 		if (!browser) return;
 		const stored = localStorage.getItem(STORAGE_KEY);
-		if (!stored) {
-			providers = [];
-			return;
+		if (stored) {
+			try {
+				providers = JSON.parse(stored) as ProviderRow[];
+			} catch {
+				providers = [];
+			}
 		}
-		try {
-			providers = JSON.parse(stored) as ProviderRow[];
-		} catch {
-			providers = [];
+		if (!stored || providers.length === 0) {
+			providers = buildDefaultProviders();
+			saveProviders();
 		}
 	};
 
@@ -150,10 +180,6 @@
 		const nextPreview = parseProviderUrl(providerUrl, providerTypeMode);
 		if (nextPreview.errors.length > 0) {
 			formError = '';
-			return;
-		}
-		if (!pat.trim()) {
-			formError = 'PAT is required.';
 			return;
 		}
 
@@ -228,6 +254,13 @@
 		if (!confirm('Clear all mock providers?')) return;
 		providers = [];
 		saveProviders();
+	};
+
+	const toggleAddProvider = () => {
+		showAddProvider = !showAddProvider;
+		if (!showAddProvider) {
+			resetForm();
+		}
 	};
 
 	const providerTag = (type: ProviderType) => {
@@ -323,107 +356,117 @@
 	</section>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Add Provider</h2>
-			<p class="text-sm text-[var(--text-tertiary)]">Enter a provider URL and PAT. PATs are stored only in the backend.</p>
+		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Configured Providers</h2>
+				<p class="text-sm text-[var(--text-tertiary)]">Mock list stored in localStorage.</p>
+			</div>
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={toggleAddProvider}
+			>
+				{showAddProvider ? 'Close' : 'Add Provider'}
+			</button>
 		</header>
 
-		<div class="grid gap-4 lg:grid-cols-3">
-			<div class="lg:col-span-2 space-y-4">
-				<div class="grid gap-4 md:grid-cols-2">
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider URL</label>
-						<input
-							type="url"
-							placeholder="https://github.com/NorskHelsenett"
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={providerUrl}
-							oninput={updatePreview}
-						/>
-					</div>
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider Type</label>
-						<select
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={providerTypeMode}
-							onchange={updatePreview}
-						>
-							<option value="auto">Auto detect</option>
-							<option value="github">GitHub</option>
-							<option value="gitlab">GitLab</option>
-							<option value="gitea">Gitea</option>
-							<option value="forgejo">Forgejo</option>
-						</select>
-					</div>
-				</div>
-
-				<div class="grid gap-4 md:grid-cols-2">
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Display Name</label>
-						<input
-							type="text"
-							placeholder="github.com/NorskHelsenett"
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={displayName}
-						/>
-						<p class="text-xs text-[var(--text-tertiary)]">Optional. Defaults to derived URL.</p>
-					</div>
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Personal Access Token</label>
-						<div class="flex items-center gap-2">
+		{#if showAddProvider}
+			<div class="grid gap-4 lg:grid-cols-3" in:slide={{ duration: 180 }} out:slide={{ duration: 160 }}>
+				<div class="lg:col-span-2 space-y-4">
+					<div class="grid gap-4 md:grid-cols-2">
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider URL</label>
 							<input
-								type={showPat ? 'text' : 'password'}
-								placeholder="Enter PAT"
+								type="url"
+								placeholder="https://github.com/NorskHelsenett"
 								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-								bind:value={pat}
+								bind:value={providerUrl}
+								oninput={updatePreview}
 							/>
-							<button
-								type="button"
-								class="rounded-full border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-								onclick={() => (showPat = !showPat)}
-							>
-								{showPat ? 'Hide' : 'Show'}
-							</button>
 						</div>
-						<p class="text-xs text-[var(--text-tertiary)]">PAT is never shown after submission.</p>
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider Type</label>
+							<select
+								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+								bind:value={providerTypeMode}
+								onchange={updatePreview}
+							>
+								<option value="auto">Auto detect</option>
+								<option value="github">GitHub</option>
+								<option value="gitlab">GitLab</option>
+								<option value="gitea">Gitea</option>
+								<option value="forgejo">Forgejo</option>
+							</select>
+						</div>
 					</div>
+
+					<div class="grid gap-4 md:grid-cols-2">
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Display Name</label>
+							<input
+								type="text"
+								placeholder="github.com/NorskHelsenett"
+								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+								bind:value={displayName}
+							/>
+							<p class="text-xs text-[var(--text-tertiary)]">Optional. Defaults to derived URL.</p>
+						</div>
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Personal Access Token</label>
+							<div class="relative">
+								<input
+									type={showPat ? 'text' : 'password'}
+									placeholder="Enter PAT"
+									class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-12 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+									bind:value={pat}
+								/>
+								<button
+									type="button"
+									class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+									onclick={() => (showPat = !showPat)}
+									aria-label={showPat ? 'Hide PAT' : 'Show PAT'}
+								>
+									{#if showPat}
+										<EyeOff size={14} />
+									{:else}
+										<Eye size={14} />
+									{/if}
+								</button>
+							</div>
+							<p class="text-xs text-[var(--text-tertiary)]">Optional. Leave empty to mark as public.</p>
+						</div>
+					</div>
+
+				{#if showValidation && preview.errors.length > 0}
+					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						{preview.errors[0]}
+					</div>
+				{/if}
+				{#if showValidation && formError}
+					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						{formError}
+					</div>
+				{/if}
 				</div>
 
-			{#if showValidation && preview.errors.length > 0}
-				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-					{preview.errors[0]}
+				<div class="space-y-4 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+					<h3 class="text-sm font-semibold text-[var(--text-bright)]">Derived Preview</h3>
+					<div class="text-xs text-[var(--text-tertiary)]">
+						<p>Type: {preview.type ? providerTag(preview.type) : 'Unknown'}</p>
+						<p>Base URL: {preview.baseUrl ?? '-'}</p>
+						<p>Owner/Group: {preview.ownerPath || 'All repositories'}</p>
+						<p>Access: {pat.trim() ? 'PAT required' : 'Public'}</p>
+					</div>
+					<button
+						type="button"
+						class="w-full rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200"
+						onclick={addProvider}
+					>
+						Add Provider
+					</button>
 				</div>
-			{/if}
-			{#if showValidation && formError}
-				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-					{formError}
-				</div>
-			{/if}
 			</div>
-
-			<div class="space-y-4 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<h3 class="text-sm font-semibold text-[var(--text-bright)]">Derived Preview</h3>
-				<div class="text-xs text-[var(--text-tertiary)]">
-					<p>Type: {preview.type ? providerTag(preview.type) : 'Unknown'}</p>
-					<p>Base URL: {preview.baseUrl ?? '-'}</p>
-					<p>Owner/Group: {preview.ownerPath || 'All repositories'}</p>
-				</div>
-				<button
-					type="button"
-					class="w-full rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-					onclick={addProvider}
-				>
-					Add Provider
-				</button>
-			</div>
-		</div>
-	</section>
-
-	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Configured Providers</h2>
-			<p class="text-sm text-[var(--text-tertiary)]">Mock list stored in localStorage.</p>
-		</header>
+		{/if}
 
 		{#if providers.length === 0}
 			<p class="text-sm text-[var(--text-secondary)]">No providers configured yet.</p>
@@ -456,7 +499,7 @@
 									{entry.ownerPath || 'All'}
 								</td>
 								<td class="px-5 py-3 text-xs">
-									{entry.tokenFingerprint ? `${entry.tokenFingerprint}` : 'Missing'}
+									{entry.tokenFingerprint ? `${entry.tokenFingerprint}` : 'Public'}
 									{#if entry.lastRotatedAt}
 										<div class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 											Rotated {entry.lastRotatedAt}
