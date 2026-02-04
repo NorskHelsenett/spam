@@ -170,6 +170,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 						{
 							Name:  "runner",
 							Image: k.cfg.Image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
 								{Name: "RUN_ID", Value: runID},
