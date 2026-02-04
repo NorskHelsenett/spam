@@ -333,13 +333,13 @@ func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 			return
 		}
 
-		var ecosystems []string
-		if err := db.WithContext(r.Context()).
-			Table("components").
-			Distinct("ecosystem").
-			Where("ecosystem IS NOT NULL AND ecosystem != ''").
-			Order("ecosystem ASC").
-			Pluck("ecosystem", &ecosystems).Error; err != nil {
+	var ecosystems []string
+	if err := db.WithContext(r.Context()).
+		Table("sbom_component_view").
+		Distinct("kind").
+		Where("is_root = false AND kind IS NOT NULL AND kind != ''").
+		Order("kind ASC").
+		Pluck("kind", &ecosystems).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}

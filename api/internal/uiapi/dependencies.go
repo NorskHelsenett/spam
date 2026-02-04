@@ -78,38 +78,48 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		// Build unified query - group by name+ecosystem
 		query := `
 			WITH sbom_deps AS (
-				SELECT 
-					c.name,
-					c.ecosystem,
-					MIN(SPLIT_PART(c.purl, '@', 1)) as purl_base,
+				SELECT
+					scv.name,
+					scv.ecosystem,
+					MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl_base,
 					'sbom' as source,
-					COUNT(DISTINCT cv.version) as version_count,
-					COUNT(DISTINCT sc.sbom_id) as sbom_count,
-					COUNT(DISTINCT sb.asset_ref_id) as repo_count
-				FROM components c
-				JOIN component_versions cv ON cv.component_id = c.id
-				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				LEFT JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
-				WHERE 1=1
+					COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
+					COUNT(DISTINCT scv.sbom_id) as sbom_count,
+					COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
+				FROM (
+					SELECT
+						COALESCE(s.package_name, s.normalized_name, s.name) as name,
+						s.kind as ecosystem,
+						s.purl,
+						s.purl_version,
+						s.version,
+						s.sbom_id,
+						s.asset_type,
+						s.asset_ref_id
+					FROM sbom_component_view s
+					WHERE s.is_root = false
+					  AND s.purl IS NOT NULL
+				) scv
+				WHERE scv.name IS NOT NULL
 		`
 
 		args := []interface{}{}
 
 		if search != "" {
-			query += ` AND c.name ILIKE ?`
-			args = append(args, "%"+search+"%")
+			query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
+			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
 		if ecosystem != "" {
-			query += ` AND c.ecosystem = ?`
+			query += ` AND scv.ecosystem = ?`
 			args = append(args, ecosystem)
 		}
 		if repoID != "" {
-			query += ` AND sb.asset_ref_id = ?`
+			query += ` AND scv.asset_ref_id = ?`
 			args = append(args, repoID)
 		}
 
 		query += `
-				GROUP BY c.name, c.ecosystem
+				GROUP BY scv.name, scv.ecosystem
 			),
 			manifest_deps AS (
 				SELECT 
@@ -318,16 +328,15 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		versionsQuery := `
 			WITH sbom_versions AS (
 				SELECT 
-					cv.version,
-					COUNT(DISTINCT sb.asset_ref_id) as repo_count,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+					COUNT(DISTINCT s.asset_ref_id) as repo_count,
 					'sbom' as source
-				FROM components c
-				JOIN component_versions cv ON cv.component_id = c.id
-				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id
-				WHERE c.name = ? AND c.ecosystem = ?
-				  AND sb.asset_type = 'REPO_COMMIT'
-				GROUP BY cv.version
+				FROM sbom_component_view s
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
+				  AND s.asset_type = 'REPO_COMMIT'
+				GROUP BY COALESCE(s.version, NULLIF(s.purl_version, ''), '')
 			),
 			manifest_versions AS (
 				SELECT 
@@ -415,10 +424,11 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		// Get PURL if available (for display)
 		var purl sql.NullString
 		db.WithContext(r.Context()).Raw(`
-			SELECT c.purl
-			FROM components c
-			WHERE c.name = ? AND c.ecosystem = ?
-			LIMIT 1
+			SELECT MIN(NULLIF(split_part(s.purl, '@', 1), ''))
+			FROM sbom_component_view s
+			WHERE s.is_root = false
+			  AND s.purl IS NOT NULL
+			  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
 		`, name, ecosystem).Row().Scan(&purl)
 
 		detail := DependencyDetail{
@@ -466,28 +476,30 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		// Simplified approach: find SBOMs containing this dependency, then find bound assets
 		assetsQuery := `
 			WITH sbom_assets AS (
-				SELECT 
+				SELECT DISTINCT
 					'REPO_COMMIT' as asset_type,
 					r.id as repo_id,
 					r.provider,
 					r.org,
 					r.slug,
 					rc.commit_sha,
-					cv.version,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
 					'sbom' as source,
 					NULL as manifest_path,
 					NULL as manifest_type,
 					false as direct,
-					sc.scope,
+					NULL as scope,
 					sb.created_at
-				FROM components c
-				JOIN component_versions cv ON cv.component_id = c.id
-				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id AND sb.asset_type = 'REPO_COMMIT'
+				FROM sbom_component_view s
+				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+				  AND sb.asset_type = 'REPO_COMMIT'
+				  AND sb.asset_ref_id = s.asset_ref_id
 				JOIN repo_commits rc ON rc.id = sb.asset_ref_id
 				JOIN repos r ON r.id = rc.repo_id
-				WHERE c.name = ? AND c.ecosystem = ?
-				  AND (? = '' OR cv.version = ?)
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
+				  AND (? = '' OR COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?)
 			),
 			manifest_assets AS (
 				SELECT 
@@ -526,12 +538,14 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		countQuery := `
 			WITH sbom_assets AS (
 				SELECT DISTINCT sb.id
-				FROM components c
-				JOIN component_versions cv ON cv.component_id = c.id
-				JOIN sbom_components sc ON sc.component_version_id = cv.id
-				JOIN sbom_bindings sb ON sb.sbom_id = sc.sbom_id AND sb.asset_type = 'REPO_COMMIT'
-				WHERE c.name = ? AND c.ecosystem = ?
-				  AND (? = '' OR cv.version = ?)
+				FROM sbom_component_view s
+				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+				  AND sb.asset_type = 'REPO_COMMIT'
+				  AND sb.asset_ref_id = s.asset_ref_id
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
+				  AND (? = '' OR COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?)
 			),
 			manifest_assets AS (
 				SELECT md.id
