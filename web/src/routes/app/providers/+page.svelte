@@ -72,8 +72,8 @@
 	let sortDirection = $state<'asc' | 'desc'>('asc');
 
 	// Bulk scan state
-	let bulkScanning = $state(false);
-	let bulkProgress = $state({ current: 0, total: 0, errors: [] as string[] });
+	let queueing = $state(false);
+	let queueProgress = $state({ total: 0, errors: [] as string[] });
 
 	// Table column definitions
 	const githubColumns = [
@@ -613,44 +613,46 @@
 		goto(`/app/providers/repo?${params}`);
 	};
 
-	// Trigger SBOM scan for all visible repos
-	const scanAllRepos = async (repos: RepoData[], provider: string, baseUrl?: string) => {
-		if (repos.length === 0 || bulkScanning) return;
+	// Trigger SBOM scan for all repos (including paginated results)
+	const queueAllRepos = async (provider: string, owner: string, group: string, baseUrl?: string, includeSubgroups: boolean = false) => {
+		if (queueing) return;
 
-		bulkScanning = true;
-		bulkProgress = { current: 0, total: repos.length, errors: [] };
+		queueing = true;
+		queueProgress = { total: 0, errors: [] };
 
-		for (let i = 0; i < repos.length; i++) {
-			const repo = repos[i];
-			try {
-				const response = await fetch('/api/runs', {
-					method: 'POST',
-					credentials: 'include',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({
-						provider,
-						repo_path: repo.full_path,
-						base_url: baseUrl || undefined,
-						ref: repo.default_branch || undefined
-					})
-				});
+		try {
+			const response = await fetch('/api/scan-all', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					provider,
+					owner: owner || undefined,
+					group: group || undefined,
+					base_url: baseUrl || undefined,
+					include_subgroups: includeSubgroups
+				})
+			});
 
-				if (!response.ok) {
-					const text = await response.text();
-					bulkProgress.errors.push(`${repo.name}: ${text || 'Failed'}`);
-				}
-			} catch (err) {
-				bulkProgress.errors.push(`${repo.name}: ${err instanceof Error ? err.message : 'Failed'}`);
+			if (!response.ok) {
+				const text = await response.text();
+				queueProgress.errors = [text || 'Failed to queue repos'];
+			} else {
+				const data = await response.json();
+				queueProgress = {
+					total: data.total_queued,
+					errors: data.errors || []
+				};
 			}
-
-			bulkProgress.current = i + 1;
+		} catch (err) {
+			queueProgress.errors = [err instanceof Error ? err.message : 'Failed to queue repos'];
 		}
 
-		// Auto-dismiss after 3 seconds if no errors
-		if (bulkProgress.errors.length === 0) {
+		// Auto-dismiss after 5 seconds if no errors
+		if (queueProgress.errors.length === 0) {
 			setTimeout(() => {
-				bulkScanning = false;
-			}, 3000);
+				queueing = false;
+			}, 5000);
 		}
 	};
 
@@ -775,36 +777,39 @@
 					>
 						{ghLoading ? 'Loading...' : 'Fetch Repos'}
 					</button>
-					{#if ghRepos.length > 0}
-						<button
-							type="button"
-							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-							onclick={() => scanAllRepos(ghRepos, 'github')}
-							disabled={bulkScanning}
-							title="Trigger SBOM generation for all {ghRepos.length} repositories"
-						>
-							{bulkScanning ? 'Scanning...' : `Scan All (${ghRepos.length})`}
-						</button>
-					{/if}
+					<button
+						type="button"
+						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						onclick={() => queueAllRepos('github', ghOwner, '', undefined, false)}
+						disabled={queueing || !ghOwner.trim()}
+						title="Queue SBOM generation for all repositories from {ghOwner}"
+					>
+						{queueing ? 'Queueing...' : 'Queue All'}
+					</button>
 				</div>
 
-				{#if bulkScanning && activeTab === 'github'}
+				{#if queueing && activeTab === 'github'}
 					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">Scanning repositories...</span>
-							<span class="font-medium text-[var(--accent)]">{bulkProgress.current} / {bulkProgress.total}</span>
+							<span class="text-[var(--text-secondary)]">
+								{#if queueProgress.total > 0}
+									Added {queueProgress.total} {queueProgress.total === 1 ? 'repository' : 'repositories'} to queue
+								{:else}
+									Adding repositories to queue...
+								{/if}
+							</span>
+							{#if queueProgress.total > 0}
+								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
+							{/if}
 						</div>
-						<div class="mt-2 h-2 overflow-hidden rounded-full bg-[var(--border-color)]">
-							<div class="h-full bg-[var(--accent)] transition-all" style="width: {(bulkProgress.current / bulkProgress.total) * 100}%"></div>
-						</div>
-						{#if bulkProgress.errors.length > 0}
+						{#if queueProgress.errors.length > 0}
 							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{bulkProgress.errors.length} errors:</p>
-								{#each bulkProgress.errors.slice(0, 5) as error}
+								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
+								{#each queueProgress.errors.slice(0, 5) as error}
 									<p class="text-xs text-[var(--error)]">{error}</p>
 								{/each}
-								{#if bulkProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {bulkProgress.errors.length - 5} more</p>
+								{#if queueProgress.errors.length > 5}
+									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
 								{/if}
 							</div>
 						{/if}
@@ -856,36 +861,39 @@
 					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
 						{glLoading ? 'Loading...' : 'Fetch Projects'}
 					</button>
-					{#if glProjects.length > 0}
-						<button
-							type="button"
-							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-							onclick={() => scanAllRepos(glProjects, 'gitlab')}
-							disabled={bulkScanning}
-							title="Trigger SBOM generation for all {glProjects.length} projects"
-						>
-							{bulkScanning ? 'Scanning...' : `Scan All (${glProjects.length})`}
-						</button>
-					{/if}
+					<button
+						type="button"
+						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						onclick={() => queueAllRepos('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
+						disabled={queueing || !glGroup.trim()}
+						title="Queue SBOM generation for all projects from {glGroup}"
+					>
+						{queueing ? 'Queueing...' : 'Queue All'}
+					</button>
 				</div>
 
-				{#if bulkScanning && activeTab === 'gitlab'}
+				{#if queueing && activeTab === 'gitlab'}
 					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">Scanning projects...</span>
-							<span class="font-medium text-[var(--accent)]">{bulkProgress.current} / {bulkProgress.total}</span>
+							<span class="text-[var(--text-secondary)]">
+								{#if queueProgress.total > 0}
+									Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue
+								{:else}
+									Adding projects to queue...
+								{/if}
+							</span>
+							{#if queueProgress.total > 0}
+								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
+							{/if}
 						</div>
-						<div class="mt-2 h-2 overflow-hidden rounded-full bg-[var(--border-color)]">
-							<div class="h-full bg-[var(--accent)] transition-all" style="width: {(bulkProgress.current / bulkProgress.total) * 100}%"></div>
-						</div>
-						{#if bulkProgress.errors.length > 0}
+						{#if queueProgress.errors.length > 0}
 							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{bulkProgress.errors.length} errors:</p>
-								{#each bulkProgress.errors.slice(0, 5) as error}
+								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
+								{#each queueProgress.errors.slice(0, 5) as error}
 									<p class="text-xs text-[var(--error)]">{error}</p>
 								{/each}
-								{#if bulkProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {bulkProgress.errors.length - 5} more</p>
+								{#if queueProgress.errors.length > 5}
+									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
 								{/if}
 							</div>
 						{/if}
@@ -1015,36 +1023,39 @@
 					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
 						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
 					</button>
-					{#if cpProjects.length > 0}
-						<button
-							type="button"
-							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-							onclick={() => scanAllRepos(cpProjects, provider.type, provider.baseUrl)}
-							disabled={bulkScanning}
-							title="Trigger SBOM generation for all {cpProjects.length} projects"
-						>
-							{bulkScanning ? 'Scanning...' : `Scan All (${cpProjects.length})`}
-						</button>
-					{/if}
+					<button
+						type="button"
+						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups)}
+						disabled={queueing}
+						title="Queue SBOM generation for all projects from {provider.name}"
+					>
+						{queueing ? 'Queueing...' : 'Queue All'}
+					</button>
 				</div>
 
-				{#if bulkScanning && activeTab === provider.id}
+				{#if queueing && activeTab === provider.id}
 					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">Scanning projects...</span>
-							<span class="font-medium text-[var(--accent)]">{bulkProgress.current} / {bulkProgress.total}</span>
+							<span class="text-[var(--text-secondary)]">
+								{#if queueProgress.total > 0}
+									Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue
+								{:else}
+									Adding projects to queue...
+								{/if}
+							</span>
+							{#if queueProgress.total > 0}
+								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
+							{/if}
 						</div>
-						<div class="mt-2 h-2 overflow-hidden rounded-full bg-[var(--border-color)]">
-							<div class="h-full bg-[var(--accent)] transition-all" style="width: {(bulkProgress.current / bulkProgress.total) * 100}%"></div>
-						</div>
-						{#if bulkProgress.errors.length > 0}
+						{#if queueProgress.errors.length > 0}
 							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{bulkProgress.errors.length} errors:</p>
-								{#each bulkProgress.errors.slice(0, 5) as error}
+								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
+								{#each queueProgress.errors.slice(0, 5) as error}
 									<p class="text-xs text-[var(--error)]">{error}</p>
 								{/each}
-								{#if bulkProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {bulkProgress.errors.length - 5} more</p>
+								{#if queueProgress.errors.length > 5}
+									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
 								{/if}
 							</div>
 						{/if}

@@ -1,8 +1,6 @@
 <script lang="ts">
 	import {
-		CheckCircle,
 		XCircle,
-		Clock,
 		Loader2,
 		AlertTriangle,
 		Download,
@@ -27,7 +25,7 @@
 		status: 'completed' | 'running' | 'pending' | 'error' | 'warning';
 		icon?: any;
 		details?: string[];
-		category: 'k8s' | 'run' | 'result' | 'event';
+		category: 'k8s' | 'run' | 'event';
 	};
 
 	type K8sEvent = {
@@ -84,32 +82,22 @@
 	let showRawLogs = $state(false);
 	let showAllEvents = $state(false);
 
-	// Define all expected steps in order
+	// Define essential steps only
 	const ALL_STEPS: Array<{
 		id: string;
 		title: string;
 		defaultDescription: string;
 		icon: any;
-		category: 'k8s' | 'run' | 'result';
+		category: 'k8s' | 'run';
 	}> = [
-		// K8s steps
-		{ id: 'k8s-scheduled', title: 'Pod Scheduled', defaultDescription: 'Scheduling pod on cluster', icon: Server, category: 'k8s' },
-		{ id: 'k8s-pulling', title: 'Pulling Image', defaultDescription: 'Pulling container image', icon: Download, category: 'k8s' },
-		{ id: 'k8s-pulled', title: 'Image Pulled', defaultDescription: 'Container image ready', icon: Download, category: 'k8s' },
-		{ id: 'k8s-created', title: 'Container Created', defaultDescription: 'Creating container', icon: Server, category: 'k8s' },
-		{ id: 'k8s-started', title: 'Container Started', defaultDescription: 'Container running', icon: Play, category: 'k8s' },
+		// K8s - just show container started
+		{ id: 'k8s-started', title: 'Container Started', defaultDescription: 'Pod running on cluster', icon: Play, category: 'k8s' },
 		// Run steps
-		{ id: 'run-start', title: 'Run Started', defaultDescription: 'Initializing runner', icon: Play, category: 'run' },
-		{ id: 'run-auth', title: 'Authenticating', defaultDescription: 'Requesting access token', icon: Shield, category: 'run' },
 		{ id: 'run-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'run' },
 		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
 		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
 		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running Gitleaks scan', icon: Shield, category: 'run' },
 		{ id: 'run-upload', title: 'Uploading Results', defaultDescription: 'Sending data to server', icon: Upload, category: 'run' },
-		// Result steps
-		{ id: 'result-complete', title: 'Run Complete', defaultDescription: 'All tasks finished', icon: CheckCircle, category: 'result' },
-		// Cleanup
-		{ id: 'k8s-cleanup', title: 'Cleanup', defaultDescription: 'Removing job resources', icon: Trash2, category: 'k8s' },
 	];
 
 	// Track completed step data from logs/events
@@ -127,19 +115,7 @@
 		for (const log of logs) {
 			const line = log.line.trim();
 
-			if (line.includes('Starting run:')) {
-				completed.set('run-start', {
-					timestamp: log.ts,
-					description: `Run ID: ${runId.substring(0, 8)}`,
-					status: 'completed'
-				});
-			} else if (line.includes('Requesting access token')) {
-				completed.set('run-auth', {
-					timestamp: log.ts,
-					description: 'Access token acquired',
-					status: 'completed'
-				});
-			} else if (line.includes('Cloning')) {
+			if (line.includes('Cloning')) {
 				const match = line.match(/Cloning (https?:\/\/[^\s]+)/);
 				completed.set('run-clone', {
 					timestamp: log.ts,
@@ -191,11 +167,6 @@
 					});
 				}
 			} else if (line.includes('Run completed successfully')) {
-				completed.set('result-complete', {
-					timestamp: log.ts,
-					description: 'All tasks finished successfully',
-					status: 'completed'
-				});
 				// Mark upload as definitely complete
 				const upload = completed.get('run-upload');
 				if (upload) {
@@ -213,37 +184,6 @@
 
 		for (const event of events) {
 			switch (event.reason) {
-				case 'Scheduled':
-					completed.set('k8s-scheduled', {
-						timestamp: event.first_timestamp,
-						description: event.message.replace('Successfully assigned ', 'Assigned to ').substring(0, 60),
-						status: 'completed'
-					});
-					break;
-				case 'Pulling':
-					completed.set('k8s-pulling', {
-						timestamp: event.first_timestamp,
-						description: 'Downloading container image',
-						status: 'completed'
-					});
-					break;
-				case 'Pulled':
-					const pullMatch = event.message.match(/in ([^\s]+)/);
-					const sizeMatch = event.message.match(/Image size: (\d+)/);
-					const sizeInfo = sizeMatch ? ` (${Math.round(parseInt(sizeMatch[1]) / 1024 / 1024)}MB)` : '';
-					completed.set('k8s-pulled', {
-						timestamp: event.first_timestamp,
-						description: pullMatch ? `Pulled in ${pullMatch[1]}${sizeInfo}` : 'Image ready',
-						status: 'completed'
-					});
-					break;
-				case 'Created':
-					completed.set('k8s-created', {
-						timestamp: event.first_timestamp,
-						description: 'Container created',
-						status: 'completed'
-					});
-					break;
 				case 'Started':
 					completed.set('k8s-started', {
 						timestamp: event.first_timestamp,
@@ -253,20 +193,11 @@
 					break;
 				case 'Failed':
 				case 'BackOff':
-					// Mark the appropriate step as failed
-					if (!completed.has('k8s-pulled')) {
-						completed.set('k8s-pulling', {
-							timestamp: event.first_timestamp,
-							description: event.message.substring(0, 60),
-							status: 'error'
-						});
-					}
-					break;
-				case 'Killing':
-					completed.set('k8s-cleanup', {
+					// Mark container start as failed
+					completed.set('k8s-started', {
 						timestamp: event.first_timestamp,
-						description: 'Stopping container',
-						status: 'completed'
+						description: event.message.substring(0, 60),
+						status: 'error'
 					});
 					break;
 			}
@@ -348,11 +279,11 @@
 		// Determine current running step based on status
 		let currentRunningStep: string | null = null;
 		if (status === 'QUEUED') {
-			currentRunningStep = 'k8s-scheduled';
+			currentRunningStep = 'k8s-started';
 		} else if (status === 'RUNNING') {
 			// Find the first incomplete step
 			for (const step of ALL_STEPS) {
-				if (!completedSteps.has(step.id) && step.category !== 'result') {
+				if (!completedSteps.has(step.id)) {
 					currentRunningStep = step.id;
 					break;
 				}
@@ -378,40 +309,6 @@
 		for (const stepDef of ALL_STEPS) {
 			const completed = completedSteps.get(stepDef.id);
 
-			// Skip result-complete if run not complete
-			if (stepDef.id === 'result-complete') {
-				if (status !== 'SUCCEEDED' && status !== 'FAILED') {
-					continue;
-				}
-				// Add summary info
-				const summaryDetails: string[] = [];
-				if (sbomComponentCount > 0) {
-					summaryDetails.push(`${sbomComponentCount} SBOM component${sbomComponentCount !== 1 ? 's' : ''}`);
-				}
-				if (secretCount > 0) {
-					summaryDetails.push(`${secretCount} secret${secretCount !== 1 ? 's' : ''} found`);
-				} else {
-					summaryDetails.push('No secrets found');
-				}
-				if (manifestCount > 0) {
-					summaryDetails.push(`${manifestCount} manifest${manifestCount !== 1 ? 's' : ''}`);
-				}
-
-				timeline.push({
-					...stepDef,
-					description: status === 'SUCCEEDED' ? 'All tasks completed successfully' : 'Run failed',
-					status: status === 'SUCCEEDED' ? 'completed' : 'error',
-					details: summaryDetails,
-					timestamp: completed?.timestamp
-				});
-				continue;
-			}
-
-			// Skip cleanup if not complete and not failed
-			if (stepDef.id === 'k8s-cleanup' && !completed && status !== 'SUCCEEDED' && status !== 'FAILED') {
-				continue;
-			}
-
 			let stepStatus: TimelineStep['status'] = 'pending';
 			let details = completed?.details;
 
@@ -434,6 +331,13 @@
 			}
 			if (stepDef.id === 'run-manifests' && stepStatus === 'completed' && manifestCount > 0) {
 				details = [...(details || []), `${manifestCount} file${manifestCount !== 1 ? 's' : ''} collected`];
+			}
+			if (stepDef.id === 'run-secrets' && stepStatus === 'completed') {
+				if (secretCount > 0) {
+					details = [...(details || []), `${secretCount} secret${secretCount !== 1 ? 's' : ''} found`];
+				} else if (!details?.some(d => d.includes('secret'))) {
+					details = [...(details || []), 'No secrets found'];
+				}
 			}
 
 			timeline.push({
@@ -481,8 +385,6 @@
 				return 'K8s';
 			case 'run':
 				return 'Runner';
-			case 'result':
-				return 'Result';
 			case 'event':
 				return 'Event';
 			default:

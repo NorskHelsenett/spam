@@ -90,6 +90,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
+				api.Post("/scan-all", uiapi.ScanAllHandler(db, authService))
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 				api.Get("/runs/{id}/stream", uiapi.RunStreamHandler(db, authService))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
