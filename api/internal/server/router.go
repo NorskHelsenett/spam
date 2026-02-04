@@ -92,7 +92,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
 				api.Post("/scan-all", uiapi.ScanAllHandler(db, authService))
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
-				api.Get("/runs/{id}/stream", uiapi.RunStreamHandler(db, authService))
+				api.Get("/runs/{id}/stream", uiapi.RunStreamHandler(db, authService, func() *runner.K8sClient {
+					if opts != nil {
+						return opts.K8sClient
+					}
+					return nil
+				}()))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
 				// Kubernetes integration endpoints (only available if runner is enabled)

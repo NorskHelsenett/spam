@@ -71,6 +71,7 @@
 	let k8sEvents: K8sEvent[] = $state([]);
 	let podStatus: PodStatus | null = $state(null);
 	let showTimeline = $state(true);
+	let k8sPollingDisabled = $state(false);
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -105,18 +106,30 @@
 	};
 
 	const loadK8sEvents = async (runId: string) => {
+		if (k8sPollingDisabled) return false;
 		try {
 			const response = await fetch(`/api/runs/${runId}/events`, {
 				credentials: 'include'
 			});
+			if (response.status === 404 || response.status === 400) {
+				// K8s endpoints not available or run has no job; stop polling
+				k8sPollingDisabled = true;
+				if (eventsInterval) {
+					clearInterval(eventsInterval);
+					eventsInterval = null;
+				}
+				return false;
+			}
 			if (response.ok) {
 				const data = await response.json();
 				k8sEvents = data.events || [];
 				podStatus = data.pod_status || null;
+				return true;
 			}
 		} catch (e) {
 			console.log('K8s events not available:', e);
 		}
+		return false;
 	};
 
 	const loadArtifacts = async (runId: string, runData: Run) => {
@@ -245,17 +258,33 @@
 				}
 			});
 
+			eventSource.addEventListener('k8s', (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					k8sEvents = data.events || [];
+					podStatus = data.pod_status || null;
+				} catch (e) {
+					console.error('Failed to parse k8s event:', e);
+				}
+			});
+
 			eventSource.onerror = () => {
 				// SSE not available or connection failed, close and fall back to polling
 				if (eventSource) {
 					eventSource.close();
 					eventSource = null;
 				}
-				setupPolling();
+				if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
+					setupPolling();
+					startK8sPolling();
+				}
 			};
 		} catch (e) {
 			console.log('SSE not available, using polling');
-			setupPolling();
+			if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
+				setupPolling();
+				startK8sPolling();
+			}
 		}
 	};
 
@@ -274,6 +303,20 @@
 	};
 
 	let eventsInterval: ReturnType<typeof setInterval> | null = null;
+	const startK8sPolling = () => {
+		if (k8sPollingDisabled) {
+			return;
+		}
+		if (eventsInterval) {
+			clearInterval(eventsInterval);
+		}
+		eventsInterval = setInterval(() => {
+			const id = $page.params.id;
+			if (id && run?.k8s_job_name) {
+				loadK8sEvents(id);
+			}
+		}, 5000);
+	};
 
 	onMount(async () => {
 		if (!browser) return;
@@ -289,17 +332,8 @@
 			await loadK8sEvents(id);
 		}
 
-		// Try SSE first, fall back to polling if not available
-		// Only connect if run is still in progress (SSE for completed runs is handled by loadRun)
-		if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
-			connectSSE();
-			// Periodically refresh K8s events for running jobs
-			eventsInterval = setInterval(() => {
-				if (run?.k8s_job_name) {
-					loadK8sEvents(id);
-				}
-			}, 5000);
-		}
+		// Try SSE for both running and completed runs to capture K8s events and logs
+		connectSSE();
 	});
 
 	onDestroy(() => {
@@ -621,4 +655,3 @@
 		</div>
 	</div>
 {/if}
-

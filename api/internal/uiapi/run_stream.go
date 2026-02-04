@@ -15,7 +15,7 @@ import (
 
 // RunStreamHandler streams logs for a run via SSE.
 // GET /api/runs/{id}/stream
-func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.LoadSession(r); err != nil {
 			http.Error(w, "unauthenticated", http.StatusUnauthorized)
@@ -54,6 +54,48 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		// Get last_id parameter for resuming
 		lastID, _ := strconv.ParseInt(r.URL.Query().Get("last_id"), 10, 64)
 
+		// Helper to send K8s event snapshot (if available)
+		sendK8sSnapshot := func() {
+			var (
+				events    []runner.K8sEvent
+				podStatus *runner.PodStatus
+				err       error
+			)
+
+			if k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != "" {
+				events, err = k8sClient.GetJobEvents(r.Context(), run.K8sJobName, run.K8sNamespace)
+				if err != nil {
+					log.Printf("failed to get job events: %v", err)
+				} else {
+					podStatus, _ = k8sClient.GetPodStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+					if err := persistK8sSnapshot(r.Context(), db, runID, events, podStatus); err != nil {
+						log.Printf("failed to store events: %v", err)
+					}
+				}
+			}
+
+			if len(events) == 0 && podStatus == nil {
+				var ok bool
+				events, podStatus, ok, err = loadPersistedK8sSnapshot(r.Context(), db, runID)
+				if err != nil {
+					log.Printf("failed to load stored events: %v", err)
+					return
+				}
+				if !ok {
+					return
+				}
+			}
+
+			payload := map[string]interface{}{
+				"events":     events,
+				"pod_status": podStatus,
+			}
+			data, _ := json.Marshal(payload)
+			fmt.Fprintf(w, "event: k8s\n")
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+
 		// Send historical logs
 		var logs []runner.RunLog
 		query := db.WithContext(r.Context()).Where("run_id = ?", runID)
@@ -75,6 +117,9 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			fmt.Fprintf(w, "data: %s\n\n", data)
 		}
 		flusher.Flush()
+
+		// Send initial K8s snapshot (if any)
+		sendK8sSnapshot()
 
 		// If run is already complete, send status and close
 		if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
@@ -131,6 +176,14 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
+		var k8sTicker *time.Ticker
+		var k8sTick <-chan time.Time
+		if k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != "" {
+			k8sTicker = time.NewTicker(5 * time.Second)
+			defer k8sTicker.Stop()
+			k8sTick = k8sTicker.C
+		}
+
 		var lastLogID int64
 		if len(logs) > 0 {
 			lastLogID = logs[len(logs)-1].ID
@@ -170,6 +223,9 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				// Check if run completed
 				if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err == nil {
 					if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
+						// Send final K8s snapshot before closing
+						sendK8sSnapshot()
+
 						// Send final status
 						statusEvent := map[string]interface{}{
 							"status":      string(run.Status),
@@ -219,6 +275,8 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 						return
 					}
 				}
+			case <-k8sTick:
+				sendK8sSnapshot()
 			}
 		}
 	}

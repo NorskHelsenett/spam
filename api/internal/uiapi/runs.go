@@ -541,21 +541,36 @@ func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 			return
 		}
 
-		if run.K8sJobName == "" || run.K8sNamespace == "" {
-			http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
-			return
+		var (
+			events    []runner.K8sEvent
+			podStatus *runner.PodStatus
+			err       error
+		)
+
+		if k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != "" {
+			events, err = k8sClient.GetJobEvents(r.Context(), run.K8sJobName, run.K8sNamespace)
+			if err != nil {
+				log.Printf("failed to get job events: %v", err)
+			} else {
+				podStatus, _ = k8sClient.GetPodStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+				if err := persistK8sSnapshot(r.Context(), db, runID, events, podStatus); err != nil {
+					log.Printf("failed to store events: %v", err)
+				}
+			}
 		}
 
-		// Get events from Kubernetes
-		events, err := k8sClient.GetJobEvents(r.Context(), run.K8sJobName, run.K8sNamespace)
-		if err != nil {
-			log.Printf("failed to get job events: %v", err)
-			http.Error(w, "failed to retrieve events from Kubernetes", http.StatusInternalServerError)
-			return
+		if len(events) == 0 && podStatus == nil {
+			var ok bool
+			events, podStatus, ok, err = loadPersistedK8sSnapshot(r.Context(), db, runID)
+			if err != nil {
+				log.Printf("failed to load stored events: %v", err)
+				http.Error(w, "failed to retrieve events", http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				events = []runner.K8sEvent{}
+			}
 		}
-
-		// Get pod status for additional context
-		podStatus, _ := k8sClient.GetPodStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"events":     events,
