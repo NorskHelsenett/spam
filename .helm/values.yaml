@@ -75,6 +75,9 @@ providerSecrets:
   # Provide a specific key (optional). If empty, auto-generate and keep across upgrades.
   key: ""
 
+  # Optional annotations added to the provider secrets Secret
+  annotations: {}
+
 # To manually create the secret, use:
 #   kubectl create secret generic spam-app-secret \
 #     --from-literal=OIDC_ISSUER_URL='https://auth.example.com' \
