@@ -128,7 +128,7 @@
 				const sbomResponse = await fetch(`/api/sboms/${runData.sbom_id}`, { credentials: 'include' });
 				if (sbomResponse.ok) {
 					const sbomData = await sbomResponse.json();
-					const componentCount = sbomData.components?.length || 0;
+					const componentCount = sbomData.component_count || 0;
 					
 					artifactsList.push({
 						type: 'sbom',
