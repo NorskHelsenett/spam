@@ -4,6 +4,7 @@
 	import { page } from '$app/stores';
 	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download, Activity } from 'lucide-svelte';
 	import RunTimeline from '$lib/components/RunTimeline.svelte';
+	import Dialog from '$lib/components/Dialog.svelte';
 
 	type Run = {
 		id: string;
@@ -65,6 +66,7 @@
 	let showRawDialog = $state(false);
 	let rawDialogTitle = $state('');
 	let rawDialogData = $state('');
+	let rawDialogLoading = $state(false);
 	let eventSource: EventSource | null = null;
 	let lastStatus = $state('');
 	let runLogs: RunLog[] = $state([]);
@@ -207,10 +209,73 @@
 		artifacts = artifactsList;
 	};
 
-	const showRaw = (artifact: Artifact) => {
+	const refreshArtifactData = async (artifact: Artifact) => {
+		const runId = $page.params.id;
+		if (!runId) {
+			return artifact.raw_data;
+		}
+
+		if (artifact.type === 'sbom' && run?.sbom_id) {
+			const sbomResponse = await fetch(`/api/sboms/${run.sbom_id}`, { credentials: 'include' });
+			if (sbomResponse.ok) {
+				const sbomData = await sbomResponse.json();
+				artifacts = artifacts.map((item) =>
+					item.type === 'sbom'
+						? { ...item, count: sbomData.component_count || 0, raw_data: sbomData }
+						: item
+				);
+				return sbomData;
+			}
+		}
+
+		if (artifact.type === 'secrets') {
+			const secretsResponse = await fetch(`/api/runs/${runId}/secrets`, { credentials: 'include' });
+			if (secretsResponse.ok) {
+				const secretsData = await secretsResponse.json();
+				artifacts = artifacts.map((item) =>
+					item.type === 'secrets'
+						? { ...item, count: secretsData.finding_count || 0, raw_data: secretsData }
+						: item
+				);
+				return secretsData;
+			}
+		}
+
+		if (artifact.type === 'manifests') {
+			const manifestsResponse = await fetch(`/api/manifests?run_id=${runId}`, { credentials: 'include' });
+			if (manifestsResponse.ok) {
+				const manifestsData = await manifestsResponse.json();
+				const manifestCount = manifestsData.manifests?.length || 0;
+				artifacts = artifacts.map((item) =>
+					item.type === 'manifests'
+						? { ...item, count: manifestCount, raw_data: manifestsData.manifests }
+						: item
+				);
+				return manifestsData.manifests;
+			}
+		}
+
+		return artifact.raw_data;
+	};
+
+	const showRaw = async (artifact: Artifact) => {
 		rawDialogTitle = artifact.name;
-		rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+		rawDialogLoading = true;
+		rawDialogData = '';
 		showRawDialog = true;
+
+		try {
+			const latestData = await refreshArtifactData(artifact);
+			if (latestData === undefined) {
+				rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+			} else {
+				rawDialogData = JSON.stringify(latestData, null, 2);
+			}
+		} catch (e) {
+			rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+		} finally {
+			rawDialogLoading = false;
+		}
 	};
 
 	const connectSSE = () => {
@@ -622,36 +687,27 @@
 </div>
 
 <!-- Raw Data Dialog -->
-{#if showRawDialog}
-	<div
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-		onclick={() => { showRawDialog = false; }}
-		role="button"
-		tabindex="0"
-		aria-label="Close dialog"
-		onkeydown={(e) => { if (e.key === 'Escape') showRawDialog = false; }}
-	>
-		<div
-			class="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl"
-			role="dialog"
-			aria-modal="true"
-			tabindex="-1"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
-		>
-			<div class="flex items-center justify-between border-b border-[var(--border-color)] p-6">
-				<h3 class="text-lg font-semibold text-[var(--text-bright)]">{rawDialogTitle}</h3>
-				<button
-					type="button"
-					class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={() => { showRawDialog = false; }}
-				>
-					<XCircle class="h-5 w-5" />
-				</button>
-			</div>
-			<div class="overflow-auto p-6" style="max-height: calc(90vh - 80px);">
+<Dialog bind:open={showRawDialog} showCloseButton={false} onClose={() => {}}>
+	<div class="flex flex-col">
+		<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-5">
+			<h3 class="text-lg font-semibold text-[var(--text-bright)]">{rawDialogTitle}</h3>
+			<button
+				type="button"
+				class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => { showRawDialog = false; }}
+			>
+				<XCircle class="h-5 w-5" />
+			</button>
+		</div>
+		<div class="overflow-auto px-6 py-5" style="max-height: calc(90vh - 80px);">
+			{#if rawDialogLoading}
+				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+					<Loader2 class="h-4 w-4 animate-spin" />
+					Loading...
+				</div>
+			{:else}
 				<pre class="overflow-x-auto rounded-lg bg-[var(--hover-bg)] p-4 text-xs text-[var(--text-secondary)]"><code>{rawDialogData}</code></pre>
-			</div>
+			{/if}
 		</div>
 	</div>
-{/if}
+</Dialog>

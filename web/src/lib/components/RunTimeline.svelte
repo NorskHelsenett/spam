@@ -312,6 +312,14 @@
 				stepStatus = completed.status;
 			} else if (stepDef.id === currentRunningStep) {
 				stepStatus = 'running';
+			} else if (stepDef.id === 'k8s-started' && podStatus) {
+				if (podStatus.phase === 'Running' || podStatus.phase === 'Succeeded') {
+					stepStatus = 'completed';
+				} else if (podStatus.phase === 'Failed' || podStatus.is_error) {
+					stepStatus = 'error';
+				}
+			} else if (stepDef.id === 'k8s-started' && status === 'SUCCEEDED') {
+				stepStatus = 'completed';
 			} else if (status === 'FAILED') {
 				// If run failed and step not completed, check if it should be marked as skipped
 				const stepIndex = ALL_STEPS.findIndex(s => s.id === stepDef.id);
