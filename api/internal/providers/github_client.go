@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -83,6 +85,83 @@ func toLanguagesArray(lang string) []string {
 		return nil
 	}
 	return []string{lang}
+}
+
+// fetchLanguagesParallel fetches languages for all repos in parallel.
+func (c *GitHubClientImpl) fetchLanguagesParallel(ctx context.Context, repos []RepoData) {
+	if len(repos) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for i := range repos {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			repos[idx].Languages = c.getLanguages(ctx, repos[idx].FullPath)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// getLanguages fetches all languages for a repo, sorted by bytes descending.
+func (c *GitHubClientImpl) getLanguages(ctx context.Context, fullPath string) []string {
+	url := fmt.Sprintf("%s/repos/%s/languages", c.baseURL, fullPath)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	// Response is map of language -> bytes, e.g. {"Go": 974056, "Shell": 15280}
+	var languageMap map[string]int64
+	if err := json.Unmarshal(body, &languageMap); err != nil {
+		return nil
+	}
+
+	if len(languageMap) == 0 {
+		return nil
+	}
+
+	// Sort languages by bytes descending
+	type langBytes struct {
+		lang  string
+		bytes int64
+	}
+	sorted := make([]langBytes, 0, len(languageMap))
+	for lang, bytes := range languageMap {
+		sorted = append(sorted, langBytes{lang, bytes})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].bytes > sorted[j].bytes
+	})
+
+	result := make([]string, len(sorted))
+	for i, lb := range sorted {
+		result[i] = lb.lang
+	}
+	return result
 }
 
 // ListPublicRepos lists public repositories for a user or organization.
@@ -162,7 +241,7 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			Description:   r.Description,
 			HTMLURL:       r.HTMLURL,
 			DefaultBranch: r.DefaultBranch,
-			Languages:     toLanguagesArray(r.Language),
+			Languages:     nil, // Will be populated by fetchLanguagesParallel
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
@@ -172,6 +251,9 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			PushedAt:      r.PushedAt,
 		}
 	}
+
+	// Fetch languages in parallel for all repos
+	c.fetchLanguagesParallel(ctx, repos)
 
 	pageInfo := c.parsePageInfo(resp, pageSize)
 	return repos, pageInfo, nil
@@ -394,6 +476,9 @@ func (c *GitHubClientImpl) GetRepoDetails(ctx context.Context, owner, repo strin
 		license = ghRepo.License.Name
 	}
 
+	// Fetch all languages
+	languages := c.getLanguages(ctx, ghRepo.FullName)
+
 	return &RepoDetails{
 		RepoData: RepoData{
 			ExternalID:    strconv.FormatInt(ghRepo.ID, 10),
@@ -402,7 +487,7 @@ func (c *GitHubClientImpl) GetRepoDetails(ctx context.Context, owner, repo strin
 			Description:   ghRepo.Description,
 			HTMLURL:       ghRepo.HTMLURL,
 			DefaultBranch: ghRepo.DefaultBranch,
-			Languages:     toLanguagesArray(ghRepo.Language),
+			Languages:     languages,
 			IsPrivate:     ghRepo.Private,
 			IsArchived:    ghRepo.Archived,
 			IsFork:        ghRepo.Fork,
