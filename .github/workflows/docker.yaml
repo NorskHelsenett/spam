@@ -65,7 +65,7 @@ jobs:
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -148,7 +148,7 @@ jobs:
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' }}
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -220,7 +220,7 @@ jobs:
           set -euo pipefail
           repo_path=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           chart_name=$(awk -F': ' '/^name:/ {print $2; exit}' .helm/Chart.yaml)
-          
+
           # Use different chart path for dev branches
           if [ "${{ github.ref }}" = "refs/heads/main" ]; then
             chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path"
@@ -228,10 +228,10 @@ jobs:
             chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path/helm/dev"
           fi
           chart_ref="${chart_repo}/${chart_name}"
-          
+
           # Get version from Chart.yaml
           CHART_YAML_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' .helm/Chart.yaml | tr -d ' ')
-          
+
           tmp_chart_metadata=$(mktemp)
           if helm show chart "$chart_ref" > "$tmp_chart_metadata" 2>/dev/null; then
             PUBLISHED_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' "$tmp_chart_metadata" | tr -d ' ')
@@ -240,12 +240,12 @@ jobs:
             PUBLISHED_VERSION="0.0.0"
           fi
           rm -f "$tmp_chart_metadata"
-          
+
           # Function to compare semantic versions
           version_gt() {
             test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
           }
-          
+
           # Determine which version to use
           if version_gt "$CHART_YAML_VERSION" "$PUBLISHED_VERSION"; then
             NEW_VERSION="$CHART_YAML_VERSION"
@@ -258,9 +258,9 @@ jobs:
             # Update version line in Chart.yaml
             sed -i -E "s/^version: .*/version: $NEW_VERSION/" .helm/Chart.yaml
           fi
-          
+
           echo "Final version: $NEW_VERSION"
-          
+
           # Inject image repository and digest
           APP_DIGEST=${{ needs.build-app.outputs.digest }}
           APP_TAG="latest@${APP_DIGEST}"
@@ -268,12 +268,12 @@ jobs:
           RUNNER_DIGEST=${{ needs.build-runner.outputs.digest }}
           RUNNER_TAG="latest@${RUNNER_DIGEST}"
           RUNNER_REPO="${{ needs.build-runner.outputs.repository }}"
-          
+
           echo "Injecting app repository: $APP_REPO"
           echo "Injecting app tag with digest: $APP_TAG"
           echo "Injecting runner repository: $RUNNER_REPO"
           echo "Injecting runner tag with digest: $RUNNER_TAG"
-          
+
           python3 - <<EOF
           import pathlib
 
@@ -283,44 +283,44 @@ jobs:
           runner_repo = "${RUNNER_REPO}"
           path = pathlib.Path(".helm/values.yaml")
           lines = path.read_text().splitlines()
-          
+
           in_image_section = False
           in_runner_section = False
           in_runner_image_section = False
           for idx, line in enumerate(lines):
               stripped = line.lstrip()
-              
+
               # Detect if we're in the TOP-LEVEL image section (no indentation before "image:")
               if line.startswith("image:") and not line.startswith((" ", "\t")):
                   in_image_section = True
                   in_runner_section = False
                   in_runner_image_section = False
                   continue
-              
+
               # Detect if we're in the runner section
               if line.startswith("runner:") and not line.startswith((" ", "\t")):
                   in_runner_section = True
                   in_image_section = False
                   continue
-              
+
               # Detect runner.image subsection
               if in_runner_section and stripped.startswith("image:") and line.startswith(" "):
                   in_runner_image_section = True
                   continue
-              
+
               # Exit image section when we hit another top-level key
               if in_image_section and stripped and not line.startswith((" ", "\t")):
                   in_image_section = False
-              
+
               # Exit runner section when we hit another top-level key
               if in_runner_section and stripped and not line.startswith((" ", "\t")):
                   in_runner_section = False
                   in_runner_image_section = False
-              
+
               # Exit runner.image section when indentation decreases
               if in_runner_image_section and stripped and len(line) - len(stripped) < 4:
                   in_runner_image_section = False
-              
+
               # Update repository and tag within top-level image section
               if in_image_section:
                   if stripped.startswith("repository:"):
@@ -329,7 +329,7 @@ jobs:
                   elif stripped.startswith("tag:"):
                       indent = line[:len(line) - len(stripped)]
                       lines[idx] = f'{indent}tag: "{app_tag}"'
-              
+
               # Update repository and tag within runner.image section
               if in_runner_image_section:
                   if stripped.startswith("repository:"):
@@ -338,15 +338,15 @@ jobs:
                   elif stripped.startswith("tag:"):
                       indent = line[:len(line) - len(stripped)]
                       lines[idx] = f'{indent}tag: "{runner_tag}"'
-          
+
           path.write_text("\n".join(lines) + ("\n" if lines else ""))
           EOF
-          
+
           # Add required Helm repositories for dependencies
           echo "Adding Helm repositories..."
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update
-          
+
           # Package and push (already logged in earlier step)
           (cd .helm && helm dependency build && helm package .)
           helm push ".helm/${chart_name}-${NEW_VERSION}.tgz" "$chart_repo"

@@ -83,12 +83,25 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				"commit_hash": run.CommitHash,
 			}
 
-			// Look up associated SBOM
-			var sbomBinding struct{ SBOMID string }
-			if err := db.WithContext(r.Context()).Table("sbom_bindings").
-				Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
-				Select("sbom_id").First(&sbomBinding).Error; err == nil {
-				statusEvent["sbom_id"] = sbomBinding.SBOMID
+			// Parse payload to get repo_id for SBOM lookup
+			var payload runner.CreateRunPayload
+			if len(run.Payload) > 0 {
+				json.Unmarshal(run.Payload, &payload)
+			}
+
+			// Look up associated SBOM via repo commit
+			if payload.RepoID != "" && run.CommitHash != "" {
+				var repoCommit struct{ ID string }
+				if err := db.WithContext(r.Context()).Table("repo_commits").
+					Where("repo_id = ? AND commit_sha = ?", payload.RepoID, run.CommitHash).
+					Select("id").First(&repoCommit).Error; err == nil {
+					var sbomBinding struct{ SBOMID string }
+					if err := db.WithContext(r.Context()).Table("sbom_bindings").
+						Where("asset_type = ? AND asset_ref_id = ?", "REPO_COMMIT", repoCommit.ID).
+						Select("sbom_id").First(&sbomBinding).Error; err == nil {
+						statusEvent["sbom_id"] = sbomBinding.SBOMID
+					}
+				}
 			}
 
 			// Look up associated secrets
@@ -163,12 +176,25 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 							"commit_hash": run.CommitHash,
 						}
 
-						// Look up associated artifacts
-						var sbomBinding struct{ SBOMID string }
-						if err := db.WithContext(r.Context()).Table("sbom_bindings").
-							Where("asset_type = 'RUN' AND asset_ref_id = ?", runID).
-							Select("sbom_id").First(&sbomBinding).Error; err == nil {
-							statusEvent["sbom_id"] = sbomBinding.SBOMID
+						// Parse payload to get repo_id for SBOM lookup
+						var payload runner.CreateRunPayload
+						if len(run.Payload) > 0 {
+							json.Unmarshal(run.Payload, &payload)
+						}
+
+						// Look up associated SBOM via repo commit
+						if payload.RepoID != "" && run.CommitHash != "" {
+							var repoCommit struct{ ID string }
+							if err := db.WithContext(r.Context()).Table("repo_commits").
+								Where("repo_id = ? AND commit_sha = ?", payload.RepoID, run.CommitHash).
+								Select("id").First(&repoCommit).Error; err == nil {
+								var sbomBinding struct{ SBOMID string }
+								if err := db.WithContext(r.Context()).Table("sbom_bindings").
+									Where("asset_type = ? AND asset_ref_id = ?", "REPO_COMMIT", repoCommit.ID).
+									Select("sbom_id").First(&sbomBinding).Error; err == nil {
+									statusEvent["sbom_id"] = sbomBinding.SBOMID
+								}
+							}
 						}
 
 						var secret struct{ ID string }

@@ -280,14 +280,23 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			K8sJobName: job.K8sJobName,
 		}
 
-		// Look up associated SBOM
-		var sbomBinding struct {
-			SBOMID string
-		}
-		if err := db.WithContext(r.Context()).Table("sbom_bindings").
-			Where("asset_ref_id = ? AND source = ?", payload.RepoID, "spam-runner").
-			Select("sbom_id").First(&sbomBinding).Error; err == nil {
-			response.SBOMID = sbomBinding.SBOMID
+		// Look up associated SBOM via repo commit
+		if payload.RepoID != "" && job.CommitHash != "" {
+			var repoCommit struct {
+				ID string
+			}
+			if err := db.WithContext(r.Context()).Table("repo_commits").
+				Where("repo_id = ? AND commit_sha = ?", payload.RepoID, job.CommitHash).
+				Select("id").First(&repoCommit).Error; err == nil {
+				var sbomBinding struct {
+					SBOMID string
+				}
+				if err := db.WithContext(r.Context()).Table("sbom_bindings").
+					Where("asset_type = ? AND asset_ref_id = ?", "REPO_COMMIT", repoCommit.ID).
+					Select("sbom_id").First(&sbomBinding).Error; err == nil {
+					response.SBOMID = sbomBinding.SBOMID
+				}
+			}
 		}
 
 		// Look up associated secrets

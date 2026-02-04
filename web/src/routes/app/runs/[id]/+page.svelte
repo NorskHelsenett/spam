@@ -219,14 +219,17 @@
 		return () => clearInterval(interval);
 	};
 
-	onMount(() => {
+	onMount(async () => {
 		if (!browser) return;
-		
-		// Initial load
-		loadRun(true);
+
+		// Initial load - wait for it to complete before connecting SSE
+		await loadRun(true);
 
 		// Try SSE first, fall back to polling if not available
-		connectSSE();
+		// Only connect if run is still in progress (SSE for completed runs is handled by loadRun)
+		if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
+			connectSSE();
+		}
 	});
 
 	onDestroy(() => {
