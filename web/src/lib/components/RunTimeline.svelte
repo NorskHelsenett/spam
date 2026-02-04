@@ -61,8 +61,6 @@
 		sbomComponentCount?: number;
 		manifestCount?: number;
 		commitHash?: string;
-		k8sJobName?: string;
-		onViewRawLogs?: () => void;
 	};
 
 	let {
@@ -74,9 +72,7 @@
 		secretCount = 0,
 		sbomComponentCount = 0,
 		manifestCount = 0,
-		commitHash = '',
-		k8sJobName = '',
-		onViewRawLogs
+		commitHash = ''
 	}: Props = $props();
 
 	let showRawLogs = $state(false);
@@ -560,23 +556,9 @@
 
 				{#if showRawLogs}
 					<div class="mt-3 max-h-80 overflow-auto rounded-lg bg-[var(--card-bg)] p-4">
-						<pre class="text-xs text-[var(--text-secondary)] font-mono whitespace-pre-wrap break-all">{rawLogsText}</pre>
+						<pre class="text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all" style="font-family: 'JetBrains Mono', monospace;">{rawLogsText}</pre>
 					</div>
 				{/if}
-			</div>
-		{/if}
-
-		<!-- External K8s Logs Button -->
-		{#if k8sJobName && onViewRawLogs}
-			<div class="mt-4 border-t border-[var(--border-color)]/40 pt-4">
-				<button
-					type="button"
-					class="flex items-center gap-2 text-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
-					onclick={onViewRawLogs}
-				>
-					<Terminal class="h-4 w-4" />
-					View K8s Pod Logs
-				</button>
 			</div>
 		{/if}
 	{/if}

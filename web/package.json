@@ -38,6 +38,7 @@
 	},
 	"dependencies": {
 		"@fontsource/inter": "^5.2.8",
+		"@fontsource/jetbrains-mono": "^5.2.8",
 		"@types/dompurify": "^3.0.5",
 		"dompurify": "^3.3.1",
 		"lucide-svelte": "^0.562.0",
