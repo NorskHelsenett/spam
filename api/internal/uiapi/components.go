@@ -325,7 +325,7 @@ func ComponentAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 	}
 }
 
-// EcosystemsListHandler returns distinct ecosystems.
+// EcosystemsListHandler returns distinct ecosystems from both SBOMs and manifests.
 func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.LoadSession(r); err != nil {
@@ -333,13 +333,18 @@ func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 			return
 		}
 
-	var ecosystems []string
-	if err := db.WithContext(r.Context()).
-		Table("sbom_component_view").
-		Distinct("kind").
-		Where("is_root = false AND kind IS NOT NULL AND kind != ''").
-		Order("kind ASC").
-		Pluck("kind", &ecosystems).Error; err != nil {
+		// Get ecosystems from both sbom_component_view and manifest_dependencies
+		var ecosystems []string
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT DISTINCT ecosystem FROM (
+				SELECT kind as ecosystem FROM sbom_component_view
+				WHERE is_root = false AND kind IS NOT NULL AND kind != ''
+				UNION
+				SELECT DISTINCT ecosystem FROM manifest_dependencies
+				WHERE ecosystem IS NOT NULL AND ecosystem != ''
+			) combined
+			ORDER BY ecosystem ASC
+		`).Pluck("ecosystem", &ecosystems).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
