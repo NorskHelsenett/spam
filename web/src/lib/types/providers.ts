@@ -5,7 +5,7 @@ export type RepoData = {
 	description: string;
 	html_url: string;
 	default_branch: string;
-	language: string;
+	languages: string[];
 	is_private: boolean;
 	is_archived: boolean;
 	is_fork: boolean;

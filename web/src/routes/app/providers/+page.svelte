@@ -83,6 +83,7 @@
 	const gitlabColumns = [
 		{ key: 'name', label: 'Project' },
 		{ key: 'path', label: 'Path' },
+		{ key: 'language', label: 'Language' },
 		{ key: 'updated', label: 'Last Activity' },
 		{ key: 'status', label: 'Status', align: 'center' as const },
 		{ key: 'actions', label: '', align: 'right' as const }

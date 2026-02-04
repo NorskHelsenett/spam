@@ -133,7 +133,7 @@
 
 	const licenseSegments = (): DonutSegment[] => {
 		if (!summary) return [];
-		const segments = summary.top_licenses.map((license, index) => ({
+		const segments = (summary.top_licenses ?? []).map((license, index) => ({
 			label: license.license,
 			value: license.count,
 			color: licensePalette[index % licensePalette.length]
@@ -161,7 +161,7 @@
 
 	const scannerSegments = (): DonutSegment[] => {
 		if (!summary) return [];
-		return summary.scanners.map((scanner, index) => ({
+		return (summary.scanners ?? []).map((scanner, index) => ({
 			label: scanner.name,
 			value: scanner.count,
 			color: scannerPalette[index % scannerPalette.length]
@@ -170,7 +170,7 @@
 
 	const totalScans = () => {
 		if (!summary) return 0;
-		return summary.scanners.reduce((sum, s) => sum + s.count, 0);
+		return (summary.scanners ?? []).reduce((sum, s) => sum + s.count, 0);
 	};
 </script>
 
@@ -223,15 +223,15 @@
 			</div>
 		{/if}
 	</section>
-
+  
 	{#if summary}
-		<div class="grid gap-6 lg:grid-cols-3 lg:grid-rows-2">
-			<section class="panel-surface rounded-2xl p-6 lg:row-span-2">
+		<div class="grid gap-6 lg:grid-cols-3">
+			<section class="panel-surface flex flex-col rounded-2xl p-6 lg:col-span-2">
 				<div class="flex items-center justify-between">
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">SBOM activity</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">latest</span>
 				</div>
-				<div class="mt-4 max-h-[400px] overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<div class="mt-4 max-h-[26em] flex-1 overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
@@ -242,7 +242,7 @@
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each summary.recent_sboms as sbom}
+							{#each summary.recent_sboms ?? [] as sbom}
 								<tr
 									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 									on:click={() => goto(`/app/agents?sbom_id=${sbom.sbom_id}`)}
@@ -265,12 +265,20 @@
 				</div>
 			</section>
 
-			<section class="panel-surface rounded-2xl p-6 lg:row-span-2">
+			<section class="panel-surface rounded-2xl p-6">
+				<DonutChart
+					title="License distribution"
+					total={summary.counts.component_count}
+					segments={licenseSegments()}
+				/>
+			</section>
+
+			<section class="panel-surface flex flex-col rounded-2xl p-6 lg:col-span-2">
 				<div class="flex items-center justify-between">
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Top components</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">by SBOM coverage</span>
 				</div>
-				<div class="mt-4 max-h-[400px] overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<div class="mt-4 max-h-[26em] flex-1 overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
@@ -281,7 +289,7 @@
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each summary.top_components as comp}
+							{#each summary.top_components ?? [] as comp}
 								<tr
 									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 									on:click={() => goto(`/app/components?ecosystem=${comp.kind}&q=${encodeURIComponent(comp.package_name)}`)}
@@ -297,13 +305,7 @@
 				</div>
 			</section>
 
-			<section class="panel-surface rounded-2xl p-6">
-				<DonutChart
-					title="License distribution"
-					total={summary.counts.component_count}
-					segments={licenseSegments()}
-				/>
-			</section>
+
 
 			<section class="panel-surface rounded-2xl p-6">
 			<DonutChart

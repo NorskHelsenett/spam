@@ -77,6 +77,14 @@ type gitHubOrg struct {
 	AvatarURL   string `json:"avatar_url"`
 }
 
+// toLanguagesArray converts a single language string to a slice.
+func toLanguagesArray(lang string) []string {
+	if lang == "" {
+		return nil
+	}
+	return []string{lang}
+}
+
 // ListPublicRepos lists public repositories for a user or organization.
 func (c *GitHubClientImpl) ListPublicRepos(ctx context.Context, owner string, opts ListOptions) ([]RepoData, PageInfo, error) {
 	if opts.PageSize <= 0 {
@@ -154,7 +162,7 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			Description:   r.Description,
 			HTMLURL:       r.HTMLURL,
 			DefaultBranch: r.DefaultBranch,
-			Language:      r.Language,
+			Languages:     toLanguagesArray(r.Language),
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
@@ -394,7 +402,7 @@ func (c *GitHubClientImpl) GetRepoDetails(ctx context.Context, owner, repo strin
 			Description:   ghRepo.Description,
 			HTMLURL:       ghRepo.HTMLURL,
 			DefaultBranch: ghRepo.DefaultBranch,
-			Language:      ghRepo.Language,
+			Languages:     toLanguagesArray(ghRepo.Language),
 			IsPrivate:     ghRepo.Private,
 			IsArchived:    ghRepo.Archived,
 			IsFork:        ghRepo.Fork,

@@ -643,13 +643,23 @@ func sortByName(repos []providers.RepoData, ascending bool) {
 }
 
 func sortByLanguage(repos []providers.RepoData, ascending bool) {
+	// Helper to get primary language (first in array)
+	getPrimary := func(langs []string) string {
+		if len(langs) > 0 {
+			return langs[0]
+		}
+		return ""
+	}
+
 	for i := 0; i < len(repos)-1; i++ {
 		for j := i + 1; j < len(repos); j++ {
 			swap := false
+			langI := getPrimary(repos[i].Languages)
+			langJ := getPrimary(repos[j].Languages)
 			if ascending {
-				swap = repos[i].Language > repos[j].Language
+				swap = langI > langJ
 			} else {
-				swap = repos[i].Language < repos[j].Language
+				swap = langI < langJ
 			}
 			if swap {
 				repos[i], repos[j] = repos[j], repos[i]

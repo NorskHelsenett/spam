@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -65,6 +66,7 @@ type gitLabProject struct {
 	Archived          bool      `json:"archived"`
 	ForkedFromProject *struct{} `json:"forked_from_project"` // Non-nil if forked
 	Topics            []string  `json:"topics"`
+	Language          string    `json:"language"`
 	CreatedAt         time.Time `json:"created_at"`
 	LastActivityAt    time.Time `json:"last_activity_at"`
 }
@@ -172,6 +174,7 @@ func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath str
 			Description:   p.Description,
 			HTMLURL:       p.WebURL,
 			DefaultBranch: p.DefaultBranch,
+			Languages:     nil, // Will be populated by fetchLanguagesParallel
 			IsPrivate:     p.Visibility != "public",
 			IsArchived:    p.Archived,
 			IsFork:        p.ForkedFromProject != nil,
@@ -181,6 +184,9 @@ func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath str
 			PushedAt:      p.LastActivityAt, // GitLab doesn't separate pushed_at
 		}
 	}
+
+	// Fetch languages in parallel for all projects
+	c.fetchLanguagesParallel(ctx, repos)
 
 	pageInfo := c.parsePageInfo(resp)
 	return repos, pageInfo, nil
@@ -373,6 +379,9 @@ func (c *GitLabClientImpl) GetRepoDetails(ctx context.Context, projectPath strin
 		license = glProject.License.Name
 	}
 
+	// Fetch languages from languages endpoint (GitLab doesn't include it in project response)
+	languages := c.getLanguages(ctx, projectPath)
+
 	return &RepoDetails{
 		RepoData: RepoData{
 			ExternalID:    strconv.FormatInt(glProject.ID, 10),
@@ -381,6 +390,7 @@ func (c *GitLabClientImpl) GetRepoDetails(ctx context.Context, projectPath strin
 			Description:   glProject.Description,
 			HTMLURL:       glProject.WebURL,
 			DefaultBranch: glProject.DefaultBranch,
+			Languages:     languages,
 			IsPrivate:     glProject.Visibility != "public",
 			IsArchived:    glProject.Archived,
 			IsFork:        glProject.ForkedFromProject != nil,
@@ -416,6 +426,86 @@ func (c *GitLabClientImpl) getContributorCount(ctx context.Context, projectPath 
 	encodedPath := url.PathEscape(projectPath)
 	urlStr := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=1", c.baseURL, encodedPath)
 	return c.getCountFromHeader(ctx, urlStr)
+}
+
+// fetchLanguagesParallel fetches languages for all repos in parallel.
+func (c *GitLabClientImpl) fetchLanguagesParallel(ctx context.Context, repos []RepoData) {
+	if len(repos) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	for i := range repos {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			repos[idx].Languages = c.getLanguages(ctx, repos[idx].FullPath)
+		}(i)
+	}
+	wg.Wait()
+}
+
+// getLanguages fetches all languages for a project, sorted by percentage descending.
+func (c *GitLabClientImpl) getLanguages(ctx context.Context, projectPath string) []string {
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/languages", c.baseURL, encodedPath)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil
+	}
+
+	// Response is map of language -> percentage, e.g. {"Go": 100.0, "Shell": 0.5}
+	var languageMap map[string]float64
+	if err := json.Unmarshal(body, &languageMap); err != nil {
+		return nil
+	}
+
+	if len(languageMap) == 0 {
+		return nil
+	}
+
+	// Sort languages by percentage descending
+	type langPct struct {
+		lang string
+		pct  float64
+	}
+	sorted := make([]langPct, 0, len(languageMap))
+	for lang, pct := range languageMap {
+		sorted = append(sorted, langPct{lang, pct})
+	}
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if sorted[j].pct > sorted[i].pct {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	result := make([]string, len(sorted))
+	for i, lp := range sorted {
+		result[i] = lp.lang
+	}
+	return result
 }
 
 func (c *GitLabClientImpl) getCountFromHeader(ctx context.Context, urlStr string) int {

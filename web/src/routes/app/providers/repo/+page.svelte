@@ -27,7 +27,7 @@
 		description: string;
 		html_url: string;
 		default_branch: string;
-		language: string;
+		languages: string[];
 		is_private: boolean;
 		is_archived: boolean;
 		is_fork: boolean;
@@ -479,8 +479,10 @@
 				<span class="flex items-center gap-1.5"><Star class="h-4 w-4" /> {details.stats.stars.toLocaleString()} stars</span>
 				<span class="flex items-center gap-1.5"><GitFork class="h-4 w-4" /> {details.stats.forks.toLocaleString()} forks</span>
 				<span class="flex items-center gap-1.5"><Eye class="h-4 w-4" /> {details.stats.watchers.toLocaleString()} watching</span>
-				{#if details.language}
-					<span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {details.language}</span>
+				{#if details.languages && details.languages.length > 0}
+					{#each details.languages as lang}
+						<span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {lang}</span>
+					{/each}
 				{/if}
 				{#if details.license}
 					<span class="flex items-center gap-1.5"><Scale class="h-4 w-4" /> {details.license}</span>
