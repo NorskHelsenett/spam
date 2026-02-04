@@ -130,6 +130,15 @@
 					description: 'Generating software bill of materials',
 					status: 'completed'
 				});
+			} else if (line.includes('Collecting dependency manifest files')) {
+				const existing = completed.get('run-manifests');
+				if (!existing) {
+					completed.set('run-manifests', {
+						timestamp: log.ts,
+						description: 'Finding dependency files',
+						status: 'running'
+					});
+				}
 			} else if (line.includes('Found') && line.includes('dependency manifest')) {
 				const match = line.match(/Found (\d+) dependency manifest/);
 				completed.set('run-manifests', {
@@ -138,6 +147,14 @@
 					status: 'completed'
 				});
 			} else if (line.includes('Running gitleaks')) {
+				const manifests = completed.get('run-manifests');
+				if (manifests && manifests.status === 'running') {
+					completed.set('run-manifests', {
+						timestamp: log.ts,
+						description: 'No manifest files found',
+						status: 'completed'
+					});
+				}
 				completed.set('run-secrets', {
 					timestamp: log.ts,
 					description: 'Scanning for secrets',

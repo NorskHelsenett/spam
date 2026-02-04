@@ -93,6 +93,10 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) 
 				http.Error(w, "owner not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitHub org/user", http.StatusUnauthorized)
+				return
+			}
 			if errors.Is(err, providers.ErrRateLimited) {
 				http.Error(w, "rate limited", http.StatusTooManyRequests)
 				return
@@ -155,6 +159,10 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 				http.Error(w, "group not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
+				return
+			}
 			if errors.Is(err, providers.ErrRateLimited) {
 				http.Error(w, "rate limited", http.StatusTooManyRequests)
 				return
@@ -211,6 +219,10 @@ func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Sto
 			log.Printf("GitLab API error for group %q subgroups: %v", group, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "group not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
@@ -290,6 +302,10 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) h
 				http.Error(w, "owner not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo instance", http.StatusUnauthorized)
+				return
+			}
 			if errors.Is(err, providers.ErrRateLimited) {
 				http.Error(w, "rate limited", http.StatusTooManyRequests)
 				return
@@ -341,6 +357,10 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) ht
 		})
 		if err != nil {
 			log.Printf("Gitea API error for orgs: %v", err)
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo instance", http.StatusUnauthorized)
+				return
+			}
 			if errors.Is(err, providers.ErrRateLimited) {
 				http.Error(w, "rate limited", http.StatusTooManyRequests)
 				return
@@ -538,6 +558,10 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 				http.Error(w, "repository not found", http.StatusNotFound)
 				return
 			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitHub repo", http.StatusUnauthorized)
+				return
+			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
 			return
 		}
@@ -650,6 +674,10 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			log.Printf("Gitea repo details error for %s/%s: %v", owner, repo, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo repo", http.StatusUnauthorized)
 				return
 			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
