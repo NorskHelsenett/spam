@@ -73,9 +73,10 @@ func Load() (Config, error) {
 
 // WorkerConfig captures configuration for the background worker.
 type WorkerConfig struct {
-	DatabaseURL string
-	Concurrency int // Number of concurrent job processors
-	Runner      RunnerConfig
+	DatabaseURL  string
+	Concurrency  int           // Number of concurrent job processors
+	StaleTimeout time.Duration // Duration after which RUNNING jobs are considered stale
+	Runner       RunnerConfig
 }
 
 // RunnerConfig captures configuration for the Kubernetes runner system.
@@ -123,6 +124,13 @@ func LoadWorker() (WorkerConfig, error) {
 		return WorkerConfig{}, fmt.Errorf("runner config: %w", err)
 	}
 	cfg.Runner = runnerCfg
+
+	// Stale timeout: runner active deadline + 15 minute buffer (or 15m if runner disabled)
+	if cfg.Runner.Enabled {
+		cfg.StaleTimeout = time.Duration(cfg.Runner.ActiveDeadline)*time.Second + 15*time.Minute
+	} else {
+		cfg.StaleTimeout = 15 * time.Minute
+	}
 
 	return cfg, nil
 }

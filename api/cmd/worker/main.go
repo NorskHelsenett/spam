@@ -79,9 +79,8 @@ func run() error {
 
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
 	pollInterval := 2 * time.Second
-	staleAfter := 10 * time.Minute
 
-	log.Printf("worker started: %s (concurrency=%d)", workerID, cfg.Concurrency)
+	log.Printf("worker started: %s (concurrency=%d, stale_timeout=%s)", workerID, cfg.Concurrency, cfg.StaleTimeout)
 
 	// Semaphore to limit concurrent job processing
 	sem := make(chan struct{}, cfg.Concurrency)
@@ -102,7 +101,7 @@ func run() error {
 
 		case <-ticker.C:
 			now := time.Now()
-			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-staleAfter), now)
+			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
 
 			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
 			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)

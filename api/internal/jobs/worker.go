@@ -88,6 +88,9 @@ func CountRunningByType(ctx context.Context, db *gorm.DB, jobType JobType) (int6
 }
 
 // RequeueStaleJobs moves stale RUNNING jobs back to RETRY for safe restarts.
+// It catches two cases:
+// 1. Jobs with locked_at < staleBefore (worker crashed while processing)
+// 2. Jobs with NULL locked_at but updated_at < staleBefore (async runs like CREATE_RUN that never completed)
 func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, now time.Time) (int, error) {
 	var jobs []Job
 	updated := 0
@@ -95,7 +98,8 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, n
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.
 			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status = ? AND locked_at < ?", JobStatusRunning, staleBefore).
+			Where("status = ?", JobStatusRunning).
+			Where("(locked_at < ? OR (locked_at IS NULL AND updated_at < ?))", staleBefore, staleBefore).
 			Find(&jobs).Error; err != nil {
 			return err
 		}
