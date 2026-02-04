@@ -10,24 +10,18 @@ import (
 	"strings"
 )
 
-const (
-	minSecretKeyLen = 32
-)
-
 // ParseSecretKey parses a raw or base64 key string.
 func ParseSecretKey(raw string) ([]byte, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return nil, nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(trimmed)
-	if err == nil {
-		if isValidAESKey(decoded) {
-			return decoded, nil
-		}
-	}
 	if isValidAESKey([]byte(trimmed)) {
 		return []byte(trimmed), nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(trimmed)
+	if err == nil && isValidAESKey(decoded) {
+		return decoded, nil
 	}
 	return nil, errors.New("provider secrets key must be 16, 24, or 32 bytes (raw or base64)")
 }
@@ -43,7 +37,7 @@ func isValidAESKey(key []byte) bool {
 
 // EncryptToken encrypts the given token with AES-GCM.
 func EncryptToken(key []byte, token string) ([]byte, error) {
-	if len(key) < minSecretKeyLen {
+	if !isValidAESKey(key) {
 		return nil, errors.New("provider secrets key not configured")
 	}
 	block, err := aes.NewCipher(key)
@@ -65,7 +59,7 @@ func EncryptToken(key []byte, token string) ([]byte, error) {
 
 // DecryptToken decrypts the given encrypted token blob.
 func DecryptToken(key []byte, blob []byte) (string, error) {
-	if len(key) < minSecretKeyLen {
+	if !isValidAESKey(key) {
 		return "", errors.New("provider secrets key not configured")
 	}
 	block, err := aes.NewCipher(key)

@@ -398,15 +398,13 @@ func parseSecretKeyEnv(key string) ([]byte, error) {
 		return nil, nil
 	}
 
-	decoded, err := base64.StdEncoding.DecodeString(value)
-	if err == nil {
-		if isValidBlockKey(decoded) {
-			return decoded, nil
-		}
-	}
-
 	if isValidBlockKey([]byte(value)) {
 		return []byte(value), nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err == nil && isValidBlockKey(decoded) {
+		return decoded, nil
 	}
 
 	return nil, errors.New("PROVIDER_SECRETS_KEY must be 16, 24, or 32 bytes (raw or base64)")

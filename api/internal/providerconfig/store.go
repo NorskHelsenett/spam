@@ -250,7 +250,7 @@ func (s *Store) rotateToken(ctx context.Context, providerID string, pat string, 
 }
 
 func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID string, pat string, createdBy string) error {
-	if len(s.key) < minSecretKeyLen {
+	if !isValidAESKey(s.key) {
 		return errors.New("provider secrets key not configured")
 	}
 
