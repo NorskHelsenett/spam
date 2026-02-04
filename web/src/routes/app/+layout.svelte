@@ -305,7 +305,7 @@ let isAdmin = $state(false);
 
 
 <style>
-	:global(button) {
+	button {
 		cursor: pointer;
 		width: 100%;
 	}
