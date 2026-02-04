@@ -620,14 +620,6 @@
 
 	.code-block {
 		font-family: 'JetBrains Mono', monospace;
-		background: repeating-linear-gradient(
-			to bottom,
-			rgba(255, 255, 255, 0.02),
-			rgba(255, 255, 255, 0.02) 24px,
-			rgba(255, 255, 255, 0.04) 24px,
-			rgba(255, 255, 255, 0.04) 48px
-		);
-		padding: 0.75rem;
 		border-radius: 0.5rem;
 	}
 </style>
