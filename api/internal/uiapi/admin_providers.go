@@ -105,7 +105,11 @@ func AdminProvidersCreateHandler(db *gorm.DB, authService *auth.Service, store *
 				http.Error(w, "provider already exists", http.StatusConflict)
 				return
 			}
-			http.Error(w, "failed to create provider", http.StatusBadRequest)
+			if strings.Contains(err.Error(), "provider secrets key not configured") {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -144,7 +148,7 @@ func AdminProvidersUpdateHandler(db *gorm.DB, authService *auth.Service, store *
 
 		updated, err := store.Update(r.Context(), providerID, req.DisplayName, req.Enabled)
 		if err != nil {
-			http.Error(w, "failed to update provider", http.StatusBadRequest)
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
@@ -184,7 +188,11 @@ func AdminProvidersRotateHandler(db *gorm.DB, authService *auth.Service, store *
 
 		updated, err := store.RotateToken(r.Context(), providerID, req.PAT, adminUser.ID)
 		if err != nil {
-			http.Error(w, "failed to rotate token", http.StatusBadRequest)
+			if strings.Contains(err.Error(), "provider secrets key not configured") {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 

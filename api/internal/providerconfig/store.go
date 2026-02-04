@@ -143,23 +143,29 @@ func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat strin
 	provider.ID = uuid.NewString()
 	provider.CreatedByUserID = createdBy
 
-	existing := ProviderInstance{}
-	if err := s.db.WithContext(ctx).
-		Where("type = ? AND base_url = ? AND owner_path = ?", provider.Type, provider.BaseURL, provider.OwnerPath).
-		First(&existing).Error; err == nil {
-		return nil, errors.New("provider already exists")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil, err
-	}
-
-	if err := s.db.WithContext(ctx).Create(&provider).Error; err != nil {
-		return nil, err
-	}
-
-	if strings.TrimSpace(pat) != "" {
-		if err := s.rotateToken(ctx, provider.ID, pat, createdBy); err != nil {
-			return nil, err
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		existing := ProviderInstance{}
+		if err := tx.WithContext(ctx).
+			Where("type = ? AND base_url = ? AND owner_path = ?", provider.Type, provider.BaseURL, provider.OwnerPath).
+			First(&existing).Error; err == nil {
+			return errors.New("provider already exists")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
 		}
+
+		if err := tx.WithContext(ctx).Create(&provider).Error; err != nil {
+			return err
+		}
+
+		if strings.TrimSpace(pat) != "" {
+			if err := s.rotateTokenTx(ctx, tx, provider.ID, pat, createdBy); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	admins, err := s.ListAdmin(ctx)
@@ -238,6 +244,12 @@ func (s *Store) Delete(ctx context.Context, providerID string) error {
 }
 
 func (s *Store) rotateToken(ctx context.Context, providerID string, pat string, createdBy string) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		return s.rotateTokenTx(ctx, tx, providerID, pat, createdBy)
+	})
+}
+
+func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID string, pat string, createdBy string) error {
 	if len(s.key) < minSecretKeyLen {
 		return errors.New("provider secrets key not configured")
 	}
@@ -248,24 +260,22 @@ func (s *Store) rotateToken(ctx context.Context, providerID string, pat string, 
 	}
 	fingerprint := FingerprintToken(pat)
 
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		now := time.Now()
-		if err := tx.Model(&ProviderSecret{}).
-			Where("provider_id = ? AND revoked_at IS NULL", providerID).
-			Update("revoked_at", &now).Error; err != nil {
-			return err
-		}
+	now := time.Now()
+	if err := tx.WithContext(ctx).Model(&ProviderSecret{}).
+		Where("provider_id = ? AND revoked_at IS NULL", providerID).
+		Update("revoked_at", &now).Error; err != nil {
+		return err
+	}
 
-		secret := ProviderSecret{
-			ID:               uuid.NewString(),
-			ProviderID:       providerID,
-			TokenEncrypted:   encrypted,
-			TokenFingerprint: fingerprint,
-			CreatedByUserID:  createdBy,
-		}
+	secret := ProviderSecret{
+		ID:               uuid.NewString(),
+		ProviderID:       providerID,
+		TokenEncrypted:   encrypted,
+		TokenFingerprint: fingerprint,
+		CreatedByUserID:  createdBy,
+	}
 
-		return tx.Create(&secret).Error
-	})
+	return tx.WithContext(ctx).Create(&secret).Error
 }
 
 // FindProviderMatch finds the best provider instance for a given repo path.
