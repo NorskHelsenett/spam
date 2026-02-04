@@ -511,6 +511,15 @@
 							{run.status}
 						</span>
 					</div>
+					{#if run.error}
+						<div class="mt-4 flex items-start gap-3 rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
+							<XCircle class="mt-0.5 h-5 w-5 text-[var(--error)]" />
+							<div>
+								<p class="text-xs uppercase tracking-wider text-[var(--error)]">Error</p>
+								<p class="mt-1 text-sm text-[var(--text-secondary)] break-words">{run.error}</p>
+							</div>
+						</div>
+					{/if}
 					<p class="mt-2 flex items-center gap-2 text-[var(--text-secondary)]">
 						<GitBranch class="h-4 w-4" />
 						{run.repo_path || run.clone_url}
@@ -546,13 +555,6 @@
 					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.finished_at)}</p>
 				</div>
 			</div>
-
-			{#if run.error}
-				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-4">
-					<p class="text-xs uppercase tracking-wider text-[var(--error)]">Error</p>
-					<p class="mt-2 text-sm text-[var(--text-secondary)]">{run.error}</p>
-				</div>
-			{/if}
 
 			{#if run.k8s_job_name}
 				<div class="text-xs text-[var(--text-muted)]">

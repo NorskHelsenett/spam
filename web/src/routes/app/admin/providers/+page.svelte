@@ -39,6 +39,7 @@
 	let rotatePat = $state('');
 	let rotatingId = $state<string | null>(null);
 	let showPat = $state(false);
+	let showValidation = $state(false);
 
 	const nowIso = () => new Date().toISOString();
 
@@ -50,6 +51,15 @@
 		return undefined;
 	};
 
+	const ensureScheme = (value: string) => {
+		const trimmed = value.trim();
+		if (!trimmed) return trimmed;
+		if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+			return trimmed;
+		}
+		return `https://${trimmed}`;
+	};
+
 	const parseProviderUrl = (raw: string, mode: ProviderTypeMode): ProviderPreview => {
 		const errors: string[] = [];
 		if (!raw.trim()) {
@@ -57,7 +67,7 @@
 		}
 		let url: URL;
 		try {
-			url = new URL(raw.trim());
+			url = new URL(ensureScheme(raw));
 		} catch {
 			return { errors: ['Provider URL must be a valid URL (https://...).'] };
 		}
@@ -112,6 +122,7 @@
 		pat = '';
 		providerTypeMode = 'auto';
 		showPat = false;
+		showValidation = false;
 		updatePreview();
 	};
 
@@ -135,9 +146,10 @@
 	};
 
 	const addProvider = () => {
+		showValidation = true;
 		const nextPreview = parseProviderUrl(providerUrl, providerTypeMode);
 		if (nextPreview.errors.length > 0) {
-			formError = nextPreview.errors[0];
+			formError = '';
 			return;
 		}
 		if (!pat.trim()) {
@@ -152,7 +164,7 @@
 
 		const entry: ProviderRow = {
 			id: crypto.randomUUID(),
-			providerUrl: providerUrl.trim(),
+			providerUrl: ensureScheme(providerUrl).trim(),
 			baseUrl,
 			ownerPath,
 			type,
@@ -377,16 +389,16 @@
 					</div>
 				</div>
 
-				{#if preview.errors.length > 0}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-						{preview.errors[0]}
-					</div>
-				{/if}
-				{#if formError}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-						{formError}
-					</div>
-				{/if}
+			{#if showValidation && preview.errors.length > 0}
+				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+					{preview.errors[0]}
+				</div>
+			{/if}
+			{#if showValidation && formError}
+				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+					{formError}
+				</div>
+			{/if}
 			</div>
 
 			<div class="space-y-4 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
@@ -400,7 +412,6 @@
 					type="button"
 					class="w-full rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
 					onclick={addProvider}
-					disabled={preview.errors.length > 0 || !pat.trim()}
 				>
 					Add Provider
 				</button>
@@ -445,7 +456,7 @@
 									{entry.ownerPath || 'All'}
 								</td>
 								<td class="px-5 py-3 text-xs">
-									{entry.tokenFingerprint ? `Set ${entry.tokenFingerprint}` : 'Missing'}
+									{entry.tokenFingerprint ? `${entry.tokenFingerprint}` : 'Missing'}
 									{#if entry.lastRotatedAt}
 										<div class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 											Rotated {entry.lastRotatedAt}
