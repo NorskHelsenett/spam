@@ -563,8 +563,8 @@
 				</button>
 
 				{#if showRawLogs}
-					<div class="mt-3 max-h-80 overflow-auto rounded-lg bg-[var(--card-bg)] p-4">
-						<pre class="text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all" style="font-family: 'JetBrains Mono', monospace;">{rawLogsText}</pre>
+					<div class="mt-3 max-h-80 overflow-auto rounded-lg border border-[var(--border-color)]/60 bg-[var(--main-content-bg)]/80 p-4 shadow-inner">
+						<pre class="code-block text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all"><code>{rawLogsText}</code></pre>
 					</div>
 				{/if}
 			</div>
@@ -616,5 +616,18 @@
 		flex: 1;
 		min-width: 0;
 		padding-top: 4px;
+	}
+
+	.code-block {
+		font-family: 'JetBrains Mono', monospace;
+		background: repeating-linear-gradient(
+			to bottom,
+			rgba(255, 255, 255, 0.02),
+			rgba(255, 255, 255, 0.02) 24px,
+			rgba(255, 255, 255, 0.04) 24px,
+			rgba(255, 255, 255, 0.04) 48px
+		);
+		padding: 0.75rem;
+		border-radius: 0.5rem;
 	}
 </style>
