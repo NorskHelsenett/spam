@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"gorm.io/gorm"
 )
 
@@ -128,9 +129,21 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) 
 	}
 
 	for _, row := range rows {
+		status := row.Status
+		if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+			if resultMap, err := parseRunResultMap(row.Result); err == nil {
+				events, podStatus, ok, err := loadPersistedK8sSnapshotFromResult(resultMap)
+				if err == nil && ok {
+					if failed, _ := inferK8sFailure(events, podStatus); failed {
+						status, _, _ = correctRunStatusFromSnapshot(r.Context(), db, row.ID, status, events, podStatus)
+					}
+				}
+			}
+		}
+
 		summary := RepoMetadataRunSummary{
 			ID:         row.ID,
-			Status:     row.Status,
+			Status:     status,
 			CommitSHA:  row.CommitHash,
 			StartedAt:  formatTimePtr(row.LockedAt),
 			FinishedAt: formatTimePtr(row.FinishedAt),

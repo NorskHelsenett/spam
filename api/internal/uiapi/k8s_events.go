@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"gorm.io/gorm"
 )
@@ -46,6 +47,10 @@ func loadPersistedK8sSnapshot(ctx context.Context, db *gorm.DB, runID string) ([
 		return nil, nil, false, err
 	}
 
+	return loadPersistedK8sSnapshotFromResult(resultMap)
+}
+
+func loadPersistedK8sSnapshotFromResult(resultMap map[string]json.RawMessage) ([]runner.K8sEvent, *runner.PodStatus, bool, error) {
 	raw, ok := resultMap["k8s"]
 	if !ok || len(raw) == 0 {
 		return nil, nil, false, nil
@@ -75,12 +80,16 @@ func loadRunResultMap(ctx context.Context, db *gorm.DB, runID string) (map[strin
 		return nil, err
 	}
 
-	if len(row.Result) == 0 {
+	return parseRunResultMap(row.Result)
+}
+
+func parseRunResultMap(raw json.RawMessage) (map[string]json.RawMessage, error) {
+	if len(raw) == 0 {
 		return map[string]json.RawMessage{}, nil
 	}
 
 	var resultMap map[string]json.RawMessage
-	if err := json.Unmarshal(row.Result, &resultMap); err != nil {
+	if err := json.Unmarshal(raw, &resultMap); err != nil {
 		return nil, err
 	}
 
@@ -101,6 +110,33 @@ func saveRunResultMap(ctx context.Context, db *gorm.DB, runID string, resultMap 
 		Table("jobs").
 		Where("id = ?", runID).
 		Update("result", payload).Error
+}
+
+func correctRunStatusFromSnapshot(ctx context.Context, db *gorm.DB, runID string, status string, events []runner.K8sEvent, podStatus *runner.PodStatus) (string, string, bool) {
+	if status == string(jobs.JobStatusFailed) {
+		return status, "", false
+	}
+
+	if failed, message := inferK8sFailure(events, podStatus); failed {
+		errorText := message
+		if errorText == "" {
+			errorText = "k8s runner failed to start"
+		}
+		now := time.Now()
+		if err := db.WithContext(ctx).Table("jobs").
+			Where("id = ?", runID).
+			Updates(map[string]interface{}{
+				"status":      jobs.JobStatusFailed,
+				"error":       errorText,
+				"finished_at": now,
+				"updated_at":  now,
+			}).Error; err == nil {
+			return string(jobs.JobStatusFailed), errorText, true
+		}
+		return string(jobs.JobStatusFailed), errorText, false
+	}
+
+	return status, "", false
 }
 
 func inferK8sFailure(events []runner.K8sEvent, podStatus *runner.PodStatus) (bool, string) {

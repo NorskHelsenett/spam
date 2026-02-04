@@ -90,10 +90,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			LockedAt   *time.Time
 			FinishedAt *time.Time
 			K8sJobName string `gorm:"column:k8s_job_name"`
+			Result     []byte
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name").
+		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name, result").
 			Order("created_at DESC").
 			Offset(offset).
 			Limit(pageSize).
@@ -110,15 +111,31 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				json.Unmarshal(job.Payload, &payload)
 			}
 
+			status := job.Status
+			errorText := job.Error
+			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+				if resultMap, err := parseRunResultMap(job.Result); err == nil {
+					events, podStatus, ok, err := loadPersistedK8sSnapshotFromResult(resultMap)
+					if err == nil && ok {
+						if failed, message := inferK8sFailure(events, podStatus); failed {
+							status, errorText, _ = correctRunStatusFromSnapshot(r.Context(), db, job.ID, status, events, podStatus)
+							if errorText == "" {
+								errorText = message
+							}
+						}
+					}
+				}
+			}
+
 			runs = append(runs, RunResponse{
 				ID:         job.ID,
-				Status:     job.Status,
+				Status:     status,
 				CloneURL:   payload.CloneURL,
 				Provider:   payload.Provider,
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
 				CommitSHA:  job.CommitHash,
-				Error:      job.Error,
+				Error:      errorText,
 				CreatedAt:  job.CreatedAt,
 				StartedAt:  job.LockedAt,
 				FinishedAt: job.FinishedAt,
