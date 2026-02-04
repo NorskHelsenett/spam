@@ -97,6 +97,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				if opts != nil && opts.K8sClient != nil {
 					api.Get("/runs/{id}/k8s-logs", uiapi.RunLogsHandler(db, authService, opts.K8sClient))
 					api.Get("/runs/{id}/k8s-status", uiapi.RunJobStatusHandler(db, authService, opts.K8sClient))
+					api.Get("/runs/{id}/events", uiapi.RunEventsHandler(db, authService, opts.K8sClient))
 				}
 				if opts != nil && opts.RunExecutor != nil {
 					api.Post("/runs/{id}/cancel", uiapi.RunCancelHandler(db, authService, opts.RunExecutor))

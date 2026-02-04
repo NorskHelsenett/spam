@@ -261,6 +261,197 @@ func (k *K8sClient) GetJobStatus(ctx context.Context, jobName, namespace string)
 	return k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 }
 
+// PodStatus contains the status of a pod including any waiting/error states.
+type PodStatus struct {
+	Phase           string `json:"phase"`
+	Reason          string `json:"reason,omitempty"`
+	Message         string `json:"message,omitempty"`
+	ContainerStatus string `json:"container_status,omitempty"`
+	WaitingReason   string `json:"waiting_reason,omitempty"`
+	WaitingMessage  string `json:"waiting_message,omitempty"`
+	IsError         bool   `json:"is_error"`
+}
+
+// GetPodStatus retrieves the status of the pod associated with a job.
+// It returns error states like ImagePullBackOff, ErrImagePull, CrashLoopBackOff, etc.
+func (k *K8sClient) GetPodStatus(ctx context.Context, jobName, namespace string) (*PodStatus, error) {
+	if k.cfg.LocalMode {
+		return nil, fmt.Errorf("pod status not available in local mode")
+	}
+
+	// Find the pod created by this job
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	if len(pods.Items) == 0 {
+		return &PodStatus{
+			Phase:   "Pending",
+			Reason:  "NoPod",
+			Message: "no pods found for job",
+		}, nil
+	}
+
+	pod := pods.Items[0]
+	status := &PodStatus{
+		Phase: string(pod.Status.Phase),
+	}
+
+	// Check pod-level conditions
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {
+			status.Reason = cond.Reason
+			status.Message = cond.Message
+			if cond.Reason == "Unschedulable" {
+				status.IsError = true
+			}
+		}
+	}
+
+	// Check container statuses for waiting/error states
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == "runner" {
+			status.ContainerStatus = "unknown"
+			if cs.State.Running != nil {
+				status.ContainerStatus = "running"
+			} else if cs.State.Terminated != nil {
+				status.ContainerStatus = "terminated"
+				if cs.State.Terminated.ExitCode != 0 {
+					status.Reason = cs.State.Terminated.Reason
+					status.Message = cs.State.Terminated.Message
+					status.IsError = true
+				}
+			} else if cs.State.Waiting != nil {
+				status.ContainerStatus = "waiting"
+				status.WaitingReason = cs.State.Waiting.Reason
+				status.WaitingMessage = cs.State.Waiting.Message
+
+				// Mark specific waiting states as errors
+				switch cs.State.Waiting.Reason {
+				case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+					status.IsError = true
+					status.Reason = cs.State.Waiting.Reason
+					status.Message = cs.State.Waiting.Message
+				case "CrashLoopBackOff":
+					status.IsError = true
+					status.Reason = cs.State.Waiting.Reason
+					status.Message = cs.State.Waiting.Message
+				case "CreateContainerConfigError", "CreateContainerError":
+					status.IsError = true
+					status.Reason = cs.State.Waiting.Reason
+					status.Message = cs.State.Waiting.Message
+				}
+			}
+			break
+		}
+	}
+
+	// Also check init container statuses
+	for _, cs := range pod.Status.InitContainerStatuses {
+		if cs.State.Waiting != nil {
+			switch cs.State.Waiting.Reason {
+			case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+				status.IsError = true
+				status.Reason = cs.State.Waiting.Reason
+				status.Message = cs.State.Waiting.Message
+				status.WaitingReason = cs.State.Waiting.Reason
+				status.WaitingMessage = cs.State.Waiting.Message
+			}
+		}
+	}
+
+	return status, nil
+}
+
+// K8sEvent represents a Kubernetes event.
+type K8sEvent struct {
+	Type           string    `json:"type"`            // Normal, Warning
+	Reason         string    `json:"reason"`          // Scheduled, Pulling, Pulled, Created, Started, etc.
+	Message        string    `json:"message"`         // Human-readable description
+	Source         string    `json:"source"`          // Component that reported the event
+	FirstTimestamp time.Time `json:"first_timestamp"` // When the event was first recorded
+	LastTimestamp  time.Time `json:"last_timestamp"`  // When the event was last recorded
+	Count          int32     `json:"count"`           // Number of times this event occurred
+	Object         string    `json:"object"`          // Object this event is about (job, pod)
+}
+
+// GetJobEvents retrieves Kubernetes events for a job and its pods.
+func (k *K8sClient) GetJobEvents(ctx context.Context, jobName, namespace string) ([]K8sEvent, error) {
+	if k.cfg.LocalMode {
+		return nil, fmt.Errorf("events not available in local mode")
+	}
+
+	var result []K8sEvent
+
+	// Get events for the job
+	jobFieldSelector := fmt.Sprintf("involvedObject.kind=Job,involvedObject.name=%s", jobName)
+	jobEvents, err := k.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+		FieldSelector: jobFieldSelector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list job events: %w", err)
+	}
+
+	for _, e := range jobEvents.Items {
+		result = append(result, K8sEvent{
+			Type:           e.Type,
+			Reason:         e.Reason,
+			Message:        e.Message,
+			Source:         e.Source.Component,
+			FirstTimestamp: e.FirstTimestamp.Time,
+			LastTimestamp:  e.LastTimestamp.Time,
+			Count:          e.Count,
+			Object:         "job/" + jobName,
+		})
+	}
+
+	// Find pods created by this job and get their events
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+
+	for _, pod := range pods.Items {
+		podFieldSelector := fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s", pod.Name)
+		podEvents, err := k.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+			FieldSelector: podFieldSelector,
+		})
+		if err != nil {
+			log.Printf("failed to list events for pod %s: %v", pod.Name, err)
+			continue
+		}
+
+		for _, e := range podEvents.Items {
+			result = append(result, K8sEvent{
+				Type:           e.Type,
+				Reason:         e.Reason,
+				Message:        e.Message,
+				Source:         e.Source.Component,
+				FirstTimestamp: e.FirstTimestamp.Time,
+				LastTimestamp:  e.LastTimestamp.Time,
+				Count:          e.Count,
+				Object:         "pod/" + pod.Name,
+			})
+		}
+	}
+
+	// Sort events by timestamp
+	for i := 0; i < len(result)-1; i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[i].FirstTimestamp.After(result[j].FirstTimestamp) {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+
+	return result, nil
+}
+
 // GetPodLogs retrieves logs from the runner pod associated with a job.
 func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, tailLines *int64) (string, error) {
 	if k.cfg.LocalMode {

@@ -4,7 +4,8 @@
       "Bash(go vet:*)",
       "Bash(pushd:*)",
       "Bash(popd)",
-      "Bash(go test:*)"
+      "Bash(go test:*)",
+      "Bash(npm run:*)"
     ]
   }
 }

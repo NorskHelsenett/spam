@@ -515,6 +515,55 @@ func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runn
 	}
 }
 
+// RunEventsHandler retrieves Kubernetes events for a run.
+// GET /api/runs/{id}/events
+func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get run from database
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		if run.K8sJobName == "" || run.K8sNamespace == "" {
+			http.Error(w, "run has no associated Kubernetes job", http.StatusBadRequest)
+			return
+		}
+
+		// Get events from Kubernetes
+		events, err := k8sClient.GetJobEvents(r.Context(), run.K8sJobName, run.K8sNamespace)
+		if err != nil {
+			log.Printf("failed to get job events: %v", err)
+			http.Error(w, "failed to retrieve events from Kubernetes", http.StatusInternalServerError)
+			return
+		}
+
+		// Get pod status for additional context
+		podStatus, _ := k8sClient.GetPodStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"events":     events,
+			"pod_status": podStatus,
+		})
+	}
+}
+
 // RunSecretsHandler retrieves gitleaks findings for a run.
 // GET /api/runs/{id}/secrets
 func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {

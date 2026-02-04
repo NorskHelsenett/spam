@@ -2,7 +2,8 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download } from 'lucide-svelte';
+	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download, Activity } from 'lucide-svelte';
+	import RunTimeline from '$lib/components/RunTimeline.svelte';
 
 	type Run = {
 		id: string;
@@ -32,6 +33,31 @@
 		raw_data?: any;
 	};
 
+	type K8sEvent = {
+		type: string;
+		reason: string;
+		message: string;
+		source: string;
+		first_timestamp: string;
+		last_timestamp: string;
+		count: number;
+		object: string;
+	};
+
+	type RunLog = {
+		line: string;
+		ts: string;
+	};
+
+	type PodStatus = {
+		phase: string;
+		reason?: string;
+		message?: string;
+		waiting_reason?: string;
+		waiting_message?: string;
+		is_error?: boolean;
+	};
+
 	let run: Run | null = $state(null);
 	let artifacts: Artifact[] = $state([]);
 	let loading = $state(true);
@@ -41,6 +67,10 @@
 	let rawDialogData = $state('');
 	let eventSource: EventSource | null = null;
 	let lastStatus = $state('');
+	let runLogs: RunLog[] = $state([]);
+	let k8sEvents: K8sEvent[] = $state([]);
+	let podStatus: PodStatus | null = $state(null);
+	let showTimeline = $state(true);
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -71,6 +101,21 @@
 			error = e instanceof Error ? e.message : 'Failed to load run';
 		} finally {
 			loading = false;
+		}
+	};
+
+	const loadK8sEvents = async (runId: string) => {
+		try {
+			const response = await fetch(`/api/runs/${runId}/events`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				const data = await response.json();
+				k8sEvents = data.events || [];
+				podStatus = data.pod_status || null;
+			}
+		} catch (e) {
+			console.log('K8s events not available:', e);
 		}
 	};
 
@@ -164,7 +209,7 @@
 		// If not available, fall back to polling
 		try {
 			eventSource = new EventSource(`/api/runs/${id}/stream`, { withCredentials: true });
-			
+
 			eventSource.addEventListener('status', (event) => {
 				try {
 					const data = JSON.parse(event.data);
@@ -172,14 +217,17 @@
 						// Status changed - update run and load artifacts
 						run.status = data.status;
 						lastStatus = data.status;
-						
+
 						// If SSE includes artifact IDs, update them immediately
 						if (data.sbom_id) run.sbom_id = data.sbom_id;
-						if (data.secret_id) run.secret_id = data.secret_id;					if (data.commit_hash) run.commit_hash = data.commit_hash;						
+						if (data.secret_id) run.secret_id = data.secret_id;
+						if (data.commit_hash) run.commit_hash = data.commit_hash;
+
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
 						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
 							loadArtifacts(id, run);
+							loadK8sEvents(id);
 						}
 					}
 				} catch (e) {
@@ -187,8 +235,14 @@
 				}
 			});
 
-			eventSource.addEventListener('log', () => {
-				// Log events received (could display in UI later)
+			eventSource.addEventListener('log', (event) => {
+				// Collect logs for the timeline
+				try {
+					const data = JSON.parse(event.data);
+					runLogs = [...runLogs, { line: data.line, ts: data.ts }];
+				} catch (e) {
+					console.error('Failed to parse log event:', e);
+				}
 			});
 
 			eventSource.onerror = () => {
@@ -219,16 +273,32 @@
 		return () => clearInterval(interval);
 	};
 
+	let eventsInterval: ReturnType<typeof setInterval> | null = null;
+
 	onMount(async () => {
 		if (!browser) return;
 
+		const id = $page.params.id;
+		if (!id) return;
+
 		// Initial load - wait for it to complete before connecting SSE
 		await loadRun(true);
+
+		// Load K8s events if the run has a K8s job
+		if (run?.k8s_job_name) {
+			await loadK8sEvents(id);
+		}
 
 		// Try SSE first, fall back to polling if not available
 		// Only connect if run is still in progress (SSE for completed runs is handled by loadRun)
 		if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
 			connectSSE();
+			// Periodically refresh K8s events for running jobs
+			eventsInterval = setInterval(() => {
+				if (run?.k8s_job_name) {
+					loadK8sEvents(id);
+				}
+			}, 5000);
 		}
 	});
 
@@ -236,6 +306,10 @@
 		if (eventSource) {
 			eventSource.close();
 			eventSource = null;
+		}
+		if (eventsInterval) {
+			clearInterval(eventsInterval);
+			eventsInterval = null;
 		}
 	});
 
@@ -386,7 +460,40 @@
 					K8s Job: {run.k8s_job_name}
 				</div>
 			{/if}
+		</section>
 
+		<!-- Timeline Section -->
+		<section class="panel-surface px-6 py-6 sm:px-10">
+			<div class="mb-4 flex items-center justify-between">
+				<h2 class="flex items-center gap-2 text-lg font-semibold text-[var(--text-bright)]">
+					<Activity class="h-5 w-5 text-[var(--accent)]" />
+					Execution Timeline
+				</h2>
+				<button
+					type="button"
+					class="text-sm text-[var(--text-secondary)] hover:text-[var(--accent)]"
+					onclick={() => { showTimeline = !showTimeline; }}
+				>
+					{showTimeline ? 'Hide' : 'Show'}
+				</button>
+			</div>
+
+			{#if showTimeline}
+				<RunTimeline
+					runId={run.id}
+					status={run.status}
+					logs={runLogs}
+					events={k8sEvents}
+					podStatus={podStatus ?? undefined}
+					secretCount={artifacts.find(a => a.type === 'secrets')?.count || 0}
+					sbomComponentCount={artifacts.find(a => a.type === 'sbom')?.count || 0}
+					manifestCount={artifacts.find(a => a.type === 'manifests')?.count || 0}
+					commitHash={run.commit_hash || ''}
+				/>
+			{/if}
+		</section>
+
+		<section class="panel-surface space-y-6 px-6 py-8 sm:px-10">
 			<!-- Results Section -->
 			{#if run.status === 'SUCCEEDED' && artifacts.length > 0}
 				<div class="space-y-4">
