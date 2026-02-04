@@ -61,6 +61,20 @@ appSecret:
     cookieHashKey: ""   # HMAC key for cookie signing (≥32 bytes, auto-generated)
     cookieBlockKey: ""  # AES key for cookie encryption (16/24/32 bytes, auto-generated)
 
+# Provider secrets key for encrypting PATs
+providerSecrets:
+  # Set to true to create the secret automatically
+  enabled: false
+
+  # Use an existing secret instead of creating one (optional)
+  existingSecret: ""  # e.g., "spam-provider-secrets"
+
+  # Set to true to prevent secret updates (rotation requires new secret name)
+  immutable: true
+
+  # Provide a specific key (optional). If empty, auto-generate and keep across upgrades.
+  key: ""
+
 # To manually create the secret, use:
 #   kubectl create secret generic spam-app-secret \
 #     --from-literal=OIDC_ISSUER_URL='https://auth.example.com' \
