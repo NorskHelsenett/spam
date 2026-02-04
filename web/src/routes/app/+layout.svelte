@@ -8,7 +8,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
-	
+
 	let appEventSource: EventSource | null = null;
 
 	const startAppStream = () => {
@@ -279,8 +279,8 @@ let isAdmin = $state(false);
 				</span>
 				<span class="font-medium">Theme: {$theme === 'dark' ? 'Dark' : 'Light'}</span>
 			</button>
-			<button 
-				type="button" 
+			<button
+				type="button"
 				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 				onclick={() => accountDialogOpen = true}
 			>
@@ -302,3 +302,11 @@ let isAdmin = $state(false);
 </div>
 
 <AccountDialog bind:open={accountDialogOpen} />
+
+
+<style>
+	:global(button) {
+		cursor: pointer;
+		width: 100%;
+	}
+</style>
