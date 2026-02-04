@@ -12,9 +12,9 @@ import (
 
 // Config captures the runtime configuration required by the API server.
 type Config struct {
-	HTTPPort    string
-	DatabaseURL string
-	OIDC        OIDCConfig
+	HTTPPort           string
+	DatabaseURL        string
+	OIDC               OIDCConfig
 	ProviderSecretsKey []byte
 }
 
@@ -80,20 +80,20 @@ type WorkerConfig struct {
 
 // RunnerConfig captures configuration for the Kubernetes runner system.
 type RunnerConfig struct {
-	Enabled        bool              // Enable runner functionality
-	HMACKey        []byte            // Key for signing run tokens
-	ProviderSecretsKey []byte        // Key for encrypting provider secrets
-	Image          string            // Runner container image
-	Namespace      string            // Kubernetes namespace for runner jobs
-	ServiceAccount string            // ServiceAccount for runner jobs
-	WorkerURL      string            // Internal callback URL (http://worker:8081)
-	HTTPPort       int               // Worker runner HTTP port (default 8081)
-	TTLSeconds     int32             // TTL for completed K8s jobs
-	ActiveDeadline int64             // Maximum runtime for K8s jobs in seconds
-	LocalMode      bool              // Skip K8s, run Docker inline for testing
-	DockerSocket   string            // Docker socket path for local mode
-	KubeconfigPath string            // Path to kubeconfig (empty for in-cluster)
-	PodAnnotations map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
+	Enabled            bool              // Enable runner functionality
+	HMACKey            []byte            // Key for signing run tokens
+	ProviderSecretsKey []byte            // Key for encrypting provider secrets
+	Image              string            // Runner container image
+	Namespace          string            // Kubernetes namespace for runner jobs
+	ServiceAccount     string            // ServiceAccount for runner jobs
+	WorkerURL          string            // Internal callback URL (http://worker:8081)
+	HTTPPort           int               // Worker runner HTTP port (default 8081)
+	TTLSeconds         int32             // TTL for completed K8s jobs
+	ActiveDeadline     int64             // Maximum runtime for K8s jobs in seconds
+	LocalMode          bool              // Skip K8s, run Docker inline for testing
+	DockerSocket       string            // Docker socket path for local mode
+	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
+	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -400,16 +400,16 @@ func parseSecretKeyEnv(key string) ([]byte, error) {
 
 	decoded, err := base64.StdEncoding.DecodeString(value)
 	if err == nil {
-		if len(decoded) < 32 {
-			return nil, errors.New("PROVIDER_SECRETS_KEY must be at least 32 bytes")
+		if isValidBlockKey(decoded) {
+			return decoded, nil
 		}
-		return decoded, nil
 	}
 
-	if len(value) < 32 {
-		return nil, errors.New("PROVIDER_SECRETS_KEY must be at least 32 bytes")
+	if isValidBlockKey([]byte(value)) {
+		return []byte(value), nil
 	}
-	return []byte(value), nil
+
+	return nil, errors.New("PROVIDER_SECRETS_KEY must be 16, 24, or 32 bytes (raw or base64)")
 }
 
 // parseMapEnv parses a comma-separated key=value environment variable.

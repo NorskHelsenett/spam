@@ -22,15 +22,23 @@ func ParseSecretKey(raw string) ([]byte, error) {
 	}
 	decoded, err := base64.StdEncoding.DecodeString(trimmed)
 	if err == nil {
-		if len(decoded) < minSecretKeyLen {
-			return nil, errors.New("provider secrets key must be at least 32 bytes")
+		if isValidAESKey(decoded) {
+			return decoded, nil
 		}
-		return decoded, nil
 	}
-	if len(trimmed) < minSecretKeyLen {
-		return nil, errors.New("provider secrets key must be at least 32 bytes")
+	if isValidAESKey([]byte(trimmed)) {
+		return []byte(trimmed), nil
 	}
-	return []byte(trimmed), nil
+	return nil, errors.New("provider secrets key must be 16, 24, or 32 bytes (raw or base64)")
+}
+
+func isValidAESKey(key []byte) bool {
+	switch len(key) {
+	case 16, 24, 32:
+		return true
+	default:
+		return false
+	}
 }
 
 // EncryptToken encrypts the given token with AES-GCM.
