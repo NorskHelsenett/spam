@@ -1,7 +1,10 @@
 package jobs
 
+// JobType represents the type of a job.
+type JobType = string
+
 const (
-	JobTypeParseSBOM = "PARSE_SBOM"
-	JobTypeCreateRun = "CREATE_RUN"
-	JobTypeRefreshSBOMViews = "REFRESH_SBOM_VIEWS"
+	JobTypeParseSBOM        JobType = "PARSE_SBOM"
+	JobTypeCreateRun        JobType = "CREATE_RUN"
+	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
 )

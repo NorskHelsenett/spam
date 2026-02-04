@@ -11,14 +11,21 @@ import (
 )
 
 // ClaimNextJob selects the next available job and marks it RUNNING.
-func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Time) (*Job, error) {
+// Optional excludeTypes can be passed to skip certain job types (e.g., when at concurrency limit for runs).
+func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Time, excludeTypes ...JobType) (*Job, error) {
 	var claimed *Job
 
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var job Job
-		if err := tx.
+		query := tx.
 			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("status IN ? AND run_at <= ?", []JobStatus{JobStatusQueued, JobStatusRetry}, now).
+			Where("status IN ? AND run_at <= ?", []JobStatus{JobStatusQueued, JobStatusRetry}, now)
+
+		if len(excludeTypes) > 0 {
+			query = query.Where("type NOT IN ?", excludeTypes)
+		}
+
+		if err := query.
 			Order("run_at asc, created_at asc").
 			First(&job).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -67,6 +74,17 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 	}
 
 	return claimed, nil
+}
+
+// CountRunningByType returns the number of jobs of a given type currently in RUNNING status.
+func CountRunningByType(ctx context.Context, db *gorm.DB, jobType JobType) (int64, error) {
+	var count int64
+	if err := db.WithContext(ctx).Model(&Job{}).
+		Where("type = ? AND status = ?", jobType, JobStatusRunning).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // RequeueStaleJobs moves stale RUNNING jobs back to RETRY for safe restarts.

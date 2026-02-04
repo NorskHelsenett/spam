@@ -104,6 +104,13 @@ func run() error {
 			now := time.Now()
 			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-staleAfter), now)
 
+			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
+			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)
+			if err != nil {
+				log.Printf("count running runs error: %v", err)
+				runningRuns = int64(cfg.Concurrency) // Assume at limit on error
+			}
+
 			// Try to claim jobs up to available concurrency slots
 			for {
 				// Check if we can acquire a slot (non-blocking)
@@ -123,7 +130,13 @@ func run() error {
 				default:
 				}
 
-				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now())
+				// Determine which job types to claim based on running runs
+				var excludeTypes []jobs.JobType
+				if runningRuns >= int64(cfg.Concurrency) {
+					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
+				}
+
+				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now(), excludeTypes...)
 				if err != nil {
 					log.Printf("claim job error: %v", err)
 					<-sem // Release the slot
@@ -133,6 +146,11 @@ func run() error {
 					// No more jobs available
 					<-sem // Release the slot
 					goto nextTick
+				}
+
+				// Track if we're starting a new run
+				if job.Type == jobs.JobTypeCreateRun {
+					runningRuns++
 				}
 
 				// Process job in a goroutine
