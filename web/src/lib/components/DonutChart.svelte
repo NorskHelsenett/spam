@@ -72,9 +72,9 @@
 					cy={center}
 					r={radius}
 					fill="none"
-					stroke="var(--border-color)"
+					stroke="var(--gray)"
 					stroke-width={strokeWidth}
-					opacity={hoveredIndex === 'other' ? 0.6 : 0.3}
+					opacity={hoveredIndex === 'other' ? 0.6 : 0.35}
 					class="donut-segment transition-all duration-200 ease-out"
 					class:hovered={hoveredIndex === 'other'}
 					on:mouseenter={() => (hoveredIndex = 'other')}
@@ -89,7 +89,7 @@
 					cy={center}
 					r={radius}
 					fill="none"
-					stroke="var(--border-color)"
+					stroke="var(--bg3)"
 					stroke-width={strokeWidth}
 					opacity="0.3"
 				/>
@@ -126,7 +126,7 @@
 					style="left: {tooltipX + 16}px; top: {tooltipY - 24}px; transform: translateX(-50%);"
 				>
 					{#if hoveredIndex === 'other'}
-						<span class="inline-block h-2 w-2 rounded-full mr-1.5 bg-[var(--border-color)]"></span>
+						<span class="inline-block h-2 w-2 rounded-full mr-1.5 bg-[var(--gray)]"></span>
 						Other · {otherValue}
 						<span class="text-[var(--text-tertiary)]">({otherPercent.toFixed(1)}%)</span>
 					{:else if segmentData[hoveredIndex]}

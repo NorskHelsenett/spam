@@ -49,6 +49,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
+				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
+				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))

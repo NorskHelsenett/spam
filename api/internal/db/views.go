@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -22,5 +23,29 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 			return fmt.Errorf("exec view sql %s: %w", path, err)
 		}
 	}
+	return nil
+}
+
+// RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
+func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
+	if err := db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_component_view").Error; err != nil {
+		return fmt.Errorf("refresh sbom_component_view: %w", err)
+	}
+	if err := db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_metadata_view").Error; err != nil {
+		return fmt.Errorf("refresh sbom_metadata_view: %w", err)
+	}
+
+	refreshedAt := time.Now().UTC()
+	if err := db.WithContext(ctx).Exec(`
+		INSERT INTO materialized_view_refreshes (name, refreshed_at)
+		VALUES
+			('sbom_component_view', ?),
+			('sbom_metadata_view', ?)
+		ON CONFLICT (name)
+		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+	`, refreshedAt, refreshedAt).Error; err != nil {
+		return fmt.Errorf("record refresh: %w", err)
+	}
+
 	return nil
 }

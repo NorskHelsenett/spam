@@ -17,13 +17,13 @@
 <div class="flex min-h-[200px] w-full flex-col items-center justify-center gap-4">
 	{#if variant === 'spinner'}
 		<div class="relative flex items-center justify-center {classes.outer}">
-			<div class="ring-clockwise {classes.outer} absolute rounded-full border-2 border-transparent border-t-[var(--accent)] border-r-[var(--accent)]"></div>
-			<div class="ring-counter {classes.inner} absolute rounded-full border-2 border-transparent border-b-[var(--info)] border-l-[var(--info)]"></div>
-			<Loader2 class="{classes.icon} text-[var(--text-muted)]" />
+			<div class="ring-clockwise {classes.outer} absolute rounded-full border-2 border-transparent border-t-[var(--yellow)] border-r-[var(--orange)]"></div>
+			<div class="ring-counter {classes.inner} absolute rounded-full border-2 border-transparent border-b-[var(--aqua)] border-l-[var(--blue)]"></div>
+			<Loader2 class="{classes.icon} text-[var(--gray)]" />
 		</div>
 	{:else}
-		<div class="w-48 overflow-hidden rounded-full bg-[var(--border-color)]/30">
-			<div class="loading-bar {classes.bar} rounded-full bg-[var(--accent)]"></div>
+		<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
+			<div class="loading-bar {classes.bar} rounded-full bg-[var(--yellow)]"></div>
 		</div>
 	{/if}
 	<p class="{classes.text} uppercase tracking-[0.2em] text-[var(--text-muted)]">{message}</p>

@@ -1,4 +1,7 @@
-CREATE OR REPLACE VIEW sbom_metadata_view AS
+DROP MATERIALIZED VIEW IF EXISTS sbom_metadata_view;
+DROP VIEW IF EXISTS sbom_metadata_view;
+
+CREATE MATERIALIZED VIEW sbom_metadata_view AS
 WITH sbom_json AS (
   SELECT
     s.id AS sbom_id,
@@ -77,3 +80,12 @@ LEFT JOIN scanner sc ON sc.sbom_id = sj.sbom_id
 LEFT JOIN root_component r ON r.sbom_id = sj.sbom_id
 LEFT JOIN repo_bindings rc ON rc.sbom_id = sj.sbom_id
 LEFT JOIN image_bindings ib ON ib.sbom_id = sj.sbom_id;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_metadata_mv
+  ON sbom_metadata_view (sbom_id);
+
+CREATE INDEX IF NOT EXISTS idx_sbom_metadata_mv_repo
+  ON sbom_metadata_view (repo_id);
+
+CREATE INDEX IF NOT EXISTS idx_sbom_metadata_mv_image
+  ON sbom_metadata_view (image_id);

@@ -287,6 +287,13 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		if _, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
+			Type:    jobs.JobTypeRefreshSBOMViews,
+			Payload: map[string]string{"sbom_id": response.SBOMID},
+		}); err != nil {
+			log.Printf("failed to enqueue view refresh: %v", err)
+		}
+
 		writeJSON(w, http.StatusCreated, response)
 	}
 }

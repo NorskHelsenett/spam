@@ -1,4 +1,7 @@
-CREATE OR REPLACE VIEW sbom_component_view AS
+DROP MATERIALIZED VIEW IF EXISTS sbom_component_view;
+DROP VIEW IF EXISTS sbom_component_view;
+
+CREATE MATERIALIZED VIEW sbom_component_view AS
 WITH sbom_json AS (
   SELECT
     s.id AS sbom_id,
@@ -194,3 +197,12 @@ LEFT JOIN deps d
   AND d.asset_type IS NOT DISTINCT FROM c.asset_type
   AND d.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
   AND d.component_ref = c.component_ref;
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
+  ON sbom_component_view (sbom_id, component_ref, is_root);
+
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_sbom
+  ON sbom_component_view (sbom_id);
+
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_kind_name
+  ON sbom_component_view (kind, package_name);

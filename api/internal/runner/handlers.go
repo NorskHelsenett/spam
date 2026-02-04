@@ -127,6 +127,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 				commitSHA = payload.CommitSHA
 			}
 
+			var storedSBOMID string
 			err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 				var binding *artifacts.BindingInput
 				if payload.RepoID != "" && commitSHA != "" {
@@ -174,11 +175,19 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return err
 				}
+				storedSBOMID = sbomID
 				log.Printf("ingested SBOM %s for run %s (%d bytes), job %s", sbomID, runID, len(sbomData), jobID)
 				return nil
 			})
 			if err != nil {
 				log.Printf("failed to ingest sbom: %v", err)
+			} else if storedSBOMID != "" {
+				if _, err := jobs.CreateJob(r.Context(), s.db, jobs.CreateJobInput{
+					Type:    jobs.JobTypeRefreshSBOMViews,
+					Payload: map[string]string{"sbom_id": storedSBOMID},
+				}); err != nil {
+					log.Printf("failed to enqueue view refresh: %v", err)
+				}
 			}
 		}
 	}

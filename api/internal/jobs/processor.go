@@ -9,6 +9,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
+	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/inventory"
 	"gorm.io/gorm"
@@ -47,9 +48,18 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processParseSBOM(ctx, db, job)
 	case JobTypeCreateRun:
 		return processCreateRun(ctx, db, job, runExecutor)
+	case JobTypeRefreshSBOMViews:
+		return processRefreshSBOMViews(ctx, db)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
+}
+
+func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	if err := dbviews.RefreshMaterializedViews(ctx, db); err != nil {
+		return nil, err
+	}
+	return map[string]string{"status": "refreshed"}, nil
 }
 
 func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {
