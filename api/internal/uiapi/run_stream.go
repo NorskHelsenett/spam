@@ -55,7 +55,8 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 		lastID, _ := strconv.ParseInt(r.URL.Query().Get("last_id"), 10, 64)
 
 		// Helper to send K8s event snapshot (if available)
-		sendK8sSnapshot := func() {
+		// Returns (failed, errorMsg) if a K8s error was detected and status was updated
+		sendK8sSnapshot := func() (bool, string) {
 			var (
 				events    []runner.K8sEvent
 				podStatus *runner.PodStatus
@@ -79,10 +80,10 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 				events, podStatus, ok, err = loadPersistedK8sSnapshot(r.Context(), db, runID)
 				if err != nil {
 					log.Printf("failed to load stored events: %v", err)
-					return
+					return false, ""
 				}
 				if !ok {
-					return
+					return false, ""
 				}
 			}
 
@@ -94,6 +95,14 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 			fmt.Fprintf(w, "event: k8s\n")
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
+
+			// Check if K8s reported an error and update run status if needed
+			newStatus, errorMsg, updated := correctRunStatusFromSnapshot(r.Context(), db, runID, string(run.Status), events, podStatus)
+			if updated && newStatus == "FAILED" {
+				run.Status = runner.RunStatus(newStatus)
+				return true, errorMsg
+			}
+			return false, ""
 		}
 
 		// Send historical logs
@@ -118,8 +127,19 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 		}
 		flusher.Flush()
 
-		// Send initial K8s snapshot (if any)
-		sendK8sSnapshot()
+		// Send initial K8s snapshot (if any) and check for K8s errors
+		if k8sFailed, k8sError := sendK8sSnapshot(); k8sFailed {
+			// K8s error detected (e.g., ImagePullBackOff), send failure status and close
+			statusEvent := map[string]interface{}{
+				"status": "FAILED",
+				"error":  k8sError,
+			}
+			data, _ := json.Marshal(statusEvent)
+			fmt.Fprintf(w, "event: status\n")
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			return
+		}
 
 		// If run is already complete, send status and close
 		if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
@@ -224,7 +244,7 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 				if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err == nil {
 					if run.Status == runner.RunStatusSucceeded || run.Status == runner.RunStatusFailed || run.Status == runner.RunStatusCancelled {
 						// Send final K8s snapshot before closing
-						sendK8sSnapshot()
+						_, _ = sendK8sSnapshot()
 
 						// Send final status
 						statusEvent := map[string]interface{}{
@@ -276,7 +296,19 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 					}
 				}
 			case <-k8sTick:
-				sendK8sSnapshot()
+				// Check for K8s errors during polling
+				if k8sFailed, k8sError := sendK8sSnapshot(); k8sFailed {
+					// K8s error detected (e.g., ImagePullBackOff), send failure status and close
+					statusEvent := map[string]interface{}{
+						"status": "FAILED",
+						"error":  k8sError,
+					}
+					data, _ := json.Marshal(statusEvent)
+					fmt.Fprintf(w, "event: status\n")
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					flusher.Flush()
+					return
+				}
 			}
 		}
 	}

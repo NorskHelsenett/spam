@@ -173,15 +173,15 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 		return
 	}
 
-	log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
-
 	if job.Type == jobs.JobTypeCreateRun {
+		log.Printf("run started: id=%s type=%s result=%+v", job.ID, job.Type, result)
 		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusRunning, result, "", nil); updateErr != nil {
 			log.Printf("update job error: %v", updateErr)
 		}
 		return
 	}
 
+	log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
 	if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusSucceeded, result, "", nil); updateErr != nil {
 		log.Printf("update job error: %v", updateErr)
 	}
