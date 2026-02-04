@@ -71,6 +71,8 @@
 	let k8sEvents: K8sEvent[] = $state([]);
 	let podStatus: PodStatus | null = $state(null);
 	let showTimeline = $state(true);
+	let showK8sLogs = $state(false);
+	let k8sLogsContent = $state('');
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -116,6 +118,27 @@
 			}
 		} catch (e) {
 			console.log('K8s events not available:', e);
+		}
+	};
+
+	const loadK8sLogs = async () => {
+		if (!run?.k8s_job_name) return;
+
+		const id = $page.params.id;
+		try {
+			const response = await fetch(`/api/runs/${id}/k8s-logs?tail=500`, {
+				credentials: 'include'
+			});
+			if (response.ok) {
+				k8sLogsContent = await response.text();
+				showK8sLogs = true;
+			} else {
+				k8sLogsContent = 'Failed to load K8s logs';
+				showK8sLogs = true;
+			}
+		} catch (e) {
+			k8sLogsContent = `Error loading logs: ${e}`;
+			showK8sLogs = true;
 		}
 	};
 
@@ -489,6 +512,8 @@
 					sbomComponentCount={artifacts.find(a => a.type === 'sbom')?.count || 0}
 					manifestCount={artifacts.find(a => a.type === 'manifests')?.count || 0}
 					commitHash={run.commit_hash || ''}
+					k8sJobName={run.k8s_job_name || ''}
+					onViewRawLogs={loadK8sLogs}
 				/>
 			{/if}
 		</section>
@@ -589,17 +614,17 @@
 
 <!-- Raw Data Dialog -->
 {#if showRawDialog}
-	<div 
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" 
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
 		onclick={() => { showRawDialog = false; }}
 		role="button"
 		tabindex="0"
 		aria-label="Close dialog"
 		onkeydown={(e) => { if (e.key === 'Escape') showRawDialog = false; }}
 	>
-		<div 
-			class="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl" 
-			role="dialog" 
+		<div
+			class="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl"
+			role="dialog"
 			aria-modal="true"
 			tabindex="-1"
 			onclick={(e) => e.stopPropagation()}
@@ -617,6 +642,46 @@
 			</div>
 			<div class="overflow-auto p-6" style="max-height: calc(90vh - 80px);">
 				<pre class="overflow-x-auto rounded-lg bg-[var(--hover-bg)] p-4 text-xs text-[var(--text-secondary)]"><code>{rawDialogData}</code></pre>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- K8s Logs Dialog -->
+{#if showK8sLogs}
+	<div
+		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+		onclick={() => { showK8sLogs = false; }}
+		role="button"
+		tabindex="0"
+		aria-label="Close dialog"
+		onkeydown={(e) => { if (e.key === 'Escape') showK8sLogs = false; }}
+	>
+		<div
+			class="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl"
+			role="dialog"
+			aria-modal="true"
+			tabindex="-1"
+			onclick={(e) => e.stopPropagation()}
+			onkeydown={(e) => e.stopPropagation()}
+		>
+			<div class="flex items-center justify-between border-b border-[var(--border-color)] p-6">
+				<h3 class="text-lg font-semibold text-[var(--text-bright)]">
+					K8s Pod Logs
+					{#if run?.k8s_job_name}
+						<span class="ml-2 font-mono text-sm text-[var(--text-muted)]">{run.k8s_job_name}</span>
+					{/if}
+				</h3>
+				<button
+					type="button"
+					class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+					onclick={() => { showK8sLogs = false; }}
+				>
+					<XCircle class="h-5 w-5" />
+				</button>
+			</div>
+			<div class="overflow-auto p-6" style="max-height: calc(90vh - 80px);">
+				<pre class="overflow-x-auto rounded-lg bg-[var(--hover-bg)] p-4 font-mono text-xs text-[var(--text-secondary)] whitespace-pre-wrap">{k8sLogsContent || 'No logs available'}</pre>
 			</div>
 		</div>
 	</div>

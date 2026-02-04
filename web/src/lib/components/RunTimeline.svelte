@@ -12,7 +12,11 @@
 		FileCode,
 		Server,
 		Play,
-		Upload
+		Upload,
+		Trash2,
+		Terminal,
+		ChevronDown,
+		ChevronUp
 	} from 'lucide-svelte';
 
 	type TimelineStep = {
@@ -23,7 +27,7 @@
 		status: 'completed' | 'running' | 'pending' | 'error' | 'warning';
 		icon?: any;
 		details?: string[];
-		category: 'k8s' | 'run' | 'result';
+		category: 'k8s' | 'run' | 'result' | 'event';
 	};
 
 	type K8sEvent = {
@@ -59,6 +63,8 @@
 		sbomComponentCount?: number;
 		manifestCount?: number;
 		commitHash?: string;
+		k8sJobName?: string;
+		onViewRawLogs?: () => void;
 	};
 
 	let {
@@ -70,288 +76,295 @@
 		secretCount = 0,
 		sbomComponentCount = 0,
 		manifestCount = 0,
-		commitHash = ''
+		commitHash = '',
+		k8sJobName = '',
+		onViewRawLogs
 	}: Props = $props();
 
-	// Parse logs into timeline steps
-	const parseLogsToSteps = (logs: RunLog[]): TimelineStep[] => {
-		const steps: TimelineStep[] = [];
-		let currentStep: TimelineStep | null = null;
+	let showRawLogs = $state(false);
+	let showAllEvents = $state(false);
+
+	// Define all expected steps in order
+	const ALL_STEPS: Array<{
+		id: string;
+		title: string;
+		defaultDescription: string;
+		icon: any;
+		category: 'k8s' | 'run' | 'result';
+	}> = [
+		// K8s steps
+		{ id: 'k8s-scheduled', title: 'Pod Scheduled', defaultDescription: 'Scheduling pod on cluster', icon: Server, category: 'k8s' },
+		{ id: 'k8s-pulling', title: 'Pulling Image', defaultDescription: 'Pulling container image', icon: Download, category: 'k8s' },
+		{ id: 'k8s-pulled', title: 'Image Pulled', defaultDescription: 'Container image ready', icon: Download, category: 'k8s' },
+		{ id: 'k8s-created', title: 'Container Created', defaultDescription: 'Creating container', icon: Server, category: 'k8s' },
+		{ id: 'k8s-started', title: 'Container Started', defaultDescription: 'Container running', icon: Play, category: 'k8s' },
+		// Run steps
+		{ id: 'run-start', title: 'Run Started', defaultDescription: 'Initializing runner', icon: Play, category: 'run' },
+		{ id: 'run-auth', title: 'Authenticating', defaultDescription: 'Requesting access token', icon: Shield, category: 'run' },
+		{ id: 'run-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'run' },
+		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
+		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
+		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running Gitleaks scan', icon: Shield, category: 'run' },
+		{ id: 'run-upload', title: 'Uploading Results', defaultDescription: 'Sending data to server', icon: Upload, category: 'run' },
+		// Result steps
+		{ id: 'result-complete', title: 'Run Complete', defaultDescription: 'All tasks finished', icon: CheckCircle, category: 'result' },
+		// Cleanup
+		{ id: 'k8s-cleanup', title: 'Cleanup', defaultDescription: 'Removing job resources', icon: Trash2, category: 'k8s' },
+	];
+
+	// Track completed step data from logs/events
+	type CompletedStepData = {
+		timestamp?: string;
+		description?: string;
+		details?: string[];
+		status: 'completed' | 'running' | 'error' | 'warning';
+	};
+
+	// Parse logs to extract completed step data
+	const parseLogsToCompletedSteps = (logs: RunLog[]): Map<string, CompletedStepData> => {
+		const completed = new Map<string, CompletedStepData>();
 
 		for (const log of logs) {
 			const line = log.line.trim();
 
-			// Detect step transitions
 			if (line.includes('Starting run:')) {
-				steps.push({
-					id: 'start',
-					title: 'Run Started',
-					description: `Run ID: ${runId.substring(0, 8)}`,
+				completed.set('run-start', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: Play,
-					category: 'run'
+					description: `Run ID: ${runId.substring(0, 8)}`,
+					status: 'completed'
 				});
 			} else if (line.includes('Requesting access token')) {
-				steps.push({
-					id: 'auth',
-					title: 'Authenticating',
-					description: 'Requesting access token',
+				completed.set('run-auth', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: Shield,
-					category: 'run'
+					description: 'Access token acquired',
+					status: 'completed'
 				});
 			} else if (line.includes('Cloning')) {
 				const match = line.match(/Cloning (https?:\/\/[^\s]+)/);
-				steps.push({
-					id: 'clone',
-					title: 'Cloning Repository',
-					description: match ? match[1].replace('.git...', '') : 'Repository',
+				completed.set('run-clone', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: GitBranch,
-					category: 'run'
+					description: match ? match[1].replace('.git...', '').replace(/^https?:\/\/[^/]+\//, '') : 'Repository cloned',
+					status: 'completed'
 				});
 			} else if (line.includes('Commit hash:')) {
 				const hash = line.match(/Commit hash:\s*([a-f0-9]+)/)?.[1];
-				if (hash) {
-					// Update the last clone step with commit info
-					const cloneStep = steps.find((s) => s.id === 'clone');
-					if (cloneStep) {
-						cloneStep.details = [`Commit: ${hash.substring(0, 7)}`];
-					}
+				const existing = completed.get('run-clone');
+				if (existing && hash) {
+					existing.details = [`Commit: ${hash.substring(0, 7)}`];
 				}
 			} else if (line.includes('Running syft')) {
-				steps.push({
-					id: 'sbom',
-					title: 'SBOM Generation',
-					description: 'Running Syft for SBOM generation',
+				completed.set('run-sbom', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: Package,
-					category: 'run'
+					description: 'Generating software bill of materials',
+					status: 'completed'
 				});
 			} else if (line.includes('Found') && line.includes('dependency manifest')) {
 				const match = line.match(/Found (\d+) dependency manifest/);
-				steps.push({
-					id: 'manifests-found',
-					title: 'Dependency Manifests',
-					description: match ? `Found ${match[1]} manifest file(s)` : 'Collecting manifests',
+				completed.set('run-manifests', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: FileCode,
-					category: 'run'
+					description: match ? `Found ${match[1]} manifest file(s)` : 'Manifests collected',
+					status: 'completed'
 				});
 			} else if (line.includes('Running gitleaks')) {
-				steps.push({
-					id: 'secrets',
-					title: 'Secret Detection',
-					description: 'Running Gitleaks scan',
+				completed.set('run-secrets', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: Shield,
-					category: 'run'
+					description: 'Scanning for secrets',
+					status: 'completed'
 				});
 			} else if (line.includes('leaks found:')) {
 				const match = line.match(/leaks found:\s*(\d+)/);
 				const count = match ? parseInt(match[1]) : 0;
-				const secretStep = steps.find((s) => s.id === 'secrets');
-				if (secretStep) {
-					secretStep.details = [`${count} secret${count !== 1 ? 's' : ''} found`];
+				const existing = completed.get('run-secrets');
+				if (existing) {
+					existing.details = [`${count} secret${count !== 1 ? 's' : ''} found`];
 					if (count > 0) {
-						secretStep.status = 'warning';
+						existing.status = 'warning';
 					}
 				}
-			} else if (line.includes('Uploading SBOM')) {
-				steps.push({
-					id: 'upload-sbom',
-					title: 'Uploading SBOM',
-					description: 'Sending SBOM to server',
-					timestamp: log.ts,
-					status: 'completed',
-					icon: Upload,
-					category: 'run'
-				});
-			} else if (line.includes('Uploading gitleaks')) {
-				steps.push({
-					id: 'upload-secrets',
-					title: 'Uploading Secrets Report',
-					description: 'Sending scan results to server',
-					timestamp: log.ts,
-					status: 'completed',
-					icon: Upload,
-					category: 'run'
-				});
-			} else if (line.includes('Uploading dependency manifests')) {
-				steps.push({
-					id: 'upload-manifests',
-					title: 'Uploading Manifests',
-					description: 'Sending manifests to server',
-					timestamp: log.ts,
-					status: 'completed',
-					icon: Upload,
-					category: 'run'
-				});
+			} else if (line.includes('Uploading SBOM') || line.includes('Uploading gitleaks') || line.includes('Uploading dependency')) {
+				const existing = completed.get('run-upload');
+				if (!existing) {
+					completed.set('run-upload', {
+						timestamp: log.ts,
+						description: 'Uploading results to server',
+						status: 'completed'
+					});
+				}
 			} else if (line.includes('Run completed successfully')) {
-				steps.push({
-					id: 'complete',
-					title: 'Run Completed',
-					description: 'All tasks finished successfully',
+				completed.set('result-complete', {
 					timestamp: log.ts,
-					status: 'completed',
-					icon: CheckCircle,
-					category: 'run'
+					description: 'All tasks finished successfully',
+					status: 'completed'
 				});
-			} else if (line.includes('error') || line.includes('Error') || line.includes('failed')) {
-				// Track errors
-				const lastStep = steps[steps.length - 1];
-				if (lastStep) {
-					lastStep.status = 'error';
-					if (!lastStep.details) lastStep.details = [];
-					lastStep.details.push(line);
+				// Mark upload as definitely complete
+				const upload = completed.get('run-upload');
+				if (upload) {
+					upload.description = 'All results uploaded';
 				}
 			}
 		}
 
-		return steps;
+		return completed;
 	};
 
-	// Parse K8s events into timeline steps
-	const parseEventsToSteps = (events: K8sEvent[]): TimelineStep[] => {
-		const steps: TimelineStep[] = [];
-		const seen = new Set<string>();
+	// Parse K8s events to extract completed step data
+	const parseEventsToCompletedSteps = (events: K8sEvent[]): Map<string, CompletedStepData> => {
+		const completed = new Map<string, CompletedStepData>();
 
 		for (const event of events) {
-			// Deduplicate similar events
-			const key = `${event.reason}-${event.object}`;
-			if (seen.has(key)) continue;
-			seen.add(key);
-
-			let title = event.reason;
-			let description = event.message;
-			let status: TimelineStep['status'] = event.type === 'Normal' ? 'completed' : 'warning';
-			let icon = Server;
-
-			// Customize based on event reason
 			switch (event.reason) {
 				case 'Scheduled':
-					title = 'Pod Scheduled';
-					icon = Server;
-					description = event.message.replace('Successfully assigned ', 'Assigned to ');
+					completed.set('k8s-scheduled', {
+						timestamp: event.first_timestamp,
+						description: event.message.replace('Successfully assigned ', 'Assigned to ').substring(0, 60),
+						status: 'completed'
+					});
 					break;
 				case 'Pulling':
-					title = 'Pulling Image';
-					icon = Download;
-					description = event.message.replace('Pulling image "', '').replace('"', '');
-					// Truncate long image names
-					if (description.length > 60) {
-						description = description.substring(0, 57) + '...';
-					}
+					completed.set('k8s-pulling', {
+						timestamp: event.first_timestamp,
+						description: 'Downloading container image',
+						status: 'completed'
+					});
 					break;
 				case 'Pulled':
-					title = 'Image Pulled';
-					icon = Download;
 					const pullMatch = event.message.match(/in ([^\s]+)/);
-					description = pullMatch ? `Pulled in ${pullMatch[1]}` : 'Successfully pulled';
+					const sizeMatch = event.message.match(/Image size: (\d+)/);
+					const sizeInfo = sizeMatch ? ` (${Math.round(parseInt(sizeMatch[1]) / 1024 / 1024)}MB)` : '';
+					completed.set('k8s-pulled', {
+						timestamp: event.first_timestamp,
+						description: pullMatch ? `Pulled in ${pullMatch[1]}${sizeInfo}` : 'Image ready',
+						status: 'completed'
+					});
 					break;
 				case 'Created':
-					title = 'Container Created';
-					icon = Server;
+					completed.set('k8s-created', {
+						timestamp: event.first_timestamp,
+						description: 'Container created',
+						status: 'completed'
+					});
 					break;
 				case 'Started':
-					title = 'Container Started';
-					icon = Play;
+					completed.set('k8s-started', {
+						timestamp: event.first_timestamp,
+						description: 'Container running',
+						status: 'completed'
+					});
 					break;
 				case 'Failed':
 				case 'BackOff':
-					title = event.reason === 'BackOff' ? 'Image Pull Backoff' : 'Failed';
-					status = 'error';
-					icon = XCircle;
-					break;
-				case 'PolicyViolation':
-					title = 'Policy Violation';
-					status = event.message.includes('fail') ? 'warning' : 'completed';
-					icon = AlertTriangle;
-					// Truncate long policy messages
-					if (description.length > 80) {
-						description = description.substring(0, 77) + '...';
+					// Mark the appropriate step as failed
+					if (!completed.has('k8s-pulled')) {
+						completed.set('k8s-pulling', {
+							timestamp: event.first_timestamp,
+							description: event.message.substring(0, 60),
+							status: 'error'
+						});
 					}
 					break;
-				default:
-					// Keep original
+				case 'Killing':
+					completed.set('k8s-cleanup', {
+						timestamp: event.first_timestamp,
+						description: 'Stopping container',
+						status: 'completed'
+					});
+					break;
+			}
+		}
+
+		return completed;
+	};
+
+	// Get all K8s events as timeline items (for history)
+	const getAllK8sEvents = (events: K8sEvent[]): TimelineStep[] => {
+		const eventSteps: TimelineStep[] = [];
+
+		for (const event of events) {
+			let icon = Server;
+			let stepStatus: TimelineStep['status'] = event.type === 'Normal' ? 'completed' : 'warning';
+			let title = event.reason;
+
+			switch (event.reason) {
+				case 'Scheduled':
+					icon = Server;
+					title = 'Pod Scheduled';
+					break;
+				case 'Pulling':
+					icon = Download;
+					title = 'Pulling Image';
+					break;
+				case 'Pulled':
+					icon = Download;
+					title = 'Image Pulled';
+					break;
+				case 'Created':
+					icon = Server;
+					title = 'Container Created';
+					break;
+				case 'Started':
+					icon = Play;
+					title = 'Container Started';
+					break;
+				case 'Failed':
+				case 'BackOff':
+					icon = XCircle;
+					title = event.reason === 'BackOff' ? 'Image Pull Backoff' : 'Failed';
+					stepStatus = 'error';
+					break;
+				case 'PolicyViolation':
+					icon = AlertTriangle;
+					title = 'Policy Violation';
+					stepStatus = event.message.includes('fail') ? 'warning' : 'completed';
+					break;
+				case 'Killing':
+					icon = Trash2;
+					title = 'Stopping Container';
 					break;
 			}
 
-			steps.push({
-				id: `k8s-${event.reason}-${event.first_timestamp}`,
+			eventSteps.push({
+				id: `event-${event.reason}-${event.first_timestamp}-${event.object}`,
 				title,
-				description,
+				description: event.message.length > 80 ? event.message.substring(0, 77) + '...' : event.message,
 				timestamp: event.first_timestamp,
-				status,
+				status: stepStatus,
 				icon,
-				category: 'k8s',
-				details: event.count > 1 ? [`Occurred ${event.count} times`] : undefined
+				category: 'event',
+				details: event.count > 1 ? [`Occurred ${event.count} times`, `Source: ${event.source}`] : [`Source: ${event.source}`]
 			});
 		}
 
-		return steps;
+		return eventSteps;
 	};
 
-	// Build the complete timeline
+	// Build the complete timeline with all steps
 	const buildTimeline = (): TimelineStep[] => {
-		const k8sSteps = parseEventsToSteps(events || []);
-		const runSteps = parseLogsToSteps(logs || []);
+		const logSteps = parseLogsToCompletedSteps(logs || []);
+		const eventSteps = parseEventsToCompletedSteps(events || []);
 
-		// Combine and sort by timestamp
-		const allSteps = [...k8sSteps, ...runSteps];
-		allSteps.sort((a, b) => {
-			if (!a.timestamp || !b.timestamp) return 0;
-			return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-		});
+		// Merge completed steps
+		const completedSteps = new Map([...eventSteps, ...logSteps]);
 
-		// Add result steps if run is completed
-		if (status === 'SUCCEEDED' || status === 'FAILED') {
-			if (sbomComponentCount > 0) {
-				allSteps.push({
-					id: 'result-sbom',
-					title: 'SBOM Generated',
-					description: `${sbomComponentCount} component${sbomComponentCount !== 1 ? 's' : ''} detected`,
-					status: 'completed',
-					icon: Package,
-					category: 'result'
-				});
-			}
-
-			if (secretCount !== undefined) {
-				allSteps.push({
-					id: 'result-secrets',
-					title: 'Secret Scan Complete',
-					description:
-						secretCount > 0
-							? `${secretCount} secret${secretCount !== 1 ? 's' : ''} found`
-							: 'No secrets found',
-					status: secretCount > 0 ? 'warning' : 'completed',
-					icon: Shield,
-					category: 'result'
-				});
-			}
-
-			if (manifestCount > 0) {
-				allSteps.push({
-					id: 'result-manifests',
-					title: 'Manifests Collected',
-					description: `${manifestCount} manifest${manifestCount !== 1 ? 's' : ''} saved`,
-					status: 'completed',
-					icon: FileCode,
-					category: 'result'
-				});
+		// Determine current running step based on status
+		let currentRunningStep: string | null = null;
+		if (status === 'QUEUED') {
+			currentRunningStep = 'k8s-scheduled';
+		} else if (status === 'RUNNING') {
+			// Find the first incomplete step
+			for (const step of ALL_STEPS) {
+				if (!completedSteps.has(step.id) && step.category !== 'result') {
+					currentRunningStep = step.id;
+					break;
+				}
 			}
 		}
 
-		// Add pod error step if there's a pod issue
+		// Build timeline
+		const timeline: TimelineStep[] = [];
+
+		// Add pod error if present
 		if (podStatus?.is_error) {
-			allSteps.unshift({
+			timeline.push({
 				id: 'pod-error',
 				title: podStatus.waiting_reason || podStatus.reason || 'Pod Error',
 				description: podStatus.waiting_message || podStatus.message || 'Pod encountered an error',
@@ -361,10 +374,85 @@
 			});
 		}
 
-		return allSteps;
+		// Add all expected steps
+		for (const stepDef of ALL_STEPS) {
+			const completed = completedSteps.get(stepDef.id);
+
+			// Skip result-complete if run not complete
+			if (stepDef.id === 'result-complete') {
+				if (status !== 'SUCCEEDED' && status !== 'FAILED') {
+					continue;
+				}
+				// Add summary info
+				const summaryDetails: string[] = [];
+				if (sbomComponentCount > 0) {
+					summaryDetails.push(`${sbomComponentCount} SBOM component${sbomComponentCount !== 1 ? 's' : ''}`);
+				}
+				if (secretCount > 0) {
+					summaryDetails.push(`${secretCount} secret${secretCount !== 1 ? 's' : ''} found`);
+				} else {
+					summaryDetails.push('No secrets found');
+				}
+				if (manifestCount > 0) {
+					summaryDetails.push(`${manifestCount} manifest${manifestCount !== 1 ? 's' : ''}`);
+				}
+
+				timeline.push({
+					...stepDef,
+					description: status === 'SUCCEEDED' ? 'All tasks completed successfully' : 'Run failed',
+					status: status === 'SUCCEEDED' ? 'completed' : 'error',
+					details: summaryDetails,
+					timestamp: completed?.timestamp
+				});
+				continue;
+			}
+
+			// Skip cleanup if not complete and not failed
+			if (stepDef.id === 'k8s-cleanup' && !completed && status !== 'SUCCEEDED' && status !== 'FAILED') {
+				continue;
+			}
+
+			let stepStatus: TimelineStep['status'] = 'pending';
+			let details = completed?.details;
+
+			if (completed) {
+				stepStatus = completed.status;
+			} else if (stepDef.id === currentRunningStep) {
+				stepStatus = 'running';
+			} else if (status === 'FAILED') {
+				// If run failed and step not completed, check if it should be marked as skipped
+				const stepIndex = ALL_STEPS.findIndex(s => s.id === stepDef.id);
+				const lastCompletedIndex = Math.max(...Array.from(completedSteps.keys()).map(id => ALL_STEPS.findIndex(s => s.id === id)));
+				if (stepIndex > lastCompletedIndex) {
+					stepStatus = 'pending'; // Skipped due to failure
+				}
+			}
+
+			// Add counts to specific steps when completed
+			if (stepDef.id === 'run-sbom' && stepStatus === 'completed' && sbomComponentCount > 0) {
+				details = [...(details || []), `${sbomComponentCount} component${sbomComponentCount !== 1 ? 's' : ''} detected`];
+			}
+			if (stepDef.id === 'run-manifests' && stepStatus === 'completed' && manifestCount > 0) {
+				details = [...(details || []), `${manifestCount} file${manifestCount !== 1 ? 's' : ''} collected`];
+			}
+
+			timeline.push({
+				id: stepDef.id,
+				title: stepDef.title,
+				description: completed?.description || stepDef.defaultDescription,
+				timestamp: completed?.timestamp,
+				status: stepStatus,
+				icon: stepDef.icon,
+				category: stepDef.category,
+				details
+			});
+		}
+
+		return timeline;
 	};
 
 	const timeline = $derived(buildTimeline());
+	const allEvents = $derived(getAllK8sEvents(events || []));
 
 	const getStatusColor = (stepStatus: string) => {
 		switch (stepStatus) {
@@ -376,19 +464,27 @@
 				return 'var(--warning)';
 			case 'error':
 				return 'var(--error)';
+			case 'pending':
+				return 'var(--text-muted)';
 			default:
 				return 'var(--text-muted)';
 		}
 	};
 
+	const getStatusOpacity = (stepStatus: string) => {
+		return stepStatus === 'pending' ? '0.5' : '1';
+	};
+
 	const getCategoryLabel = (category: string) => {
 		switch (category) {
 			case 'k8s':
-				return 'Kubernetes';
+				return 'K8s';
 			case 'run':
 				return 'Runner';
 			case 'result':
-				return 'Results';
+				return 'Result';
+			case 'event':
+				return 'Event';
 			default:
 				return '';
 		}
@@ -399,20 +495,25 @@
 		const date = new Date(ts);
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	};
+
+	// Format raw logs for display
+	const rawLogsText = $derived(logs.map(l => `[${formatTimestamp(l.ts)}] ${l.line}`).join('\n'));
 </script>
 
 <div class="timeline-container">
-	{#if timeline.length === 0}
+	{#if timeline.length === 0 && status === 'QUEUED'}
 		<div class="flex items-center justify-center py-8 text-[var(--text-muted)]">
 			<Loader2 class="mr-2 h-5 w-5 animate-spin" />
-			Waiting for events...
+			Waiting for pod to be scheduled...
 		</div>
 	{:else}
+		<!-- Main Timeline -->
 		<div class="timeline">
 			{#each timeline as step, index (step.id)}
 				{@const Icon = step.icon || Clock}
 				{@const isLast = index === timeline.length - 1}
-				<div class="timeline-item">
+				{@const isPending = step.status === 'pending'}
+				<div class="timeline-item" style="opacity: {getStatusOpacity(step.status)}">
 					<!-- Vertical line -->
 					{#if !isLast}
 						<div
@@ -424,12 +525,19 @@
 					<!-- Icon node -->
 					<div
 						class="timeline-node"
-						style="background: {getStatusColor(step.status)}20; border-color: {getStatusColor(step.status)}"
+						style="background: {getStatusColor(step.status)}20; border-color: {getStatusColor(step.status)}; {isPending ? 'border-style: dashed;' : ''}"
 					>
-						<Icon
-							class="h-4 w-4 {step.status === 'running' ? 'animate-spin' : ''}"
-							style="color: {getStatusColor(step.status)}"
-						/>
+						{#if step.status === 'running'}
+							<Loader2
+								class="h-4 w-4 animate-spin"
+								style="color: {getStatusColor(step.status)}"
+							/>
+						{:else}
+							<Icon
+								class="h-4 w-4"
+								style="color: {getStatusColor(step.status)}"
+							/>
+						{/if}
 					</div>
 
 					<!-- Content -->
@@ -437,16 +545,23 @@
 						<div class="flex items-start justify-between gap-2">
 							<div class="flex-1">
 								<div class="flex items-center gap-2">
-									<span class="font-medium text-[var(--text-bright)]">{step.title}</span>
+									<span class="{isPending ? 'text-[var(--text-muted)]' : 'text-[var(--text-bright)]'} font-medium">
+										{step.title}
+									</span>
 									<span
 										class="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
 										style="background: {getStatusColor(step.status)}15; color: {getStatusColor(step.status)}"
 									>
 										{getCategoryLabel(step.category)}
 									</span>
+									{#if isPending}
+										<span class="text-[10px] text-[var(--text-muted)]">pending</span>
+									{/if}
 								</div>
 								{#if step.description}
-									<p class="mt-0.5 text-sm text-[var(--text-secondary)]">{step.description}</p>
+									<p class="mt-0.5 text-sm {isPending ? 'text-[var(--text-muted)]' : 'text-[var(--text-secondary)]'}">
+										{step.description}
+									</p>
 								{/if}
 								{#if step.details && step.details.length > 0}
 									<div class="mt-1 space-y-0.5">
@@ -460,12 +575,108 @@
 								<span class="whitespace-nowrap text-xs text-[var(--text-muted)]">
 									{formatTimestamp(step.timestamp)}
 								</span>
+							{:else if isPending}
+								<span class="whitespace-nowrap text-xs text-[var(--text-muted)]">--:--:--</span>
 							{/if}
 						</div>
 					</div>
 				</div>
 			{/each}
 		</div>
+
+		<!-- K8s Events History -->
+		{#if allEvents.length > 0}
+			<div class="mt-6 border-t border-[var(--border-color)]/40 pt-4">
+				<button
+					type="button"
+					class="flex w-full items-center justify-between text-sm text-[var(--text-secondary)] hover:text-[var(--text-bright)]"
+					onclick={() => { showAllEvents = !showAllEvents; }}
+				>
+					<span class="flex items-center gap-2">
+						<Server class="h-4 w-4" />
+						Kubernetes Events ({allEvents.length})
+					</span>
+					{#if showAllEvents}
+						<ChevronUp class="h-4 w-4" />
+					{:else}
+						<ChevronDown class="h-4 w-4" />
+					{/if}
+				</button>
+
+				{#if showAllEvents}
+					<div class="mt-4 space-y-2">
+						{#each allEvents as event (event.id)}
+							{@const Icon = event.icon || Server}
+							<div class="flex items-start gap-3 rounded-lg bg-[var(--card-bg)]/30 p-3">
+								<div
+									class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full"
+									style="background: {getStatusColor(event.status)}20"
+								>
+									<Icon class="h-3 w-3" style="color: {getStatusColor(event.status)}" />
+								</div>
+								<div class="flex-1 min-w-0">
+									<div class="flex items-center justify-between gap-2">
+										<span class="text-sm font-medium text-[var(--text-bright)]">{event.title}</span>
+										<span class="whitespace-nowrap text-xs text-[var(--text-muted)]">
+											{formatTimestamp(event.timestamp)}
+										</span>
+									</div>
+									<p class="mt-0.5 text-xs text-[var(--text-secondary)] break-all">{event.description}</p>
+									{#if event.details}
+										<div class="mt-1 flex flex-wrap gap-2">
+											{#each event.details as detail}
+												<span class="text-[10px] text-[var(--text-muted)]">{detail}</span>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- Raw Logs Section -->
+		{#if logs.length > 0}
+			<div class="mt-4 border-t border-[var(--border-color)]/40 pt-4">
+				<button
+					type="button"
+					class="flex w-full items-center justify-between text-sm text-[var(--text-secondary)] hover:text-[var(--text-bright)]"
+					onclick={() => { showRawLogs = !showRawLogs; }}
+				>
+					<span class="flex items-center gap-2">
+						<Terminal class="h-4 w-4" />
+						Raw Logs ({logs.length} lines)
+					</span>
+					{#if showRawLogs}
+						<ChevronUp class="h-4 w-4" />
+					{:else}
+						<ChevronDown class="h-4 w-4" />
+					{/if}
+				</button>
+
+				{#if showRawLogs}
+					<div class="mt-3 max-h-80 overflow-auto rounded-lg bg-[var(--card-bg)] p-4">
+						<pre class="text-xs text-[var(--text-secondary)] font-mono whitespace-pre-wrap break-all">{rawLogsText}</pre>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- External K8s Logs Button -->
+		{#if k8sJobName && onViewRawLogs}
+			<div class="mt-4 border-t border-[var(--border-color)]/40 pt-4">
+				<button
+					type="button"
+					class="flex items-center gap-2 text-sm text-[var(--accent)] hover:text-[var(--accent-hover)]"
+					onclick={onViewRawLogs}
+				>
+					<Terminal class="h-4 w-4" />
+					View K8s Pod Logs
+				</button>
+			</div>
+		{/if}
 	{/if}
 </div>
 
