@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	
 	onMount(async () => {
 		try {
@@ -10,14 +11,14 @@
 			
 			if (response.ok) {
 				// User is logged in, redirect to app
-				window.location.href = '/app';
+				goto('/app');
 			} else {
 				// Not logged in, redirect to login
-				window.location.href = '/auth/login';
+				goto('/auth/login');
 			}
 		} catch (error) {
 			// Error checking auth, redirect to login
-			window.location.href = '/auth/login';
+			goto('/auth/login');
 		}
 	});
 </script>

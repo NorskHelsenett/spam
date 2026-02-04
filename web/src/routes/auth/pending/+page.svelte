@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { Hourglass, Shield } from 'lucide-svelte';
 
 	let status = 'Waiting for admin approval...';
@@ -14,7 +15,7 @@
 		});
 
 		stream.addEventListener('approved', () => {
-			window.location.href = '/app';
+			goto('/app');
 		});
 
 		stream.onerror = () => {
@@ -28,7 +29,7 @@
 	});
 
 	const retryLogin = () => {
-		window.location.href = '/auth/login';
+		goto('/auth/login');
 	};
 </script>
 

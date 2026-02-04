@@ -5,6 +5,7 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
 	
@@ -62,7 +63,7 @@
 
 				if (!response.ok) {
 					// Not authenticated, redirect to login
-					window.location.href = '/auth/login';
+					goto('/auth/login');
 					return;
 				}
 
@@ -74,7 +75,7 @@
 				}
 			} catch (error) {
 				// Error checking auth, redirect to login
-				window.location.href = '/auth/login';
+				goto('/auth/login');
 			}
 		};
 
@@ -208,38 +209,40 @@ let isAdmin = $state(false);
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
 			{#each navLinks as link}
-				<a
-					href={link.href}
+				<button
+					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
 						isActive(link.href)
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
-					data-sveltekit-preload-data="hover"
+					onclick={() => goto(link.href)}
 					aria-current={isActive(link.href) ? 'page' : undefined}
+					aria-label={link.label}
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 						<link.icon size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">{link.label}</span>
-				</a>
+				</button>
 			{/each}
 			{#if isAdmin}
-				<a
-					href="/app/users"
+				<button
+					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
 						isActive('/app/users')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
-					data-sveltekit-preload-data="hover"
+					onclick={() => goto('/app/users')}
 					aria-current={isActive('/app/users') ? 'page' : undefined}
+					aria-label="Users"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 						<UsersRound size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">Users</span>
-				</a>
+				</button>
 			{/if}
 		</nav>
 
