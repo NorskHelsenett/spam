@@ -2,6 +2,7 @@
 	import Dialog from './Dialog.svelte';
 	import { User, Mail, LogOut, X } from 'lucide-svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 
 	let { 
@@ -58,7 +59,7 @@
 
 			if (response.ok || response.status === 204) {
 				if (browser) {
-					window.location.href = '/auth/login';
+					goto('/auth/login');
 				}
 			}
 		} catch (error) {

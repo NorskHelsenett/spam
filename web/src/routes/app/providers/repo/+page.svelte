@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
 	import {
@@ -352,7 +353,7 @@
 
 			// Navigate to the run page
 			if (browser) {
-				window.location.href = `/app/runs/${data.id}`;
+				goto(`/app/runs/${data.id}`);
 			}
 		} catch (err) {
 			scanError = err instanceof Error ? err.message : 'Failed to trigger scan';
@@ -363,7 +364,7 @@
 
 	const goToActiveRun = () => {
 		if (activeRunId && browser) {
-			window.location.href = `/app/runs/${activeRunId}`;
+			goto(`/app/runs/${activeRunId}`);
 		}
 	};
 
