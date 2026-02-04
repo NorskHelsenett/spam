@@ -369,6 +369,50 @@ func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 	}
 }
 
+// SBOMGetHandler returns SBOM metadata by ID.
+// GET /api/sboms/{id}
+func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.LoadSession(r); err != nil {
+			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+			return
+		}
+
+		sbomID := r.PathValue("id")
+		if sbomID == "" {
+			http.Error(w, "sbom ID required", http.StatusBadRequest)
+			return
+		}
+
+		sbom, err := artifacts.FindSBOM(r.Context(), db, sbomID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "sbom not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch sbom", http.StatusInternalServerError)
+			return
+		}
+
+		// Count components linked to this SBOM
+		var componentCount int64
+		if err := db.WithContext(r.Context()).
+			Table("sbom_components").
+			Where("sbom_id = ?", sbomID).
+			Count(&componentCount).Error; err != nil {
+			log.Printf("failed to count sbom components: %v", err)
+			componentCount = 0
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id":              sbom.ID,
+			"format":          sbom.Format,
+			"created_at":      sbom.CreatedAt,
+			"component_count": componentCount,
+		})
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

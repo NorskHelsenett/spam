@@ -97,6 +97,20 @@ func run() error {
 
 	events.StartNotificationListener(ctx, cfg.DatabaseURL)
 
+	// Optionally create K8s client for runner endpoints (read-only)
+	var routerOpts *server.RouterOptions
+	if runnerCfg, err := config.LoadRunnerConfigOptional(); err == nil && runnerCfg.Enabled {
+		k8sClient, err := runner.NewK8sClient(runnerCfg)
+		if err != nil {
+			log.Printf("warning: failed to create k8s client for API: %v (K8s endpoints will be unavailable)", err)
+		} else {
+			routerOpts = &server.RouterOptions{
+				K8sClient: k8sClient,
+			}
+			log.Printf("K8s client enabled for API server")
+		}
+	}
+
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,
 		ClientID:          cfg.OIDC.ClientID,
@@ -115,7 +129,7 @@ func run() error {
 	}
 
 	shutdownCh := make(chan struct{})
-	router := server.NewRouter(gormDB, authService, shutdownCh, nil)
+	router := server.NewRouter(gormDB, authService, shutdownCh, routerOpts)
 
 	addr := cfg.HTTPPort
 	if !strings.HasPrefix(addr, ":") {

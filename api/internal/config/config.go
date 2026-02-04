@@ -159,6 +159,42 @@ func loadRunnerConfig() (RunnerConfig, error) {
 	return cfg, nil
 }
 
+// LoadRunnerConfigOptional loads runner configuration for read-only access (e.g., API server).
+// Unlike loadRunnerConfig, this doesn't require HMAC key since it's only used for querying K8s.
+func LoadRunnerConfigOptional() (RunnerConfig, error) {
+	enabled := parseBoolEnv("RUNNER_ENABLED", false)
+	if !enabled {
+		return RunnerConfig{}, errors.New("runner not enabled")
+	}
+
+	cfg := RunnerConfig{
+		Enabled:        true,
+		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
+		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
+		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
+		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
+		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
+		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
+		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
+		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
+		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
+		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+	}
+
+	// HMAC key is optional for read-only access
+	hmacKeyStr := strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
+	if hmacKeyStr != "" {
+		hmacKey, err := base64.StdEncoding.DecodeString(hmacKeyStr)
+		if err != nil {
+			hmacKey = []byte(hmacKeyStr)
+		}
+		cfg.HMACKey = hmacKey
+	}
+
+	return cfg, nil
+}
+
 func parseBoolEnv(key string, fallback bool) bool {
 	value := strings.TrimSpace(os.Getenv(key))
 	if value == "" {
