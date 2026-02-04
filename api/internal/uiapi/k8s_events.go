@@ -3,6 +3,7 @@ package uiapi
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/runner"
@@ -100,4 +101,37 @@ func saveRunResultMap(ctx context.Context, db *gorm.DB, runID string, resultMap 
 		Table("jobs").
 		Where("id = ?", runID).
 		Update("result", payload).Error
+}
+
+func inferK8sFailure(events []runner.K8sEvent, podStatus *runner.PodStatus) (bool, string) {
+	if podStatus != nil && podStatus.IsError {
+		if podStatus.WaitingMessage != "" {
+			return true, podStatus.WaitingMessage
+		}
+		if podStatus.Message != "" {
+			return true, podStatus.Message
+		}
+		if podStatus.WaitingReason != "" {
+			return true, podStatus.WaitingReason
+		}
+		if podStatus.Reason != "" {
+			return true, podStatus.Reason
+		}
+		return true, "pod reported error"
+	}
+
+	for i := len(events) - 1; i >= 0; i-- {
+		reason := strings.ToLower(events[i].Reason)
+		if strings.Contains(reason, "backoff") ||
+			strings.Contains(reason, "failed") ||
+			strings.Contains(reason, "errimagepull") ||
+			strings.Contains(reason, "imagepullbackoff") {
+			if events[i].Message != "" {
+				return true, events[i].Message
+			}
+			return true, events[i].Reason
+		}
+	}
+
+	return false, ""
 }

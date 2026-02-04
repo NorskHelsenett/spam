@@ -265,6 +265,32 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			json.Unmarshal(job.Payload, &payload)
 		}
 
+		// If we already know K8s failed, correct status before responding
+		if job.Status == string(jobs.JobStatusSucceeded) || job.Status == string(jobs.JobStatusRunning) || job.Status == string(jobs.JobStatusQueued) {
+			events, podStatus, ok, err := loadPersistedK8sSnapshot(r.Context(), db, runID)
+			if err == nil && ok {
+				if failed, message := inferK8sFailure(events, podStatus); failed {
+					now := time.Now()
+					errorText := message
+					if errorText == "" {
+						errorText = "k8s runner failed to start"
+					}
+					if updateErr := db.WithContext(r.Context()).Table("jobs").
+						Where("id = ?", runID).
+						Updates(map[string]interface{}{
+							"status":      jobs.JobStatusFailed,
+							"error":       errorText,
+							"finished_at": now,
+							"updated_at":  now,
+						}).Error; updateErr == nil {
+						job.Status = string(jobs.JobStatusFailed)
+						job.Error = errorText
+						job.FinishedAt = &now
+					}
+				}
+			}
+		}
+
 		response := RunResponse{
 			ID:         job.ID,
 			Status:     job.Status,
