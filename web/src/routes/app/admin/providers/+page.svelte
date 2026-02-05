@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -424,17 +424,22 @@
 						</div>
 						<div class="space-y-2">
 							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider Type</label>
-							<select
-								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-								bind:value={providerTypeMode}
-								onchange={updatePreview}
-							>
-								<option value="auto">Auto detect</option>
-								<option value="github">GitHub</option>
-								<option value="gitlab">GitLab</option>
-								<option value="gitea">Gitea</option>
-								<option value="forgejo">Forgejo</option>
-							</select>
+							<div class="relative">
+								<select
+								class="w-full appearance-none rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-10 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none h-[37px]"
+									bind:value={providerTypeMode}
+									onchange={updatePreview}
+								>
+									<option value="auto">Auto detect</option>
+									<option value="github">GitHub</option>
+									<option value="gitlab">GitLab</option>
+									<option value="gitea">Gitea</option>
+									<option value="forgejo">Forgejo</option>
+								</select>
+								<div class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]">
+									<ChevronDown size={16} />
+								</div>
+							</div>
 						</div>
 					</div>
 
