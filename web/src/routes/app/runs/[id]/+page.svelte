@@ -296,6 +296,9 @@
 						run.status = data.status;
 						lastStatus = data.status;
 
+						// If SSE includes error message (e.g., from K8s failure), capture it
+						if (data.error) run.error = data.error;
+
 						// If SSE includes artifact IDs, update them immediately
 						if (data.sbom_id) run.sbom_id = data.sbom_id;
 						if (data.secret_id) run.secret_id = data.secret_id;

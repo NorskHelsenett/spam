@@ -24,7 +24,8 @@
                 "SESSION_COOKIE_HASH_KEY": "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=",
                 "SESSION_COOKIE_BLOCK_KEY": "YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODk=",
                 "SESSION_TTL": "8h",
-                "COOKIE_SECURE": "false"
+                "COOKIE_SECURE": "false",
+                "PROVIDER_SECRETS_KEY": "45fGL0V56kUzgvU3LtedkoZ70G3KYJ1j/eFlrfETFnA=",
             }
         },
         {

@@ -13,6 +13,7 @@
 		component_version_count: number;
 		license_count: number;
 		missing_license_count: number;
+		secrets_count: number;
 	};
 
 	type ScannerCount = {
@@ -125,6 +126,12 @@
 				value: c.license_count,
 				description: `${c.missing_license_count} missing`,
 				accent: c.missing_license_count > 0 ? 'var(--warning)' : 'var(--success)'
+			},
+			{
+				label: 'Secrets',
+				value: c.secrets_count,
+				description: 'Latest run per repo',
+				accent: c.secrets_count > 0 ? 'var(--error)' : 'var(--success)'
 			}
 		];
 	};
@@ -212,7 +219,7 @@
 		{:else if error}
 			<p class="text-sm text-[var(--error)]">{error}</p>
 		{:else if summary}
-			<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+			<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
 				{#each metricCards() as metric}
 					<article class="metric-card rounded-2xl p-4 sm:p-6">
 						<h2 class="text-sm uppercase tracking-[0.24em] text-[var(--text-muted)]">{metric.label}</h2>

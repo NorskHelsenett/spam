@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Trash2 } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import Dialog from '$lib/components/Dialog.svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -27,8 +29,6 @@
 		errors: string[];
 	};
 
-	const STORAGE_KEY = 'spam-admin-providers-mock-v1';
-
 	let providers: ProviderRow[] = $state([]);
 	let providerUrl = $state('');
 	let providerTypeMode: ProviderTypeMode = $state('auto');
@@ -36,12 +36,31 @@
 	let pat = $state('');
 	let preview: ProviderPreview = $state({ errors: [] });
 	let formError = $state('');
+	let error = $state('');
+	let loading = $state(true);
+	let saving = $state(false);
 	let rotatePat = $state('');
-	let rotatingId = $state<string | null>(null);
+	let rotateDialogOpen = $state(false);
+	let rotatingProvider = $state<ProviderRow | null>(null);
 	let showPat = $state(false);
+	let showRotatePat = $state(false);
 	let showValidation = $state(false);
+	let showAddProvider = $state(false);
+	let rotateError = $state('');
 
-	const nowIso = () => new Date().toISOString();
+	type ApiProvider = {
+		id: string;
+		provider_url: string;
+		base_url: string;
+		owner_path: string;
+		type: ProviderType;
+		display_name: string;
+		token_fingerprint?: string;
+		enabled: boolean;
+		created_at: string;
+		updated_at?: string;
+		last_rotated_at?: string;
+	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
 		if (host === 'github.com') return 'github';
@@ -109,13 +128,6 @@
 		formError = '';
 	};
 
-	const maskToken = (value: string) => {
-		const trimmed = value.trim();
-		if (!trimmed) return undefined;
-		const last = trimmed.slice(-4);
-		return `****${last}`;
-	};
-
 	const resetForm = () => {
 		providerUrl = '';
 		displayName = '';
@@ -126,108 +138,207 @@
 		updatePreview();
 	};
 
-	const saveProviders = () => {
-		if (!browser) return;
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(providers));
-	};
+	const mapProvider = (entry: ApiProvider): ProviderRow => ({
+		id: entry.id,
+		providerUrl: entry.provider_url,
+		baseUrl: entry.base_url,
+		ownerPath: entry.owner_path || '',
+		type: entry.type,
+		displayName: entry.display_name,
+		tokenFingerprint: entry.token_fingerprint,
+		enabled: entry.enabled,
+		createdAt: entry.created_at,
+		updatedAt: entry.updated_at,
+		lastRotatedAt: entry.last_rotated_at
+	});
 
-	const loadProviders = () => {
-		if (!browser) return;
-		const stored = localStorage.getItem(STORAGE_KEY);
-		if (!stored) {
-			providers = [];
-			return;
-		}
+	const loadProviders = async () => {
+		loading = true;
+		error = '';
 		try {
-			providers = JSON.parse(stored) as ProviderRow[];
+			const response = await fetch('/api/admin/providers', {
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				error = response.status === 403 ? 'Admin access required.' : 'Failed to load providers.';
+				providers = [];
+				return;
+			}
+			const data: ApiProvider[] = await response.json();
+			providers = data.map(mapProvider);
 		} catch {
-			providers = [];
+			error = 'Failed to load providers.';
+		} finally {
+			loading = false;
 		}
 	};
 
-	const addProvider = () => {
+	const addProvider = async () => {
 		showValidation = true;
 		const nextPreview = parseProviderUrl(providerUrl, providerTypeMode);
 		if (nextPreview.errors.length > 0) {
 			formError = '';
 			return;
 		}
-		if (!pat.trim()) {
-			formError = 'PAT is required.';
-			return;
-		}
-
-		const type = nextPreview.type as ProviderType;
-		const baseUrl = nextPreview.baseUrl as string;
-		const ownerPath = nextPreview.ownerPath ?? '';
-		const defaultDisplayName = ownerPath ? `${baseUrl}/${ownerPath}` : baseUrl;
-
-		const entry: ProviderRow = {
-			id: crypto.randomUUID(),
-			providerUrl: ensureScheme(providerUrl).trim(),
-			baseUrl,
-			ownerPath,
-			type,
-			displayName: displayName.trim() || defaultDisplayName,
-			tokenFingerprint: maskToken(pat),
-			enabled: true,
-			createdAt: nowIso()
-		};
-
-		providers = [entry, ...providers];
-		saveProviders();
-		resetForm();
-	};
-
-	const toggleEnabled = (entry: ProviderRow) => {
-		providers = providers.map((provider) =>
-			provider.id === entry.id
-				? { ...provider, enabled: !provider.enabled, updatedAt: nowIso() }
-				: provider
-		);
-		saveProviders();
-	};
-
-	const startRotate = (entry: ProviderRow) => {
-		rotatingId = entry.id;
-		rotatePat = '';
+		saving = true;
 		formError = '';
+		try {
+			const payload = {
+				provider_url: ensureScheme(providerUrl).trim(),
+				display_name: displayName.trim() || undefined,
+				pat: pat.trim() || undefined,
+				type: providerTypeMode === 'auto' ? undefined : providerTypeMode
+			};
+
+			const response = await fetch('/api/admin/providers', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(payload)
+			});
+
+			if (!response.ok) {
+				const text = await response.text();
+				formError = text || 'Failed to create provider.';
+				return;
+			}
+
+			const created: ApiProvider = await response.json();
+			providers = [mapProvider(created), ...providers];
+			resetForm();
+			showAddProvider = false;
+		} catch {
+			formError = 'Failed to create provider.';
+		} finally {
+			saving = false;
+		}
 	};
 
-	const cancelRotate = () => {
-		rotatingId = null;
+	const toggleEnabled = async (entry: ProviderRow) => {
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+				method: 'PATCH',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ enabled: !entry.enabled })
+			});
+
+			if (!response.ok) {
+				formError = 'Failed to update provider.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+		} catch {
+			formError = 'Failed to update provider.';
+		} finally {
+			saving = false;
+		}
+	};
+
+	const openRotateDialog = (entry: ProviderRow) => {
+		rotatingProvider = entry;
 		rotatePat = '';
+		showRotatePat = false;
+		rotateError = '';
+		rotateDialogOpen = true;
 	};
 
-	const submitRotate = (entry: ProviderRow) => {
+	const closeRotateDialog = () => {
+		rotateDialogOpen = false;
+		rotatingProvider = null;
+		rotatePat = '';
+		showRotatePat = false;
+		rotateError = '';
+	};
+
+	const submitRotateToken = async () => {
+		if (!rotatingProvider) return;
 		if (!rotatePat.trim()) {
-			formError = 'New PAT is required.';
+			rotateError = 'PAT is required.';
 			return;
 		}
-		providers = providers.map((provider) =>
-			provider.id === entry.id
-				? {
-						...provider,
-						tokenFingerprint: maskToken(rotatePat),
-						lastRotatedAt: nowIso(),
-						updatedAt: nowIso()
-					}
-				: provider
-		);
-		saveProviders();
-		cancelRotate();
+		saving = true;
+		rotateError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${rotatingProvider.id}/rotate`, {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ pat: rotatePat })
+			});
+
+			if (!response.ok) {
+				rotateError = 'Failed to rotate token.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+			closeRotateDialog();
+		} catch {
+			rotateError = 'Failed to rotate token.';
+		} finally {
+			saving = false;
+		}
 	};
 
-	const removeProvider = (entry: ProviderRow) => {
+	const submitMakePublic = async () => {
+		if (!rotatingProvider) return;
+		saving = true;
+		rotateError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${rotatingProvider.id}/rotate`, {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ pat: '' })
+			});
+
+			if (!response.ok) {
+				rotateError = 'Failed to revoke token.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+			closeRotateDialog();
+		} catch {
+			rotateError = 'Failed to revoke token.';
+		} finally {
+			saving = false;
+		}
+	};
+
+	const removeProvider = async (entry: ProviderRow) => {
 		if (!confirm(`Remove ${entry.displayName}?`)) return;
-		providers = providers.filter((provider) => provider.id !== entry.id);
-		saveProviders();
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+				method: 'DELETE',
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				formError = 'Failed to delete provider.';
+				return;
+			}
+			providers = providers.filter((provider) => provider.id !== entry.id);
+		} catch {
+			formError = 'Failed to delete provider.';
+		} finally {
+			saving = false;
+		}
 	};
 
-	const resetMockData = () => {
-		if (!confirm('Clear all mock providers?')) return;
-		providers = [];
-		saveProviders();
+	const toggleAddProvider = () => {
+		showAddProvider = !showAddProvider;
+		if (!showAddProvider) {
+			resetForm();
+		}
 	};
 
 	const providerTag = (type: ProviderType) => {
@@ -268,26 +379,19 @@
 			<div>
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Admin Providers</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">
-					Mock configuration UI for admin-managed provider tokens.
+					Configure provider tokens that power the Git providers view.
 				</p>
 			</div>
 			<div class="flex flex-wrap items-center gap-2">
-				<button
-					type="button"
-					class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={updatePreview}
-				>
-					<RefreshCw size={16} />
-					Refresh
-				</button>
-				<button
-					type="button"
-					class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={resetMockData}
-				>
-					<Trash2 size={16} />
-					Reset Mock Data
-				</button>
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={loadProviders}
+				disabled={loading}
+			>
+				<RefreshCw size={16} />
+				Refresh
+			</button>
 			</div>
 		</header>
 
@@ -323,109 +427,137 @@
 	</section>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Add Provider</h2>
-			<p class="text-sm text-[var(--text-tertiary)]">Enter a provider URL and PAT. PATs are stored only in the backend.</p>
+		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Configured Providers</h2>
+				<p class="text-sm text-[var(--text-tertiary)]">Stored in the database and encrypted at rest.</p>
+			</div>
+			<button
+				type="button"
+				class={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
+					showAddProvider
+						? 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]'
+						: 'border-amber-300 bg-amber-300 text-amber-950 hover:bg-amber-200'
+				}`}
+				onclick={toggleAddProvider}
+			>
+				{showAddProvider ? 'Close' : 'Add Provider'}
+			</button>
 		</header>
 
-		<div class="grid gap-4 lg:grid-cols-3">
-			<div class="lg:col-span-2 space-y-4">
-				<div class="grid gap-4 md:grid-cols-2">
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider URL</label>
-						<input
-							type="url"
-							placeholder="https://github.com/NorskHelsenett"
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={providerUrl}
-							oninput={updatePreview}
-						/>
-					</div>
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider Type</label>
-						<select
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={providerTypeMode}
-							onchange={updatePreview}
-						>
-							<option value="auto">Auto detect</option>
-							<option value="github">GitHub</option>
-							<option value="gitlab">GitLab</option>
-							<option value="gitea">Gitea</option>
-							<option value="forgejo">Forgejo</option>
-						</select>
-					</div>
-				</div>
-
-				<div class="grid gap-4 md:grid-cols-2">
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Display Name</label>
-						<input
-							type="text"
-							placeholder="github.com/NorskHelsenett"
-							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-							bind:value={displayName}
-						/>
-						<p class="text-xs text-[var(--text-tertiary)]">Optional. Defaults to derived URL.</p>
-					</div>
-					<div class="space-y-2">
-						<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Personal Access Token</label>
-						<div class="flex items-center gap-2">
+		{#if showAddProvider}
+			<div class="grid gap-4 lg:grid-cols-3" in:slide={{ duration: 180 }} out:slide={{ duration: 160 }}>
+				<div class="lg:col-span-2 space-y-4">
+					<div class="grid gap-4 md:grid-cols-2">
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider URL</label>
 							<input
-								type={showPat ? 'text' : 'password'}
-								placeholder="Enter PAT"
+								type="url"
+								placeholder="https://github.com/NorskHelsenett"
 								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-								bind:value={pat}
+								bind:value={providerUrl}
+								oninput={updatePreview}
 							/>
-							<button
-								type="button"
-								class="rounded-full border border-[var(--border-color)] px-3 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-								onclick={() => (showPat = !showPat)}
-							>
-								{showPat ? 'Hide' : 'Show'}
-							</button>
 						</div>
-						<p class="text-xs text-[var(--text-tertiary)]">PAT is never shown after submission.</p>
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Provider Type</label>
+							<div class="relative">
+								<select
+								class="w-full appearance-none rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-10 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none h-[37px]"
+									bind:value={providerTypeMode}
+									onchange={updatePreview}
+								>
+									<option value="auto">Auto detect</option>
+									<option value="github">GitHub</option>
+									<option value="gitlab">GitLab</option>
+									<option value="gitea">Gitea</option>
+									<option value="forgejo">Forgejo</option>
+								</select>
+								<div class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-secondary)]">
+									<ChevronDown size={16} />
+								</div>
+							</div>
+						</div>
 					</div>
+
+					<div class="grid gap-4 md:grid-cols-2">
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Display Name</label>
+							<input
+								type="text"
+								placeholder="github.com/NorskHelsenett"
+								class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+								bind:value={displayName}
+							/>
+							<p class="text-xs text-[var(--text-tertiary)]">Optional. Defaults to derived URL.</p>
+						</div>
+						<div class="space-y-2">
+							<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Personal Access Token</label>
+							<div class="relative">
+								<input
+									type={showPat ? 'text' : 'password'}
+									placeholder="Enter PAT"
+									class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-12 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+									bind:value={pat}
+								/>
+								<button
+									type="button"
+									class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+									onclick={() => (showPat = !showPat)}
+									aria-label={showPat ? 'Hide PAT' : 'Show PAT'}
+								>
+									{#if showPat}
+										<EyeOff size={14} />
+									{:else}
+										<Eye size={14} />
+									{/if}
+								</button>
+							</div>
+							<p class="text-xs text-[var(--text-tertiary)]">Optional. Leave empty to mark as public.</p>
+						</div>
+					</div>
+
+				{#if showValidation && preview.errors.length > 0}
+					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						{preview.errors[0]}
+					</div>
+				{/if}
+				{#if showValidation && formError}
+					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						{formError}
+					</div>
+				{/if}
 				</div>
 
-			{#if showValidation && preview.errors.length > 0}
-				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-					{preview.errors[0]}
+				<div class="space-y-4 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+					<h3 class="text-sm font-semibold text-[var(--text-bright)]">Derived Preview</h3>
+					<div class="text-xs text-[var(--text-tertiary)]">
+						<p>Type: {preview.type ? providerTag(preview.type) : 'Unknown'}</p>
+						<p>Base URL: {preview.baseUrl ?? '-'}</p>
+						<p>Owner/Group: {preview.ownerPath || 'All repositories'}</p>
+						<p>Access: {pat.trim() ? 'PAT required' : 'Public'}</p>
+					</div>
+					<button
+						type="button"
+						class="w-full rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200"
+						onclick={addProvider}
+					>
+						Add Provider
+					</button>
 				</div>
-			{/if}
-			{#if showValidation && formError}
-				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
-					{formError}
-				</div>
-			{/if}
 			</div>
+		{/if}
 
-			<div class="space-y-4 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<h3 class="text-sm font-semibold text-[var(--text-bright)]">Derived Preview</h3>
-				<div class="text-xs text-[var(--text-tertiary)]">
-					<p>Type: {preview.type ? providerTag(preview.type) : 'Unknown'}</p>
-					<p>Base URL: {preview.baseUrl ?? '-'}</p>
-					<p>Owner/Group: {preview.ownerPath || 'All repositories'}</p>
-				</div>
-				<button
-					type="button"
-					class="w-full rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-					onclick={addProvider}
-				>
-					Add Provider
-				</button>
-			</div>
-		</div>
-	</section>
+		{#if error}
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{error}</div>
+		{/if}
+		{#if formError && !showAddProvider}
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{formError}</div>
+		{/if}
 
-	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Configured Providers</h2>
-			<p class="text-sm text-[var(--text-tertiary)]">Mock list stored in localStorage.</p>
-		</header>
-
-		{#if providers.length === 0}
+		{#if loading}
+			<p class="text-sm text-[var(--text-secondary)]">Loading providers...</p>
+		{:else if providers.length === 0}
 			<p class="text-sm text-[var(--text-secondary)]">No providers configured yet.</p>
 		{:else}
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
@@ -456,7 +588,7 @@
 									{entry.ownerPath || 'All'}
 								</td>
 								<td class="px-5 py-3 text-xs">
-									{entry.tokenFingerprint ? `${entry.tokenFingerprint}` : 'Missing'}
+									{entry.tokenFingerprint ? `${entry.tokenFingerprint}` : 'Public'}
 									{#if entry.lastRotatedAt}
 										<div class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 											Rotated {entry.lastRotatedAt}
@@ -472,56 +604,31 @@
 									<div class="flex flex-wrap gap-2">
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-											onclick={() => startRotate(entry)}
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+											onclick={() => openRotateDialog(entry)}
+											disabled={saving}
 										>
-											Rotate
+											{entry.tokenFingerprint ? 'Rotate' : 'Add Token'}
 										</button>
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 											onclick={() => toggleEnabled(entry)}
+											disabled={saving}
 										>
 											{entry.enabled ? 'Disable' : 'Enable'}
 										</button>
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 											onclick={() => removeProvider(entry)}
+											disabled={saving}
 										>
 											Remove
 										</button>
 									</div>
 								</td>
 							</tr>
-							{#if rotatingId === entry.id}
-								<tr class="bg-[var(--hover-bg-subtle)]">
-									<td class="px-5 py-3" colspan="6">
-										<div class="flex flex-wrap items-center gap-3">
-											<input
-												type="password"
-												placeholder="New PAT"
-												class="w-64 rounded-full border border-[var(--border-color)] bg-transparent px-4 py-2 text-xs text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
-												bind:value={rotatePat}
-											/>
-											<button
-												type="button"
-												class="rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-xs font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-												onclick={() => submitRotate(entry)}
-											>
-												Save
-											</button>
-											<button
-												type="button"
-												class="rounded-full border border-[var(--border-color)] px-4 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-												onclick={cancelRotate}
-											>
-												Cancel
-											</button>
-										</div>
-									</td>
-								</tr>
-							{/if}
 						{/each}
 					</tbody>
 				</table>
@@ -529,3 +636,95 @@
 		{/if}
 	</section>
 </div>
+
+<!-- Rotate Token Dialog -->
+<Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false} maxWidth="max-w-xl">
+	<div class="p-6 sm:p-8">
+		{#if rotatingProvider}
+			<div class="space-y-6">
+				<div>
+					<h2 class="text-xl font-semibold text-[var(--text-bright)]">
+						{rotatingProvider.tokenFingerprint ? 'Rotate Token' : 'Add Token'}
+					</h2>
+					<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+						{rotatingProvider.displayName}
+					</p>
+				</div>
+
+				{#if rotatingProvider.tokenFingerprint}
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+						<p class="text-xs text-[var(--text-tertiary)]">
+							Current token: <span class="font-mono text-[var(--text-secondary)]">{rotatingProvider.tokenFingerprint}</span>
+						</p>
+					</div>
+				{/if}
+
+				<div class="space-y-2">
+					<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]" for="rotate-pat-input">
+						{rotatingProvider.tokenFingerprint ? 'New Personal Access Token' : 'Personal Access Token'}
+					</label>
+					<div class="relative">
+						<input
+							id="rotate-pat-input"
+							type={showRotatePat ? 'text' : 'password'}
+							placeholder="Enter PAT"
+							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-12 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-50"
+							bind:value={rotatePat}
+							disabled={saving}
+						/>
+						<button
+							type="button"
+							class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
+							onclick={() => (showRotatePat = !showRotatePat)}
+							aria-label={showRotatePat ? 'Hide PAT' : 'Show PAT'}
+						>
+							{#if showRotatePat}
+								<EyeOff size={16} />
+							{:else}
+								<Eye size={16} />
+							{/if}
+						</button>
+					</div>
+				</div>
+
+				{#if rotateError}
+					<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">
+						{rotateError}
+					</div>
+				{/if}
+
+				<div class="flex items-center justify-between gap-3 border-t border-[var(--border-color)]/60 pt-6">
+					<div class="flex gap-2">
+						<button
+							type="button"
+							class="rounded-full border border-amber-300 bg-amber-300 px-5 py-2.5 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+							onclick={submitRotateToken}
+							disabled={saving || !rotatePat.trim()}
+						>
+							{saving ? 'Saving...' : 'Save'}
+						</button>
+						<button
+							type="button"
+							class="rounded-full border border-[var(--border-color)] px-5 py-2.5 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+							onclick={closeRotateDialog}
+							disabled={saving}
+						>
+							Cancel
+						</button>
+					</div>
+					{#if rotatingProvider.tokenFingerprint}
+						<button
+							type="button"
+							class="rounded-full border border-[var(--error)]/40 px-5 py-2.5 text-sm text-[var(--error)] transition hover:bg-[var(--error)]/10 disabled:opacity-50"
+							onclick={submitMakePublic}
+							disabled={saving}
+							title="Revoke the current token and allow unauthenticated access"
+						>
+							{saving ? 'Revoking...' : 'Make Public'}
+						</button>
+					{/if}
+				</div>
+			</div>
+		{/if}
+	</div>
+</Dialog>

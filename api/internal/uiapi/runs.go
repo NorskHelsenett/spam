@@ -11,6 +11,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -48,6 +49,7 @@ type CreateRunRequest struct {
 	RepoPath string `json:"repo_path"`          // owner/repo or group/project
 	Ref      string `json:"ref,omitempty"`      // branch or tag
 	BaseURL  string `json:"base_url,omitempty"` // for gitlab/gitea custom instances
+	ProviderID string `json:"provider_id,omitempty"`
 }
 
 // CreateRunResponse is the response after creating a run.
@@ -179,6 +181,13 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		providerID := strings.TrimSpace(req.ProviderID)
+		if providerID == "" {
+			if match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, req.BaseURL, req.RepoPath); err == nil && match != nil {
+				providerID = match.ID
+			}
+		}
+
 		org := ""
 		slug := req.RepoPath
 		if parts := strings.Split(req.RepoPath, "/"); len(parts) > 1 {
@@ -200,6 +209,7 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		// Create job payload
 		payload := jobs.CreateRunPayload{
 			RepoID:   repo.ID,
+			ProviderID: providerID,
 			Provider: req.Provider,
 			CloneURL: cloneURL,
 			Ref:      req.Ref,

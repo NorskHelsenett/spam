@@ -17,6 +17,7 @@ type AppSummaryCounts struct {
 	ComponentVersionCount int64 `json:"component_version_count"`
 	LicenseCount          int64 `json:"license_count"`
 	MissingLicenseCount   int64 `json:"missing_license_count"`
+	SecretsCount          int64 `json:"secrets_count"`
 }
 
 type AppSummaryScanner struct {
@@ -75,6 +76,14 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				FROM sbom_component_view
 				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(licenses, ''), ',')) AS lic ON TRUE
 				WHERE licenses IS NOT NULL AND licenses <> ''
+			),
+			latest_repo_secrets AS (
+				SELECT DISTINCT ON (repo_id)
+					repo_id,
+					finding_count
+				FROM run_secrets
+				WHERE repo_id IS NOT NULL AND repo_id <> ''
+				ORDER BY repo_id, created_at DESC
 			)
 			SELECT
 				(SELECT COUNT(DISTINCT sbom_id) FROM sbom_metadata_view) AS sbom_count,
@@ -88,7 +97,8 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					FROM sbom_component_view
 					WHERE type = 'library' AND package_name IS NOT NULL) AS component_version_count,
 				(SELECT COUNT(DISTINCT license) FROM license_items WHERE license <> '') AS license_count,
-				(SELECT COUNT(*) FROM sbom_component_view WHERE type = 'library' AND (licenses IS NULL OR licenses = '')) AS missing_license_count
+				(SELECT COUNT(*) FROM sbom_component_view WHERE type = 'library' AND (licenses IS NULL OR licenses = '')) AS missing_license_count,
+				COALESCE((SELECT SUM(finding_count) FROM latest_repo_secrets), 0) AS secrets_count
 		`).Scan(&resp.Counts).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return

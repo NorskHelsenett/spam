@@ -7,6 +7,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/go-chi/chi/v5"
@@ -16,13 +17,18 @@ import (
 
 // RouterOptions contains optional dependencies for the router.
 type RouterOptions struct {
-	K8sClient   *runner.K8sClient
-	RunExecutor *runner.RunExecutor
+	K8sClient     *runner.K8sClient
+	RunExecutor   *runner.RunExecutor
+	ProviderStore *providerconfig.Store
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
 func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{}, opts *RouterOptions) http.Handler {
 	r := chi.NewRouter()
+	var providerStore *providerconfig.Store
+	if opts != nil {
+		providerStore = opts.ProviderStore
+	}
 
 	// Health check endpoint without middleware to avoid noise in logs
 	r.Get("/api/healthz", health.Handler(db))
@@ -50,6 +56,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
+				api.Get("/admin/providers", uiapi.AdminProvidersListHandler(authService, providerStore))
+				api.Post("/admin/providers", uiapi.AdminProvidersCreateHandler(authService, providerStore))
+				api.Patch("/admin/providers/{id}", uiapi.AdminProvidersUpdateHandler(authService, providerStore))
+				api.Post("/admin/providers/{id}/rotate", uiapi.AdminProvidersRotateHandler(authService, providerStore))
+				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
 
@@ -74,18 +85,19 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
 				api.Get("/repos/security", uiapi.RepoSecurityCountsHandler(db, authService))
 				api.Get("/repos/metadata", uiapi.RepoMetadataHandler(db, authService))
+				api.Get("/providers/instances", uiapi.ProvidersInstancesHandler(db, authService, providerStore))
 				api.Get("/providers/detect", uiapi.ProvidersDetectHandler(authService))
-				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService))
-				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService))
-				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService))
-				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService))
-				api.Get("/providers/gitlab/subgroups", uiapi.GitLabSubgroupsHandler(authService))
-				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService))
-				api.Get("/providers/gitlab/{projectPath}/details", uiapi.GitLabRepoDetailsHandler(authService))
-				api.Get("/providers/gitea/repos", uiapi.GiteaReposHandler(authService))
-				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService))
-				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService))
-				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService))
+				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService, providerStore))
+				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/{projectPath}/details", uiapi.GitLabRepoDetailsHandler(authService, providerStore))
+				api.Get("/providers/gitea/repos", uiapi.GiteaReposHandler(authService, providerStore))
+				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService, providerStore))
+				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore))
+				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore))
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))

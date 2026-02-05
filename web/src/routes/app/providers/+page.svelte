@@ -17,14 +17,15 @@
 		CustomProvider
 	} from '$lib/types/providers';
 
-	const STORAGE_KEY = 'spam-custom-providers';
+	const USER_STORAGE_KEY = 'spam-custom-providers';
 
 	// Tab state
 	let activeTab: string = $state('github');
 	let showAddForm = $state(false);
 
-	// Custom providers from localStorage
+	// Custom providers from localStorage or admin-managed list
 	let customProviders: CustomProvider[] = $state([]);
+	let managedProvidersEnabled = $state(false);
 
 	// New provider form
 	let newProviderUrl = $state('');
@@ -34,6 +35,7 @@
 
 	// GitHub state
 	let ghOwner = $state('NorskHelsenett');
+	let ghProviderId = $state<string | null>(null);
 	let ghRepos: RepoData[] = $state([]);
 	let ghLoading = $state(false);
 	let ghError = $state('');
@@ -124,7 +126,7 @@
 	};
 
 	// Restore state from store
-	const restoreState = () => {
+	const restoreState = (useManagedProviders: boolean) => {
 		const state = get(providersState);
 		// Only restore if state was saved recently (within 30 minutes)
 		if (state.lastUpdated && Date.now() - state.lastUpdated < 30 * 60 * 1000) {
@@ -150,7 +152,7 @@
 			cpTotalCount = state.cpTotalCount;
 			cpIncludeSubgroups = state.cpIncludeSubgroups;
 			cpGroupPath = state.cpGroupPath;
-			if (state.customProviders.length > 0) {
+			if (!useManagedProviders && state.customProviders.length > 0) {
 				customProviders = state.customProviders;
 			}
 			return true; // State was restored
@@ -158,11 +160,21 @@
 		return false; // No valid state to restore
 	};
 
-	// Load custom providers from localStorage
-	const loadCustomProviders = () => {
+	// Load custom providers from localStorage or admin-managed list
+	const loadCustomProviders = async () => {
 		if (!browser) return;
+		const managed = await loadManagedProviders();
+		if (managed.length > 0) {
+			customProviders = managed;
+			managedProvidersEnabled = true;
+			return;
+		}
+
+		managedProvidersEnabled = false;
+		ghProviderId = null;
+		customProviders = [];
 		try {
-			const stored = localStorage.getItem(STORAGE_KEY);
+			const stored = localStorage.getItem(USER_STORAGE_KEY);
 			if (stored) {
 				customProviders = JSON.parse(stored);
 			}
@@ -173,8 +185,8 @@
 
 	// Save custom providers to localStorage
 	const saveCustomProviders = () => {
-		if (!browser) return;
-		localStorage.setItem(STORAGE_KEY, JSON.stringify(customProviders));
+		if (!browser || managedProvidersEnabled) return;
+		localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(customProviders));
 	};
 
 	// Normalize URL: add https://, convert SSH to HTTPS
@@ -203,6 +215,41 @@
 			return `${parsed.protocol}//${parsed.host}`;
 		} catch {
 			return url;
+		}
+	};
+
+	const isProviderType = (value: string): value is CustomProvider['type'] => {
+		return value === 'github' || value === 'gitlab' || value === 'gitea' || value === 'forgejo';
+	};
+
+	type ManagedProvider = {
+		id: string;
+		name: string;
+		type: CustomProvider['type'];
+		base_url: string;
+		owner_path?: string;
+		is_public: boolean;
+	};
+
+	const loadManagedProviders = async (): Promise<CustomProvider[]> => {
+		if (!browser) return [];
+		try {
+			const response = await fetch('/api/providers/instances', { credentials: 'include' });
+			if (!response.ok) return [];
+			const data: ManagedProvider[] = await response.json();
+			if (!Array.isArray(data)) return [];
+			return data
+				.filter((entry) => entry && isProviderType(entry.type))
+				.map((entry) => ({
+					id: entry.id,
+					name: entry.name,
+					type: entry.type,
+					baseUrl: entry.base_url,
+					ownerPath: entry.owner_path || '',
+					isPublic: entry.is_public
+				}));
+		} catch {
+			return [];
 		}
 	};
 
@@ -261,6 +308,7 @@
 
 	// Remove a custom provider
 	const removeCustomProvider = (id: string) => {
+		if (managedProvidersEnabled) return;
 		customProviders = customProviders.filter(p => p.id !== id);
 		saveCustomProviders();
 		if (activeTab === id) {
@@ -284,7 +332,8 @@
 
 	// GitHub functions
 	const fetchGitHubRepos = async (page = 1) => {
-		if (!ghOwner.trim()) return;
+		const owner = ghOwner.trim();
+		if (!owner) return;
 
 		ghLoading = true;
 		ghError = '';
@@ -294,12 +343,15 @@
 				page: String(page),
 				page_size: String(pageSize)
 			});
+			if (ghProviderId) {
+				params.set('provider_id', ghProviderId);
+			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
 			}
 
-			const response = await fetch(`/api/providers/github/${encodeURIComponent(ghOwner)}/repos?${params}`, {
+			const response = await fetch(`/api/providers/github/${encodeURIComponent(owner)}/repos?${params}`, {
 				credentials: 'include'
 			});
 
@@ -403,6 +455,12 @@
 
 	// Custom provider functions
 	const fetchCustomProjects = async (provider: CustomProvider, page = 1) => {
+		if (provider.type === 'github') {
+			cpProjects = [];
+			cpLoading = false;
+			cpError = '';
+			return;
+		}
 		cpLoading = true;
 		cpError = '';
 
@@ -412,6 +470,9 @@
 				page_size: String(pageSize),
 				base_url: provider.baseUrl
 			});
+			if (managedProvidersEnabled) {
+				params.set('provider_id', provider.id);
+			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
@@ -476,6 +537,9 @@
 				page_size: '50',
 				base_url: provider.baseUrl
 			});
+			if (managedProvidersEnabled) {
+				params.set('provider_id', provider.id);
+			}
 
 			const groupPath = cpGroup.trim();
 			const url = groupPath
@@ -519,6 +583,7 @@
 	};
 
 	const navigateToCustomSubgroup = (provider: CustomProvider, group: GroupData) => {
+		if (provider.type === 'github') return;
 		cpGroupPath = [...cpGroupPath, cpGroup];
 		cpGroup = group.full_path;
 		cpPage = 1;
@@ -527,6 +592,7 @@
 	};
 
 	const navigateCustomBack = (provider: CustomProvider, index?: number) => {
+		if (provider.type === 'github') return;
 		if (index !== undefined) {
 			cpGroup = cpGroupPath[index];
 			cpGroupPath = cpGroupPath.slice(0, index);
@@ -540,6 +606,7 @@
 	};
 
 	const handleGitHubSearch = () => {
+		ghProviderId = null;
 		ghPage = 1;
 		fetchGitHubRepos(1);
 	};
@@ -552,6 +619,13 @@
 	};
 
 	const handleCustomSearch = (provider: CustomProvider) => {
+		if (provider.type === 'github') {
+			ghProviderId = managedProvidersEnabled ? provider.id : null;
+			ghPage = 1;
+			ghOwner = provider.ownerPath || ghOwner;
+			fetchGitHubRepos(1);
+			return;
+		}
 		cpPage = 1;
 		cpGroupPath = [];
 		fetchCustomProjects(provider, 1);
@@ -595,9 +669,12 @@
 		} else if (activeTab === 'gitlab' && glProjects.length > 0) {
 			glPage = 1;
 			fetchGitLabProjects(1);
-		} else if (getActiveCustomProvider() && cpProjects.length > 0) {
+		} else if (getActiveCustomProvider()) {
 			const provider = getActiveCustomProvider();
-			if (provider) {
+			if (provider?.type === 'github' && ghRepos.length > 0) {
+				ghPage = 1;
+				fetchGitHubRepos(1);
+			} else if (provider && cpProjects.length > 0) {
 				cpPage = 1;
 				fetchCustomProjects(provider, 1);
 			}
@@ -605,16 +682,24 @@
 	};
 
 	// Navigate to repo details page
-	const goToRepoDetails = (provider: string, path: string, baseUrl?: string) => {
+	const goToRepoDetails = (provider: string, path: string, baseUrl?: string, providerId?: string) => {
 		// Save state before navigating
 		saveState();
 		const params = new URLSearchParams({ provider, path });
 		if (baseUrl) params.set('base_url', baseUrl);
+		if (providerId) params.set('provider_id', providerId);
 		goto(`/app/providers/repo?${params}`);
 	};
 
 	// Trigger SBOM scan for all repos (including paginated results)
-	const queueAllRepos = async (provider: string, owner: string, group: string, baseUrl?: string, includeSubgroups: boolean = false) => {
+	const queueAllRepos = async (
+		provider: string,
+		owner: string,
+		group: string,
+		baseUrl?: string,
+		includeSubgroups: boolean = false,
+		providerId?: string
+	) => {
 		if (queueing) return;
 
 		queueing = true;
@@ -630,7 +715,8 @@
 					owner: owner || undefined,
 					group: group || undefined,
 					base_url: baseUrl || undefined,
-					include_subgroups: includeSubgroups
+					include_subgroups: includeSubgroups,
+					provider_id: providerId || undefined
 				})
 			});
 
@@ -660,7 +746,22 @@
 		activeTab = provider.id;
 		sortColumn = '';
 		sortDirection = 'asc';
-		cpGroup = '';
+		if (provider.type === 'github') {
+			ghProviderId = managedProvidersEnabled ? provider.id : null;
+			ghOwner = provider.ownerPath || ghOwner;
+			ghRepos = [];
+			ghPage = 1;
+			ghHasNextPage = false;
+			ghTotalCount = 0;
+			ghError = '';
+			if (ghOwner.trim()) {
+				fetchGitHubRepos(1);
+			}
+			return;
+		}
+
+		ghProviderId = null;
+		cpGroup = provider.ownerPath || '';
 		cpProjects = [];
 		cpSubgroups = [];
 		cpGroupPath = [];
@@ -671,15 +772,34 @@
 	};
 
 	onMount(() => {
-		if (browser) {
-			loadCustomProviders();
+		if (!browser) return;
+		const init = async () => {
+			await loadCustomProviders();
 			// Try to restore state from store (when coming back from repo details)
-			const restored = restoreState();
+			const restored = restoreState(managedProvidersEnabled);
+			if (managedProvidersEnabled) {
+				const activeProvider = customProviders.find((provider) => provider.id === activeTab);
+				if (activeProvider?.type === 'github') {
+					ghProviderId = activeProvider.id;
+					ghOwner = activeProvider.ownerPath || ghOwner;
+				} else {
+					ghProviderId = null;
+				}
+				const activeExists = Boolean(activeProvider);
+				if (!activeExists && customProviders.length > 0) {
+					switchToCustomTab(customProviders[0]);
+				} else if (!restored && customProviders.length > 0) {
+					switchToCustomTab(customProviders[0]);
+				}
+				return;
+			}
+
 			if (!restored) {
 				// No state to restore, fetch initial data
 				fetchGitHubRepos(1);
 			}
-		}
+		};
+		init();
 	});
 </script>
 
@@ -691,17 +811,18 @@
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header>
 			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Git Providers</h1>
-			<p class="text-sm text-[var(--text-tertiary)]">Browse public repositories from GitHub, GitLab, and custom instances.</p>
+			<p class="text-sm text-[var(--text-tertiary)]">Browse repositories from GitHub, GitLab, and custom instances.</p>
 		</header>
 
 		<!-- Tabs -->
 		<div class="flex flex-wrap items-center gap-2 border-b border-[var(--border-color)]">
+			{#if !managedProvidersEnabled}
 			<button
 				type="button"
 				class="px-4 py-2 text-sm font-medium transition {activeTab === 'github'
 					? 'border-b-2 border-[var(--accent)] text-[var(--accent)]'
 					: 'text-[var(--text-secondary)] hover:text-[var(--text-bright)]'}"
-				onclick={() => { activeTab = 'github'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
+				onclick={() => { activeTab = 'github'; showAddForm = false; sortColumn = ''; sortDirection = 'asc'; ghProviderId = null; if (ghRepos.length === 0) fetchGitHubRepos(1); }}
 			>
 				GitHub
 			</button>
@@ -714,6 +835,7 @@
 			>
 				GitLab
 			</button>
+			{/if}
 			{#each customProviders as provider}
 				<div class="relative flex items-center">
 					<button
@@ -726,6 +848,7 @@
 						{provider.name}
 						<span class="ml-1 text-[10px] text-[var(--text-muted)]">({provider.type})</span>
 					</button>
+					{#if !managedProvidersEnabled}
 					<button
 						type="button"
 						class="ml-1 rounded p-1 text-[var(--text-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--error)]"
@@ -734,29 +857,32 @@
 					>
 						<X class="h-3 w-3" />
 					</button>
+					{/if}
 				</div>
 			{/each}
-			<button
-				type="button"
-				class="flex items-center gap-1 px-3 py-2 text-sm font-medium transition {showAddForm
-					? 'text-[var(--accent)]'
-					: 'text-[var(--text-secondary)] hover:text-[var(--accent)]'}"
-				onclick={() => { 
-					showAddForm = !showAddForm; 
-					activeTab = 'add'; 
-					if (showAddForm) {
-						setTimeout(() => addProviderInput?.focus(), 0);
-					}
-				}}
-				title="Add custom provider"
-			>
-				<Plus class="h-4 w-4" />
-				<span>Add</span>
-			</button>
+			{#if !managedProvidersEnabled}
+				<button
+					type="button"
+					class="flex items-center gap-1 px-3 py-2 text-sm font-medium transition {showAddForm
+						? 'text-[var(--accent)]'
+						: 'text-[var(--text-secondary)] hover:text-[var(--accent)]'}"
+					onclick={() => { 
+						showAddForm = !showAddForm; 
+						activeTab = 'add'; 
+						if (showAddForm) {
+							setTimeout(() => addProviderInput?.focus(), 0);
+						}
+					}}
+					title="Add custom provider"
+				>
+					<Plus class="h-4 w-4" />
+					<span>Add</span>
+				</button>
+			{/if}
 		</div>
 
 		<!-- GitHub Tab Content -->
-		{#if activeTab === 'github' && !showAddForm}
+		{#if !managedProvidersEnabled && activeTab === 'github' && !showAddForm}
 			<div class="space-y-4">
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
@@ -847,7 +973,7 @@
 		{/if}
 
 		<!-- GitLab Tab Content -->
-		{#if activeTab === 'gitlab' && !showAddForm}
+		{#if !managedProvidersEnabled && activeTab === 'gitlab' && !showAddForm}
 			<div class="space-y-4">
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
@@ -957,7 +1083,7 @@
 		{/if}
 
 		<!-- Add Provider Form -->
-		{#if showAddForm}
+		{#if !managedProvidersEnabled && showAddForm}
 			<div class="flex flex-col items-center justify-center py-16">
 				<div class="flex h-20 w-20 items-center justify-center rounded-2xl bg-[var(--accent)]/10 text-[var(--accent)]">
 					<Globe class="h-10 w-10" />
@@ -1002,6 +1128,92 @@
 		{#if getActiveCustomProvider() && !showAddForm}
 			{@const provider = getActiveCustomProvider()!}
 			<div class="space-y-4">
+				{#if provider.type === 'github'}
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
+						<p class="text-xs text-[var(--text-muted)]">
+							<span class="font-medium text-[var(--text-secondary)]">GitHub</span> org at
+							<span class="font-mono text-[var(--accent)]">{provider.baseUrl}</span>
+						</p>
+					</div>
+
+					<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
+						<div class="flex-1 rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]">
+							<span class="text-[var(--text-tertiary)]">Owner:</span>
+							<span class="ml-2 font-medium text-[var(--text-bright)]">{provider.ownerPath || 'Unknown'}</span>
+						</div>
+						<button
+							type="button"
+							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
+							onclick={() => handleCustomSearch(provider)}
+							disabled={ghLoading || !provider.ownerPath}
+						>
+							{ghLoading ? 'Loading...' : 'Refresh'}
+						</button>
+						<button
+							type="button"
+							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
+							disabled={queueing || !provider.ownerPath}
+							title="Queue SBOM generation for all projects from {provider.name}"
+						>
+							{queueing ? 'Queueing...' : 'Queue All'}
+						</button>
+					</div>
+
+					{#if queueing && activeTab === provider.id}
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+							<div class="flex items-center justify-between text-sm">
+								<span class="text-[var(--text-secondary)]">
+									{#if queueProgress.total > 0}
+										Added {queueProgress.total} {queueProgress.total === 1 ? 'repo' : 'repos'} to queue
+									{:else}
+										Adding repos to queue...
+									{/if}
+								</span>
+								{#if queueProgress.total > 0}
+									<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
+								{/if}
+							</div>
+							{#if queueProgress.errors.length > 0}
+								<div class="mt-3 space-y-1">
+									<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
+									{#each queueProgress.errors.slice(0, 5) as error}
+										<p class="text-xs text-[var(--error)]">{error}</p>
+									{/each}
+									{#if queueProgress.errors.length > 5}
+										<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
+									{/if}
+								</div>
+							{/if}
+						</div>
+					{/if}
+
+					{#if !provider.ownerPath}
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+							GitHub providers must include an org or user path.
+						</div>
+					{:else if ghError}
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{ghError}</div>
+					{:else if ghRepos.length === 0 && !ghLoading}
+						<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
+					{:else if ghRepos.length > 0}
+						<RepoTable columns={githubColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+							{#each ghRepos as repo}
+								<RepoTableRow repo={repo} {formatDate} onSelect={() => goToRepoDetails('github', repo.full_path, undefined, managedProvidersEnabled ? provider.id : undefined)} />
+							{/each}
+						</RepoTable>
+
+						<Pagination
+							page={ghPage}
+							totalCount={ghTotalCount}
+							{pageSize}
+							hasNextPage={ghHasNextPage}
+							loading={ghLoading}
+							onPrevious={() => fetchGitHubRepos(ghPage - 1)}
+							onNext={() => fetchGitHubRepos(ghPage + 1)}
+						/>
+					{/if}
+				{:else}
 				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
 					<p class="text-xs text-[var(--text-muted)]">
 						<span class="font-medium text-[var(--text-secondary)]">{provider.type === 'gitlab' ? 'GitLab' : provider.type === 'forgejo' ? 'Forgejo' : 'Gitea'}</span> instance at
@@ -1026,7 +1238,7 @@
 					<button
 						type="button"
 						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
-						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups)}
+						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
 						disabled={queueing}
 						title="Queue SBOM generation for all projects from {provider.name}"
 					>
@@ -1092,7 +1304,7 @@
 				{/if}
 
 				{#if cpProjects.length === 0 && !cpLoading && !cpError}
-					<p class="text-sm text-[var(--text-secondary)]">No public projects found.</p>
+					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
 				{:else if cpProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
 						{#each cpProjects as project}
@@ -1100,7 +1312,7 @@
 								repo={project}
 								showPath
 								{formatDate}
-								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl)}
+								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl, managedProvidersEnabled ? provider.id : undefined)}
 							/>
 						{/each}
 					</RepoTable>
@@ -1115,8 +1327,8 @@
 						onNext={() => fetchCustomProjects(provider, cpPage + 1)}
 					/>
 				{/if}
+				{/if}
 			</div>
 		{/if}
 	</section>
 </div>
-

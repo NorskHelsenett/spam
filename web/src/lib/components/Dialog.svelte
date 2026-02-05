@@ -1,16 +1,18 @@
 <script lang="ts">
 	import { X } from 'lucide-svelte';
 	import { browser } from '$app/environment';
-	
-	let { 
+
+	let {
 		open = $bindable(false),
 		onClose = () => {},
 		showCloseButton = true,
+		maxWidth = 'max-w-5xl',
 		children
 	}: {
 		open?: boolean;
 		onClose?: () => void;
 		showCloseButton?: boolean;
+		maxWidth?: string;
 		children?: any;
 	} = $props();
 
@@ -33,7 +35,7 @@
 
 	$effect(() => {
 		if (!browser) return;
-		
+
 		if (open) {
 			document.body.style.overflow = 'hidden';
 			document.addEventListener('keydown', handleKeydown);
@@ -51,14 +53,14 @@
 
 {#if open}
 	<!-- Backdrop -->
-	<div 
+	<div
 		class="fixed inset-0 z-50 bg-black/25 backdrop-blur-[1px]"
 		onclick={handleBackdropClick}
 		role="presentation"
 	>
 		<!-- Dialog Container -->
-		<div 
-			class="fixed left-1/2 top-1/2 z-50 flex h-auto max-h-[90vh] w-[95vw] max-w-5xl flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl" 
+		<div
+			class="fixed left-1/2 top-1/2 z-50 flex h-auto max-h-[90vh] w-[95vw] {maxWidth} flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl"
 			style="transform: translate(-50%, -50%);"
 			role="dialog"
 			aria-modal="true"
@@ -67,7 +69,7 @@
 				<!-- Close Button Sidebar -->
 				<div class="flex shrink-0 select-none flex-row flex-wrap overflow-x-auto p-1.5 md:min-w-[180px] md:max-w-[210px] md:flex-col md:p-0">
 					<div class="hidden py-3 ps-2.5 md:block">
-						<button 
+						<button
 							type="button"
 							class="flex h-9 w-9 items-center justify-center rounded-lg bg-transparent transition hover:bg-[var(--hover-bg)]"
 							aria-label="Close"

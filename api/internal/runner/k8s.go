@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/config"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -170,6 +171,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 						{
 							Name:  "runner",
 							Image: k.cfg.Image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: []corev1.EnvVar{
 								{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
 								{Name: "RUN_ID", Value: runID},
@@ -523,15 +525,6 @@ func NewRunExecutor(cfg config.RunnerConfig, server *Server) (*RunExecutor, erro
 	}, nil
 }
 
-// CreateRunPayload is imported from jobs package via interface, define local for internal use.
-type createRunPayloadInternal struct {
-	RepoID    string `json:"repo_id,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	CloneURL  string `json:"clone_url"`
-	Ref       string `json:"ref,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-}
-
 // ExecuteRun starts a run by creating a K8s job or Docker container.
 // This implements jobs.RunExecutor interface.
 func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload interface{}) error {
@@ -540,7 +533,7 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
 	}
-	var p createRunPayloadInternal
+	var p jobs.CreateRunPayload
 	if err := json.Unmarshal(payloadBytes, &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
 	}

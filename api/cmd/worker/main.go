@@ -79,9 +79,8 @@ func run() error {
 
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
 	pollInterval := 2 * time.Second
-	staleAfter := 10 * time.Minute
 
-	log.Printf("worker started: %s (concurrency=%d)", workerID, cfg.Concurrency)
+	log.Printf("worker started: %s (concurrency=%d, stale_timeout=%s)", workerID, cfg.Concurrency, cfg.StaleTimeout)
 
 	// Semaphore to limit concurrent job processing
 	sem := make(chan struct{}, cfg.Concurrency)
@@ -102,7 +101,14 @@ func run() error {
 
 		case <-ticker.C:
 			now := time.Now()
-			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-staleAfter), now)
+			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
+
+			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
+			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)
+			if err != nil {
+				log.Printf("count running runs error: %v", err)
+				runningRuns = int64(cfg.Concurrency) // Assume at limit on error
+			}
 
 			// Try to claim jobs up to available concurrency slots
 			for {
@@ -123,7 +129,13 @@ func run() error {
 				default:
 				}
 
-				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now())
+				// Determine which job types to claim based on running runs
+				var excludeTypes []jobs.JobType
+				if runningRuns >= int64(cfg.Concurrency) {
+					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
+				}
+
+				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now(), excludeTypes...)
 				if err != nil {
 					log.Printf("claim job error: %v", err)
 					<-sem // Release the slot
@@ -133,6 +145,11 @@ func run() error {
 					// No more jobs available
 					<-sem // Release the slot
 					goto nextTick
+				}
+
+				// Track if we're starting a new run
+				if job.Type == jobs.JobTypeCreateRun {
+					runningRuns++
 				}
 
 				// Process job in a goroutine
@@ -173,15 +190,15 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 		return
 	}
 
-	log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
-
 	if job.Type == jobs.JobTypeCreateRun {
+		log.Printf("run started: id=%s type=%s result=%+v", job.ID, job.Type, result)
 		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusRunning, result, "", nil); updateErr != nil {
 			log.Printf("update job error: %v", updateErr)
 		}
 		return
 	}
 
+	log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
 	if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusSucceeded, result, "", nil); updateErr != nil {
 		log.Printf("update job error: %v", updateErr)
 	}

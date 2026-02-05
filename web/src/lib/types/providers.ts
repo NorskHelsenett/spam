@@ -56,6 +56,8 @@ export type GitLabGroupsResponse = {
 export type CustomProvider = {
 	id: string;
 	name: string;
-	type: 'gitlab' | 'gitea' | 'forgejo';
+	type: 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	baseUrl: string;
+	ownerPath?: string;
+	isPublic?: boolean;
 };
