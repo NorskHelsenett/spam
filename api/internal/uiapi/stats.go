@@ -18,8 +18,7 @@ type StatsResponse struct {
 // StatsHandler returns inventory statistics.
 func StatsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -30,7 +29,11 @@ func StatsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		if err := db.WithContext(r.Context()).Table("components").Count(&stats.ComponentCount).Error; err != nil {
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT COUNT(DISTINCT kind || ':' || package_name)
+			FROM sbom_component_view
+			WHERE is_root = false AND package_name IS NOT NULL
+		`).Scan(&stats.ComponentCount).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}

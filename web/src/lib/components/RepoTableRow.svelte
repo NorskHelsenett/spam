@@ -49,17 +49,23 @@
 		<td class="px-5 py-3">
 			<span class="text-xs text-[var(--text-muted)]">{repo.full_path}</span>
 		</td>
-	{:else}
-		<td class="px-5 py-3">
-			{#if repo.language}
-				<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
-					{repo.language}
-				</span>
-			{:else}
-				<span class="text-[var(--text-muted)]">—</span>
-			{/if}
-		</td>
 	{/if}
+	<td class="px-5 py-3">
+		{#if repo.languages && repo.languages.length > 0}
+			<div class="flex flex-wrap gap-1">
+				{#each repo.languages.slice(0, 3) as lang}
+					<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
+						{lang}
+					</span>
+				{/each}
+				{#if repo.languages.length > 3}
+					<span class="text-[10px] text-[var(--text-muted)]">+{repo.languages.length - 3}</span>
+				{/if}
+			</div>
+		{:else}
+			<span class="text-[var(--text-muted)]">—</span>
+		{/if}
+	</td>
 	<td class="px-5 py-3 text-xs">
 		{formatDate(repo.pushed_at || repo.updated_at)}
 	</td>

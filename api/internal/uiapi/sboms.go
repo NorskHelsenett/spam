@@ -62,14 +62,8 @@ type sbomIngestedPayload struct {
 // SBOMUploadHandler accepts multipart SBOM uploads and enqueues parsing jobs.
 func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		session, err := authService.LoadSession(r)
-		if err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		user := requireAdmin(w, r, authService)
+		if user == nil {
 			return
 		}
 
@@ -143,7 +137,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			var assetRefID string
 
 			if repoProvided {
-				repo, err := resolveRepo(r.Context(), tx, repoID, provider, org, slug, session.UserID)
+				repo, err := resolveRepo(r.Context(), tx, repoID, provider, org, slug, user.ID)
 				if err != nil {
 					return err
 				}
@@ -161,7 +155,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					AssetType:       artifacts.AssetTypeRepoCommit,
 					AssetRefID:      commit.ID,
 					Source:          sbomSourceUpload,
-					CreatedByUserID: session.UserID,
+					CreatedByUserID: user.ID,
 				}
 				assetRefID = commit.ID
 				response.RepoID = repo.ID
@@ -173,7 +167,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					Registry:        imageRegistry,
 					Repository:      imageRepository,
 					Digest:          imageDigest,
-					CreatedByUserID: session.UserID,
+					CreatedByUserID: user.ID,
 				})
 				if err != nil {
 					return err
@@ -183,42 +177,27 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					AssetType:       artifacts.AssetTypeImageDigest,
 					AssetRefID:      image.ID,
 					Source:          sbomSourceUpload,
-					CreatedByUserID: session.UserID,
+					CreatedByUserID: user.ID,
 				}
 				assetRefID = image.ID
 				response.ImageDigestID = image.ID
 			}
 
-			sbomID, bindingID, jobID, err := artifacts.StoreSBOMWithParseJob(
+			sbomID, bindingID, err := artifacts.StoreSBOM(
 				r.Context(), tx,
 				artifacts.SBOMInput{
 					Format:           format,
 					ContentHash:      hash[:],
 					ContentBytes:     content,
-					IngestedByUserID: session.UserID,
+					IngestedByUserID: user.ID,
 				},
 				bindingInput,
-				func(ctx context.Context, tx *gorm.DB, sbomID, bindingID string) (string, error) {
-					payload := map[string]string{"sbom_id": sbomID}
-					if bindingID != "" {
-						payload["binding_id"] = bindingID
-					}
-					job, err := jobs.CreateJobTx(ctx, tx, jobs.CreateJobInput{
-						Type:    jobs.JobTypeParseSBOM,
-						Payload: payload,
-					})
-					if err != nil {
-						return "", err
-					}
-					return job.ID, nil
-				},
 			)
 			if err != nil {
 				return err
 			}
 
 			response.SBOMID = sbomID
-			response.JobID = jobID
 			if bindingID != "" {
 				response.BindingID = bindingID
 			}
@@ -226,7 +205,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			// Emit appropriate events
 			if bindingInput != nil {
 				if repoProvided {
-					repo, _ := resolveRepo(r.Context(), tx, repoID, provider, org, slug, session.UserID)
+					repo, _ := resolveRepo(r.Context(), tx, repoID, provider, org, slug, user.ID)
 					commit, _ := assets.FindRepoCommit(r.Context(), tx, assetRefID)
 					if err := events.EmitSBOMBound(tx, sbomID, sbomBoundPayload{
 						SBOMID:       sbomID,
@@ -287,6 +266,13 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		if _, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
+			Type:    jobs.JobTypeRefreshSBOMViews,
+			Payload: map[string]string{"sbom_id": response.SBOMID},
+		}); err != nil {
+			log.Printf("failed to enqueue view refresh: %v", err)
+		}
+
 		writeJSON(w, http.StatusCreated, response)
 	}
 }
@@ -335,8 +321,7 @@ func detectSBOMFormat(payload []byte) string {
 // GET /api/sboms/{id}/download
 func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -359,6 +344,49 @@ func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", "attachment; filename=sbom.json")
 		w.Write(sbom.ContentBytes)
+	}
+}
+
+// SBOMGetHandler returns SBOM metadata by ID.
+// GET /api/sboms/{id}
+func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		sbomID := r.PathValue("id")
+		if sbomID == "" {
+			http.Error(w, "sbom ID required", http.StatusBadRequest)
+			return
+		}
+
+		sbom, err := artifacts.FindSBOM(r.Context(), db, sbomID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "sbom not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch sbom", http.StatusInternalServerError)
+			return
+		}
+
+		// Count components linked to this SBOM
+		var componentCount int64
+		if err := db.WithContext(r.Context()).
+			Table("sbom_components").
+			Where("sbom_id = ?", sbomID).
+			Count(&componentCount).Error; err != nil {
+			log.Printf("failed to count sbom components: %v", err)
+			componentCount = 0
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id":              sbom.ID,
+			"format":          sbom.Format,
+			"created_at":      sbom.CreatedAt,
+			"component_count": componentCount,
+		})
 	}
 }
 

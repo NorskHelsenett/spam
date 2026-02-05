@@ -10,7 +10,7 @@ type RepoData struct {
 	Description   string    `json:"description"`
 	HTMLURL       string    `json:"html_url"`
 	DefaultBranch string    `json:"default_branch"`
-	Language      string    `json:"language"`
+	Languages     []string  `json:"languages"`
 	IsPrivate     bool      `json:"is_private"`
 	IsArchived    bool      `json:"is_archived"`
 	IsFork        bool      `json:"is_fork"`

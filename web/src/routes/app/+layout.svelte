@@ -5,9 +5,10 @@
 	import favicon from '$lib/assets/favicon.svg';
 	import { page } from '$app/stores';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
-	
+
 	let appEventSource: EventSource | null = null;
 
 	const startAppStream = () => {
@@ -62,7 +63,7 @@
 
 				if (!response.ok) {
 					// Not authenticated, redirect to login
-					window.location.href = '/auth/login';
+					goto('/auth/login');
 					return;
 				}
 
@@ -74,7 +75,7 @@
 				}
 			} catch (error) {
 				// Error checking auth, redirect to login
-				window.location.href = '/auth/login';
+				goto('/auth/login');
 			}
 		};
 
@@ -90,7 +91,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound, Package, GitBranch, Play } from 'lucide-svelte';
+	import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -208,38 +209,56 @@ let isAdmin = $state(false);
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
 			{#each navLinks as link}
-				<a
-					href={link.href}
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+				<button
+					type="button"
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
 						isActive(link.href)
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
-					data-sveltekit-preload-data="hover"
+					onclick={() => goto(link.href)}
 					aria-current={isActive(link.href) ? 'page' : undefined}
+					aria-label={link.label}
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 						<link.icon size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">{link.label}</span>
-				</a>
+				</button>
 			{/each}
 			{#if isAdmin}
-				<a
-					href="/app/users"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+				<button
+					type="button"
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
+						isActive('/app/admin/providers')
+							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
+							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
+					}`}
+					onclick={() => goto('/app/admin/providers')}
+					aria-current={isActive('/app/admin/providers') ? 'page' : undefined}
+					aria-label="Admin Providers"
+				>
+					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
+						<KeyRound size={18} stroke-width={1.7} />
+					</span>
+					<span class="font-medium">Admin Providers</span>
+				</button>
+				<button
+					type="button"
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
 						isActive('/app/users')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
-					data-sveltekit-preload-data="hover"
+					onclick={() => goto('/app/users')}
 					aria-current={isActive('/app/users') ? 'page' : undefined}
+					aria-label="Users"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 						<UsersRound size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">Users</span>
-				</a>
+				</button>
 			{/if}
 		</nav>
 
@@ -247,7 +266,7 @@ let isAdmin = $state(false);
 			<button
 				type="button"
 				onclick={toggleTheme}
-				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition active:scale-95 hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 				aria-label={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
 				title={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
 			>
@@ -260,9 +279,9 @@ let isAdmin = $state(false);
 				</span>
 				<span class="font-medium">Theme: {$theme === 'dark' ? 'Dark' : 'Light'}</span>
 			</button>
-			<button 
-				type="button" 
-				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+			<button
+				type="button"
+				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition active:scale-95 hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 				onclick={() => accountDialogOpen = true}
 			>
 				<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
@@ -283,3 +302,11 @@ let isAdmin = $state(false);
 </div>
 
 <AccountDialog bind:open={accountDialogOpen} />
+
+
+<style>
+	button {
+		cursor: pointer;
+		width: 100%;
+	}
+</style>

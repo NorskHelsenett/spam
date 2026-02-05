@@ -5,10 +5,13 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -46,6 +49,7 @@ type CreateRunRequest struct {
 	RepoPath string `json:"repo_path"`          // owner/repo or group/project
 	Ref      string `json:"ref,omitempty"`      // branch or tag
 	BaseURL  string `json:"base_url,omitempty"` // for gitlab/gitea custom instances
+	ProviderID string `json:"provider_id,omitempty"`
 }
 
 // CreateRunResponse is the response after creating a run.
@@ -58,8 +62,7 @@ type CreateRunResponse struct {
 // GET /api/runs
 func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -88,10 +91,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			LockedAt   *time.Time
 			FinishedAt *time.Time
 			K8sJobName string `gorm:"column:k8s_job_name"`
+			Result     []byte
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name").
+		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name, result").
 			Order("created_at DESC").
 			Offset(offset).
 			Limit(pageSize).
@@ -108,15 +112,31 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				json.Unmarshal(job.Payload, &payload)
 			}
 
+			status := job.Status
+			errorText := job.Error
+			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+				if resultMap, err := parseRunResultMap(job.Result); err == nil {
+					events, podStatus, ok, err := loadPersistedK8sSnapshotFromResult(resultMap)
+					if err == nil && ok {
+						if failed, message := inferK8sFailure(events, podStatus); failed {
+							status, errorText, _ = correctRunStatusFromSnapshot(r.Context(), db, job.ID, status, events, podStatus)
+							if errorText == "" {
+								errorText = message
+							}
+						}
+					}
+				}
+			}
+
 			runs = append(runs, RunResponse{
 				ID:         job.ID,
-				Status:     job.Status,
+				Status:     status,
 				CloneURL:   payload.CloneURL,
 				Provider:   payload.Provider,
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
 				CommitSHA:  job.CommitHash,
-				Error:      job.Error,
+				Error:      errorText,
 				CreatedAt:  job.CreatedAt,
 				StartedAt:  job.LockedAt,
 				FinishedAt: job.FinishedAt,
@@ -137,8 +157,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // POST /api/runs
 func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAdmin(w, r, authService) == nil {
 			return
 		}
 
@@ -160,8 +179,35 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		providerID := strings.TrimSpace(req.ProviderID)
+		if providerID == "" {
+			if match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, req.BaseURL, req.RepoPath); err == nil && match != nil {
+				providerID = match.ID
+			}
+		}
+
+		org := ""
+		slug := req.RepoPath
+		if parts := strings.Split(req.RepoPath, "/"); len(parts) > 1 {
+			org = parts[0]
+			slug = parts[len(parts)-1]
+		}
+
+		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
+			Provider: req.Provider,
+			Org:      org,
+			Slug:     slug,
+		})
+		if err != nil {
+			log.Printf("failed to upsert repo: %v", err)
+			http.Error(w, "failed to create run", http.StatusInternalServerError)
+			return
+		}
+
 		// Create job payload
 		payload := jobs.CreateRunPayload{
+			RepoID:   repo.ID,
+			ProviderID: providerID,
 			Provider: req.Provider,
 			CloneURL: cloneURL,
 			Ref:      req.Ref,
@@ -205,8 +251,7 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 // GET /api/runs/{id}
 func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -244,6 +289,32 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			json.Unmarshal(job.Payload, &payload)
 		}
 
+		// If we already know K8s failed, correct status before responding
+		if job.Status == string(jobs.JobStatusSucceeded) || job.Status == string(jobs.JobStatusRunning) || job.Status == string(jobs.JobStatusQueued) {
+			events, podStatus, ok, err := loadPersistedK8sSnapshot(r.Context(), db, runID)
+			if err == nil && ok {
+				if failed, message := inferK8sFailure(events, podStatus); failed {
+					now := time.Now()
+					errorText := message
+					if errorText == "" {
+						errorText = "k8s runner failed to start"
+					}
+					if updateErr := db.WithContext(r.Context()).Table("jobs").
+						Where("id = ?", runID).
+						Updates(map[string]interface{}{
+							"status":      jobs.JobStatusFailed,
+							"error":       errorText,
+							"finished_at": now,
+							"updated_at":  now,
+						}).Error; updateErr == nil {
+						job.Status = string(jobs.JobStatusFailed)
+						job.Error = errorText
+						job.FinishedAt = &now
+					}
+				}
+			}
+		}
+
 		response := RunResponse{
 			ID:         job.ID,
 			Status:     job.Status,
@@ -259,14 +330,23 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			K8sJobName: job.K8sJobName,
 		}
 
-		// Look up associated SBOM
-		var sbomBinding struct {
-			SBOMID string
-		}
-		if err := db.WithContext(r.Context()).Table("sbom_bindings").
-			Where("asset_ref_id = ? AND source = ?", payload.RepoID, "spam-runner").
-			Select("sbom_id").First(&sbomBinding).Error; err == nil {
-			response.SBOMID = sbomBinding.SBOMID
+		// Look up associated SBOM via repo commit
+		if payload.RepoID != "" && job.CommitHash != "" {
+			var repoCommit struct {
+				ID string
+			}
+			if err := db.WithContext(r.Context()).Table("repo_commits").
+				Where("repo_id = ? AND commit_sha = ?", payload.RepoID, job.CommitHash).
+				Select("id").First(&repoCommit).Error; err == nil {
+				var sbomBinding struct {
+					SBOMID string
+				}
+				if err := db.WithContext(r.Context()).Table("sbom_bindings").
+					Where("asset_type = ? AND asset_ref_id = ?", "REPO_COMMIT", repoCommit.ID).
+					Select("sbom_id").First(&sbomBinding).Error; err == nil {
+					response.SBOMID = sbomBinding.SBOMID
+				}
+			}
 		}
 
 		// Look up associated secrets
@@ -340,8 +420,7 @@ func indexByte(s string, c byte) int {
 // GET /api/runs/:id/k8s-logs?tail=100
 func RunLogsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -392,8 +471,7 @@ func RunLogsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8
 // POST /api/runs/:id/cancel
 func RunCancelHandler(db *gorm.DB, authService *auth.Service, executor *runner.RunExecutor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAdmin(w, r, authService) == nil {
 			return
 		}
 
@@ -437,8 +515,7 @@ func RunCancelHandler(db *gorm.DB, authService *auth.Service, executor *runner.R
 // GET /api/runs/:id/k8s-status
 func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -485,12 +562,74 @@ func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runn
 	}
 }
 
+// RunEventsHandler retrieves Kubernetes events for a run.
+// GET /api/runs/{id}/events
+func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		// Get run from database
+		var run runner.Run
+		if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		var (
+			events    []runner.K8sEvent
+			podStatus *runner.PodStatus
+			err       error
+		)
+
+		if k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != "" {
+			events, err = k8sClient.GetJobEvents(r.Context(), run.K8sJobName, run.K8sNamespace)
+			if err != nil {
+				log.Printf("failed to get job events: %v", err)
+			} else {
+				podStatus, _ = k8sClient.GetPodStatus(r.Context(), run.K8sJobName, run.K8sNamespace)
+				if err := persistK8sSnapshot(r.Context(), db, runID, events, podStatus); err != nil {
+					log.Printf("failed to store events: %v", err)
+				}
+			}
+		}
+
+		if len(events) == 0 && podStatus == nil {
+			var ok bool
+			events, podStatus, ok, err = loadPersistedK8sSnapshot(r.Context(), db, runID)
+			if err != nil {
+				log.Printf("failed to load stored events: %v", err)
+				http.Error(w, "failed to retrieve events", http.StatusInternalServerError)
+				return
+			}
+			if !ok {
+				events = []runner.K8sEvent{}
+			}
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"events":     events,
+			"pod_status": podStatus,
+		})
+	}
+}
+
 // RunSecretsHandler retrieves gitleaks findings for a run.
 // GET /api/runs/{id}/secrets
 func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 

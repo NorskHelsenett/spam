@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { Lock, ArrowRight, Shield } from 'lucide-svelte';
 	
 	onMount(async () => {
@@ -11,7 +12,7 @@
 			
 			if (response.ok) {
 				// Already logged in, redirect to app
-				window.location.href = '/app';
+				goto('/app');
 			}
 		} catch (error) {
 			// Not logged in, stay on login page

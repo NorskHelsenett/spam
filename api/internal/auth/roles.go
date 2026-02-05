@@ -45,6 +45,37 @@ func (s *Service) RequireAdmin(r *http.Request) (*User, error) {
 	return &user, nil
 }
 
+func (s *Service) RequireAdminOrGlobalReader(r *http.Request) (*User, error) {
+	session, err := s.loadSession(r)
+	if err != nil {
+		return nil, err
+	}
+	if session.UserID == "" {
+		return nil, errors.New("missing user id")
+	}
+
+	isAdmin, err := s.userHasGroup(r.Context(), session.UserID, GroupAdmin)
+	if err != nil {
+		return nil, err
+	}
+
+	if !isAdmin {
+		isGlobalReader, err := s.userHasGroup(r.Context(), session.UserID, GroupGlobalReader)
+		if err != nil {
+			return nil, err
+		}
+		if !isGlobalReader {
+			return nil, errors.New("forbidden")
+		}
+	}
+
+	var user User
+	if err := s.db.WithContext(r.Context()).First(&user, "id = ?", session.UserID).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (s *Service) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	var users []User
 	if err := s.db.WithContext(ctx).Order("created_at asc").Find(&users).Error; err != nil {

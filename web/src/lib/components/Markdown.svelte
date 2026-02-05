@@ -135,6 +135,19 @@
 	.prose :global(li) {
 		margin: 0.25rem 0;
 	}
+	.prose :global(ul.task-list) {
+		list-style: none;
+		padding-left: 0;
+	}
+	.prose :global(li.task-list-item) {
+		list-style: none;
+	}
+	.prose :global(li:has(> input[type='checkbox'])) {
+		list-style: none;
+	}
+	.prose :global(li:has(> input[type='checkbox']))::marker {
+		content: '';
+	}
 	.prose :global(li::marker) {
 		color: var(--text-muted);
 	}
@@ -156,7 +169,7 @@
 		border-left: 3px solid var(--accent);
 		background: var(--hover-bg);
 		padding: 0.75rem 1rem;
-		margin: 1rem 0;
+		margin: 0 0 1rem 0;
 		color: var(--text-muted);
 		font-style: italic;
 		border-radius: 0 0.25rem 0.25rem 0;

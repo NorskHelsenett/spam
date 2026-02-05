@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
 )
 
@@ -43,15 +44,23 @@ type GitLabGroupsResponse struct {
 	NextPage    int                   `json:"next_page"`
 }
 
+func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string, error) {
+	if store == nil {
+		return "", nil
+	}
+	providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+	if providerID == "" {
+		return "", nil
+	}
+	return store.GetActiveToken(r.Context(), providerID)
+}
+
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
-func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
+func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")
@@ -64,7 +73,13 @@ func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
 
-		client := providers.NewGitHubClient("", "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGitHubClient("", token)
 		repos, pageInfo, err := client.ListPublicRepos(r.Context(), owner, providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
@@ -73,6 +88,10 @@ func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
 			log.Printf("GitHub API error for owner %q: %v", owner, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "owner not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitHub org/user", http.StatusUnauthorized)
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
@@ -101,13 +120,10 @@ func GitHubReposHandler(authService *auth.Service) http.HandlerFunc {
 
 // GitLabProjectsHandler handles the GitLab projects endpoint.
 // GET /api/providers/gitlab/{group}/projects?base_url=https://gitlab.example.com
-func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
+func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		group := r.PathValue("group")
@@ -119,7 +135,13 @@ func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
 
-		client := providers.NewGitLabClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGitLabClient(baseURL, token)
 		projects, pageInfo, err := client.ListPublicProjects(r.Context(), group, providers.ListOptions{
 			Page:             page,
 			PageSize:         pageSize,
@@ -129,6 +151,10 @@ func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
 			log.Printf("GitLab API error for group %q: %v", group, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "group not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
@@ -157,13 +183,10 @@ func GitLabProjectsHandler(authService *auth.Service) http.HandlerFunc {
 
 // GitLabSubgroupsHandler handles the GitLab subgroups endpoint.
 // GET /api/providers/gitlab/{group}/subgroups?base_url=https://gitlab.example.com
-func GitLabSubgroupsHandler(authService *auth.Service) http.HandlerFunc {
+func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		group := r.PathValue("group")
@@ -172,7 +195,13 @@ func GitLabSubgroupsHandler(authService *auth.Service) http.HandlerFunc {
 		page, pageSize := parsePagination(r)
 		baseURL := r.URL.Query().Get("base_url") // Custom instance URL
 
-		client := providers.NewGitLabClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGitLabClient(baseURL, token)
 		groups, pageInfo, err := client.ListPublicGroups(r.Context(), group, providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
@@ -181,6 +210,10 @@ func GitLabSubgroupsHandler(authService *auth.Service) http.HandlerFunc {
 			log.Printf("GitLab API error for group %q subgroups: %v", group, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "group not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
@@ -225,13 +258,10 @@ type GiteaOrgsResponse struct {
 // GiteaReposHandler handles the Gitea repos endpoint.
 // GET /api/providers/gitea/repos?base_url=https://gitea.example.com
 // GET /api/providers/gitea/{owner}/repos?base_url=https://gitea.example.com
-func GiteaReposHandler(authService *auth.Service) http.HandlerFunc {
+func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner") // can be empty
@@ -243,7 +273,13 @@ func GiteaReposHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		client := providers.NewGiteaClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGiteaClient(baseURL, token)
 		repos, pageInfo, err := client.ListPublicRepos(r.Context(), owner, providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
@@ -252,6 +288,10 @@ func GiteaReposHandler(authService *auth.Service) http.HandlerFunc {
 			log.Printf("Gitea API error for owner %q: %v", owner, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "owner not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo instance", http.StatusUnauthorized)
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
@@ -275,13 +315,10 @@ func GiteaReposHandler(authService *auth.Service) http.HandlerFunc {
 
 // GiteaOrgsHandler handles the Gitea orgs endpoint.
 // GET /api/providers/gitea/orgs?base_url=https://gitea.example.com
-func GiteaOrgsHandler(authService *auth.Service) http.HandlerFunc {
+func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		page, pageSize := parsePagination(r)
@@ -292,13 +329,23 @@ func GiteaOrgsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		client := providers.NewGiteaClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGiteaClient(baseURL, token)
 		orgs, pageInfo, err := client.ListPublicOrgs(r.Context(), "", providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
 		})
 		if err != nil {
 			log.Printf("Gitea API error for orgs: %v", err)
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo instance", http.StatusUnauthorized)
+				return
+			}
 			if errors.Is(err, providers.ErrRateLimited) {
 				http.Error(w, "rate limited", http.StatusTooManyRequests)
 				return
@@ -329,11 +376,8 @@ type DetectProviderResponse struct {
 // GET /api/providers/detect?url=https://gitlab.example.com
 func ProvidersDetectHandler(authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		baseURL := r.URL.Query().Get("url")
@@ -465,13 +509,10 @@ type RepoDetailsResponse struct {
 
 // GitHubRepoDetailsHandler handles fetching GitHub repo details.
 // GET /api/providers/github/{owner}/{repo}/details
-func GitHubRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")
@@ -481,13 +522,23 @@ func GitHubRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		client := providers.NewGitHubClient("", "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGitHubClient("", token)
 
 		details, err := client.GetRepoDetails(r.Context(), owner, repo)
 		if err != nil {
 			log.Printf("GitHub repo details error for %s/%s: %v", owner, repo, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this GitHub repo", http.StatusUnauthorized)
 				return
 			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
@@ -508,13 +559,10 @@ func GitHubRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 
 // GitLabRepoDetailsHandler handles fetching GitLab project details.
 // GET /api/providers/gitlab/{projectPath}/details?base_url=...
-func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		projectPath := r.PathValue("projectPath")
@@ -529,7 +577,13 @@ func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 		}
 
 		baseURL := r.URL.Query().Get("base_url")
-		client := providers.NewGitLabClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGitLabClient(baseURL, token)
 
 		details, err := client.GetRepoDetails(r.Context(), projectPath)
 		if err != nil {
@@ -561,13 +615,10 @@ func GitLabRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 
 // GiteaRepoDetailsHandler handles fetching Gitea repo details.
 // GET /api/providers/gitea/{owner}/{repo}/details?base_url=...
-func GiteaRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
+func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")
@@ -583,13 +634,23 @@ func GiteaRepoDetailsHandler(authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		client := providers.NewGiteaClient(baseURL, "")
+		token, err := resolveProviderToken(r, store)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		client := providers.NewGiteaClient(baseURL, token)
 
 		details, err := client.GetRepoDetails(r.Context(), owner, repo)
 		if err != nil {
 			log.Printf("Gitea repo details error for %s/%s: %v", owner, repo, err)
 			if errors.Is(err, providers.ErrNotFound) {
 				http.Error(w, "repository not found", http.StatusNotFound)
+				return
+			}
+			if errors.Is(err, providers.ErrUnauthorized) {
+				http.Error(w, "authentication required for this Gitea/Forgejo repo", http.StatusUnauthorized)
 				return
 			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
@@ -643,13 +704,23 @@ func sortByName(repos []providers.RepoData, ascending bool) {
 }
 
 func sortByLanguage(repos []providers.RepoData, ascending bool) {
+	// Helper to get primary language (first in array)
+	getPrimary := func(langs []string) string {
+		if len(langs) > 0 {
+			return langs[0]
+		}
+		return ""
+	}
+
 	for i := 0; i < len(repos)-1; i++ {
 		for j := i + 1; j < len(repos); j++ {
 			swap := false
+			langI := getPrimary(repos[i].Languages)
+			langJ := getPrimary(repos[j].Languages)
 			if ascending {
-				swap = repos[i].Language > repos[j].Language
+				swap = langI > langJ
 			} else {
-				swap = repos[i].Language < repos[j].Language
+				swap = langI < langJ
 			}
 			if swap {
 				repos[i], repos[j] = repos[j], repos[i]

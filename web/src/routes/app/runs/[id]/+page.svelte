@@ -2,7 +2,9 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download } from 'lucide-svelte';
+	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download, Activity } from 'lucide-svelte';
+	import RunTimeline from '$lib/components/RunTimeline.svelte';
+	import Dialog from '$lib/components/Dialog.svelte';
 
 	type Run = {
 		id: string;
@@ -32,6 +34,31 @@
 		raw_data?: any;
 	};
 
+	type K8sEvent = {
+		type: string;
+		reason: string;
+		message: string;
+		source: string;
+		first_timestamp: string;
+		last_timestamp: string;
+		count: number;
+		object: string;
+	};
+
+	type RunLog = {
+		line: string;
+		ts: string;
+	};
+
+	type PodStatus = {
+		phase: string;
+		reason?: string;
+		message?: string;
+		waiting_reason?: string;
+		waiting_message?: string;
+		is_error?: boolean;
+	};
+
 	let run: Run | null = $state(null);
 	let artifacts: Artifact[] = $state([]);
 	let loading = $state(true);
@@ -39,8 +66,14 @@
 	let showRawDialog = $state(false);
 	let rawDialogTitle = $state('');
 	let rawDialogData = $state('');
+	let rawDialogLoading = $state(false);
 	let eventSource: EventSource | null = null;
 	let lastStatus = $state('');
+	let runLogs: RunLog[] = $state([]);
+	let k8sEvents: K8sEvent[] = $state([]);
+	let podStatus: PodStatus | null = $state(null);
+	let showTimeline = $state(true);
+	let k8sPollingDisabled = $state(false);
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -74,6 +107,33 @@
 		}
 	};
 
+	const loadK8sEvents = async (runId: string) => {
+		if (k8sPollingDisabled) return false;
+		try {
+			const response = await fetch(`/api/runs/${runId}/events`, {
+				credentials: 'include'
+			});
+			if (response.status === 404 || response.status === 400) {
+				// K8s endpoints not available or run has no job; stop polling
+				k8sPollingDisabled = true;
+				if (eventsInterval) {
+					clearInterval(eventsInterval);
+					eventsInterval = null;
+				}
+				return false;
+			}
+			if (response.ok) {
+				const data = await response.json();
+				k8sEvents = data.events || [];
+				podStatus = data.pod_status || null;
+				return true;
+			}
+		} catch (e) {
+			console.log('K8s events not available:', e);
+		}
+		return false;
+	};
+
 	const loadArtifacts = async (runId: string, runData: Run) => {
 		const artifactsList: Artifact[] = [];
 
@@ -83,7 +143,7 @@
 				const sbomResponse = await fetch(`/api/sboms/${runData.sbom_id}`, { credentials: 'include' });
 				if (sbomResponse.ok) {
 					const sbomData = await sbomResponse.json();
-					const componentCount = sbomData.components?.length || 0;
+					const componentCount = sbomData.component_count || 0;
 					
 					artifactsList.push({
 						type: 'sbom',
@@ -149,10 +209,73 @@
 		artifacts = artifactsList;
 	};
 
-	const showRaw = (artifact: Artifact) => {
+	const refreshArtifactData = async (artifact: Artifact) => {
+		const runId = $page.params.id;
+		if (!runId) {
+			return artifact.raw_data;
+		}
+
+		if (artifact.type === 'sbom' && run?.sbom_id) {
+			const sbomResponse = await fetch(`/api/sboms/${run.sbom_id}`, { credentials: 'include' });
+			if (sbomResponse.ok) {
+				const sbomData = await sbomResponse.json();
+				artifacts = artifacts.map((item) =>
+					item.type === 'sbom'
+						? { ...item, count: sbomData.component_count || 0, raw_data: sbomData }
+						: item
+				);
+				return sbomData;
+			}
+		}
+
+		if (artifact.type === 'secrets') {
+			const secretsResponse = await fetch(`/api/runs/${runId}/secrets`, { credentials: 'include' });
+			if (secretsResponse.ok) {
+				const secretsData = await secretsResponse.json();
+				artifacts = artifacts.map((item) =>
+					item.type === 'secrets'
+						? { ...item, count: secretsData.finding_count || 0, raw_data: secretsData }
+						: item
+				);
+				return secretsData;
+			}
+		}
+
+		if (artifact.type === 'manifests') {
+			const manifestsResponse = await fetch(`/api/manifests?run_id=${runId}`, { credentials: 'include' });
+			if (manifestsResponse.ok) {
+				const manifestsData = await manifestsResponse.json();
+				const manifestCount = manifestsData.manifests?.length || 0;
+				artifacts = artifacts.map((item) =>
+					item.type === 'manifests'
+						? { ...item, count: manifestCount, raw_data: manifestsData.manifests }
+						: item
+				);
+				return manifestsData.manifests;
+			}
+		}
+
+		return artifact.raw_data;
+	};
+
+	const showRaw = async (artifact: Artifact) => {
 		rawDialogTitle = artifact.name;
-		rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+		rawDialogLoading = true;
+		rawDialogData = '';
 		showRawDialog = true;
+
+		try {
+			const latestData = await refreshArtifactData(artifact);
+			if (latestData === undefined) {
+				rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+			} else {
+				rawDialogData = JSON.stringify(latestData, null, 2);
+			}
+		} catch (e) {
+			rawDialogData = JSON.stringify(artifact.raw_data, null, 2);
+		} finally {
+			rawDialogLoading = false;
+		}
 	};
 
 	const connectSSE = () => {
@@ -164,7 +287,7 @@
 		// If not available, fall back to polling
 		try {
 			eventSource = new EventSource(`/api/runs/${id}/stream`, { withCredentials: true });
-			
+
 			eventSource.addEventListener('status', (event) => {
 				try {
 					const data = JSON.parse(event.data);
@@ -172,14 +295,20 @@
 						// Status changed - update run and load artifacts
 						run.status = data.status;
 						lastStatus = data.status;
-						
+
+						// If SSE includes error message (e.g., from K8s failure), capture it
+						if (data.error) run.error = data.error;
+
 						// If SSE includes artifact IDs, update them immediately
 						if (data.sbom_id) run.sbom_id = data.sbom_id;
-						if (data.secret_id) run.secret_id = data.secret_id;					if (data.commit_hash) run.commit_hash = data.commit_hash;						
+						if (data.secret_id) run.secret_id = data.secret_id;
+						if (data.commit_hash) run.commit_hash = data.commit_hash;
+
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
 						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
 							loadArtifacts(id, run);
+							loadK8sEvents(id);
 						}
 					}
 				} catch (e) {
@@ -187,8 +316,24 @@
 				}
 			});
 
-			eventSource.addEventListener('log', () => {
-				// Log events received (could display in UI later)
+			eventSource.addEventListener('log', (event) => {
+				// Collect logs for the timeline
+				try {
+					const data = JSON.parse(event.data);
+					runLogs = [...runLogs, { line: data.line, ts: data.ts }];
+				} catch (e) {
+					console.error('Failed to parse log event:', e);
+				}
+			});
+
+			eventSource.addEventListener('k8s', (event) => {
+				try {
+					const data = JSON.parse(event.data);
+					k8sEvents = data.events || [];
+					podStatus = data.pod_status || null;
+				} catch (e) {
+					console.error('Failed to parse k8s event:', e);
+				}
 			});
 
 			eventSource.onerror = () => {
@@ -197,11 +342,17 @@
 					eventSource.close();
 					eventSource = null;
 				}
-				setupPolling();
+				if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
+					setupPolling();
+					startK8sPolling();
+				}
 			};
 		} catch (e) {
 			console.log('SSE not available, using polling');
-			setupPolling();
+			if (run && (run.status === 'QUEUED' || run.status === 'RUNNING')) {
+				setupPolling();
+				startK8sPolling();
+			}
 		}
 	};
 
@@ -219,13 +370,37 @@
 		return () => clearInterval(interval);
 	};
 
-	onMount(() => {
-		if (!browser) return;
-		
-		// Initial load
-		loadRun(true);
+	let eventsInterval: ReturnType<typeof setInterval> | null = null;
+	const startK8sPolling = () => {
+		if (k8sPollingDisabled) {
+			return;
+		}
+		if (eventsInterval) {
+			clearInterval(eventsInterval);
+		}
+		eventsInterval = setInterval(() => {
+			const id = $page.params.id;
+			if (id && run?.k8s_job_name) {
+				loadK8sEvents(id);
+			}
+		}, 5000);
+	};
 
-		// Try SSE first, fall back to polling if not available
+	onMount(async () => {
+		if (!browser) return;
+
+		const id = $page.params.id;
+		if (!id) return;
+
+		// Initial load - wait for it to complete before connecting SSE
+		await loadRun(true);
+
+		// Load K8s events if the run has a K8s job
+		if (run?.k8s_job_name) {
+			await loadK8sEvents(id);
+		}
+
+		// Try SSE for both running and completed runs to capture K8s events and logs
 		connectSSE();
 	});
 
@@ -233,6 +408,10 @@
 		if (eventSource) {
 			eventSource.close();
 			eventSource = null;
+		}
+		if (eventsInterval) {
+			clearInterval(eventsInterval);
+			eventsInterval = null;
 		}
 	});
 
@@ -335,6 +514,15 @@
 							{run.status}
 						</span>
 					</div>
+					{#if run.error}
+						<div class="mt-4 flex items-start gap-3 rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
+							<XCircle class="mt-0.5 h-5 w-5 text-[var(--error)]" />
+							<div>
+								<p class="text-xs uppercase tracking-wider text-[var(--error)]">Error</p>
+								<p class="mt-1 text-sm text-[var(--text-secondary)] break-words">{run.error}</p>
+							</div>
+						</div>
+					{/if}
 					<p class="mt-2 flex items-center gap-2 text-[var(--text-secondary)]">
 						<GitBranch class="h-4 w-4" />
 						{run.repo_path || run.clone_url}
@@ -371,19 +559,45 @@
 				</div>
 			</div>
 
-			{#if run.error}
-				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-4">
-					<p class="text-xs uppercase tracking-wider text-[var(--error)]">Error</p>
-					<p class="mt-2 text-sm text-[var(--text-secondary)]">{run.error}</p>
-				</div>
-			{/if}
-
 			{#if run.k8s_job_name}
 				<div class="text-xs text-[var(--text-muted)]">
 					K8s Job: {run.k8s_job_name}
 				</div>
 			{/if}
+		</section>
 
+		<!-- Timeline Section -->
+		<section class="panel-surface px-6 py-6 sm:px-10">
+			<div class="mb-4 flex items-center justify-between">
+				<h2 class="flex items-center gap-2 text-lg font-semibold text-[var(--text-bright)]">
+					<Activity class="h-5 w-5 text-[var(--accent)]" />
+					Execution Timeline
+				</h2>
+				<button
+					type="button"
+					class="text-sm text-[var(--text-secondary)] hover:text-[var(--accent)]"
+					onclick={() => { showTimeline = !showTimeline; }}
+				>
+					{showTimeline ? 'Hide' : 'Show'}
+				</button>
+			</div>
+
+			{#if showTimeline}
+				<RunTimeline
+					runId={run.id}
+					status={run.status}
+					logs={runLogs}
+					events={k8sEvents}
+					podStatus={podStatus ?? undefined}
+					secretCount={artifacts.find(a => a.type === 'secrets')?.count || 0}
+					sbomComponentCount={artifacts.find(a => a.type === 'sbom')?.count || 0}
+					manifestCount={artifacts.find(a => a.type === 'manifests')?.count || 0}
+					commitHash={run.commit_hash || ''}
+				/>
+			{/if}
+		</section>
+
+		<section class="panel-surface space-y-6 px-6 py-8 sm:px-10">
 			<!-- Results Section -->
 			{#if run.status === 'SUCCEEDED' && artifacts.length > 0}
 				<div class="space-y-4">
@@ -478,36 +692,27 @@
 </div>
 
 <!-- Raw Data Dialog -->
-{#if showRawDialog}
-	<div 
-		class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" 
-		onclick={() => { showRawDialog = false; }}
-		role="button"
-		tabindex="0"
-		aria-label="Close dialog"
-		onkeydown={(e) => { if (e.key === 'Escape') showRawDialog = false; }}
-	>
-		<div 
-			class="max-h-[90vh] w-full max-w-4xl overflow-hidden rounded-2xl border border-[var(--border-color)] bg-[var(--panel-bg)] shadow-2xl" 
-			role="dialog" 
-			aria-modal="true"
-			tabindex="-1"
-			onclick={(e) => e.stopPropagation()}
-			onkeydown={(e) => e.stopPropagation()}
-		>
-			<div class="flex items-center justify-between border-b border-[var(--border-color)] p-6">
-				<h3 class="text-lg font-semibold text-[var(--text-bright)]">{rawDialogTitle}</h3>
-				<button
-					type="button"
-					class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-					onclick={() => { showRawDialog = false; }}
-				>
-					<XCircle class="h-5 w-5" />
-				</button>
-			</div>
-			<div class="overflow-auto p-6" style="max-height: calc(90vh - 80px);">
+<Dialog bind:open={showRawDialog} showCloseButton={false} onClose={() => {}}>
+	<div class="flex flex-col">
+		<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-5">
+			<h3 class="text-lg font-semibold text-[var(--text-bright)]">{rawDialogTitle}</h3>
+			<button
+				type="button"
+				class="rounded-lg p-1 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => { showRawDialog = false; }}
+			>
+				<XCircle class="h-5 w-5" />
+			</button>
+		</div>
+		<div class="overflow-auto px-6 py-5" style="max-height: calc(90vh - 80px);">
+			{#if rawDialogLoading}
+				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+					<Loader2 class="h-4 w-4 animate-spin" />
+					Loading...
+				</div>
+			{:else}
 				<pre class="overflow-x-auto rounded-lg bg-[var(--hover-bg)] p-4 text-xs text-[var(--text-secondary)]"><code>{rawDialogData}</code></pre>
-			</div>
+			{/if}
 		</div>
 	</div>
-{/if}
+</Dialog>

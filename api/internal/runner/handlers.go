@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"io"
@@ -10,8 +9,10 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -57,10 +58,35 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Look up PAT for the repository based on run payload
-	// For now, return empty token (public repos only)
+	// Load run payload for provider metadata
+	var run Run
+	if err := s.db.WithContext(r.Context()).Where("id = ?", req.RunID).First(&run).Error; err != nil {
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+
+	var payload jobs.CreateRunPayload
+	if len(run.Payload) > 0 {
+		if err := json.Unmarshal(run.Payload, &payload); err != nil {
+			log.Printf("failed to unmarshal run payload: %v", err)
+			http.Error(w, "invalid run payload", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	providerToken := ""
+	if payload.ProviderID != "" {
+		pat, err := providerconfig.GetActiveToken(r.Context(), s.db, payload.ProviderID, s.cfg.ProviderSecretsKey)
+		if err != nil {
+			log.Printf("token exchange failed: %v", err)
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		providerToken = pat
+	}
+
 	resp := TokenExchangeResponse{
-		Token: "", // Empty means public repo
+		Token: providerToken,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -106,9 +132,11 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload CreateRunPayload
+	var payload jobs.CreateRunPayload
 	if len(run.Payload) > 0 {
-		json.Unmarshal(run.Payload, &payload)
+		if err := json.Unmarshal(run.Payload, &payload); err != nil {
+			log.Printf("failed to unmarshal run payload: %v", err)
+		}
 	}
 
 	// Process SBOM file
@@ -121,18 +149,33 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		} else {
 			hash := sha256.Sum256(sbomData)
 
-			var binding *artifacts.BindingInput
-			if payload.RepoID != "" {
-				binding = &artifacts.BindingInput{
-					AssetType:       artifacts.AssetTypeRepoCommit,
-					AssetRefID:      payload.RepoID,
-					Source:          "spam-runner",
-					CreatedByUserID: "system",
-				}
+			commitSHA := commitHash
+			if commitSHA == "" {
+				commitSHA = payload.CommitSHA
 			}
 
+			var storedSBOMID string
 			err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-				sbomID, _, jobID, err := artifacts.StoreSBOMWithParseJob(
+				var binding *artifacts.BindingInput
+				if payload.RepoID != "" && commitSHA != "" {
+					commit, err := assets.UpsertRepoCommit(r.Context(), tx, assets.RepoCommitInput{
+						RepoID:    payload.RepoID,
+						CommitSHA: commitSHA,
+						Ref:       payload.Ref,
+					})
+					if err != nil {
+						log.Printf("failed to upsert repo commit: %v", err)
+					} else {
+						binding = &artifacts.BindingInput{
+							AssetType:       artifacts.AssetTypeRepoCommit,
+							AssetRefID:      commit.ID,
+							Source:          "spam-runner",
+							CreatedByUserID: "system",
+						}
+					}
+				}
+
+				sbomID, _, err := artifacts.StoreSBOM(
 					r.Context(), tx,
 					artifacts.SBOMInput{
 						Format:           "cyclonedx-json",
@@ -141,29 +184,23 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 						IngestedByUserID: "system",
 					},
 					binding,
-					func(ctx context.Context, tx *gorm.DB, sbomID, bindingID string) (string, error) {
-						jobPayload := map[string]string{"sbom_id": sbomID}
-						if bindingID != "" {
-							jobPayload["binding_id"] = bindingID
-						}
-						job, err := jobs.CreateJobTx(ctx, tx, jobs.CreateJobInput{
-							Type:    jobs.JobTypeParseSBOM,
-							Payload: jobPayload,
-						})
-						if err != nil {
-							return "", err
-						}
-						return job.ID, nil
-					},
 				)
 				if err != nil {
 					return err
 				}
-				log.Printf("ingested SBOM %s for run %s (%d bytes), job %s", sbomID, runID, len(sbomData), jobID)
+				storedSBOMID = sbomID
+				log.Printf("ingested SBOM %s for run %s (%d bytes)", sbomID, runID, len(sbomData))
 				return nil
 			})
 			if err != nil {
 				log.Printf("failed to ingest sbom: %v", err)
+			} else if storedSBOMID != "" {
+				if _, err := jobs.CreateJob(r.Context(), s.db, jobs.CreateJobInput{
+					Type:    jobs.JobTypeRefreshSBOMViews,
+					Payload: map[string]string{"sbom_id": storedSBOMID},
+				}); err != nil {
+					log.Printf("failed to enqueue view refresh: %v", err)
+				}
 			}
 		}
 	}

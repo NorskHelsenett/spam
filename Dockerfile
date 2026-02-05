@@ -70,6 +70,7 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 COPY --from=gobuilder /go/bin/spam /app/spam
 COPY --from=gobuilder /go/bin/worker /app/worker
 COPY --from=gobuilder /go/api/web/build /app/web/build
+COPY --from=gobuilder /go/api/migrations /app/migrations
 
 EXPOSE 8080
 ENV PORT=8080

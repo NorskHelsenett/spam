@@ -5,7 +5,7 @@ export type RepoData = {
 	description: string;
 	html_url: string;
 	default_branch: string;
-	language: string;
+	languages: string[];
 	is_private: boolean;
 	is_archived: boolean;
 	is_fork: boolean;
@@ -56,6 +56,8 @@ export type GitLabGroupsResponse = {
 export type CustomProvider = {
 	id: string;
 	name: string;
-	type: 'gitlab' | 'gitea' | 'forgejo';
+	type: 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	baseUrl: string;
+	ownerPath?: string;
+	isPublic?: boolean;
 };

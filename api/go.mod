@@ -1,6 +1,6 @@
 module github.com/NorskHelsenett/spam
 
-go 1.25.5
+go 1.25
 
 require (
 	github.com/coreos/go-oidc/v3 v3.16.0

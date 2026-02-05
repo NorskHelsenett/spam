@@ -1,0 +1,323 @@
+package uiapi
+
+import (
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/jobs"
+	"gorm.io/gorm"
+)
+
+// RepoMetadataHandler returns a unified metadata response for a repo.
+// GET /api/repos/metadata?repo_id=provider:org:slug
+func RepoMetadataHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		repoID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		repoMeta, repoDBID := loadRepoMetadata(r, db, repoID)
+		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
+		runs := loadRepoRuns(r, db, repoID, repoDBID)
+		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoID, repoDBID)
+		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount)
+		secrets := loadRepoSecrets(r, db, runs.Latest)
+
+		writeJSON(w, http.StatusOK, RepoMetadataResponse{
+			Repo:            repoMeta,
+			LatestCommit:    latestCommit,
+			Runs:            runs,
+			SBOM:            sbom,
+			Dependencies:    deps,
+			Secrets:         secrets,
+			Hygiene:         RepoMetadataHygiene{},
+			Vulnerabilities: RepoMetadataVulnerabilities{},
+		})
+	}
+}
+
+func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadataRepo, string) {
+	meta := RepoMetadataRepo{ID: repoID}
+	parts := strings.SplitN(repoID, ":", 3)
+	if len(parts) != 3 {
+		return meta, ""
+	}
+
+	meta.Provider = parts[0]
+	meta.Org = parts[1]
+	meta.Slug = parts[2]
+
+	var repo struct {
+		ID string
+	}
+	if err := db.WithContext(r.Context()).Table("repos").
+		Select("id").
+		Where("provider = ? AND org = ? AND slug = ?", parts[0], parts[1], parts[2]).
+		First(&repo).Error; err == nil {
+		return meta, repo.ID
+	}
+
+	return meta, ""
+}
+
+func loadRepoLatestCommit(r *http.Request, db *gorm.DB, repoDBID string) *RepoMetadataCommit {
+	if repoDBID == "" {
+		return nil
+	}
+
+	var commit struct {
+		CommitSHA string
+		CreatedAt time.Time
+	}
+	if err := db.WithContext(r.Context()).Table("repo_commits").
+		Select("commit_sha, created_at").
+		Where("repo_id = ?", repoDBID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&commit).Error; err != nil || commit.CommitSHA == "" {
+		return nil
+	}
+
+	return &RepoMetadataCommit{
+		SHA:         commit.CommitSHA,
+		CommittedAt: commit.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) RepoMetadataRuns {
+	response := RepoMetadataRuns{
+		Total:    0,
+		Timeline: []RepoMetadataRunSummary{},
+	}
+
+	repoPath := ""
+	if parts := strings.SplitN(repoID, ":", 3); len(parts) == 3 {
+		repoPath = parts[1] + "/" + parts[2]
+	}
+
+	query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", "CREATE_RUN")
+	if repoPath != "" {
+		query = query.Where("payload::text LIKE ?", "%"+repoPath+"%")
+	}
+
+	query.Count(&response.Total)
+
+	var rows []struct {
+		ID         string
+		Status     string
+		Payload    []byte
+		CommitHash string
+		CreatedAt  time.Time
+		LockedAt   *time.Time
+		FinishedAt *time.Time
+		Result     []byte
+	}
+	if err := query.Select("id, status, payload, commit_hash, created_at, locked_at, finished_at, result").
+		Order("created_at DESC").
+		Limit(10).
+		Find(&rows).Error; err != nil {
+		return response
+	}
+
+	for _, row := range rows {
+		status := row.Status
+		if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+			if resultMap, err := parseRunResultMap(row.Result); err == nil {
+				events, podStatus, ok, err := loadPersistedK8sSnapshotFromResult(resultMap)
+				if err == nil && ok {
+					if failed, _ := inferK8sFailure(events, podStatus); failed {
+						status, _, _ = correctRunStatusFromSnapshot(r.Context(), db, row.ID, status, events, podStatus)
+					}
+				}
+			}
+		}
+
+		summary := RepoMetadataRunSummary{
+			ID:         row.ID,
+			Status:     status,
+			CommitSHA:  row.CommitHash,
+			StartedAt:  formatTimePtr(row.LockedAt),
+			FinishedAt: formatTimePtr(row.FinishedAt),
+		}
+		if row.LockedAt != nil && row.FinishedAt != nil {
+			summary.DurationMs = row.FinishedAt.Sub(*row.LockedAt).Milliseconds()
+		}
+		summary.Artifacts = loadRunArtifacts(r, db, row.ID, repoID, repoDBID)
+		response.Timeline = append(response.Timeline, summary)
+	}
+
+	if len(response.Timeline) > 0 {
+		response.Latest = &response.Timeline[0]
+	}
+
+	return response
+}
+
+func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoID, repoDBID string) []string {
+	artifacts := make([]string, 0, 3)
+
+	var secretsCount int64
+	if err := db.WithContext(r.Context()).Table("run_secrets").
+		Where("run_id = ?", runID).
+		Count(&secretsCount).Error; err == nil && secretsCount > 0 {
+		artifacts = append(artifacts, "secrets")
+	}
+
+	var sbomID string
+	if err := db.WithContext(r.Context()).Table("sbom_bindings").
+		Select("sbom_id").
+		Where("asset_ref_id = ?", repoID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&sbomID).Error; err == nil && sbomID != "" {
+		artifacts = append(artifacts, "sbom")
+		return artifacts
+	}
+
+	if repoDBID == "" {
+		return artifacts
+	}
+
+	var commitID string
+	if err := db.WithContext(r.Context()).Table("repo_commits").
+		Select("id").
+		Where("repo_id = ?", repoDBID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&commitID).Error; err != nil || commitID == "" {
+		return artifacts
+	}
+
+	if err := db.WithContext(r.Context()).Table("sbom_bindings").
+		Select("sbom_id").
+		Where("asset_ref_id = ?", commitID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&sbomID).Error; err == nil && sbomID != "" {
+		artifacts = append(artifacts, "sbom")
+	}
+
+	return artifacts
+}
+
+func loadRepoSBOM(r *http.Request, db *gorm.DB, repoID, repoDBID string) (RepoMetadataSBOM, int64) {
+	var sbomID string
+	if err := db.WithContext(r.Context()).Table("sbom_bindings").
+		Select("sbom_id").
+		Where("asset_ref_id = ?", repoID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&sbomID).Error; err != nil {
+		return RepoMetadataSBOM{}, 0
+	}
+
+	if sbomID == "" && repoDBID != "" {
+		var commitID string
+		if err := db.WithContext(r.Context()).Table("repo_commits").
+			Select("id").
+			Where("repo_id = ?", repoDBID).
+			Order("created_at DESC").
+			Limit(1).
+			Scan(&commitID).Error; err == nil && commitID != "" {
+			_ = db.WithContext(r.Context()).Table("sbom_bindings").
+				Select("sbom_id").
+				Where("asset_ref_id = ?", commitID).
+				Order("created_at DESC").
+				Limit(1).
+				Scan(&sbomID).Error
+		}
+	}
+
+	if sbomID == "" {
+		return RepoMetadataSBOM{}, 0
+	}
+
+	var sbom struct {
+		ID        string
+		Format    string
+		CreatedAt time.Time
+	}
+	if err := db.WithContext(r.Context()).Table("sboms").
+		Select("id, format, created_at").
+		Where("id = ?", sbomID).
+		First(&sbom).Error; err != nil {
+		return RepoMetadataSBOM{}, 0
+	}
+
+	var componentCount int64
+	if err := db.WithContext(r.Context()).Table("sbom_components").
+		Where("sbom_id = ?", sbomID).
+		Count(&componentCount).Error; err != nil {
+		componentCount = 0
+	}
+
+	return RepoMetadataSBOM{
+		Latest: &RepoMetadataSBOMItem{
+			ID:             sbom.ID,
+			CreatedAt:      sbom.CreatedAt.UTC().Format(time.RFC3339),
+			Format:         sbom.Format,
+			ComponentCount: componentCount,
+			DownloadURL:    "/api/sboms/" + sbom.ID + "/download",
+		},
+	}, componentCount
+}
+
+func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomComponentCount int64) RepoMetadataDependencies {
+	deps := RepoMetadataDependencies{
+		FromSBOM: sbomComponentCount,
+	}
+
+	if repoDBID == "" {
+		deps.Total = sbomComponentCount
+		return deps
+	}
+
+	var manifestCount int64
+	if err := db.WithContext(r.Context()).Table("manifest_dependencies md").
+		Joins("JOIN manifests m ON m.id = md.manifest_id").
+		Where("m.repo_id = ?", repoDBID).
+		Count(&manifestCount).Error; err == nil {
+		deps.FromManifest = manifestCount
+	}
+
+	if deps.FromManifest > deps.FromSBOM {
+		deps.Total = deps.FromManifest
+	} else {
+		deps.Total = deps.FromSBOM
+	}
+
+	return deps
+}
+
+func loadRepoSecrets(r *http.Request, db *gorm.DB, latestRun *RepoMetadataRunSummary) RepoMetadataSecrets {
+	if latestRun == nil {
+		return RepoMetadataSecrets{}
+	}
+
+	var secret struct {
+		Count     int64
+		CreatedAt time.Time
+	}
+	if err := db.WithContext(r.Context()).Table("run_secrets").
+		Select("finding_count as count, created_at").
+		Where("run_id = ?", latestRun.ID).
+		Order("created_at DESC").
+		Limit(1).
+		Scan(&secret).Error; err != nil || secret.CreatedAt.IsZero() {
+		return RepoMetadataSecrets{LatestRunID: latestRun.ID}
+	}
+
+	return RepoMetadataSecrets{
+		LatestRunID:   latestRun.ID,
+		LatestCount:   secret.Count,
+		LastScannedAt: secret.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}

@@ -86,12 +86,11 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 	return &binding, nil
 }
 
-// StoreSBOMWithParseJob stores an SBOM and creates a PARSE_SBOM job in a single transaction.
-// Use this helper to ensure components are always extracted from ingested SBOMs.
-func StoreSBOMWithParseJob(ctx context.Context, tx *gorm.DB, sbomInput SBOMInput, bindingInput *BindingInput, createJob func(context.Context, *gorm.DB, string, string) (string, error)) (sbomID, bindingID, jobID string, err error) {
+// StoreSBOM stores an SBOM and optionally creates a binding in a single transaction.
+func StoreSBOM(ctx context.Context, tx *gorm.DB, sbomInput SBOMInput, bindingInput *BindingInput) (sbomID, bindingID string, err error) {
 	sbom, err := UpsertSBOM(ctx, tx, sbomInput)
 	if err != nil {
-		return "", "", "", fmt.Errorf("upsert sbom: %w", err)
+		return "", "", fmt.Errorf("upsert sbom: %w", err)
 	}
 	sbomID = sbom.ID
 
@@ -99,15 +98,10 @@ func StoreSBOMWithParseJob(ctx context.Context, tx *gorm.DB, sbomInput SBOMInput
 		bindingInput.SBOMID = sbom.ID
 		binding, err := UpsertBinding(ctx, tx, *bindingInput)
 		if err != nil {
-			return "", "", "", fmt.Errorf("upsert binding: %w", err)
+			return "", "", fmt.Errorf("upsert binding: %w", err)
 		}
 		bindingID = binding.ID
 	}
 
-	jobID, err = createJob(ctx, tx, sbomID, bindingID)
-	if err != nil {
-		return "", "", "", fmt.Errorf("create parse job: %w", err)
-	}
-
-	return sbomID, bindingID, jobID, nil
+	return sbomID, bindingID, nil
 }
