@@ -39,7 +39,7 @@
 	}
 
 	.loading-bar {
-		animation: slide 1.5s ease-in-out infinite;
+		animation: slide 1.5s ease-in-out infinite alternate;
 	}
 
 	@keyframes spin-right {
