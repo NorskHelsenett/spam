@@ -27,16 +27,6 @@ type parseResult struct {
 	Links         int    `json:"links"`
 }
 
-// CreateRunPayload is the payload for CREATE_RUN jobs.
-type CreateRunPayload struct {
-	RepoID    string `json:"repo_id,omitempty"`
-	ProviderID string `json:"provider_id,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	CloneURL  string `json:"clone_url"`
-	Ref       string `json:"ref,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-}
-
 // RunExecutor is the interface for executing runs.
 type RunExecutor interface {
 	ExecuteRun(ctx context.Context, runID string, payload interface{}) error

@@ -10,6 +10,16 @@ import (
 	"time"
 )
 
+const (
+	// staleJobBuffer is the grace period added to runner active deadline when
+	// calculating the stale timeout. This accounts for K8s scheduling delays,
+	// pod startup time, and network latency for callbacks.
+	staleJobBuffer = 15 * time.Minute
+
+	// defaultStaleTimeout is used when the runner is disabled.
+	defaultStaleTimeout = 15 * time.Minute
+)
+
 // Config captures the runtime configuration required by the API server.
 type Config struct {
 	HTTPPort           string
@@ -125,11 +135,11 @@ func LoadWorker() (WorkerConfig, error) {
 	}
 	cfg.Runner = runnerCfg
 
-	// Stale timeout: runner active deadline + 15 minute buffer (or 15m if runner disabled)
+	// Stale timeout: runner active deadline + buffer (or default if runner disabled)
 	if cfg.Runner.Enabled {
-		cfg.StaleTimeout = time.Duration(cfg.Runner.ActiveDeadline)*time.Second + 15*time.Minute
+		cfg.StaleTimeout = time.Duration(cfg.Runner.ActiveDeadline)*time.Second + staleJobBuffer
 	} else {
-		cfg.StaleTimeout = 15 * time.Minute
+		cfg.StaleTimeout = defaultStaleTimeout
 	}
 
 	return cfg, nil

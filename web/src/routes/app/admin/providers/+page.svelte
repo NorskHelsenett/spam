@@ -562,22 +562,25 @@
 									<div class="flex flex-wrap gap-2">
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 											onclick={() => startRotate(entry)}
+											disabled={saving}
 										>
 											Rotate
 										</button>
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 											onclick={() => toggleEnabled(entry)}
+											disabled={saving}
 										>
 											{entry.enabled ? 'Disable' : 'Enable'}
 										</button>
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 											onclick={() => removeProvider(entry)}
+											disabled={saving}
 										>
 											Remove
 										</button>
@@ -591,20 +594,23 @@
 											<input
 												type="password"
 												placeholder="New PAT"
-												class="w-64 rounded-full border border-[var(--border-color)] bg-transparent px-4 py-2 text-xs text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+												class="w-64 rounded-full border border-[var(--border-color)] bg-transparent px-4 py-2 text-xs text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-50"
 												bind:value={rotatePat}
+												disabled={saving}
 											/>
 											<button
 												type="button"
-												class="rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-xs font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+												class="rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-xs font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
 												onclick={() => submitRotate(entry)}
+												disabled={saving}
 											>
-												Save
+												{saving ? 'Saving...' : 'Save'}
 											</button>
 											<button
 												type="button"
-												class="rounded-full border border-[var(--border-color)] px-4 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+												class="rounded-full border border-[var(--border-color)] px-4 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
 												onclick={cancelRotate}
+												disabled={saving}
 											>
 												Cancel
 											</button>

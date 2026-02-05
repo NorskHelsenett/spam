@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"gorm.io/gorm"
 )
@@ -149,7 +150,7 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 			}
 
 			// Parse payload to get repo_id for SBOM lookup
-			var payload runner.CreateRunPayload
+			var payload jobs.CreateRunPayload
 			if len(run.Payload) > 0 {
 				json.Unmarshal(run.Payload, &payload)
 			}
@@ -253,7 +254,7 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 						}
 
 						// Parse payload to get repo_id for SBOM lookup
-						var payload runner.CreateRunPayload
+						var payload jobs.CreateRunPayload
 						if len(run.Payload) > 0 {
 							json.Unmarshal(run.Payload, &payload)
 						}

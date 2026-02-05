@@ -7,7 +7,6 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
-	"gorm.io/gorm"
 )
 
 type createProviderRequest struct {
@@ -26,20 +25,42 @@ type rotateProviderRequest struct {
 	PAT string `json:"pat"`
 }
 
-func AdminProvidersListHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+// adminProviderGuard validates admin auth and store availability.
+// Returns the admin user on success, or writes an error response and returns nil.
+func adminProviderGuard(w http.ResponseWriter, r *http.Request, authService *auth.Service, store *providerconfig.Store) *auth.User {
+	if authService == nil {
+		http.Error(w, "auth unavailable", http.StatusInternalServerError)
+		return nil
+	}
+
+	adminUser, err := authService.RequireAdmin(r)
+	if err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return nil
+	}
+
+	if store == nil {
+		http.Error(w, "provider store unavailable", http.StatusInternalServerError)
+		return nil
+	}
+
+	return adminUser
+}
+
+// requireProviderID extracts and validates the provider ID from path.
+// Returns the ID on success, or writes an error response and returns empty string.
+func requireProviderID(w http.ResponseWriter, r *http.Request) string {
+	providerID := strings.TrimSpace(r.PathValue("id"))
+	if providerID == "" {
+		http.Error(w, "provider id required", http.StatusBadRequest)
+		return ""
+	}
+	return providerID
+}
+
+func AdminProvidersListHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		if _, err := authService.RequireAdmin(r); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		if store == nil {
-			http.Error(w, "provider store unavailable", http.StatusInternalServerError)
+		if adminProviderGuard(w, r, authService, store) == nil {
 			return
 		}
 
@@ -53,21 +74,10 @@ func AdminProvidersListHandler(db *gorm.DB, authService *auth.Service, store *pr
 	}
 }
 
-func AdminProvidersCreateHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersCreateHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		adminUser, err := authService.RequireAdmin(r)
-		if err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		if store == nil {
-			http.Error(w, "provider store unavailable", http.StatusInternalServerError)
+		adminUser := adminProviderGuard(w, r, authService, store)
+		if adminUser == nil {
 			return
 		}
 
@@ -117,26 +127,14 @@ func AdminProvidersCreateHandler(db *gorm.DB, authService *auth.Service, store *
 	}
 }
 
-func AdminProvidersUpdateHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersUpdateHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
+		if adminProviderGuard(w, r, authService, store) == nil {
 			return
 		}
 
-		if _, err := authService.RequireAdmin(r); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		if store == nil {
-			http.Error(w, "provider store unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		providerID := strings.TrimSpace(r.PathValue("id"))
+		providerID := requireProviderID(w, r)
 		if providerID == "" {
-			http.Error(w, "provider id required", http.StatusBadRequest)
 			return
 		}
 
@@ -156,27 +154,15 @@ func AdminProvidersUpdateHandler(db *gorm.DB, authService *auth.Service, store *
 	}
 }
 
-func AdminProvidersRotateHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersRotateHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
+		adminUser := adminProviderGuard(w, r, authService, store)
+		if adminUser == nil {
 			return
 		}
 
-		adminUser, err := authService.RequireAdmin(r)
-		if err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		if store == nil {
-			http.Error(w, "provider store unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		providerID := strings.TrimSpace(r.PathValue("id"))
+		providerID := requireProviderID(w, r)
 		if providerID == "" {
-			http.Error(w, "provider id required", http.StatusBadRequest)
 			return
 		}
 
@@ -200,26 +186,14 @@ func AdminProvidersRotateHandler(db *gorm.DB, authService *auth.Service, store *
 	}
 }
 
-func AdminProvidersDeleteHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService == nil {
-			http.Error(w, "auth unavailable", http.StatusInternalServerError)
+		if adminProviderGuard(w, r, authService, store) == nil {
 			return
 		}
 
-		if _, err := authService.RequireAdmin(r); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		if store == nil {
-			http.Error(w, "provider store unavailable", http.StatusInternalServerError)
-			return
-		}
-
-		providerID := strings.TrimSpace(r.PathValue("id"))
+		providerID := requireProviderID(w, r)
 		if providerID == "" {
-			http.Error(w, "provider id required", http.StatusBadRequest)
 			return
 		}
 

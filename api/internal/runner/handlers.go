@@ -66,9 +66,13 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload CreateRunPayload
+	var payload jobs.CreateRunPayload
 	if len(run.Payload) > 0 {
-		_ = json.Unmarshal(run.Payload, &payload)
+		if err := json.Unmarshal(run.Payload, &payload); err != nil {
+			log.Printf("failed to unmarshal run payload: %v", err)
+			http.Error(w, "invalid run payload", http.StatusInternalServerError)
+			return
+		}
 	}
 
 	providerToken := ""
@@ -129,9 +133,11 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload CreateRunPayload
+	var payload jobs.CreateRunPayload
 	if len(run.Payload) > 0 {
-		json.Unmarshal(run.Payload, &payload)
+		if err := json.Unmarshal(run.Payload, &payload); err != nil {
+			log.Printf("failed to unmarshal run payload: %v", err)
+		}
 	}
 
 	// Process SBOM file

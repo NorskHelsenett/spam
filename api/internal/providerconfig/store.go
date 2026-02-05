@@ -80,35 +80,62 @@ func (s *Store) ListAdmin(ctx context.Context) ([]AdminProvider, error) {
 		return nil, err
 	}
 
+	if len(providers) == 0 {
+		return []AdminProvider{}, nil
+	}
+
+	// Batch load active secrets for all providers (fixes N+1 query)
+	providerIDs := make([]string, len(providers))
+	for i, p := range providers {
+		providerIDs[i] = p.ID
+	}
+
+	var secrets []ProviderSecret
+	if err := s.db.WithContext(ctx).
+		Where("provider_id IN ? AND revoked_at IS NULL", providerIDs).
+		Order("created_at desc").
+		Find(&secrets).Error; err != nil {
+		return nil, err
+	}
+
+	// Build map of provider_id -> most recent active secret
+	secretMap := make(map[string]*ProviderSecret)
+	for i := range secrets {
+		sec := &secrets[i]
+		if existing, ok := secretMap[sec.ProviderID]; !ok || sec.CreatedAt.After(existing.CreatedAt) {
+			secretMap[sec.ProviderID] = sec
+		}
+	}
+
 	result := make([]AdminProvider, 0, len(providers))
 	for _, provider := range providers {
-		admin := AdminProvider{
-			ID:          provider.ID,
-			ProviderURL: provider.BaseURL,
-			BaseURL:     provider.BaseURL,
-			OwnerPath:   provider.OwnerPath,
-			Type:        provider.Type,
-			DisplayName: provider.DisplayName,
-			Enabled:     provider.Enabled,
-			CreatedAt:   provider.CreatedAt,
-			UpdatedAt:   provider.UpdatedAt,
-		}
-		if provider.OwnerPath != "" {
-			admin.ProviderURL = strings.TrimRight(provider.BaseURL, "/") + "/" + provider.OwnerPath
-		}
-
-		var secret ProviderSecret
-		if err := s.db.WithContext(ctx).
-			Where("provider_id = ? AND revoked_at IS NULL", provider.ID).
-			Order("created_at desc").
-			First(&secret).Error; err == nil {
+		admin := providerToAdmin(provider)
+		if secret, ok := secretMap[provider.ID]; ok {
 			admin.TokenFingerprint = secret.TokenFingerprint
 			admin.LastRotatedAt = &secret.CreatedAt
 		}
-
 		result = append(result, admin)
 	}
 	return result, nil
+}
+
+// providerToAdmin converts a ProviderInstance to AdminProvider (without secret info).
+func providerToAdmin(provider ProviderInstance) AdminProvider {
+	admin := AdminProvider{
+		ID:          provider.ID,
+		ProviderURL: provider.BaseURL,
+		BaseURL:     provider.BaseURL,
+		OwnerPath:   provider.OwnerPath,
+		Type:        provider.Type,
+		DisplayName: provider.DisplayName,
+		Enabled:     provider.Enabled,
+		CreatedAt:   provider.CreatedAt,
+		UpdatedAt:   provider.UpdatedAt,
+	}
+	if provider.OwnerPath != "" {
+		admin.ProviderURL = strings.TrimRight(provider.BaseURL, "/") + "/" + provider.OwnerPath
+	}
+	return admin
 }
 
 func (s *Store) ListPublic(ctx context.Context) ([]PublicProvider, error) {
@@ -117,23 +144,38 @@ func (s *Store) ListPublic(ctx context.Context) ([]PublicProvider, error) {
 		return nil, err
 	}
 
+	if len(providers) == 0 {
+		return []PublicProvider{}, nil
+	}
+
+	// Batch load active secrets to determine which providers are public (fixes N+1 query)
+	providerIDs := make([]string, len(providers))
+	for i, p := range providers {
+		providerIDs[i] = p.ID
+	}
+
+	var secrets []ProviderSecret
+	if err := s.db.WithContext(ctx).
+		Where("provider_id IN ? AND revoked_at IS NULL", providerIDs).
+		Find(&secrets).Error; err != nil {
+		return nil, err
+	}
+
+	// Build set of provider IDs that have active secrets
+	hasSecret := make(map[string]bool)
+	for _, sec := range secrets {
+		hasSecret[sec.ProviderID] = true
+	}
+
 	result := make([]PublicProvider, 0, len(providers))
 	for _, provider := range providers {
-		isPublic := true
-		var secret ProviderSecret
-		if err := s.db.WithContext(ctx).
-			Where("provider_id = ? AND revoked_at IS NULL", provider.ID).
-			First(&secret).Error; err == nil {
-			isPublic = false
-		}
-
 		result = append(result, PublicProvider{
 			ID:        provider.ID,
 			Name:      provider.DisplayName,
 			Type:      provider.Type,
 			BaseURL:   provider.BaseURL,
 			OwnerPath: provider.OwnerPath,
-			IsPublic:  isPublic,
+			IsPublic:  !hasSecret[provider.ID],
 		})
 	}
 	return result, nil
@@ -142,6 +184,9 @@ func (s *Store) ListPublic(ctx context.Context) ([]PublicProvider, error) {
 func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat string, createdBy string) (*AdminProvider, error) {
 	provider.ID = uuid.NewString()
 	provider.CreatedByUserID = createdBy
+
+	var tokenFingerprint string
+	var tokenCreatedAt *time.Time
 
 	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		existing := ProviderInstance{}
@@ -161,6 +206,9 @@ func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat strin
 			if err := s.rotateTokenTx(ctx, tx, provider.ID, pat, createdBy); err != nil {
 				return err
 			}
+			tokenFingerprint = FingerprintToken(pat)
+			now := time.Now()
+			tokenCreatedAt = &now
 		}
 
 		return nil
@@ -168,20 +216,15 @@ func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat strin
 		return nil, err
 	}
 
-	admins, err := s.ListAdmin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, admin := range admins {
-		if admin.ID == provider.ID {
-			return &admin, nil
-		}
-	}
-	return nil, errors.New("provider created but not found")
+	// Build AdminProvider directly from the created provider
+	admin := providerToAdmin(provider)
+	admin.TokenFingerprint = tokenFingerprint
+	admin.LastRotatedAt = tokenCreatedAt
+	return &admin, nil
 }
 
 func (s *Store) Update(ctx context.Context, providerID string, displayName *string, enabled *bool) (*AdminProvider, error) {
-	updates := map[string]interface{}{}
+	updates := map[string]any{}
 	if displayName != nil {
 		updates["display_name"] = strings.TrimSpace(*displayName)
 	}
@@ -199,16 +242,31 @@ func (s *Store) Update(ctx context.Context, providerID string, displayName *stri
 		return nil, err
 	}
 
-	admins, err := s.ListAdmin(ctx)
-	if err != nil {
+	return s.getAdminByID(ctx, providerID)
+}
+
+// getAdminByID loads a single provider with its active secret info.
+func (s *Store) getAdminByID(ctx context.Context, providerID string) (*AdminProvider, error) {
+	var provider ProviderInstance
+	if err := s.db.WithContext(ctx).Where("id = ?", providerID).First(&provider).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, errors.New("provider not found")
+		}
 		return nil, err
 	}
-	for _, admin := range admins {
-		if admin.ID == providerID {
-			return &admin, nil
-		}
+
+	admin := providerToAdmin(provider)
+
+	var secret ProviderSecret
+	if err := s.db.WithContext(ctx).
+		Where("provider_id = ? AND revoked_at IS NULL", providerID).
+		Order("created_at desc").
+		First(&secret).Error; err == nil {
+		admin.TokenFingerprint = secret.TokenFingerprint
+		admin.LastRotatedAt = &secret.CreatedAt
 	}
-	return nil, errors.New("provider not found")
+
+	return &admin, nil
 }
 
 func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, createdBy string) (*AdminProvider, error) {
@@ -219,16 +277,7 @@ func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, 
 		return nil, err
 	}
 
-	admins, err := s.ListAdmin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, admin := range admins {
-		if admin.ID == providerID {
-			return &admin, nil
-		}
-	}
-	return nil, errors.New("provider not found")
+	return s.getAdminByID(ctx, providerID)
 }
 
 func (s *Store) Delete(ctx context.Context, providerID string) error {

@@ -11,6 +11,9 @@ const (
 	ProviderGitLab  = "gitlab"
 	ProviderGitea   = "gitea"
 	ProviderForgejo = "forgejo"
+
+	// maxProviderURLLength is the maximum allowed length for provider URLs.
+	maxProviderURLLength = 2048
 )
 
 func detectTypeFromHost(host string) string {
@@ -41,11 +44,15 @@ func ensureScheme(input string) string {
 
 // ParseProviderURL parses and validates a provider URL.
 func ParseProviderURL(raw string, forcedType string) (providerType, baseURL, ownerPath string, err error) {
-	if strings.TrimSpace(raw) == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return "", "", "", errors.New("provider URL is required")
 	}
+	if len(trimmed) > maxProviderURLLength {
+		return "", "", "", errors.New("provider URL exceeds maximum length")
+	}
 
-	parsed, err := url.Parse(ensureScheme(raw))
+	parsed, err := url.Parse(ensureScheme(trimmed))
 	if err != nil {
 		return "", "", "", errors.New("provider URL must be a valid URL (https://...)")
 	}

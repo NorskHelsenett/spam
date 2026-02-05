@@ -74,16 +74,6 @@ func (RunSecret) TableName() string {
 	return "run_secrets"
 }
 
-// CreateRunPayload is the payload for CREATE_RUN jobs.
-type CreateRunPayload struct {
-	RepoID    string `json:"repo_id,omitempty"`
-	ProviderID string `json:"provider_id,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	CloneURL  string `json:"clone_url"`
-	Ref       string `json:"ref,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-}
-
 // RunResultPayload is the result stored after a run completes.
 type RunResultPayload struct {
 	SBOMID       string `json:"sbom_id,omitempty"`
