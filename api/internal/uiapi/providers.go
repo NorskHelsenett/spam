@@ -59,11 +59,8 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 // GET /api/providers/github/{owner}/repos
 func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")
@@ -125,11 +122,8 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) 
 // GET /api/providers/gitlab/{group}/projects?base_url=https://gitlab.example.com
 func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		group := r.PathValue("group")
@@ -191,11 +185,8 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 // GET /api/providers/gitlab/{group}/subgroups?base_url=https://gitlab.example.com
 func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		group := r.PathValue("group")
@@ -269,11 +260,8 @@ type GiteaOrgsResponse struct {
 // GET /api/providers/gitea/{owner}/repos?base_url=https://gitea.example.com
 func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner") // can be empty
@@ -329,11 +317,8 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) h
 // GET /api/providers/gitea/orgs?base_url=https://gitea.example.com
 func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		page, pageSize := parsePagination(r)
@@ -391,11 +376,8 @@ type DetectProviderResponse struct {
 // GET /api/providers/detect?url=https://gitlab.example.com
 func ProvidersDetectHandler(authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		baseURL := r.URL.Query().Get("url")
@@ -529,11 +511,8 @@ type RepoDetailsResponse struct {
 // GET /api/providers/github/{owner}/{repo}/details
 func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")
@@ -582,11 +561,8 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 // GET /api/providers/gitlab/{projectPath}/details?base_url=...
 func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		projectPath := r.PathValue("projectPath")
@@ -641,11 +617,8 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 // GET /api/providers/gitea/{owner}/{repo}/details?base_url=...
 func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		owner := r.PathValue("owner")

@@ -10,11 +10,8 @@ import (
 
 func ProvidersInstancesHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAuth(w, r, authService) == nil {
+			return
 		}
 
 		if store == nil {

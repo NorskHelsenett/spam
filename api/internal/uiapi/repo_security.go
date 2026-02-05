@@ -19,8 +19,7 @@ type RepoSecurityCountsResponse struct {
 // GET /api/repos/security?repo_id=provider:org:slug
 func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 

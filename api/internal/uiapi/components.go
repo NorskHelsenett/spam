@@ -76,8 +76,7 @@ type componentAssetsResponse struct {
 // ComponentsListHandler returns paginated components with search.
 func ComponentsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -148,8 +147,7 @@ func ComponentsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 // ComponentDetailHandler returns a single component with its versions.
 func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -236,8 +234,7 @@ func ComponentDetailHandler(db *gorm.DB, authService *auth.Service) http.Handler
 // ComponentAssetsHandler returns repos/images containing a component.
 func ComponentAssetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -328,8 +325,7 @@ func ComponentAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 // EcosystemsListHandler returns distinct ecosystems from both SBOMs and manifests.
 func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 

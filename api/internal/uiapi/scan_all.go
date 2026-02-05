@@ -39,11 +39,8 @@ type ScanAllResponse struct {
 // POST /api/scan-all
 func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if authService != nil {
-			if _, err := authService.LoadSession(r); err != nil {
-				http.Error(w, "unauthenticated", http.StatusUnauthorized)
-				return
-			}
+		if requireAdmin(w, r, authService) == nil {
+			return
 		}
 
 		var req ScanAllRequest

@@ -30,6 +30,10 @@ type ManifestsListResponse struct {
 // ManifestsListHandler returns paginated manifests
 func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		if page < 1 {
 			page = 1
@@ -113,6 +117,10 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 // ManifestGetHandler returns a single manifest with dependencies
 func ManifestGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
 		manifestID := chi.URLParam(r, "id")
 		if manifestID == "" {
 			http.Error(w, "missing manifest ID", http.StatusBadRequest)
@@ -147,6 +155,10 @@ func ManifestGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 // DependencySearchHandler searches for dependencies across all manifests
 func DependencySearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
 		query := r.URL.Query().Get("q")
 		ecosystem := r.URL.Query().Get("ecosystem")
 

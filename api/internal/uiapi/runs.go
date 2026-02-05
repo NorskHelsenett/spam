@@ -62,8 +62,7 @@ type CreateRunResponse struct {
 // GET /api/runs
 func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -158,8 +157,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // POST /api/runs
 func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAdmin(w, r, authService) == nil {
 			return
 		}
 
@@ -253,8 +251,7 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 // GET /api/runs/{id}
 func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -423,8 +420,7 @@ func indexByte(s string, c byte) int {
 // GET /api/runs/:id/k8s-logs?tail=100
 func RunLogsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -475,8 +471,7 @@ func RunLogsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8
 // POST /api/runs/:id/cancel
 func RunCancelHandler(db *gorm.DB, authService *auth.Service, executor *runner.RunExecutor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAdmin(w, r, authService) == nil {
 			return
 		}
 
@@ -520,8 +515,7 @@ func RunCancelHandler(db *gorm.DB, authService *auth.Service, executor *runner.R
 // GET /api/runs/:id/k8s-status
 func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -572,8 +566,7 @@ func RunJobStatusHandler(db *gorm.DB, authService *auth.Service, k8sClient *runn
 // GET /api/runs/{id}/events
 func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.K8sClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -636,8 +629,7 @@ func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 // GET /api/runs/{id}/secrets
 func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 

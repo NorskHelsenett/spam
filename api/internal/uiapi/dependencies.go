@@ -36,6 +36,10 @@ type UnifiedDependenciesResponse struct {
 // UnifiedDependenciesHandler merges SBOM components and manifest dependencies
 func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 		if page < 1 {
 			page = 1
@@ -310,8 +314,7 @@ type dependencyAssetsResponse struct {
 // DependencyDetailHandler returns detailed information about a dependency by name and ecosystem
 func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
@@ -449,8 +452,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 // DependencyAssetsHandler returns repos/images using a dependency by name and ecosystem
 func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 

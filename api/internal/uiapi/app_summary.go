@@ -62,8 +62,7 @@ type AppSummaryResponse struct {
 // AppSummaryHandler returns dashboard metrics derived from SBOM views.
 func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, err := authService.LoadSession(r); err != nil {
-			http.Error(w, "unauthenticated", http.StatusUnauthorized)
+		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
