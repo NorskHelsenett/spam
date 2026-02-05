@@ -211,7 +211,7 @@ let isAdmin = $state(false);
 			{#each navLinks as link}
 				<button
 					type="button"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
 						isActive(link.href)
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
@@ -229,7 +229,7 @@ let isAdmin = $state(false);
 			{#if isAdmin}
 				<button
 					type="button"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
 						isActive('/app/admin/providers')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
@@ -245,7 +245,7 @@ let isAdmin = $state(false);
 				</button>
 				<button
 					type="button"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 ${
+					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
 						isActive('/app/users')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
@@ -266,7 +266,7 @@ let isAdmin = $state(false);
 			<button
 				type="button"
 				onclick={toggleTheme}
-				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition active:scale-95 hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 				aria-label={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
 				title={`Switch to ${$theme === 'dark' ? 'light' : 'dark'} theme`}
 			>
@@ -281,7 +281,7 @@ let isAdmin = $state(false);
 			</button>
 			<button
 				type="button"
-				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+				class="group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] text-[var(--text-secondary)] transition active:scale-95 hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
 				onclick={() => accountDialogOpen = true}
 			>
 				<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
