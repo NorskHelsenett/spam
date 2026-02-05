@@ -183,7 +183,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				response.ImageDigestID = image.ID
 			}
 
-			sbomID, bindingID, jobID, err := artifacts.StoreSBOMWithParseJob(
+			sbomID, bindingID, err := artifacts.StoreSBOM(
 				r.Context(), tx,
 				artifacts.SBOMInput{
 					Format:           format,
@@ -192,27 +192,12 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					IngestedByUserID: user.ID,
 				},
 				bindingInput,
-				func(ctx context.Context, tx *gorm.DB, sbomID, bindingID string) (string, error) {
-					payload := map[string]string{"sbom_id": sbomID}
-					if bindingID != "" {
-						payload["binding_id"] = bindingID
-					}
-					job, err := jobs.CreateJobTx(ctx, tx, jobs.CreateJobInput{
-						Type:    jobs.JobTypeParseSBOM,
-						Payload: payload,
-					})
-					if err != nil {
-						return "", err
-					}
-					return job.ID, nil
-				},
 			)
 			if err != nil {
 				return err
 			}
 
 			response.SBOMID = sbomID
-			response.JobID = jobID
 			if bindingID != "" {
 				response.BindingID = bindingID
 			}

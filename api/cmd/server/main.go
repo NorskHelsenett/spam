@@ -18,7 +18,6 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
-	"github.com/NorskHelsenett/spam/internal/inventory"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
@@ -61,10 +60,6 @@ func run() error {
 		&assets.ImageDigest{},
 		&artifacts.SBOM{},
 		&artifacts.SBOMBinding{},
-		&inventory.Component{},
-		&inventory.ComponentVersion{},
-		&inventory.SBOMComponent{},
-		&inventory.ComponentDependency{},
 		&manifests.Manifest{},
 		&manifests.ManifestDependency{},
 		&jobs.Job{},
@@ -93,13 +88,6 @@ func run() error {
 	if seedSQLPath != "" {
 		if err := db.RunSeedSQL(ctx, gormDB, seedSQLPath); err != nil {
 			return fmt.Errorf("seed database: %w", err)
-		}
-		seedSBOMPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SBOM"))
-		if seedSBOMPath == "" {
-			seedSBOMPath = "sbom.cdx.json"
-		}
-		if err := db.SeedSBOMComponentsFromFile(ctx, gormDB, seedSBOMPath, "cyclonedx-json"); err != nil {
-			return fmt.Errorf("seed sbom components: %w", err)
 		}
 	}
 

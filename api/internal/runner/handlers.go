@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"io"
@@ -176,7 +175,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 
-				sbomID, _, jobID, err := artifacts.StoreSBOMWithParseJob(
+				sbomID, _, err := artifacts.StoreSBOM(
 					r.Context(), tx,
 					artifacts.SBOMInput{
 						Format:           "cyclonedx-json",
@@ -185,26 +184,12 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 						IngestedByUserID: "system",
 					},
 					binding,
-					func(ctx context.Context, tx *gorm.DB, sbomID, bindingID string) (string, error) {
-						jobPayload := map[string]string{"sbom_id": sbomID}
-						if bindingID != "" {
-							jobPayload["binding_id"] = bindingID
-						}
-						job, err := jobs.CreateJobTx(ctx, tx, jobs.CreateJobInput{
-							Type:    jobs.JobTypeParseSBOM,
-							Payload: jobPayload,
-						})
-						if err != nil {
-							return "", err
-						}
-						return job.ID, nil
-					},
 				)
 				if err != nil {
 					return err
 				}
 				storedSBOMID = sbomID
-				log.Printf("ingested SBOM %s for run %s (%d bytes), job %s", sbomID, runID, len(sbomData), jobID)
+				log.Printf("ingested SBOM %s for run %s (%d bytes)", sbomID, runID, len(sbomData))
 				return nil
 			})
 			if err != nil {
