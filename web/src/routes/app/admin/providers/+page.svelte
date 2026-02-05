@@ -638,7 +638,7 @@
 </div>
 
 <!-- Rotate Token Dialog -->
-<Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false}>
+<Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false} maxWidth="max-w-xl">
 	<div class="p-6 sm:p-8">
 		{#if rotatingProvider}
 			<div class="space-y-6">
