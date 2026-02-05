@@ -3,6 +3,7 @@
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import Dialog from '$lib/components/Dialog.svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -39,10 +40,13 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let rotatePat = $state('');
-	let rotatingId = $state<string | null>(null);
+	let rotateDialogOpen = $state(false);
+	let rotatingProvider = $state<ProviderRow | null>(null);
 	let showPat = $state(false);
+	let showRotatePat = $state(false);
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
+	let rotateError = $state('');
 
 	type ApiProvider = {
 		id: string;
@@ -235,26 +239,32 @@
 		}
 	};
 
-	const startRotate = (entry: ProviderRow) => {
-		rotatingId = entry.id;
+	const openRotateDialog = (entry: ProviderRow) => {
+		rotatingProvider = entry;
 		rotatePat = '';
-		formError = '';
+		showRotatePat = false;
+		rotateError = '';
+		rotateDialogOpen = true;
 	};
 
-	const cancelRotate = () => {
-		rotatingId = null;
+	const closeRotateDialog = () => {
+		rotateDialogOpen = false;
+		rotatingProvider = null;
 		rotatePat = '';
+		showRotatePat = false;
+		rotateError = '';
 	};
 
-	const submitRotate = async (entry: ProviderRow) => {
+	const submitRotateToken = async () => {
+		if (!rotatingProvider) return;
 		if (!rotatePat.trim()) {
-			formError = 'New PAT is required.';
+			rotateError = 'PAT is required.';
 			return;
 		}
 		saving = true;
-		formError = '';
+		rotateError = '';
 		try {
-			const response = await fetch(`/api/admin/providers/${entry.id}/rotate`, {
+			const response = await fetch(`/api/admin/providers/${rotatingProvider.id}/rotate`, {
 				method: 'POST',
 				credentials: 'include',
 				headers: { 'Content-Type': 'application/json' },
@@ -262,15 +272,42 @@
 			});
 
 			if (!response.ok) {
-				formError = 'Failed to rotate token.';
+				rotateError = 'Failed to rotate token.';
 				return;
 			}
 
 			const updated: ApiProvider = await response.json();
 			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
-			cancelRotate();
+			closeRotateDialog();
 		} catch {
-			formError = 'Failed to rotate token.';
+			rotateError = 'Failed to rotate token.';
+		} finally {
+			saving = false;
+		}
+	};
+
+	const submitMakePublic = async () => {
+		if (!rotatingProvider) return;
+		saving = true;
+		rotateError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${rotatingProvider.id}/rotate`, {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ pat: '' })
+			});
+
+			if (!response.ok) {
+				rotateError = 'Failed to revoke token.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) => (provider.id === updated.id ? mapProvider(updated) : provider));
+			closeRotateDialog();
+		} catch {
+			rotateError = 'Failed to revoke token.';
 		} finally {
 			saving = false;
 		}
@@ -568,10 +605,10 @@
 										<button
 											type="button"
 											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											onclick={() => startRotate(entry)}
+											onclick={() => openRotateDialog(entry)}
 											disabled={saving}
 										>
-											Rotate
+											{entry.tokenFingerprint ? 'Rotate' : 'Add Token'}
 										</button>
 										<button
 											type="button"
@@ -592,37 +629,6 @@
 									</div>
 								</td>
 							</tr>
-							{#if rotatingId === entry.id}
-								<tr class="bg-[var(--hover-bg-subtle)]">
-									<td class="px-5 py-3" colspan="6">
-										<div class="flex flex-wrap items-center gap-3">
-											<input
-												type="password"
-												placeholder="New PAT"
-												class="w-64 rounded-full border border-[var(--border-color)] bg-transparent px-4 py-2 text-xs text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-50"
-												bind:value={rotatePat}
-												disabled={saving}
-											/>
-											<button
-												type="button"
-												class="rounded-full border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-xs font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
-												onclick={() => submitRotate(entry)}
-												disabled={saving}
-											>
-												{saving ? 'Saving...' : 'Save'}
-											</button>
-											<button
-												type="button"
-												class="rounded-full border border-[var(--border-color)] px-4 py-2 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-												onclick={cancelRotate}
-												disabled={saving}
-											>
-												Cancel
-											</button>
-										</div>
-									</td>
-								</tr>
-							{/if}
 						{/each}
 					</tbody>
 				</table>
@@ -630,3 +636,95 @@
 		{/if}
 	</section>
 </div>
+
+<!-- Rotate Token Dialog -->
+<Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false}>
+	<div class="p-6 sm:p-8">
+		{#if rotatingProvider}
+			<div class="space-y-6">
+				<div>
+					<h2 class="text-xl font-semibold text-[var(--text-bright)]">
+						{rotatingProvider.tokenFingerprint ? 'Rotate Token' : 'Add Token'}
+					</h2>
+					<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+						{rotatingProvider.displayName}
+					</p>
+				</div>
+
+				{#if rotatingProvider.tokenFingerprint}
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+						<p class="text-xs text-[var(--text-tertiary)]">
+							Current token: <span class="font-mono text-[var(--text-secondary)]">{rotatingProvider.tokenFingerprint}</span>
+						</p>
+					</div>
+				{/if}
+
+				<div class="space-y-2">
+					<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]" for="rotate-pat-input">
+						{rotatingProvider.tokenFingerprint ? 'New Personal Access Token' : 'Personal Access Token'}
+					</label>
+					<div class="relative">
+						<input
+							id="rotate-pat-input"
+							type={showRotatePat ? 'text' : 'password'}
+							placeholder="Enter PAT"
+							class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 pr-12 text-sm text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none disabled:opacity-50"
+							bind:value={rotatePat}
+							disabled={saving}
+						/>
+						<button
+							type="button"
+							class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
+							onclick={() => (showRotatePat = !showRotatePat)}
+							aria-label={showRotatePat ? 'Hide PAT' : 'Show PAT'}
+						>
+							{#if showRotatePat}
+								<EyeOff size={16} />
+							{:else}
+								<Eye size={16} />
+							{/if}
+						</button>
+					</div>
+				</div>
+
+				{#if rotateError}
+					<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">
+						{rotateError}
+					</div>
+				{/if}
+
+				<div class="flex items-center justify-between gap-3 border-t border-[var(--border-color)]/60 pt-6">
+					<div class="flex gap-2">
+						<button
+							type="button"
+							class="rounded-full border border-amber-300 bg-amber-300 px-5 py-2.5 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+							onclick={submitRotateToken}
+							disabled={saving || !rotatePat.trim()}
+						>
+							{saving ? 'Saving...' : 'Save'}
+						</button>
+						<button
+							type="button"
+							class="rounded-full border border-[var(--border-color)] px-5 py-2.5 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+							onclick={closeRotateDialog}
+							disabled={saving}
+						>
+							Cancel
+						</button>
+					</div>
+					{#if rotatingProvider.tokenFingerprint}
+						<button
+							type="button"
+							class="rounded-full border border-[var(--error)]/40 px-5 py-2.5 text-sm text-[var(--error)] transition hover:bg-[var(--error)]/10 disabled:opacity-50"
+							onclick={submitMakePublic}
+							disabled={saving}
+							title="Revoke the current token and allow unauthenticated access"
+						>
+							{saving ? 'Revoking...' : 'Make Public'}
+						</button>
+					{/if}
+				</div>
+			</div>
+		{/if}
+	</div>
+</Dialog>

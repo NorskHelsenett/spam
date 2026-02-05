@@ -16,13 +16,15 @@ type ProviderInstance struct {
 }
 
 // ProviderSecret stores encrypted PATs for provider instances.
+// Old secrets are preserved (with RevokedAt set) for audit history.
 type ProviderSecret struct {
-	ID              string     `gorm:"primaryKey;size:36" json:"id"`
-	ProviderID      string     `gorm:"size:36;index;not null" json:"provider_id"`
-	Provider        ProviderInstance `gorm:"constraint:OnDelete:CASCADE;"`
-	TokenEncrypted  []byte     `gorm:"type:bytea;not null" json:"-"`
-	TokenFingerprint string    `gorm:"size:16" json:"token_fingerprint"`
-	CreatedByUserID string     `gorm:"size:36" json:"created_by"`
-	CreatedAt       time.Time  `json:"created_at"`
-	RevokedAt       *time.Time `gorm:"index" json:"revoked_at,omitempty"`
+	ID               string           `gorm:"primaryKey;size:36" json:"id"`
+	ProviderID       string           `gorm:"size:36;index;not null" json:"provider_id"`
+	Provider         ProviderInstance `gorm:"constraint:OnDelete:CASCADE;"`
+	TokenEncrypted   []byte           `gorm:"type:bytea;not null" json:"-"`
+	TokenFingerprint string           `gorm:"size:16" json:"token_fingerprint"`
+	CreatedByUserID  string           `gorm:"size:36" json:"created_by"`
+	CreatedAt        time.Time        `json:"created_at"`
+	RevokedAt        *time.Time       `gorm:"index" json:"revoked_at,omitempty"`
+	RevokedByUserID  string           `gorm:"size:36" json:"revoked_by,omitempty"`
 }

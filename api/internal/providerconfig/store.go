@@ -269,11 +269,24 @@ func (s *Store) getAdminByID(ctx context.Context, providerID string) (*AdminProv
 	return &admin, nil
 }
 
-func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, createdBy string) (*AdminProvider, error) {
-	if strings.TrimSpace(pat) == "" {
-		return nil, errors.New("token required")
-	}
-	if err := s.rotateToken(ctx, providerID, pat, createdBy); err != nil {
+// RotateToken rotates the PAT for a provider.
+// If pat is empty, the existing token is revoked (making the provider public).
+func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, userID string) (*AdminProvider, error) {
+	trimmedPat := strings.TrimSpace(pat)
+
+	if err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Always revoke existing active tokens first
+		if err := s.revokeActiveTokensTx(ctx, tx, providerID, userID); err != nil {
+			return err
+		}
+
+		// If new PAT provided, create new secret
+		if trimmedPat != "" {
+			return s.createSecretTx(ctx, tx, providerID, trimmedPat, userID)
+		}
+
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
@@ -292,13 +305,19 @@ func (s *Store) Delete(ctx context.Context, providerID string) error {
 	})
 }
 
-func (s *Store) rotateToken(ctx context.Context, providerID string, pat string, createdBy string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		return s.rotateTokenTx(ctx, tx, providerID, pat, createdBy)
-	})
+// revokeActiveTokensTx revokes all active tokens for a provider, recording who revoked them.
+func (s *Store) revokeActiveTokensTx(ctx context.Context, tx *gorm.DB, providerID string, revokedBy string) error {
+	now := time.Now()
+	return tx.WithContext(ctx).Model(&ProviderSecret{}).
+		Where("provider_id = ? AND revoked_at IS NULL", providerID).
+		Updates(map[string]any{
+			"revoked_at":      &now,
+			"revoked_by_user_id": revokedBy,
+		}).Error
 }
 
-func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID string, pat string, createdBy string) error {
+// createSecretTx creates a new encrypted secret for a provider.
+func (s *Store) createSecretTx(ctx context.Context, tx *gorm.DB, providerID string, pat string, createdBy string) error {
 	if !isValidAESKey(s.key) {
 		return errors.New("provider secrets key not configured")
 	}
@@ -307,24 +326,24 @@ func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID strin
 	if err != nil {
 		return err
 	}
-	fingerprint := FingerprintToken(pat)
-
-	now := time.Now()
-	if err := tx.WithContext(ctx).Model(&ProviderSecret{}).
-		Where("provider_id = ? AND revoked_at IS NULL", providerID).
-		Update("revoked_at", &now).Error; err != nil {
-		return err
-	}
 
 	secret := ProviderSecret{
 		ID:               uuid.NewString(),
 		ProviderID:       providerID,
 		TokenEncrypted:   encrypted,
-		TokenFingerprint: fingerprint,
+		TokenFingerprint: FingerprintToken(pat),
 		CreatedByUserID:  createdBy,
 	}
 
 	return tx.WithContext(ctx).Create(&secret).Error
+}
+
+// rotateTokenTx is a helper for Create that revokes existing and creates new in one step.
+func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID string, pat string, createdBy string) error {
+	if err := s.revokeActiveTokensTx(ctx, tx, providerID, createdBy); err != nil {
+		return err
+	}
+	return s.createSecretTx(ctx, tx, providerID, pat, createdBy)
 }
 
 // FindProviderMatch finds the best provider instance for a given repo path.
