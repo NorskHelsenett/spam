@@ -222,6 +222,17 @@ export const mockSemanticSwatches = [
 	{ label: 'Disk', varName: '--disk-color' }
 ];
 
+export const mockPaletteGroups = [
+	{ name: 'Red', variants: [{ label: 'Red', varName: '--red' }, { label: 'Red Dim', varName: '--red-dim' }] },
+	{ name: 'Green', variants: [{ label: 'Green', varName: '--green' }, { label: 'Green Dim', varName: '--green-dim' }] },
+	{ name: 'Yellow', variants: [{ label: 'Yellow', varName: '--yellow' }, { label: 'Yellow Dim', varName: '--yellow-dim' }] },
+	{ name: 'Blue', variants: [{ label: 'Blue', varName: '--blue' }, { label: 'Blue Dim', varName: '--blue-dim' }] },
+	{ name: 'Purple', variants: [{ label: 'Purple', varName: '--purple' }, { label: 'Purple Dim', varName: '--purple-dim' }] },
+	{ name: 'Aqua', variants: [{ label: 'Aqua', varName: '--aqua' }, { label: 'Aqua Dim', varName: '--aqua-dim' }] },
+	{ name: 'Orange', variants: [{ label: 'Orange', varName: '--orange' }, { label: 'Orange Dim', varName: '--orange-dim' }] },
+	{ name: 'Gray', variants: [{ label: 'Gray', varName: '--gray' }, { label: 'Gray Dim', varName: '--gray-dim' }] }
+];
+
 export const mockTabs = [
 	{ value: 'overview', label: 'Overview' },
 	{ value: 'insights', label: 'Insights' },

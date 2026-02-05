@@ -21,6 +21,7 @@
 		mockTextSamples,
 		mockColorSwatches,
 		mockSemanticSwatches,
+		mockPaletteGroups,
 		mockTabs
 	} from './fixtures';
 
@@ -160,6 +161,21 @@
 				</div>
 			{/each}
 		</div>
+		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			{#each mockPaletteGroups as group}
+				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">{group.name}</p>
+					<div class="mt-3 grid grid-cols-2 gap-3">
+						{#each group.variants as variant}
+							<div>
+								<div class="h-10 rounded-lg" style={`background: var(${variant.varName});`}></div>
+								<p class="mt-2 text-xs text-[var(--text-tertiary)]">{variant.label}</p>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/each}
+		</div>
 	</section>
 
 	<section class="panel-surface space-y-8 px-6 py-8 sm:px-10 sm:py-10">
@@ -170,7 +186,7 @@
 		<div class="flex flex-wrap items-center gap-3">
 			<button type="button" class="btn btn-primary">Primary</button>
 			<button type="button" class="btn btn-secondary">Secondary</button>
-			<button type="button" class="btn btn-ghost">Ghost</button>
+			<button type="button" class="btn btn-ghost">Ghost button</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
 		</div>
@@ -428,10 +444,10 @@ console.log(apiUrl);</code>
 					<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Meter</label>
 					<meter class="w-full" min="0" max="100" low="30" high="80" optimum="90" value="72"></meter>
 				</div>
-				<figure class="rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 p-4">
-					<div class="h-28 w-full rounded-lg bg-gradient-to-r from-[var(--bg2)] via-[var(--bg1)] to-[var(--bg3)]"></div>
-					<figcaption class="mt-2 text-xs text-[var(--text-tertiary)]">Placeholder media block.</figcaption>
-				</figure>
+					<figure class="rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 p-4">
+						<div class="placeholder-block h-28 w-full rounded-lg"></div>
+						<figcaption class="mt-2 text-xs text-[var(--text-tertiary)]">Placeholder media block.</figcaption>
+					</figure>
 			</div>
 		</div>
 	</section>
@@ -470,7 +486,12 @@ console.log(apiUrl);</code>
 	.btn-ghost {
 		background: transparent;
 		color: var(--text-secondary);
-		border: 1px dashed var(--border-color);
+		border: 1px solid var(--border-color);
+	}
+
+	.btn-ghost:hover {
+		background: var(--hover-bg);
+		color: var(--text-bright);
 	}
 
 	.btn-outline {
@@ -620,6 +641,27 @@ console.log(apiUrl);</code>
 	input[type='range']::-moz-range-track {
 		background: transparent;
 		border: none;
+	}
+
+	.placeholder-block {
+		background: linear-gradient(
+			110deg,
+			var(--bg2) 10%,
+			var(--bg1) 45%,
+			var(--bg3) 60%,
+			var(--bg2) 90%
+		);
+		background-size: 200% 100%;
+		animation: placeholder-sheen 2.4s linear infinite;
+	}
+
+	@keyframes placeholder-sheen {
+		0% {
+			background-position: 200% 50%;
+		}
+		100% {
+			background-position: -200% 50%;
+		}
 	}
 
 </style>
