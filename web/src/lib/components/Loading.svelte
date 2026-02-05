@@ -39,7 +39,10 @@
 	}
 
 	.loading-bar {
-		animation: slide 1.5s ease-in-out infinite alternate;
+		position: relative;
+		width: 35%;
+		left: 0%;
+		animation: slide 2.0s linear infinite alternate;
 	}
 
 	@keyframes spin-right {
@@ -62,16 +65,12 @@
 
 	@keyframes slide {
 		0% {
-			width: 20%;
-			margin-left: 0;
-		}
-		50% {
-			width: 50%;
-			margin-left: 25%;
+			left: 0%;
+			transform: translateX(-95%);
 		}
 		100% {
-			width: 20%;
-			margin-left: 80%;
+			left: 100%;
+			transform: translateX(-5%);
 		}
 	}
 </style>
