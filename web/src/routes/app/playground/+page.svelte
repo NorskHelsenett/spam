@@ -11,6 +11,7 @@
 	import Toggle from '$lib/components/Toggle.svelte';
 	import Checkbox from '$lib/components/Checkbox.svelte';
 	import Radio from '$lib/components/Radio.svelte';
+	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 
@@ -52,12 +53,21 @@
 	let rangeValue = $state(42);
 	let checkboxValue = $state(true);
 	let toggleValue = $state(true);
+	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 
 	const selectOptions = [
 		{ value: 'daily', label: 'Daily' },
 		{ value: 'weekly', label: 'Weekly' },
 		{ value: 'monthly', label: 'Monthly' }
+	];
+
+	const scrapeIntervalOptions = [
+		{ value: '0', label: 'Off' },
+		{ value: '900', label: '15 min' },
+		{ value: '3600', label: '1 hour' },
+		{ value: '21600', label: '6 hours' },
+		{ value: '86400', label: '24 hours' }
 	];
 
 
@@ -186,7 +196,7 @@
 		<div class="flex flex-wrap items-center gap-3">
 			<button type="button" class="btn btn-primary">Primary</button>
 			<button type="button" class="btn btn-secondary">Secondary</button>
-			<button type="button" class="btn btn-ghost">Ghost button</button>
+			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
 		</div>
@@ -243,7 +253,10 @@
 			</div>
 			<div class="space-y-4">
 				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Select</label>
-				<Select options={selectOptions} bind:value={selectValue} />
+				<div class="flex items-center gap-3">
+					<Select options={selectOptions} bind:value={selectValue} />
+					<Select options={selectOptions} bind:value={selectValue} class="w-full" />
+				</div>
 
 				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Radio</label>
 				<div class="flex flex-wrap gap-4">
@@ -256,6 +269,10 @@
 
 				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Toggle</label>
 				<Toggle bind:checked={toggleValue} label="Feature flag" />
+
+				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Button Group</label>
+				<ButtonGroup options={scrapeIntervalOptions} bind:value={buttonGroupValue} />
+				<p class="text-xs text-[var(--text-tertiary)]">Scrape interval: {buttonGroupValue === '0' ? 'Off' : scrapeIntervalOptions.find(o => o.value === buttonGroupValue)?.label}</p>
 
 				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Range</label>
 				<input type="range" min="0" max="100" bind:value={rangeValue} />

@@ -13,11 +13,13 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/poller"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"gorm.io/gorm"
 )
 
-var runExecutor *runner.RunExecutor
+var runExecutor jobs.RunExecutor
 
 func main() {
 	if err := run(); err != nil {
@@ -77,6 +79,10 @@ func run() error {
 		log.Printf("runner server enabled on port %d (local_mode=%v)", cfg.Runner.HTTPPort, cfg.Runner.LocalMode)
 	}
 
+	// Create provider store and poller for commit-based polling
+	providerStore := providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	commitPoller := poller.New(gormDB, providerStore)
+
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
 	pollInterval := 2 * time.Second
 
@@ -102,6 +108,9 @@ func run() error {
 		case <-ticker.C:
 			now := time.Now()
 			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
+
+			// Poll providers for new commits
+			commitPoller.Poll(ctx)
 
 			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
 			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)

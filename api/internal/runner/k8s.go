@@ -117,15 +117,15 @@ func (k *K8sClient) discoverPodAnnotations() error {
 }
 
 // CreateRunJob creates a Kubernetes job for a run.
-func (k *K8sClient) CreateRunJob(ctx context.Context, runID, cloneURL, ref, token string) (string, string, error) {
+func (k *K8sClient) CreateRunJob(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
 	if k.cfg.LocalMode {
-		return k.createLocalDockerRun(ctx, runID, cloneURL, ref, token)
+		return k.createLocalDockerRun(ctx, runID, cloneURL, ref, token, commitSHA)
 	}
 
-	return k.createK8sJob(ctx, runID, cloneURL, ref, token)
+	return k.createK8sJob(ctx, runID, cloneURL, ref, token, commitSHA)
 }
 
-func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, token string) (string, string, error) {
+func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
 	jobName := fmt.Sprintf("run-%s", runID[:8])
 	namespace := k.cfg.Namespace
 
@@ -172,13 +172,19 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 							Name:  "runner",
 							Image: k.cfg.Image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
-							Env: []corev1.EnvVar{
-								{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
-								{Name: "RUN_ID", Value: runID},
-								{Name: "RUN_TOKEN", Value: token},
-								{Name: "REPO_CLONE_URL", Value: cloneURL},
-								{Name: "REPO_REF", Value: ref},
-							},
+							Env: func() []corev1.EnvVar {
+								envs := []corev1.EnvVar{
+									{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
+									{Name: "RUN_ID", Value: runID},
+									{Name: "RUN_TOKEN", Value: token},
+									{Name: "REPO_CLONE_URL", Value: cloneURL},
+									{Name: "REPO_REF", Value: ref},
+								}
+								if commitSHA != "" {
+									envs = append(envs, corev1.EnvVar{Name: "REPO_COMMIT_SHA", Value: commitSHA})
+								}
+								return envs
+							}(),
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -213,7 +219,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	return created.Name, namespace, nil
 }
 
-func (k *K8sClient) createLocalDockerRun(ctx context.Context, runID, cloneURL, ref, token string) (string, string, error) {
+func (k *K8sClient) createLocalDockerRun(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
 	args := []string{
 		"run", "--rm",
 		"-e", fmt.Sprintf("WORKER_URL=%s", k.cfg.WorkerURL),
@@ -223,6 +229,9 @@ func (k *K8sClient) createLocalDockerRun(ctx context.Context, runID, cloneURL, r
 	}
 	if ref != "" {
 		args = append(args, "-e", fmt.Sprintf("REPO_REF=%s", ref))
+	}
+	if commitSHA != "" {
+		args = append(args, "-e", fmt.Sprintf("REPO_COMMIT_SHA=%s", commitSHA))
 	}
 	args = append(args, k.cfg.Image)
 
@@ -544,7 +553,7 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	}
 
 	// Create K8s job or Docker container
-	jobName, namespace, err := e.k8s.CreateRunJob(ctx, runID, p.CloneURL, p.Ref, token)
+	jobName, namespace, err := e.k8s.CreateRunJob(ctx, runID, p.CloneURL, p.Ref, token, p.CommitSHA)
 	if err != nil {
 		return fmt.Errorf("create job: %w", err)
 	}

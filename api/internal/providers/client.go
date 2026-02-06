@@ -26,6 +26,9 @@ type Client interface {
 	// For GitLab: lists subgroups of a group, or root groups if empty.
 	ListPublicOrgs(ctx context.Context, username string, opts ListOptions) ([]OrgData, PageInfo, error)
 
+	// GetLatestCommit returns the SHA of the latest commit on the given ref (branch).
+	GetLatestCommit(ctx context.Context, repoPath string, ref string) (string, error)
+
 	// BaseURL returns the base URL of the provider API.
 	BaseURL() string
 

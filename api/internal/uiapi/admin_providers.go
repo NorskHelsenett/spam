@@ -17,8 +17,9 @@ type createProviderRequest struct {
 }
 
 type updateProviderRequest struct {
-	DisplayName *string `json:"display_name,omitempty"`
-	Enabled     *bool   `json:"enabled,omitempty"`
+	DisplayName  *string `json:"display_name,omitempty"`
+	Enabled      *bool   `json:"enabled,omitempty"`
+	PollInterval *int    `json:"poll_interval,omitempty"`
 }
 
 type rotateProviderRequest struct {
@@ -144,7 +145,7 @@ func AdminProvidersUpdateHandler(authService *auth.Service, store *providerconfi
 			return
 		}
 
-		updated, err := store.Update(r.Context(), providerID, req.DisplayName, req.Enabled)
+		updated, err := store.Update(r.Context(), providerID, req.DisplayName, req.Enabled, req.PollInterval)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

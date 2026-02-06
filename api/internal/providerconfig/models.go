@@ -10,6 +10,7 @@ type ProviderInstance struct {
 	OwnerPath       string    `gorm:"size:512;not null;default:'';uniqueIndex:ux_provider_identity,priority:3" json:"owner_path"`
 	DisplayName     string    `gorm:"size:512;not null" json:"display_name"`
 	Enabled         bool      `gorm:"not null;default:true" json:"enabled"`
+	PollInterval    *int      `gorm:"column:poll_interval;default:3600" json:"poll_interval,omitempty"`
 	CreatedByUserID string    `gorm:"size:36" json:"created_by"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`

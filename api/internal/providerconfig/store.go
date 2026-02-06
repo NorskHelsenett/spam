@@ -29,6 +29,7 @@ type AdminProvider struct {
 	DisplayName      string     `json:"display_name"`
 	TokenFingerprint string     `json:"token_fingerprint,omitempty"`
 	Enabled          bool       `json:"enabled"`
+	PollInterval     *int       `json:"poll_interval,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	LastRotatedAt    *time.Time `json:"last_rotated_at,omitempty"`
@@ -122,15 +123,16 @@ func (s *Store) ListAdmin(ctx context.Context) ([]AdminProvider, error) {
 // providerToAdmin converts a ProviderInstance to AdminProvider (without secret info).
 func providerToAdmin(provider ProviderInstance) AdminProvider {
 	admin := AdminProvider{
-		ID:          provider.ID,
-		ProviderURL: provider.BaseURL,
-		BaseURL:     provider.BaseURL,
-		OwnerPath:   provider.OwnerPath,
-		Type:        provider.Type,
-		DisplayName: provider.DisplayName,
-		Enabled:     provider.Enabled,
-		CreatedAt:   provider.CreatedAt,
-		UpdatedAt:   provider.UpdatedAt,
+		ID:           provider.ID,
+		ProviderURL:  provider.BaseURL,
+		BaseURL:      provider.BaseURL,
+		OwnerPath:    provider.OwnerPath,
+		Type:         provider.Type,
+		DisplayName:  provider.DisplayName,
+		Enabled:      provider.Enabled,
+		PollInterval: provider.PollInterval,
+		CreatedAt:    provider.CreatedAt,
+		UpdatedAt:    provider.UpdatedAt,
 	}
 	if provider.OwnerPath != "" {
 		admin.ProviderURL = strings.TrimRight(provider.BaseURL, "/") + "/" + provider.OwnerPath
@@ -223,13 +225,21 @@ func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat strin
 	return &admin, nil
 }
 
-func (s *Store) Update(ctx context.Context, providerID string, displayName *string, enabled *bool) (*AdminProvider, error) {
+func (s *Store) Update(ctx context.Context, providerID string, displayName *string, enabled *bool, pollInterval ...*int) (*AdminProvider, error) {
 	updates := map[string]any{}
 	if displayName != nil {
 		updates["display_name"] = strings.TrimSpace(*displayName)
 	}
 	if enabled != nil {
 		updates["enabled"] = *enabled
+	}
+	if len(pollInterval) > 0 && pollInterval[0] != nil {
+		v := *pollInterval[0]
+		if v <= 0 {
+			updates["poll_interval"] = nil
+		} else {
+			updates["poll_interval"] = v
+		}
 	}
 
 	if len(updates) == 0 {
@@ -418,4 +428,15 @@ func (s *Store) GetActiveToken(ctx context.Context, providerID string) (string, 
 		return "", nil
 	}
 	return GetActiveToken(ctx, s.db, providerID, s.key)
+}
+
+// ListEnabledWithPolling returns providers where polling is enabled.
+func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance, error) {
+	var providers []ProviderInstance
+	if err := s.db.WithContext(ctx).
+		Where("enabled = true AND poll_interval IS NOT NULL AND poll_interval > 0").
+		Find(&providers).Error; err != nil {
+		return nil, err
+	}
+	return providers, nil
 }

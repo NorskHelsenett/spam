@@ -34,19 +34,20 @@ type TokenResponse struct {
 }
 
 type Runner struct {
-	workerURL    string
-	runID        string
-	runToken     string
-	repoCloneURL string
-	repoRef      string
-	workDir      string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wsConn       *websocket.Conn
-	logChan      chan string
-	localMode    bool
-	sbomScanner  string // "trivy" or "syft"
-	commitHash   string
+	workerURL     string
+	runID         string
+	runToken      string
+	repoCloneURL  string
+	repoRef       string
+	repoCommitSHA string
+	workDir       string
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wsConn        *websocket.Conn
+	logChan       chan string
+	localMode     bool
+	sbomScanner   string // "trivy" or "syft"
+	commitHash    string
 }
 
 func main() {
@@ -55,6 +56,7 @@ func main() {
 	runToken := os.Getenv("RUN_TOKEN")
 	repoCloneURL := os.Getenv("REPO_CLONE_URL")
 	repoRef := os.Getenv("REPO_REF")
+	repoCommitSHA := os.Getenv("REPO_COMMIT_SHA")
 	sbomScanner := os.Getenv("SBOM_SCANNER")
 
 	if workerURL == "" || runID == "" || repoCloneURL == "" {
@@ -74,17 +76,18 @@ func main() {
 	defer cancel()
 
 	r := &Runner{
-		workerURL:    workerURL,
-		runID:        runID,
-		runToken:     runToken,
-		repoCloneURL: repoCloneURL,
-		repoRef:      repoRef,
-		workDir:      workDir,
-		ctx:          ctx,
-		cancel:       cancel,
-		logChan:      make(chan string, 100),
-		localMode:    workerURL == "local",
-		sbomScanner:  sbomScanner,
+		workerURL:     workerURL,
+		runID:         runID,
+		runToken:      runToken,
+		repoCloneURL:  repoCloneURL,
+		repoRef:       repoRef,
+		repoCommitSHA: repoCommitSHA,
+		workDir:       workDir,
+		ctx:           ctx,
+		cancel:        cancel,
+		logChan:       make(chan string, 100),
+		localMode:     workerURL == "local",
+		sbomScanner:   sbomScanner,
 	}
 
 	// Setup cleanup
@@ -233,15 +236,36 @@ func (r *Runner) runPipeline() int {
 
 	// Clone repository
 	r.log(fmt.Sprintf("Cloning %s...", r.repoCloneURL))
-	cloneArgs := []string{"clone", "--depth=1"}
-	if r.repoRef != "" {
-		cloneArgs = append(cloneArgs, "--branch", r.repoRef)
-	}
-	cloneArgs = append(cloneArgs, cloneURL, r.workDir)
+	if r.repoCommitSHA != "" {
+		// Pinned-commit mode: clone without --depth=1, then checkout exact SHA
+		cloneArgs := []string{"clone", "--no-tags"}
+		if r.repoRef != "" {
+			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
+		}
+		cloneArgs = append(cloneArgs, cloneURL, r.workDir)
 
-	if err := r.runCommand("git", cloneArgs...); err != nil {
-		r.log(fmt.Sprintf("Git clone failed: %v", err))
-		return 1
+		if err := r.runCommand("git", cloneArgs...); err != nil {
+			r.log(fmt.Sprintf("Git clone failed: %v", err))
+			return 1
+		}
+		r.log(fmt.Sprintf("Checking out pinned commit %s...", r.repoCommitSHA))
+		checkoutCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "checkout", r.repoCommitSHA)
+		if out, err := checkoutCmd.CombinedOutput(); err != nil {
+			r.log(fmt.Sprintf("Git checkout failed: %v\n%s", err, string(out)))
+			return 1
+		}
+	} else {
+		// Standard shallow clone
+		cloneArgs := []string{"clone", "--depth=1"}
+		if r.repoRef != "" {
+			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
+		}
+		cloneArgs = append(cloneArgs, cloneURL, r.workDir)
+
+		if err := r.runCommand("git", cloneArgs...); err != nil {
+			r.log(fmt.Sprintf("Git clone failed: %v", err))
+			return 1
+		}
 	}
 
 	// Capture the actual commit hash that was cloned

@@ -83,10 +83,11 @@ func Load() (Config, error) {
 
 // WorkerConfig captures configuration for the background worker.
 type WorkerConfig struct {
-	DatabaseURL  string
-	Concurrency  int           // Number of concurrent job processors
-	StaleTimeout time.Duration // Duration after which RUNNING jobs are considered stale
-	Runner       RunnerConfig
+	DatabaseURL        string
+	Concurrency        int           // Number of concurrent job processors
+	StaleTimeout       time.Duration // Duration after which RUNNING jobs are considered stale
+	ProviderSecretsKey []byte        // Key for decrypting provider secrets (for poller)
+	Runner             RunnerConfig
 }
 
 // RunnerConfig captures configuration for the Kubernetes runner system.
@@ -127,6 +128,13 @@ func LoadWorker() (WorkerConfig, error) {
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
 	}
+
+	// Load provider secrets key (needed for poller regardless of runner)
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
 
 	// Load runner config
 	runnerCfg, err := loadRunnerConfig()

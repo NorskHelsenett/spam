@@ -4,6 +4,7 @@
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import Select from '$lib/components/Select.svelte';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -17,6 +18,7 @@
 		displayName: string;
 		tokenFingerprint?: string;
 		enabled: boolean;
+		pollInterval?: number | null;
 		createdAt: string;
 		updatedAt?: string;
 		lastRotatedAt?: string;
@@ -57,6 +59,7 @@
 		display_name: string;
 		token_fingerprint?: string;
 		enabled: boolean;
+		poll_interval?: number | null;
 		created_at: string;
 		updated_at?: string;
 		last_rotated_at?: string;
@@ -147,6 +150,7 @@
 		displayName: entry.display_name,
 		tokenFingerprint: entry.token_fingerprint,
 		enabled: entry.enabled,
+		pollInterval: entry.poll_interval,
 		createdAt: entry.created_at,
 		updatedAt: entry.updated_at,
 		lastRotatedAt: entry.last_rotated_at
@@ -361,6 +365,42 @@
 		return entry.baseUrl;
 	};
 
+	const pollIntervalOptions = [
+		{ value: '0', label: 'Off' },
+		{ value: '900', label: '15 min' },
+		{ value: '3600', label: '1 hour' },
+		{ value: '21600', label: '6 hours' },
+		{ value: '86400', label: '24 hours' }
+	];
+
+	const updatePollInterval = async (entry: ProviderRow, value: string) => {
+		const numValue = parseInt(value) || 0;
+		saving = true;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+				method: 'PATCH',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ poll_interval: numValue || null })
+			});
+
+			if (!response.ok) {
+				formError = 'Failed to update polling interval.';
+				return;
+			}
+
+			const updated: ApiProvider = await response.json();
+			providers = providers.map((provider) =>
+				provider.id === updated.id ? mapProvider(updated) : provider
+			);
+		} catch {
+			formError = 'Failed to update polling interval.';
+		} finally {
+			saving = false;
+		}
+	};
+
 	onMount(() => {
 		if (browser) {
 			loadProviders();
@@ -568,6 +608,7 @@
 							<th class="px-5 py-3 text-left">Type</th>
 							<th class="px-5 py-3 text-left">Owner/Group</th>
 							<th class="px-5 py-3 text-left">Token</th>
+							<th class="px-5 py-3 text-left">Polling</th>
 							<th class="px-5 py-3 text-left">Status</th>
 							<th class="px-5 py-3 text-left">Actions</th>
 						</tr>
@@ -594,6 +635,15 @@
 											Rotated {entry.lastRotatedAt}
 										</div>
 									{/if}
+								</td>
+								<td class="px-5 py-3">
+									<Select
+										options={pollIntervalOptions}
+										value={String(entry.pollInterval || 3600)}
+										disabled={saving}
+										size="sm"
+										onchange={(v) => updatePollInterval(entry, v)}
+									/>
 								</td>
 								<td class="px-5 py-3">
 									<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${entry.enabled ? 'border-[var(--success)]/40 text-[var(--success)]' : 'border-[var(--border-color)] text-[var(--text-tertiary)]'}`}>

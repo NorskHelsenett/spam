@@ -318,6 +318,54 @@ func (c *GiteaClientImpl) parsePageInfo(resp *http.Response, pageSize int, resul
 	return info
 }
 
+// GetLatestCommit returns the SHA of the latest commit on the given ref (branch).
+func (c *GiteaClientImpl) GetLatestCommit(ctx context.Context, repoPath string, ref string) (string, error) {
+	parts := strings.SplitN(repoPath, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid repo path: %s", repoPath)
+	}
+	owner, repo := parts[0], parts[1]
+
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/git/commits?sha=%s&limit=1",
+		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(ref))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return "", err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var commits []struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(body, &commits); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	if len(commits) == 0 {
+		return "", ErrNotFound
+	}
+
+	return commits[0].SHA, nil
+}
+
 // giteaRepoDetails represents detailed repo info from Gitea API.
 type giteaRepoDetails struct {
 	giteaRepo

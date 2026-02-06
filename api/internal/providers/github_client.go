@@ -418,6 +418,49 @@ func extractPageParam(urlStr string) int {
 	return page
 }
 
+// GetLatestCommit returns the SHA of the latest commit on the given ref (branch).
+func (c *GitHubClientImpl) GetLatestCommit(ctx context.Context, repoPath string, ref string) (string, error) {
+	url := fmt.Sprintf("%s/repos/%s/commits?sha=%s&per_page=1", c.baseURL, repoPath, ref)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return "", err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var commits []struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(body, &commits); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	if len(commits) == 0 {
+		return "", ErrNotFound
+	}
+
+	return commits[0].SHA, nil
+}
+
 // gitHubRepoDetails represents detailed repo info from GitHub API.
 type gitHubRepoDetails struct {
 	gitHubRepo

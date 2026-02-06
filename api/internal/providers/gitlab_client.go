@@ -314,6 +314,48 @@ func (c *GitLabClientImpl) parsePageInfo(resp *http.Response) PageInfo {
 	return info
 }
 
+// GetLatestCommit returns the SHA of the latest commit on the given ref (branch).
+func (c *GitLabClientImpl) GetLatestCommit(ctx context.Context, repoPath string, ref string) (string, error) {
+	encodedPath := url.PathEscape(repoPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/commits?ref_name=%s&per_page=1", c.baseURL, encodedPath, url.QueryEscape(ref))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", err
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return "", err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var commits []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(body, &commits); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+	if len(commits) == 0 {
+		return "", ErrNotFound
+	}
+
+	return commits[0].ID, nil
+}
+
 // gitLabProjectDetails represents detailed project info from GitLab API.
 type gitLabProjectDetails struct {
 	gitLabProject
