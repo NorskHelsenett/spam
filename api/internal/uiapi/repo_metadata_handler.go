@@ -253,8 +253,8 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoID, repoDBID string) (RepoMe
 	}
 
 	var componentCount int64
-	if err := db.WithContext(r.Context()).Table("sbom_components").
-		Where("sbom_id = ?", sbomID).
+	if err := db.WithContext(r.Context()).Table("sbom_component_view").
+		Where("sbom_id = ? AND is_root = false", sbomID).
 		Count(&componentCount).Error; err != nil {
 		componentCount = 0
 	}

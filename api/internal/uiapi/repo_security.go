@@ -70,8 +70,8 @@ func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.Hand
 
 		var sbomDeps int64
 		if sbomID != "" {
-			if err := db.WithContext(r.Context()).Table("sbom_components").
-				Where("sbom_id = ?", sbomID).
+			if err := db.WithContext(r.Context()).Table("sbom_component_view").
+				Where("sbom_id = ? AND is_root = false", sbomID).
 				Count(&sbomDeps).Error; err != nil {
 				http.Error(w, "failed to fetch sbom components", http.StatusInternalServerError)
 				return

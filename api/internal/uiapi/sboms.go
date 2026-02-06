@@ -371,11 +371,11 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// Count components linked to this SBOM
+		// Count components linked to this SBOM (from materialized view)
 		var componentCount int64
 		if err := db.WithContext(r.Context()).
-			Table("sbom_components").
-			Where("sbom_id = ?", sbomID).
+			Table("sbom_component_view").
+			Where("sbom_id = ? AND is_root = false", sbomID).
 			Count(&componentCount).Error; err != nil {
 			log.Printf("failed to count sbom components: %v", err)
 			componentCount = 0
