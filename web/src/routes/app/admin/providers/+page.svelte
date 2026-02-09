@@ -183,6 +183,14 @@
 		return 'border-[var(--border-color)] text-[var(--text-tertiary)]';
 	};
 
+	const healthDetails = (entry: ProviderRow) => {
+		const health = (entry.healthStatus || '').toUpperCase();
+		if (!entry.enabled || (health !== 'FAILED' && health !== 'DEGRADED')) {
+			return '';
+		}
+		return (entry.healthMessage || '').trim();
+	};
+
 	const loadProviders = async () => {
 		loading = true;
 		error = '';
@@ -697,9 +705,16 @@
 									/>
 								</td>
 								<td class="px-5 py-3">
-									<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}>
-										{statusLabel(entry)}
-									</span>
+									<div class="group relative inline-flex">
+										<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}>
+											{statusLabel(entry)}
+										</span>
+										{#if healthDetails(entry)}
+											<div class="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-80 -translate-x-1/2 rounded-xl border border-[var(--border-color)] bg-[var(--surface-bg)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)] shadow-xl group-hover:block">
+												{healthDetails(entry)}
+											</div>
+										{/if}
+									</div>
 								</td>
 								<td class="px-5 py-3">
 									<div class="flex flex-wrap gap-2">
