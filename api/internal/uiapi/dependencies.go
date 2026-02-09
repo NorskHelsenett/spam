@@ -109,7 +109,7 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		args := []interface{}{}
 		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Clauses)
+			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
 			if predicate != "" {
 				query += ` AND ` + predicate
 				args = append(args, predicateArgs...)
@@ -277,7 +277,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		args := []interface{}{}
 
 		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Clauses)
+			predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Groups)
 			if predicate != "" {
 				query += ` AND ` + predicate
 				args = append(args, predicateArgs...)
@@ -315,7 +315,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		// Apply filters for manifest side (continue parameter numbering)
 		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Clauses)
+			predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Groups)
 			if predicate != "" {
 				query += ` AND ` + predicate
 				args = append(args, predicateArgs...)

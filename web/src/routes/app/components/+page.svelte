@@ -197,13 +197,13 @@
 					<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 					<input
 						type="text"
-						placeholder="Search name/PURL or use query syntax (e.g. debug@4.4.2 || lodash<=4)"
+						placeholder="Search name/PURL or use query syntax (e.g. react@19.0.1..19.2.0 || react>=20 && react<21)"
 						class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none"
 						bind:value={searchQuery}
 						oninput={handleSearch}
 					/>
 				</div>
-				<p class="mt-2 text-xs text-[var(--text-muted)]">Examples: <code>debug@4.4.2</code>, <code>debug &lt;= 4</code>, <code>debug &lt;=4.4 || lodash@4.17.21</code></p>
+				<p class="mt-2 text-xs text-[var(--text-muted)]">Examples: <code>debug@4.4.2</code>, <code>react@19.0.1..19.2.0</code>, <code>react&gt;=19.0.1 &amp;&amp; react&lt;=19.2.0</code>, <code>debug &lt;=4.4 || lodash@4.17.21</code></p>
 			</div>
 			<Select
 				options={ecosystemOptions}

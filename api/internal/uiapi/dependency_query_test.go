@@ -23,15 +23,20 @@ func TestParseDependencySearchQuery_ExactAndRangeAndOr(t *testing.T) {
 	if !parsed.Structured {
 		t.Fatalf("expected structured query")
 	}
-	if len(parsed.Clauses) != 2 {
-		t.Fatalf("expected 2 clauses, got %d", len(parsed.Clauses))
+	if len(parsed.Groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(parsed.Groups))
 	}
+	if len(parsed.Groups[0]) != 1 || len(parsed.Groups[1]) != 1 {
+		t.Fatalf("expected one clause per group, got %d and %d", len(parsed.Groups[0]), len(parsed.Groups[1]))
+	}
+	c0 := parsed.Groups[0][0]
+	c1 := parsed.Groups[1][0]
 
-	if parsed.Clauses[0].Name != "debug" || parsed.Clauses[0].Comparator != "=" || parsed.Clauses[0].RawVersion != "4.4.2" {
-		t.Fatalf("unexpected first clause: %#v", parsed.Clauses[0])
+	if c0.Name != "debug" || c0.Comparator != "=" || c0.RawVersion != "4.4.2" {
+		t.Fatalf("unexpected first clause: %#v", c0)
 	}
-	if parsed.Clauses[1].Name != "lodash" || parsed.Clauses[1].Comparator != "<=" || parsed.Clauses[1].RawVersion != "4.17" {
-		t.Fatalf("unexpected second clause: %#v", parsed.Clauses[1])
+	if c1.Name != "lodash" || c1.Comparator != "<=" || c1.RawVersion != "4.17" {
+		t.Fatalf("unexpected second clause: %#v", c1)
 	}
 }
 
@@ -43,11 +48,11 @@ func TestParseDependencySearchQuery_ScopedPackage(t *testing.T) {
 	if !parsed.Structured {
 		t.Fatalf("expected structured query")
 	}
-	if len(parsed.Clauses) != 1 {
-		t.Fatalf("expected 1 clause, got %d", len(parsed.Clauses))
+	if len(parsed.Groups) != 1 || len(parsed.Groups[0]) != 1 {
+		t.Fatalf("expected one group with one clause")
 	}
-	if parsed.Clauses[0].Name != "@scope/pkg" {
-		t.Fatalf("unexpected clause name: %q", parsed.Clauses[0].Name)
+	if parsed.Groups[0][0].Name != "@scope/pkg" {
+		t.Fatalf("unexpected clause name: %q", parsed.Groups[0][0].Name)
 	}
 }
 
@@ -93,7 +98,7 @@ func TestBuildStructuredDependencyPredicate(t *testing.T) {
 		t.Fatalf("expected structured query")
 	}
 
-	predicate, args := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, '')", parsed.Clauses)
+	predicate, args := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, '')", parsed.Groups)
 	if predicate == "" {
 		t.Fatalf("expected predicate")
 	}
@@ -114,7 +119,7 @@ func TestBuildStructuredDependencyPredicate_NoRegexQuestionMark(t *testing.T) {
 		t.Fatalf("expected structured query")
 	}
 
-	predicate, _ := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsed.Clauses)
+	predicate, _ := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsed.Groups)
 	if strings.Contains(predicate, "v?") {
 		t.Fatalf("predicate should not contain literal '?' in regex: %q", predicate)
 	}
@@ -129,7 +134,7 @@ func TestBuildStructuredDependencyPredicate_NameUsesILikeFallback(t *testing.T) 
 		t.Fatalf("expected structured query")
 	}
 
-	predicate, args := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, '')", parsed.Clauses)
+	predicate, args := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, '')", parsed.Groups)
 	if !strings.Contains(predicate, "ILIKE ?") {
 		t.Fatalf("expected ILIKE fallback in predicate, got %q", predicate)
 	}
@@ -142,5 +147,45 @@ func TestBuildStructuredDependencyPredicate_NameUsesILikeFallback(t *testing.T) 
 	}
 	if !foundWildcard {
 		t.Fatalf("expected wildcard arg for name fallback, args=%v", args)
+	}
+}
+
+func TestParseDependencySearchQuery_AndAndBetween(t *testing.T) {
+	parsed, err := parseDependencySearchQuery("react@19.0.1..19.2.0 || react>=20 && react<21")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !parsed.Structured {
+		t.Fatalf("expected structured query")
+	}
+	if len(parsed.Groups) != 2 {
+		t.Fatalf("expected 2 groups, got %d", len(parsed.Groups))
+	}
+	if len(parsed.Groups[0]) != 1 {
+		t.Fatalf("expected first group to contain 1 clause, got %d", len(parsed.Groups[0]))
+	}
+	if parsed.Groups[0][0].Comparator != "between" {
+		t.Fatalf("expected between comparator, got %q", parsed.Groups[0][0].Comparator)
+	}
+	if len(parsed.Groups[1]) != 2 {
+		t.Fatalf("expected second group to contain 2 clauses, got %d", len(parsed.Groups[1]))
+	}
+}
+
+func TestBuildStructuredDependencyPredicate_AndUsesAnd(t *testing.T) {
+	parsed, err := parseDependencySearchQuery("react>=19.0.1 && react<=19.2.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	predicate, _ := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, '')", parsed.Groups)
+	if !strings.Contains(predicate, " AND ") {
+		t.Fatalf("expected AND in predicate, got %q", predicate)
+	}
+}
+
+func TestParseDependencySearchQuery_BetweenInvalidOrder(t *testing.T) {
+	_, err := parseDependencySearchQuery("react@19.2.0..19.0.1")
+	if err == nil {
+		t.Fatalf("expected error for invalid range order")
 	}
 }
