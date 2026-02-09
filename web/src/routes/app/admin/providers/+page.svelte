@@ -52,7 +52,7 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
-	let syncingProviderId = $state<string | null>(null);
+	let syncingProviderIds = $state<Set<string>>(new Set());
 
 	type ApiProvider = {
 		id: string;
@@ -384,7 +384,8 @@
 	};
 
 	const syncProviderNow = async (entry: ProviderRow) => {
-		syncingProviderId = entry.id;
+		if (syncingProviderIds.has(entry.id)) return;
+		syncingProviderIds = new Set(syncingProviderIds).add(entry.id);
 		formError = '';
 		try {
 			const response = await fetch(`/api/admin/providers/${entry.id}/sync`, {
@@ -408,7 +409,9 @@
 		} catch {
 			formError = 'Failed to sync provider.';
 		} finally {
-			syncingProviderId = null;
+			const next = new Set(syncingProviderIds);
+			next.delete(entry.id);
+			syncingProviderIds = next;
 		}
 	};
 
@@ -736,11 +739,11 @@
 										<button
 											type="button"
 											class="sync-now-btn rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											class:syncing={syncingProviderId === entry.id}
+											class:syncing={syncingProviderIds.has(entry.id)}
 											onclick={() => syncProviderNow(entry)}
-											disabled={saving || syncingProviderId === entry.id}
+											disabled={saving || syncingProviderIds.has(entry.id)}
 										>
-											{#if syncingProviderId === entry.id}
+											{#if syncingProviderIds.has(entry.id)}
 												<span class="sync-label syncing-text" data-text="Syncing...">Syncing...</span>
 											{:else}
 												<span class="sync-label">Sync Now</span>
