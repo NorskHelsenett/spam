@@ -16,6 +16,11 @@ type RunExecutor interface {
 	ExecuteRun(ctx context.Context, runID string, payload interface{}) error
 }
 
+// RunReconciler reconciles RUNNING jobs against their K8s job state.
+type RunReconciler interface {
+	ReconcileRunningJobs(ctx context.Context, db *gorm.DB, minAge time.Duration) (int, error)
+}
+
 // ProcessJob executes job-specific handlers.
 func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {
 	switch job.Type {

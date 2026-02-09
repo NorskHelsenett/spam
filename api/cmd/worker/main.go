@@ -109,6 +109,15 @@ func run() error {
 			now := time.Now()
 			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
 
+			// Reconcile RUNNING jobs against K8s state
+			if reconciler, ok := runExecutor.(jobs.RunReconciler); ok {
+				if n, err := reconciler.ReconcileRunningJobs(ctx, gormDB, 2*time.Minute); err != nil {
+					log.Printf("reconcile error: %v", err)
+				} else if n > 0 {
+					log.Printf("reconciled %d running jobs", n)
+				}
+			}
+
 			// Poll providers for new commits
 			commitPoller.Poll(ctx)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -212,11 +213,53 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	}
 
 	created, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
-	if err != nil {
+	if err == nil {
+		return created.Name, namespace, nil
+	}
+
+	if !apierrors.IsAlreadyExists(err) {
 		return "", "", fmt.Errorf("failed to create job: %w", err)
 	}
 
-	return created.Name, namespace, nil
+	// Job already exists — attempt to adopt or replace it
+	existing, getErr := k.GetJobStatus(ctx, jobName, namespace)
+	if getErr != nil {
+		return "", "", fmt.Errorf("job already exists and failed to get status: %w", getErr)
+	}
+
+	// Verify the existing job belongs to this run
+	if existing.Labels["spam.io/run-id"] != runID {
+		return "", "", fmt.Errorf("job %s already exists for a different run (label=%s)", jobName, existing.Labels["spam.io/run-id"])
+	}
+
+	// If the K8s job is still active or already succeeded, adopt it
+	if existing.Status.Active > 0 || existing.Status.Succeeded > 0 {
+		log.Printf("adopting existing k8s job: job=%s/%s active=%d succeeded=%d", namespace, jobName, existing.Status.Active, existing.Status.Succeeded)
+		return existing.Name, namespace, nil
+	}
+
+	// If the K8s job has failed, delete it and create a new one
+	if existing.Status.Failed > 0 {
+		log.Printf("replacing failed k8s job: job=%s/%s failed=%d", namespace, jobName, existing.Status.Failed)
+		propagationPolicy := metav1.DeletePropagationBackground
+		if delErr := k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: &propagationPolicy,
+		}); delErr != nil {
+			return "", "", fmt.Errorf("failed to delete old job: %w", delErr)
+		}
+
+		// Brief wait for deletion to propagate, then retry creation
+		time.Sleep(2 * time.Second)
+		retried, retryErr := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
+		if retryErr != nil {
+			return "", "", fmt.Errorf("failed to recreate job after deletion: %w", retryErr)
+		}
+		return retried.Name, namespace, nil
+	}
+
+	// Job exists but has no active/succeeded/failed pods (e.g. just created) — adopt it
+	log.Printf("adopting existing k8s job (no terminal status): job=%s/%s", namespace, jobName)
+	return existing.Name, namespace, nil
 }
 
 func (k *K8sClient) createLocalDockerRun(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
