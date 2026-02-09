@@ -14,6 +14,7 @@
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 
 	import {
 		mockDonut,
@@ -55,6 +56,15 @@
 	let toggleValue = $state(true);
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
+	let refreshing = $state(false);
+
+	const handleRefresh = () => {
+		if (refreshing) return;
+		refreshing = true;
+		setTimeout(() => {
+			refreshing = false;
+		}, 1000);
+	};
 
 	const selectOptions = [
 		{ value: 'daily', label: 'Daily' },
@@ -199,6 +209,12 @@
 			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
+			<button type="button" class="btn btn-ghost" onclick={handleRefresh} disabled={refreshing}>
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
+				Refresh
+			</button>
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
 			<span class="pill pill-success">Success</span>
@@ -206,6 +222,12 @@
 			<span class="pill pill-error">Error</span>
 			<span class="pill pill-info">Info</span>
 			<span class="pill pill-neutral">Neutral</span>
+		</div>
+		<div class="flex flex-wrap items-center gap-2">
+			<span class="badge">Default</span>
+			<span class="badge">Approved</span>
+			<span class="badge">Pending</span>
+			<span class="badge">Read-only</span>
 		</div>
 	</section>
 
@@ -237,7 +259,7 @@
 					<button
 						type="button"
 						class="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-2 text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-						on:click={() => (showPassword = !showPassword)}
+						onclick={() => (showPassword = !showPassword)}
 						aria-label={showPassword ? 'Hide password' : 'Show password'}
 					>
 						{#if showPassword}
@@ -346,7 +368,7 @@
 		<div class="grid gap-6 lg:grid-cols-2">
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Dialog</p>
-				<button type="button" class="btn btn-secondary" on:click={() => (dialogOpen = true)}>
+				<button type="button" class="btn btn-secondary" onclick={() => (dialogOpen = true)}>
 					Open dialog
 				</button>
 				<Dialog bind:open={dialogOpen}>
@@ -360,10 +382,10 @@
 							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
 								<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Actions</p>
 								<div class="mt-3 flex gap-2">
-									<button type="button" class="btn btn-primary" on:click={() => (dialogOpen = false)}>
+									<button type="button" class="btn btn-primary" onclick={() => (dialogOpen = false)}>
 										Confirm
 									</button>
-									<button type="button" class="btn btn-ghost" on:click={() => (dialogOpen = false)}>
+									<button type="button" class="btn btn-ghost" onclick={() => (dialogOpen = false)}>
 										Cancel
 									</button>
 								</div>
@@ -375,7 +397,7 @@
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Dependency detail</p>
 				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Opens live data when available.</p>
-				<button type="button" class="btn btn-secondary" on:click={() => (dependencyOpen = true)}>
+				<button type="button" class="btn btn-secondary" onclick={() => (dependencyOpen = true)}>
 					Open dependency detail
 				</button>
 				<DependencyDetail
@@ -471,122 +493,7 @@ console.log(apiUrl);</code>
 </div>
 
 <style>
-	.btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		gap: 0.5rem;
-		border-radius: 999px;
-		padding: 0.55rem 1.1rem;
-		font-size: 0.85rem;
-		font-weight: 600;
-		letter-spacing: 0.02em;
-		transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease, color 150ms ease;
-	}
-
-	.btn:active {
-		transform: scale(0.98);
-	}
-
-	.btn-primary {
-		background: var(--accent);
-		color: var(--main-content-bg);
-		box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
-	}
-
-	.btn-secondary {
-		background: var(--hover-bg);
-		color: var(--text-bright);
-		border: 1px solid var(--border-color);
-	}
-
-	.btn-ghost {
-		background: transparent;
-		color: var(--text-secondary);
-		border: 1px solid var(--border-color);
-	}
-
-	.btn-ghost:hover {
-		background: var(--hover-bg);
-		color: var(--text-bright);
-	}
-
-	.btn-outline {
-		background: transparent;
-		color: var(--text-bright);
-		border: 1px solid var(--accent);
-	}
-
-	.btn:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
-		box-shadow: none;
-	}
-
-	.pill {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.35rem;
-		border-radius: 999px;
-		padding: 0.3rem 0.75rem;
-		font-size: 0.7rem;
-		letter-spacing: 0.15em;
-		text-transform: uppercase;
-		border: 1px solid var(--border-color);
-	}
-
-	.pill-success {
-		background: color-mix(in srgb, var(--success) 20%, transparent);
-		color: var(--success);
-	}
-
-	.pill-warning {
-		background: color-mix(in srgb, var(--warning) 18%, transparent);
-		color: var(--warning);
-	}
-
-	.pill-error {
-		background: color-mix(in srgb, var(--error) 18%, transparent);
-		color: var(--error);
-	}
-
-	.pill-info {
-		background: color-mix(in srgb, var(--info) 18%, transparent);
-		color: var(--info);
-	}
-
-	.pill-neutral {
-		background: color-mix(in srgb, var(--gray) 20%, transparent);
-		color: var(--text-secondary);
-	}
-
-	.input {
-		width: 100%;
-		border-radius: 1.25rem;
-		border: 1px solid var(--border-color);
-		background: transparent;
-		padding: 0.75rem 1rem;
-		font-size: 0.9rem;
-		color: var(--text-secondary);
-		transition: border-color 150ms ease, box-shadow 150ms ease;
-	}
-
-	.input:focus {
-		outline: none;
-		border-color: var(--accent);
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
-	}
-
-	.input-error {
-		border-color: var(--error);
-		box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 25%, transparent);
-	}
-
-	.input-with-icon {
-		padding-right: 3rem;
-	}
-
-
+	/* btn, pill, input classes are now global in app.css */
 
 	progress,
 	meter {

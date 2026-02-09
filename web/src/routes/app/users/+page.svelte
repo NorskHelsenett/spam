@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import Select from '$lib/components/Select.svelte';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 
 	type UserSummary = {
 		id: string;
@@ -14,13 +16,22 @@
 		created_at: string;
 	};
 
+	const roleOptions = [
+		{ value: 'pending', label: 'Pending' },
+		{ value: 'default', label: 'Default' },
+		{ value: 'global_reader', label: 'Global reader' },
+		{ value: 'admin', label: 'Admin' }
+	];
+
 	let users: UserSummary[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let savingUser = $state<string | null>(null);
+	let refreshing = $state(false);
 
 	const loadUsers = async () => {
 		loading = true;
+		refreshing = true;
 		error = '';
 		try {
 			const response = await fetch('/api/admin/users', {
@@ -36,6 +47,7 @@
 			error = 'Failed to load users.';
 		} finally {
 			loading = false;
+			setTimeout(() => { refreshing = false; }, 1000);
 		}
 	};
 
@@ -81,11 +93,10 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Users</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">Approve new access requests and adjust roles.</p>
 			</div>
-			<button
-				type="button"
-				class="rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-				onclick={loadUsers}
-			>
+			<button type="button" class="btn btn-ghost" onclick={loadUsers} disabled={refreshing}>
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
 				Refresh
 			</button>
 		</header>
@@ -118,21 +129,18 @@
 								<td class="px-5 py-3">{user.email ?? '—'}</td>
 								<td class="px-5 py-3 text-xs">{user.subject}</td>
 								<td class="px-5 py-3">
-									<span class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs">
+									<span class="badge">
 										{user.approved ? 'Approved' : 'Pending'}
 									</span>
 								</td>
 								<td class="px-5 py-3">
-									<select
-										class="rounded-full border border-[var(--border-color)] bg-transparent px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:text-[var(--text-bright)]"
+									<Select
+										value={user.role}
+										options={roleOptions}
 										disabled={savingUser === user.id}
-										onchange={(event) => updateRole(user, (event.target as HTMLSelectElement).value)}
-									>
-										<option value="pending" selected={user.role === 'pending'}>Pending</option>
-										<option value="default" selected={user.role === 'default'}>Default</option>
-										<option value="global_reader" selected={user.role === 'global_reader'}>Global reader</option>
-										<option value="admin" selected={user.role === 'admin'}>Admin</option>
-									</select>
+										size="sm"
+										onchange={(value) => updateRole(user, value)}
+									/>
 								</td>
 								<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 									{user.created_at}

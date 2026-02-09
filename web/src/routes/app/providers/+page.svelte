@@ -8,6 +8,7 @@
 	import RepoTable from '$lib/components/RepoTable.svelte';
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
+	import Checkbox from '$lib/components/Checkbox.svelte';
 	import type {
 		RepoData,
 		GroupData,
@@ -897,7 +898,7 @@
 					</div>
 					<button
 						type="button"
-						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
+						class="btn btn-outline"
 						onclick={handleGitHubSearch}
 						disabled={ghLoading || !ghOwner.trim()}
 					>
@@ -905,7 +906,7 @@
 					</button>
 					<button
 						type="button"
-						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						class="btn btn-primary"
 						onclick={() => queueAllRepos('github', ghOwner, '', undefined, false)}
 						disabled={queueing || !ghOwner.trim()}
 						title="Queue SBOM generation for all repositories from {ghOwner}"
@@ -980,16 +981,13 @@
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 						<input type="text" placeholder="Group path (e.g., gitlab-org)" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
 					</div>
-					<label class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-						<input type="checkbox" bind:checked={glIncludeSubgroups} class="rounded border-[var(--border-color)]" />
-						Include subgroups
-					</label>
-					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
+					<Checkbox bind:checked={glIncludeSubgroups} label="Include subgroups" />
+					<button type="button" class="btn btn-outline" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
 						{glLoading ? 'Loading...' : 'Fetch Projects'}
 					</button>
 					<button
 						type="button"
-						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						class="btn btn-primary"
 						onclick={() => queueAllRepos('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
 						disabled={queueing || !glGroup.trim()}
 						title="Queue SBOM generation for all projects from {glGroup}"
@@ -1102,7 +1100,7 @@
 						/>
 						<button
 							type="button"
-							class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-5 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
+							class="btn btn-outline"
 							onclick={detectAndAddProvider}
 							disabled={detecting || !newProviderUrl.trim()}
 						>
@@ -1143,7 +1141,7 @@
 						</div>
 						<button
 							type="button"
-							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50"
+							class="btn btn-outline"
 							onclick={() => handleCustomSearch(provider)}
 							disabled={ghLoading || !provider.ownerPath}
 						>
@@ -1151,7 +1149,7 @@
 						</button>
 						<button
 							type="button"
-							class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+							class="btn btn-primary"
 							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
 							disabled={queueing || !provider.ownerPath}
 							title="Queue SBOM generation for all projects from {provider.name}"
@@ -1227,17 +1225,14 @@
 						<input type="text" placeholder="Group/organization path" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
 					</div>
 					{#if provider.type === 'gitlab'}
-						<label class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-							<input type="checkbox" bind:checked={cpIncludeSubgroups} class="rounded border-[var(--border-color)]" />
-							Include subgroups
-						</label>
+						<Checkbox bind:checked={cpIncludeSubgroups} label="Include subgroups" />
 					{/if}
-					<button type="button" class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)]/10 px-6 py-3 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-50" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
+					<button type="button" class="btn btn-outline" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
 						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
 					</button>
 					<button
 						type="button"
-						class="rounded-2xl border border-[var(--accent)] bg-[var(--accent)] px-6 py-3 text-sm font-medium text-white transition hover:bg-[var(--accent)]/90 disabled:opacity-50"
+						class="btn btn-primary"
 						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
 						disabled={queueing}
 						title="Queue SBOM generation for all projects from {provider.name}"

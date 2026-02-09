@@ -2,7 +2,7 @@
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, Package, Shield, FileCode, Eye, Download, Activity } from 'lucide-svelte';
+	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, GitCommit, Package, Shield, FileCode, Eye, Download, Activity, ExternalLink } from 'lucide-svelte';
 	import RunTimeline from '$lib/components/RunTimeline.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 
@@ -13,7 +13,7 @@
 		provider: string;
 		repo_path: string;
 		ref?: string;
-		commit_hash?: string;
+		commit_sha?: string;
 		error?: string;
 		created_at: string;
 		started_at?: string;
@@ -302,7 +302,7 @@
 						// If SSE includes artifact IDs, update them immediately
 						if (data.sbom_id) run.sbom_id = data.sbom_id;
 						if (data.secret_id) run.secret_id = data.secret_id;
-						if (data.commit_hash) run.commit_hash = data.commit_hash;
+						if (data.commit_hash) run.commit_sha = data.commit_hash;
 
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
@@ -468,6 +468,22 @@
 	const goBack = () => {
 		if (browser) history.back();
 	};
+
+	const getCommitUrl = (cloneUrl: string, provider: string, sha: string): string | null => {
+		if (!cloneUrl || !sha) return null;
+		// Strip .git suffix and build commit URL
+		let baseUrl = cloneUrl.replace(/\.git$/, '');
+		if (provider === 'gitlab') {
+			return `${baseUrl}/-/commit/${sha}`;
+		}
+		// GitHub, Gitea, Forgejo all use /commit/{sha}
+		return `${baseUrl}/commit/${sha}`;
+	};
+
+	const getRepoUrl = (cloneUrl: string): string | null => {
+		if (!cloneUrl) return null;
+		return cloneUrl.replace(/\.git$/, '');
+	};
 </script>
 
 <svelte:head>
@@ -523,20 +539,75 @@
 							</div>
 						</div>
 					{/if}
-					<p class="mt-2 flex items-center gap-2 text-[var(--text-secondary)]">
-						<GitBranch class="h-4 w-4" />
-						{run.repo_path || run.clone_url}
-						{#if run.ref}
-							<span class="text-[var(--text-muted)]">({run.ref})</span>
+					<div class="mt-3 flex flex-wrap items-center gap-3">
+						<a
+							href={getRepoUrl(run.clone_url) || '#'}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="inline-flex items-center gap-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
+						>
+							<GitBranch class="h-4 w-4" />
+							{run.repo_path || run.clone_url}
+							{#if run.ref}
+								<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--text-muted)]">{run.ref}</span>
+							{/if}
+							<ExternalLink class="h-3 w-3 opacity-50" />
+						</a>
+						{#if run.commit_sha}
+							{@const commitUrl = getCommitUrl(run.clone_url, run.provider, run.commit_sha)}
+							<a
+								href={commitUrl || '#'}
+								target="_blank"
+								rel="noopener noreferrer"
+								class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 font-mono text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
+								title={run.commit_sha}
+							>
+								<GitCommit class="h-4 w-4" />
+								{run.commit_sha.substring(0, 7)}
+								<ExternalLink class="h-3 w-3 opacity-50" />
+							</a>
 						{/if}
-						{#if run.commit_hash}
-							<span class="font-mono text-xs text-[var(--text-muted)]" title="Commit Hash">
-								@ {run.commit_hash.substring(0, 7)}
-							</span>
-						{/if}
-					</p>
+					</div>
 				</div>
 			</div>
+
+			{#if run.status === 'SUCCEEDED' || run.status === 'FAILED'}
+				{@const sbomArtifact = artifacts.find(a => a.type === 'sbom')}
+				{@const secretsArtifact = artifacts.find(a => a.type === 'secrets')}
+				{@const manifestsArtifact = artifacts.find(a => a.type === 'manifests')}
+				<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+						<div class="flex items-center justify-between">
+							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Components</p>
+							<Package class="h-5 w-5 text-[var(--success)]" />
+						</div>
+						<p class="mt-2 text-3xl font-bold text-[var(--text-bright)]">
+							{sbomArtifact?.count ?? '-'}
+						</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">from SBOM analysis</p>
+					</div>
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+						<div class="flex items-center justify-between">
+							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Secrets Found</p>
+							<Shield class="h-5 w-5" style="color: {secretsArtifact && secretsArtifact.count > 0 ? 'var(--warning)' : 'var(--success)'}" />
+						</div>
+						<p class="mt-2 text-3xl font-bold" style="color: {secretsArtifact && secretsArtifact.count > 0 ? 'var(--warning)' : 'var(--text-bright)'}">
+							{secretsArtifact?.count ?? '-'}
+						</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">from secret detection scan</p>
+					</div>
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+						<div class="flex items-center justify-between">
+							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Manifests</p>
+							<FileCode class="h-5 w-5 text-[var(--accent)]" />
+						</div>
+						<p class="mt-2 text-3xl font-bold text-[var(--text-bright)]">
+							{manifestsArtifact?.count ?? '-'}
+						</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">dependency files detected</p>
+					</div>
+				</div>
+			{/if}
 
 			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
@@ -592,7 +663,7 @@
 					secretCount={artifacts.find(a => a.type === 'secrets')?.count || 0}
 					sbomComponentCount={artifacts.find(a => a.type === 'sbom')?.count || 0}
 					manifestCount={artifacts.find(a => a.type === 'manifests')?.count || 0}
-					commitHash={run.commit_hash || ''}
+					commitHash={run.commit_sha || ''}
 				/>
 			{/if}
 		</section>
