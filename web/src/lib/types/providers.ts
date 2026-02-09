@@ -8,6 +8,7 @@ export type RepoData = {
 	languages: string[];
 	is_private: boolean;
 	is_archived: boolean;
+	is_disabled: boolean;
 	is_fork: boolean;
 	topics: string[];
 	created_at: string;

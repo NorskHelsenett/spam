@@ -170,8 +170,8 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "runner",
-							Image: k.cfg.Image,
+							Name:            "runner",
+							Image:           k.cfg.Image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: func() []corev1.EnvVar {
 								envs := []corev1.EnvVar{
@@ -588,6 +588,9 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	var p jobs.CreateRunPayload
 	if err := json.Unmarshal(payloadBytes, &p); err != nil {
 		return fmt.Errorf("unmarshal payload: %w", err)
+	}
+	if p.RepoDisabled {
+		return jobs.NonRetryable(fmt.Errorf("repository is disabled; skipping runner spawn"))
 	}
 	// Generate run token (valid for 2 hours)
 	token, err := GenerateRunToken(e.cfg.HMACKey, runID, 2*time.Hour)

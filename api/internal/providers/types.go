@@ -13,6 +13,7 @@ type RepoData struct {
 	Languages     []string  `json:"languages"`
 	IsPrivate     bool      `json:"is_private"`
 	IsArchived    bool      `json:"is_archived"`
+	IsDisabled    bool      `json:"is_disabled"`
 	IsFork        bool      `json:"is_fork"`
 	Topics        []string  `json:"topics"`
 	CreatedAt     time.Time `json:"created_at"`

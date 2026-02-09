@@ -204,6 +204,9 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 			wg.Add(1)
 			go func(r providers.RepoData) {
 				defer wg.Done()
+				if r.IsDisabled {
+					return
+				}
 
 				// Build clone URL
 				cloneURL := buildCloneURL(provider, r.FullPath, baseURL)
@@ -243,11 +246,12 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 
 				// Create job payload
 				payload := jobs.CreateRunPayload{
-					RepoID:   repoRecord.ID,
-					ProviderID: resolvedProviderID,
-					Provider: provider,
-					CloneURL: cloneURL,
-					Ref:      r.DefaultBranch,
+					RepoID:       repoRecord.ID,
+					ProviderID:   resolvedProviderID,
+					Provider:     provider,
+					CloneURL:     cloneURL,
+					Ref:          r.DefaultBranch,
+					RepoDisabled: r.IsDisabled,
 				}
 
 				payloadBytes, err := json.Marshal(payload)

@@ -62,6 +62,7 @@ type gitHubRepo struct {
 	Language      string    `json:"language"`
 	Private       bool      `json:"private"`
 	Archived      bool      `json:"archived"`
+	Disabled      bool      `json:"disabled"`
 	Fork          bool      `json:"fork"`
 	Topics        []string  `json:"topics"`
 	CreatedAt     time.Time `json:"created_at"`
@@ -253,6 +254,7 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			Languages:     nil, // Will be populated by fetchLanguagesParallel
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
+			IsDisabled:    r.Disabled,
 			IsFork:        r.Fork,
 			Topics:        r.Topics,
 			CreatedAt:     r.CreatedAt,
@@ -542,6 +544,7 @@ func (c *GitHubClientImpl) GetRepoDetails(ctx context.Context, owner, repo strin
 			Languages:     languages,
 			IsPrivate:     ghRepo.Private,
 			IsArchived:    ghRepo.Archived,
+			IsDisabled:    ghRepo.Disabled,
 			IsFork:        ghRepo.Fork,
 			Topics:        ghRepo.Topics,
 			CreatedAt:     ghRepo.CreatedAt,

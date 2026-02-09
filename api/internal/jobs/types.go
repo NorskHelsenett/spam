@@ -17,4 +17,6 @@ type CreateRunPayload struct {
 	CloneURL   string `json:"clone_url"`
 	Ref        string `json:"ref,omitempty"`
 	CommitSHA  string `json:"commit_sha,omitempty"`
+	// RepoDisabled indicates the provider reported this repository as disabled.
+	RepoDisabled bool `json:"repo_disabled,omitempty"`
 }

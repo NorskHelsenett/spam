@@ -193,7 +193,9 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	if err != nil {
 		next := (*time.Time)(nil)
 		status := jobs.JobStatusFailed
-		if job.Attempts < job.MaxAttempts {
+		if jobs.IsNonRetryable(err) {
+			log.Printf("job failed (non-retryable): id=%s type=%s error=%v", job.ID, job.Type, err)
+		} else if job.Attempts < job.MaxAttempts {
 			retryAt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, now)
 			next = &retryAt
 			status = jobs.JobStatusRetry

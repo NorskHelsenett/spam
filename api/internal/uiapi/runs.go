@@ -45,11 +45,12 @@ type RunsListResponse struct {
 
 // CreateRunRequest is the request to create a new run.
 type CreateRunRequest struct {
-	Provider string `json:"provider"`           // github, gitlab, gitea
-	RepoPath string `json:"repo_path"`          // owner/repo or group/project
-	Ref      string `json:"ref,omitempty"`      // branch or tag
-	BaseURL  string `json:"base_url,omitempty"` // for gitlab/gitea custom instances
-	ProviderID string `json:"provider_id,omitempty"`
+	Provider     string `json:"provider"`           // github, gitlab, gitea
+	RepoPath     string `json:"repo_path"`          // owner/repo or group/project
+	Ref          string `json:"ref,omitempty"`      // branch or tag
+	BaseURL      string `json:"base_url,omitempty"` // for gitlab/gitea custom instances
+	ProviderID   string `json:"provider_id,omitempty"`
+	RepoDisabled bool   `json:"repo_disabled,omitempty"`
 }
 
 // CreateRunResponse is the response after creating a run.
@@ -206,11 +207,12 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 		// Create job payload
 		payload := jobs.CreateRunPayload{
-			RepoID:   repo.ID,
-			ProviderID: providerID,
-			Provider: req.Provider,
-			CloneURL: cloneURL,
-			Ref:      req.Ref,
+			RepoID:       repo.ID,
+			ProviderID:   providerID,
+			Provider:     req.Provider,
+			CloneURL:     cloneURL,
+			Ref:          req.Ref,
+			RepoDisabled: req.RepoDisabled,
 		}
 
 		payloadBytes, err := json.Marshal(payload)

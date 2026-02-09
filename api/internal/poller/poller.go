@@ -108,6 +108,9 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		if repo.DefaultBranch == "" {
 			continue
 		}
+		if repo.IsDisabled {
+			continue
+		}
 
 		latestSHA, err := client.GetLatestCommit(ctx, repo.FullPath, repo.DefaultBranch)
 		if err != nil {
@@ -153,12 +156,13 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		}
 
 		payload := jobs.CreateRunPayload{
-			RepoID:     repoRecord.ID,
-			ProviderID: provider.ID,
-			Provider:   provider.Type,
-			CloneURL:   cloneURL,
-			Ref:        repo.DefaultBranch,
-			CommitSHA:  latestSHA,
+			RepoID:       repoRecord.ID,
+			ProviderID:   provider.ID,
+			Provider:     provider.Type,
+			CloneURL:     cloneURL,
+			Ref:          repo.DefaultBranch,
+			CommitSHA:    latestSHA,
+			RepoDisabled: repo.IsDisabled,
 		}
 
 		payloadBytes, err := json.Marshal(payload)

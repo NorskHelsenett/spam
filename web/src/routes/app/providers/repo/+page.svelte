@@ -31,6 +31,7 @@
 		languages: string[];
 		is_private: boolean;
 		is_archived: boolean;
+		is_disabled: boolean;
 		is_fork: boolean;
 		topics: string[];
 		created_at: string;
@@ -342,7 +343,8 @@
 					repo_path: path,
 					base_url: baseUrl || undefined,
 					provider_id: providerId || undefined,
-					ref: details.default_branch || undefined
+					ref: details.default_branch || undefined,
+					repo_disabled: details.is_disabled || undefined
 				})
 			});
 
