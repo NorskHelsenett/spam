@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
@@ -53,6 +54,13 @@
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
 	let syncingProviderIds = $state<Set<string>>(new Set());
+	let healthTooltip = $state<{
+		entryId: string;
+		message: string;
+		top: number;
+		left: number;
+	} | null>(null);
+	let healthTooltipEl: HTMLDivElement | null = $state(null);
 
 	type ApiProvider = {
 		id: string;
@@ -195,6 +203,60 @@
 			return '';
 		}
 		return (entry.healthMessage || '').trim();
+	};
+
+	const hasHealthDetails = (entry: ProviderRow) => Boolean(healthDetails(entry));
+
+	const TOOLTIP_OFFSET = 10;
+	const TOOLTIP_EDGE_GAP = 12;
+
+	const hideHealthTooltip = (entryId?: string) => {
+		if (!entryId || healthTooltip?.entryId === entryId) {
+			healthTooltip = null;
+		}
+	};
+
+	const showHealthTooltip = async (event: MouseEvent | FocusEvent, entry: ProviderRow) => {
+		const message = healthDetails(entry);
+		if (!message || !browser) {
+			return;
+		}
+
+		const anchor = event.currentTarget as HTMLElement | null;
+		if (!anchor) {
+			return;
+		}
+
+		const rect = anchor.getBoundingClientRect();
+		healthTooltip = {
+			entryId: entry.id,
+			message,
+			top: rect.bottom + TOOLTIP_OFFSET,
+			left: rect.left + rect.width / 2
+		};
+
+		await tick();
+
+		if (!healthTooltip || healthTooltip.entryId !== entry.id || !healthTooltipEl) {
+			return;
+		}
+
+		const tipRect = healthTooltipEl.getBoundingClientRect();
+		const maxLeft = window.innerWidth - tipRect.width - TOOLTIP_EDGE_GAP;
+		const centeredLeft = rect.left + rect.width / 2 - tipRect.width / 2;
+		const left = Math.max(TOOLTIP_EDGE_GAP, Math.min(maxLeft, centeredLeft));
+
+		let top = rect.bottom + TOOLTIP_OFFSET;
+		if (top + tipRect.height > window.innerHeight - TOOLTIP_EDGE_GAP) {
+			top = rect.top - tipRect.height - TOOLTIP_OFFSET;
+		}
+		top = Math.max(TOOLTIP_EDGE_GAP, top);
+
+		healthTooltip = {
+			...healthTooltip,
+			top,
+			left
+		};
 	};
 
 	const loadProviders = async () => {
@@ -482,6 +544,17 @@
 		if (browser) {
 			loadProviders();
 			updatePreview();
+
+			const closeTooltip = () => {
+				healthTooltip = null;
+			};
+			window.addEventListener('scroll', closeTooltip, true);
+			window.addEventListener('resize', closeTooltip);
+
+			return () => {
+				window.removeEventListener('scroll', closeTooltip, true);
+				window.removeEventListener('resize', closeTooltip);
+			};
 		}
 	});
 </script>
@@ -723,15 +796,22 @@
 									/>
 								</td>
 								<td class="px-5 py-3">
-									<div class="group relative inline-flex">
-										<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}>
-											{statusLabel(entry)}
+									<div class="relative inline-flex">
+										<span
+											class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}
+										>
+											<button
+												type="button"
+												class="inline-flex items-center border-0 bg-transparent p-0 text-inherit"
+												tabindex={hasHealthDetails(entry) ? 0 : -1}
+												onmouseenter={(event) => showHealthTooltip(event, entry)}
+												onmouseleave={() => hideHealthTooltip(entry.id)}
+												onfocus={(event) => showHealthTooltip(event, entry)}
+												onblur={() => hideHealthTooltip(entry.id)}
+											>
+												{statusLabel(entry)}
+											</button>
 										</span>
-										{#if healthDetails(entry)}
-											<div class="pointer-events-none absolute left-1/2 top-full z-20 mt-2 hidden w-80 -translate-x-1/2 rounded-xl border border-[var(--border-color)] bg-[var(--surface-bg)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)] shadow-xl group-hover:block">
-												{healthDetails(entry)}
-											</div>
-										{/if}
 									</div>
 								</td>
 								<td class="px-5 py-3">
@@ -783,6 +863,16 @@
 		{/if}
 	</section>
 </div>
+
+{#if healthTooltip}
+	<div
+		bind:this={healthTooltipEl}
+		class="pointer-events-none fixed z-[200] w-80 rounded-xl border border-[var(--border-color)] bg-[var(--surface-bg)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)] shadow-xl"
+		style={`top: ${healthTooltip.top}px; left: ${healthTooltip.left}px;`}
+	>
+		{healthTooltip.message}
+	</div>
+{/if}
 
 <!-- Rotate Token Dialog -->
 <Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false} maxWidth="max-w-xl">
