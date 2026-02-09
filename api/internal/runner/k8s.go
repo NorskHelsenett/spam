@@ -12,6 +12,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -591,6 +592,14 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	}
 	if p.RepoDisabled {
 		return jobs.NonRetryable(fmt.Errorf("repository is disabled; skipping runner spawn"))
+	}
+	if strings.TrimSpace(p.ProviderID) != "" {
+		var provider providerconfig.ProviderInstance
+		if err := e.server.db.WithContext(ctx).First(&provider, "id = ?", p.ProviderID).Error; err == nil {
+			if provider.HealthStatus == providerconfig.ProviderHealthFailed {
+				return jobs.NonRetryable(fmt.Errorf("provider health is failed; skipping runner spawn"))
+			}
+		}
 	}
 	// Generate run token (valid for 2 hours)
 	token, err := GenerateRunToken(e.cfg.HMACKey, runID, 2*time.Hour)

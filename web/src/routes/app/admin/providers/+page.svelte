@@ -19,6 +19,9 @@
 		tokenFingerprint?: string;
 		enabled: boolean;
 		pollInterval?: number | null;
+		healthStatus: string;
+		healthMessage?: string;
+		lastHealthCheck?: string;
 		createdAt: string;
 		updatedAt?: string;
 		lastRotatedAt?: string;
@@ -49,6 +52,7 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
+	let syncingProviderId = $state<string | null>(null);
 
 	type ApiProvider = {
 		id: string;
@@ -60,6 +64,9 @@
 		token_fingerprint?: string;
 		enabled: boolean;
 		poll_interval?: number | null;
+		health_status?: string;
+		health_message?: string;
+		last_health_check?: string;
 		created_at: string;
 		updated_at?: string;
 		last_rotated_at?: string;
@@ -151,10 +158,30 @@
 		tokenFingerprint: entry.token_fingerprint,
 		enabled: entry.enabled,
 		pollInterval: entry.poll_interval,
+		healthStatus: entry.health_status || 'UNKNOWN',
+		healthMessage: entry.health_message,
+		lastHealthCheck: entry.last_health_check,
 		createdAt: entry.created_at,
 		updatedAt: entry.updated_at,
 		lastRotatedAt: entry.last_rotated_at
 	});
+
+	const statusLabel = (entry: ProviderRow) => {
+		const health = (entry.healthStatus || '').toUpperCase();
+		if (entry.enabled && (health === 'FAILED' || health === 'DEGRADED')) return 'Unhealhty';
+		return entry.enabled ? 'Enabled' : 'Disabled';
+	};
+
+	const statusClass = (entry: ProviderRow) => {
+		const health = (entry.healthStatus || '').toUpperCase();
+		if (entry.enabled && (health === 'FAILED' || health === 'DEGRADED')) {
+			return 'border-[var(--error)]/40 text-[var(--error)]';
+		}
+		if (entry.enabled) {
+			return 'border-[var(--success)]/40 text-[var(--success)]';
+		}
+		return 'border-[var(--border-color)] text-[var(--text-tertiary)]';
+	};
 
 	const loadProviders = async () => {
 		loading = true;
@@ -203,7 +230,11 @@
 
 			if (!response.ok) {
 				const text = await response.text();
-				formError = text || 'Failed to create provider.';
+				if (text && text.toLowerCase().includes('provider health check failed')) {
+					formError = 'Could not verify provider access. Check URL and PAT.';
+				} else {
+					formError = text || 'Failed to create provider.';
+				}
 				return;
 			}
 
@@ -335,6 +366,26 @@
 			formError = 'Failed to delete provider.';
 		} finally {
 			saving = false;
+		}
+	};
+
+	const syncProviderNow = async (entry: ProviderRow) => {
+		syncingProviderId = entry.id;
+		formError = '';
+		try {
+			const response = await fetch(`/api/admin/providers/${entry.id}/sync`, {
+				method: 'POST',
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				formError = 'Failed to sync provider.';
+				return;
+			}
+			await loadProviders();
+		} catch {
+			formError = 'Failed to sync provider.';
+		} finally {
+			syncingProviderId = null;
 		}
 	};
 
@@ -646,12 +697,25 @@
 									/>
 								</td>
 								<td class="px-5 py-3">
-									<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${entry.enabled ? 'border-[var(--success)]/40 text-[var(--success)]' : 'border-[var(--border-color)] text-[var(--text-tertiary)]'}`}>
-										{entry.enabled ? 'Enabled' : 'Disabled'}
+									<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}>
+										{statusLabel(entry)}
 									</span>
 								</td>
 								<td class="px-5 py-3">
 									<div class="flex flex-wrap gap-2">
+										<button
+											type="button"
+											class="sync-now-btn rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+											class:syncing={syncingProviderId === entry.id}
+											onclick={() => syncProviderNow(entry)}
+											disabled={saving || syncingProviderId === entry.id}
+										>
+											{#if syncingProviderId === entry.id}
+												<span class="sync-label syncing-text" data-text="Syncing...">Syncing...</span>
+											{:else}
+												<span class="sync-label">Sync Now</span>
+											{/if}
+										</button>
 										<button
 											type="button"
 											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
@@ -778,3 +842,45 @@
 		{/if}
 	</div>
 </Dialog>
+
+<style>
+	.sync-now-btn {
+		position: relative;
+		overflow: hidden;
+	}
+
+	.sync-label {
+		position: relative;
+		display: inline-block;
+	}
+
+	.sync-now-btn.syncing .syncing-text::after {
+		content: attr(data-text);
+		position: absolute;
+		inset: 0;
+		color: transparent;
+		background: linear-gradient(
+			110deg,
+			transparent 0%,
+			transparent 35%,
+			color-mix(in srgb, var(--text-primary) 55%, transparent) 46%,
+			var(--text-primary) 50%,
+			color-mix(in srgb, var(--text-primary) 55%, transparent) 54%,
+			transparent 65%,
+			transparent 100%
+		);
+		background-size: 220% 100%;
+		-webkit-background-clip: text;
+		background-clip: text;
+		animation: sync-thinking-shimmer 1.25s linear infinite;
+	}
+
+	@keyframes sync-thinking-shimmer {
+		0% {
+			background-position: 200% 0;
+		}
+		100% {
+			background-position: -30% 0;
+		}
+	}
+</style>

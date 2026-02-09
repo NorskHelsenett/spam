@@ -26,6 +26,17 @@ type Poller struct {
 	last  map[string]time.Time // providerID -> last poll time
 }
 
+type SyncResult struct {
+	ProviderID     string `json:"provider_id"`
+	ProviderName   string `json:"provider_name"`
+	HealthStatus   string `json:"health_status"`
+	HealthMessage  string `json:"health_message,omitempty"`
+	TotalRepos     int    `json:"total_repos"`
+	Queued         int    `json:"queued"`
+	SkippedSame    int    `json:"skipped_same"`
+	SkippedPending int    `json:"skipped_pending"`
+}
+
 // New creates a new Poller.
 func New(db *gorm.DB, store *providerconfig.Store) *Poller {
 	return &Poller{
@@ -59,7 +70,9 @@ func (p *Poller) Poll(ctx context.Context) {
 			continue
 		}
 
-		p.pollProvider(ctx, provider)
+		if _, err := p.syncProvider(ctx, provider); err != nil {
+			log.Printf("poller: sync provider %s: %v", provider.DisplayName, err)
+		}
 
 		p.mu.Lock()
 		p.last[provider.ID] = time.Now()
@@ -67,21 +80,55 @@ func (p *Poller) Poll(ctx context.Context) {
 	}
 }
 
-func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.ProviderInstance) {
+// SyncProvider performs an immediate sync regardless of poll interval.
+func (p *Poller) SyncProvider(ctx context.Context, providerID string) (*SyncResult, error) {
+	var provider providerconfig.ProviderInstance
+	if err := p.db.WithContext(ctx).
+		Where("id = ? AND enabled = true", strings.TrimSpace(providerID)).
+		First(&provider).Error; err != nil {
+		return nil, err
+	}
+	return p.syncProvider(ctx, provider)
+}
+
+func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.ProviderInstance) (*SyncResult, error) {
+	result := &SyncResult{
+		ProviderID:   provider.ID,
+		ProviderName: provider.DisplayName,
+		HealthStatus: providerconfig.ProviderHealthUnknown,
+	}
+
 	token, err := p.store.GetActiveToken(ctx, provider.ID)
 	if err != nil {
 		log.Printf("poller: get token for %s: %v", provider.DisplayName, err)
-		return
+		msg := "failed to load provider token"
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthFailed, msg)
+		result.HealthStatus = providerconfig.ProviderHealthFailed
+		result.HealthMessage = msg
+		return result, err
 	}
 
-	client := createClient(provider.Type, provider.BaseURL, token)
+	healthMsg, healthErr := providerconfig.CheckProviderHealth(ctx, provider.Type, provider.BaseURL, provider.OwnerPath, token)
+	if healthErr != nil {
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthFailed, healthMsg)
+		result.HealthStatus = providerconfig.ProviderHealthFailed
+		result.HealthMessage = healthMsg
+		return result, nil
+	}
+
+	client := providerconfig.NewProviderClient(provider.Type, provider.BaseURL, token)
 	if client == nil {
 		log.Printf("poller: unknown provider type %s for %s", provider.Type, provider.DisplayName)
-		return
+		msg := "unsupported provider type"
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthFailed, msg)
+		result.HealthStatus = providerconfig.ProviderHealthFailed
+		result.HealthMessage = msg
+		return result, nil
 	}
 
 	// Fetch all repos (paginated)
 	var allRepos []providers.RepoData
+	var listErr error
 	page := 1
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, provider.OwnerPath, providers.ListOptions{
@@ -90,6 +137,7 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		})
 		if err != nil {
 			log.Printf("poller: list repos for %s page %d: %v", provider.DisplayName, page, err)
+			listErr = err
 			break
 		}
 		allRepos = append(allRepos, repos...)
@@ -99,11 +147,21 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		page++
 	}
 
-	if len(allRepos) == 0 {
-		return
+	if listErr != nil {
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthFailed, "failed to list repositories")
+		result.HealthStatus = providerconfig.ProviderHealthFailed
+		result.HealthMessage = "failed to list repositories"
+		return result, nil
 	}
 
-	var queued, skippedSame, skippedPending int
+	if len(allRepos) == 0 {
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthHealthy, "no repositories found")
+		result.HealthStatus = providerconfig.ProviderHealthHealthy
+		result.HealthMessage = "no repositories found"
+		return result, nil
+	}
+
+	var queued, skippedSame, skippedPending, healthFailed int
 	for _, repo := range allRepos {
 		if repo.DefaultBranch == "" {
 			continue
@@ -115,6 +173,7 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		latestSHA, err := client.GetLatestCommit(ctx, repo.FullPath, repo.DefaultBranch)
 		if err != nil {
 			// Skip repos where we can't get the latest commit (empty repos, permission issues, etc.)
+			healthFailed++
 			continue
 		}
 
@@ -196,6 +255,22 @@ func (p *Poller) pollProvider(ctx context.Context, provider providerconfig.Provi
 		log.Printf("poller: %s — queued=%d skipped_same=%d skipped_pending=%d total=%d",
 			provider.DisplayName, queued, skippedSame, skippedPending, len(allRepos))
 	}
+
+	result.TotalRepos = len(allRepos)
+	result.Queued = queued
+	result.SkippedSame = skippedSame
+	result.SkippedPending = skippedPending
+
+	if healthFailed > 0 {
+		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthDegraded, fmt.Sprintf("%d repo health checks failed", healthFailed))
+		result.HealthStatus = providerconfig.ProviderHealthDegraded
+		result.HealthMessage = fmt.Sprintf("%d repo health checks failed", healthFailed)
+		return result, nil
+	}
+	_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthHealthy, "")
+	result.HealthStatus = providerconfig.ProviderHealthHealthy
+	result.HealthMessage = ""
+	return result, nil
 }
 
 // getLastScannedCommit returns the commit_hash of the last SUCCEEDED run for a repo.
@@ -221,19 +296,6 @@ func (p *Poller) hasPendingJob(ctx context.Context, repoID string) bool {
 		Where("payload->>'repo_id' = ?", repoID).
 		Count(&count)
 	return count > 0
-}
-
-func createClient(providerType, baseURL, token string) providers.Client {
-	switch providerType {
-	case "github":
-		return providers.NewGitHubClient(baseURL, token)
-	case "gitlab":
-		return providers.NewGitLabClient(baseURL, token)
-	case "gitea", "forgejo":
-		return providers.NewGiteaClient(baseURL, token)
-	default:
-		return nil
-	}
 }
 
 func buildCloneURL(provider, repoPath, baseURL string) string {

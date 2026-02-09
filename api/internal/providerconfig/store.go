@@ -30,6 +30,9 @@ type AdminProvider struct {
 	TokenFingerprint string     `json:"token_fingerprint,omitempty"`
 	Enabled          bool       `json:"enabled"`
 	PollInterval     *int       `json:"poll_interval,omitempty"`
+	HealthStatus     string     `json:"health_status"`
+	HealthMessage    string     `json:"health_message,omitempty"`
+	LastHealthCheck  *time.Time `json:"last_health_check,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at"`
 	LastRotatedAt    *time.Time `json:"last_rotated_at,omitempty"`
@@ -55,20 +58,22 @@ func EnsureDefaults(ctx context.Context, db *gorm.DB) error {
 
 	defaults := []ProviderInstance{
 		{
-			ID:          uuid.NewString(),
-			Type:        ProviderGitHub,
-			BaseURL:     "https://github.com",
-			OwnerPath:   "NorskHelsenett",
-			DisplayName: "github.com/NorskHelsenett",
-			Enabled:     true,
+			ID:           uuid.NewString(),
+			Type:         ProviderGitHub,
+			BaseURL:      "https://github.com",
+			OwnerPath:    "NorskHelsenett",
+			DisplayName:  "github.com/NorskHelsenett",
+			Enabled:      true,
+			HealthStatus: ProviderHealthUnknown,
 		},
 		{
-			ID:          uuid.NewString(),
-			Type:        ProviderGitLab,
-			BaseURL:     "https://gitlab.com",
-			OwnerPath:   "",
-			DisplayName: "gitlab.com",
-			Enabled:     true,
+			ID:           uuid.NewString(),
+			Type:         ProviderGitLab,
+			BaseURL:      "https://gitlab.com",
+			OwnerPath:    "",
+			DisplayName:  "gitlab.com",
+			Enabled:      true,
+			HealthStatus: ProviderHealthUnknown,
 		},
 	}
 
@@ -123,16 +128,19 @@ func (s *Store) ListAdmin(ctx context.Context) ([]AdminProvider, error) {
 // providerToAdmin converts a ProviderInstance to AdminProvider (without secret info).
 func providerToAdmin(provider ProviderInstance) AdminProvider {
 	admin := AdminProvider{
-		ID:           provider.ID,
-		ProviderURL:  provider.BaseURL,
-		BaseURL:      provider.BaseURL,
-		OwnerPath:    provider.OwnerPath,
-		Type:         provider.Type,
-		DisplayName:  provider.DisplayName,
-		Enabled:      provider.Enabled,
-		PollInterval: provider.PollInterval,
-		CreatedAt:    provider.CreatedAt,
-		UpdatedAt:    provider.UpdatedAt,
+		ID:              provider.ID,
+		ProviderURL:     provider.BaseURL,
+		BaseURL:         provider.BaseURL,
+		OwnerPath:       provider.OwnerPath,
+		Type:            provider.Type,
+		DisplayName:     provider.DisplayName,
+		Enabled:         provider.Enabled,
+		PollInterval:    provider.PollInterval,
+		HealthStatus:    provider.HealthStatus,
+		HealthMessage:   provider.HealthMessage,
+		LastHealthCheck: provider.LastHealthCheck,
+		CreatedAt:       provider.CreatedAt,
+		UpdatedAt:       provider.UpdatedAt,
 	}
 	if provider.OwnerPath != "" {
 		admin.ProviderURL = strings.TrimRight(provider.BaseURL, "/") + "/" + provider.OwnerPath
@@ -186,6 +194,9 @@ func (s *Store) ListPublic(ctx context.Context) ([]PublicProvider, error) {
 func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat string, createdBy string) (*AdminProvider, error) {
 	provider.ID = uuid.NewString()
 	provider.CreatedByUserID = createdBy
+	if strings.TrimSpace(provider.HealthStatus) == "" {
+		provider.HealthStatus = ProviderHealthUnknown
+	}
 
 	var tokenFingerprint string
 	var tokenCreatedAt *time.Time
@@ -321,7 +332,7 @@ func (s *Store) revokeActiveTokensTx(ctx context.Context, tx *gorm.DB, providerI
 	return tx.WithContext(ctx).Model(&ProviderSecret{}).
 		Where("provider_id = ? AND revoked_at IS NULL", providerID).
 		Updates(map[string]any{
-			"revoked_at":      &now,
+			"revoked_at":         &now,
 			"revoked_by_user_id": revokedBy,
 		}).Error
 }
@@ -439,4 +450,37 @@ func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance,
 		return nil, err
 	}
 	return providers, nil
+}
+
+func normalizeHealthStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case ProviderHealthHealthy:
+		return ProviderHealthHealthy
+	case ProviderHealthDegraded:
+		return ProviderHealthDegraded
+	case ProviderHealthFailed:
+		return ProviderHealthFailed
+	default:
+		return ProviderHealthUnknown
+	}
+}
+
+// UpdateHealth records provider connectivity/repo health status for UI and diagnostics.
+func (s *Store) UpdateHealth(ctx context.Context, providerID, status, message string) error {
+	if strings.TrimSpace(providerID) == "" {
+		return nil
+	}
+
+	now := time.Now()
+	updates := map[string]any{
+		"health_status":     normalizeHealthStatus(status),
+		"health_message":    strings.TrimSpace(message),
+		"last_health_check": now,
+		"updated_at":        now,
+	}
+
+	return s.db.WithContext(ctx).
+		Model(&ProviderInstance{}).
+		Where("id = ?", providerID).
+		Updates(updates).Error
 }

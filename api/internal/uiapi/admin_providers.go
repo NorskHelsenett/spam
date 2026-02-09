@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/poller"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"gorm.io/gorm"
 )
 
 type createProviderRequest struct {
@@ -110,6 +112,14 @@ func AdminProvidersCreateHandler(authService *auth.Service, store *providerconfi
 			Enabled:     true,
 		}
 
+		if msg, err := providerconfig.CheckProviderHealth(r.Context(), provider.Type, provider.BaseURL, provider.OwnerPath, strings.TrimSpace(req.PAT)); err != nil {
+			if msg == "" {
+				msg = "provider health check failed"
+			}
+			http.Error(w, msg, http.StatusBadRequest)
+			return
+		}
+
 		created, err := store.Create(r.Context(), provider, req.PAT, adminUser.ID)
 		if err != nil {
 			if strings.Contains(err.Error(), "provider already exists") {
@@ -123,8 +133,31 @@ func AdminProvidersCreateHandler(authService *auth.Service, store *providerconfi
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		_ = store.UpdateHealth(r.Context(), created.ID, providerconfig.ProviderHealthHealthy, "")
 
 		writeJSON(w, http.StatusCreated, created)
+	}
+}
+
+func AdminProvidersSyncHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if adminProviderGuard(w, r, authService, store) == nil {
+			return
+		}
+
+		providerID := requireProviderID(w, r)
+		if providerID == "" {
+			return
+		}
+
+		syncer := poller.New(db, store)
+		result, err := syncer.SyncProvider(r.Context(), providerID)
+		if err != nil {
+			http.Error(w, "failed to sync provider", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
