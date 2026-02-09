@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle } from 'lucide-svelte';
+	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download } from 'lucide-svelte';
 	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
 	import Select from '$lib/components/Select.svelte';
 
@@ -27,6 +27,7 @@
 	let page = $state(1);
 	let totalCount = $state(0);
 	let pageSize = $state(50);
+	let exporting = $state(false);
 
 	// Sorting
 	let sortColumn = $state<string>('');
@@ -91,6 +92,99 @@
 		}
 	};
 
+	const csvEscape = (value: string | number | boolean | null | undefined) => {
+		if (value === null || value === undefined) return '';
+		const str = String(value);
+		if (str.includes('"') || str.includes(',') || str.includes('\n') || str.includes('\r')) {
+			return `"${str.replaceAll('"', '""')}"`;
+		}
+		return str;
+	};
+
+	const exportCsv = async () => {
+		if (exporting) return;
+		exporting = true;
+		try {
+			const allRows: UnifiedDependency[] = [];
+			const perPage = 100;
+			let exportPage = 1;
+			let expectedTotal = 0;
+			while (true) {
+				const params = new URLSearchParams();
+				if (searchQuery) params.set('q', searchQuery);
+				if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
+				if (selectedSource) params.set('source', selectedSource);
+				if (sortColumn) {
+					params.set('sort', sortColumn);
+					params.set('order', sortDirection);
+				}
+				params.set('page', String(exportPage));
+				params.set('per_page', String(perPage));
+
+				const response = await fetch(`/api/dependencies?${params}`, { credentials: 'include' });
+				if (!response.ok) {
+					throw new Error(response.status === 401 ? 'Please log in.' : 'Failed to export dependencies.');
+				}
+				const data = await response.json();
+				const batch: UnifiedDependency[] = data.dependencies || [];
+				expectedTotal = data.total || 0;
+				const totalPages = data.total_pages || 0;
+				allRows.push(...batch);
+
+				if (batch.length === 0 || allRows.length >= expectedTotal || (totalPages > 0 && exportPage >= totalPages)) break;
+				exportPage += 1;
+			}
+
+			const headers = [
+				'name',
+				'ecosystem',
+				'versions',
+				'source_display',
+				'repos',
+				'sboms',
+				'purl',
+				'sources_raw',
+				'has_direct',
+				'scopes'
+			];
+
+			const lines = [headers.join(',')];
+			for (const dep of allRows) {
+				const sourceDisplay =
+					dep.sources[0] === 'both' ? 'Both' : dep.sources[0] === 'sbom' ? 'SBOM' : 'Manifest';
+				const line = [
+					csvEscape(dep.name),
+					csvEscape(dep.ecosystem || ''),
+					csvEscape(dep.version_count),
+					csvEscape(sourceDisplay),
+					csvEscape(dep.repo_count),
+					csvEscape(dep.sbom_count),
+					csvEscape(dep.purl || ''),
+					csvEscape((dep.sources || []).join('|')),
+					csvEscape(Boolean(dep.has_direct)),
+					csvEscape((dep.scopes || []).join('|'))
+				];
+				lines.push(line.join(','));
+			}
+
+			const csv = lines.join('\n');
+			const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			const date = new Date().toISOString().slice(0, 10);
+			link.href = url;
+			link.download = `dependencies-${date}.csv`;
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(url);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to export dependencies.';
+		} finally {
+			exporting = false;
+		}
+	};
+
 	const handleSearch = () => {
 		if (searchTimeout) clearTimeout(searchTimeout);
 		searchTimeout = setTimeout(() => {
@@ -146,6 +240,15 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Dependencies</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">Search dependencies from SBOMs and manifest files.</p>
 			</div>
+			<button
+				type="button"
+				class="btn btn-secondary w-full sm:w-auto"
+				onclick={exportCsv}
+				disabled={exporting || loading}
+			>
+				<Download class="h-4 w-4" />
+				{exporting ? 'Exporting...' : 'Export CSV'}
+			</button>
 		</header>
 
 		<!-- Search and filters -->
