@@ -38,6 +38,11 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 		ecosystem := r.URL.Query().Get("ecosystem")
 		repoID := r.URL.Query().Get("repo_id")
 		source := r.URL.Query().Get("source") // "", "sbom", "manifest", "both"
+		parsedSearch, err := parseDependencySearchQuery(search)
+		if err != nil {
+			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		query := `
 			WITH sbom_rows AS (
@@ -103,7 +108,13 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 		`
 
 		args := []interface{}{}
-		if search != "" {
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Clauses)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
 			query += ` AND (component_name ILIKE ? OR component_purl ILIKE ?)`
 			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
@@ -206,6 +217,11 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		source := r.URL.Query().Get("source") // "sbom", "manifest", or empty for both
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order") // "asc" or "desc"
+		parsedSearch, err := parseDependencySearchQuery(search)
+		if err != nil {
+			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// Validate and set defaults for sorting
 		if sortColumn == "" {
@@ -260,7 +276,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		args := []interface{}{}
 
-		if search != "" {
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Clauses)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
 			query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
 			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
@@ -292,7 +314,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		`
 
 		// Apply filters for manifest side (continue parameter numbering)
-		if search != "" {
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Clauses)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
 			query += ` AND md.name ILIKE ?`
 			args = append(args, "%"+search+"%")
 		}

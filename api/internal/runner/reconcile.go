@@ -64,8 +64,8 @@ func (e *RunExecutor) ReconcileRunningJobs(ctx context.Context, db *gorm.DB, min
 
 	for i := range orphans {
 		run := orphans[i]
-		log.Printf("reconcile: orphaned RUNNING job (no k8s job), marking FAILED: run_id=%s", run.ID)
-		if err := e.markRunFailed(ctx, db, &run, "orphaned job: worker did not create k8s job"); err != nil {
+		log.Printf("reconcile: orphaned RUNNING job (no k8s job), re-queuing: run_id=%s", run.ID)
+		if err := e.requeueRun(ctx, db, &run); err != nil {
 			log.Printf("reconcile error: orphaned run_id=%s error=%v", run.ID, err)
 			continue
 		}
@@ -135,6 +135,30 @@ func (e *RunExecutor) reconcileRun(ctx context.Context, db *gorm.DB, run *Run) e
 		Model(&Run{}).
 		Where("id = ?", run.ID).
 		Update("updated_at", time.Now()).Error
+}
+
+func (e *RunExecutor) requeueRun(ctx context.Context, db *gorm.DB, run *Run) error {
+	now := time.Now()
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
+			"status":     RunStatusQueued,
+			"locked_at":  nil,
+			"locked_by":  "",
+			"updated_at": now,
+		}).Error; err != nil {
+			return err
+		}
+
+		return events.EmitEvent(tx, events.EventJobStatusChanged, "job", run.ID, jobs.JobEventPayload{
+			JobID:       run.ID,
+			Type:        run.Type,
+			Status:      jobs.JobStatus(RunStatusQueued),
+			Previous:    jobs.JobStatus(RunStatusRunning),
+			Attempts:    run.Attempts,
+			MaxAttempts: run.MaxAttempts,
+			RunAt:       run.RunAt,
+		})
+	})
 }
 
 func (e *RunExecutor) markRunSucceeded(ctx context.Context, db *gorm.DB, run *Run) error {
