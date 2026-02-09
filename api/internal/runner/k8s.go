@@ -597,7 +597,7 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 		var provider providerconfig.ProviderInstance
 		if err := e.server.db.WithContext(ctx).First(&provider, "id = ?", p.ProviderID).Error; err == nil {
 			if provider.HealthStatus == providerconfig.ProviderHealthFailed {
-				return jobs.NonRetryable(fmt.Errorf("provider health is failed; skipping runner spawn"))
+				return jobs.ProviderUnavailable(fmt.Errorf("provider health is failed; will retry later"))
 			}
 		}
 	}

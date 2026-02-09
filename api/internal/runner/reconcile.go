@@ -48,8 +48,32 @@ func (e *RunExecutor) ReconcileRunningJobs(ctx context.Context, db *gorm.DB, min
 		reconciled++
 	}
 
+	// Second pass: find orphaned RUNNING jobs with no k8s_job_name
+	// These are jobs where the worker crashed before creating the K8s job
+	var orphans []Run
+	if err := db.WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+		Where("type = ?", jobs.JobTypeCreateRun).
+		Where("status = ?", RunStatusRunning).
+		Where("k8s_job_name = ''").
+		Where("updated_at < ?", cutoff).
+		Limit(50).
+		Find(&orphans).Error; err != nil {
+		return reconciled, fmt.Errorf("query orphaned jobs: %w", err)
+	}
+
+	for i := range orphans {
+		run := orphans[i]
+		log.Printf("reconcile: orphaned RUNNING job (no k8s job), marking FAILED: run_id=%s", run.ID)
+		if err := e.markRunFailed(ctx, db, &run, "orphaned job: worker did not create k8s job"); err != nil {
+			log.Printf("reconcile error: orphaned run_id=%s error=%v", run.ID, err)
+			continue
+		}
+		reconciled++
+	}
+
 	if reconciled > 0 {
-		log.Printf("reconciled %d/%d running jobs", reconciled, len(runs))
+		log.Printf("reconciled %d jobs (%d running, %d orphaned)", reconciled, len(runs), len(orphans))
 	}
 	return reconciled, nil
 }
@@ -61,8 +85,17 @@ func (e *RunExecutor) reconcileRun(ctx context.Context, db *gorm.DB, run *Run) e
 		return e.markRunFailed(ctx, db, run, "k8s job not found")
 	}
 
-	// Job is still actively running — touch updated_at to prevent stale requeue
+	// Job is still actively running — but check pod status for stuck error states
 	if k8sJob.Status.Active > 0 {
+		podStatus, podErr := e.k8s.GetPodStatus(ctx, run.K8sJobName, run.K8sNamespace)
+		if podErr == nil && podStatus.IsError {
+			errMsg := fmt.Sprintf("k8s pod stuck: %s: %s", podStatus.Reason, podStatus.Message)
+			log.Printf("reconcile: pod in error state, marking run FAILED: run_id=%s job=%s/%s error=%s",
+				run.ID, run.K8sNamespace, run.K8sJobName, errMsg)
+			_ = e.k8s.DeleteJob(ctx, run.K8sJobName, run.K8sNamespace)
+			return e.markRunFailed(ctx, db, run, errMsg)
+		}
+		// Pod is healthy or we couldn't check — touch updated_at
 		return db.WithContext(ctx).
 			Model(&Run{}).
 			Where("id = ?", run.ID).
@@ -88,7 +121,16 @@ func (e *RunExecutor) reconcileRun(ctx context.Context, db *gorm.DB, run *Run) e
 		return e.markRunFailed(ctx, db, run, errMsg)
 	}
 
-	// No active/succeeded/failed — still pending, touch updated_at
+	// No active/succeeded/failed — still pending, check pod status for errors
+	podStatus, podErr := e.k8s.GetPodStatus(ctx, run.K8sJobName, run.K8sNamespace)
+	if podErr == nil && podStatus.IsError {
+		errMsg := fmt.Sprintf("k8s pod stuck: %s: %s", podStatus.Reason, podStatus.Message)
+		log.Printf("reconcile: pod in error state (no active pods), marking run FAILED: run_id=%s job=%s/%s error=%s",
+			run.ID, run.K8sNamespace, run.K8sJobName, errMsg)
+		_ = e.k8s.DeleteJob(ctx, run.K8sJobName, run.K8sNamespace)
+		return e.markRunFailed(ctx, db, run, errMsg)
+	}
+	// Pod is healthy or we couldn't check — touch updated_at
 	return db.WithContext(ctx).
 		Model(&Run{}).
 		Where("id = ?", run.ID).
