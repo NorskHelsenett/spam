@@ -3,6 +3,7 @@
 	import { browser } from '$app/environment';
 	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle } from 'lucide-svelte';
 	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
+	import Select from '$lib/components/Select.svelte';
 
 	type UnifiedDependency = {
 		name: string;
@@ -36,6 +37,16 @@
 	let selectedDependency: UnifiedDependency | null = $state(null);
 
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+	const sourceOptions = [
+		{ value: '', label: 'All sources' },
+		{ value: 'sbom', label: 'SBOM only' },
+		{ value: 'manifest', label: 'Manifest only' },
+		{ value: 'both', label: 'Both (verified)' }
+	];
+	const ecosystemOptions = $derived([
+		{ value: '', label: 'All ecosystems' },
+		...ecosystems.map((eco) => ({ value: eco, label: eco }))
+	]);
 
 	const loadEcosystems = async () => {
 		try {
@@ -139,7 +150,7 @@
 
 		<!-- Search and filters -->
 		<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
-			<div class="relative flex-1">
+			<div class="relative flex-1 sm:min-w-[20rem]">
 				<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 				<input
 					type="text"
@@ -149,26 +160,18 @@
 					oninput={handleSearch}
 				/>
 			</div>
-			<select
-				class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] transition focus:border-[var(--accent)] focus:outline-none"
+			<Select
+				options={ecosystemOptions}
 				bind:value={selectedEcosystem}
+				class="w-full sm:w-auto sm:min-w-[12rem] sm:shrink-0"
 				onchange={handleEcosystemChange}
-			>
-				<option value="">All ecosystems</option>
-				{#each ecosystems as eco}
-					<option value={eco}>{eco}</option>
-				{/each}
-			</select>
-			<select
-				class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] transition focus:border-[var(--accent)] focus:outline-none"
+			/>
+			<Select
+				options={sourceOptions}
 				bind:value={selectedSource}
+				class="w-full sm:w-auto sm:min-w-[12rem] sm:shrink-0"
 				onchange={handleSourceChange}
-			>
-				<option value="">All sources</option>
-				<option value="sbom">SBOM only</option>
-				<option value="manifest">Manifest only</option>
-				<option value="both">Both (verified)</option>
-			</select>
+			/>
 		</div>
 
 		{#if error}
