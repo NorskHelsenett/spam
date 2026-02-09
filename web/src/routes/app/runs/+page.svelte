@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { Play, CheckCircle, XCircle, Clock, Loader2, RefreshCw } from 'lucide-svelte';
@@ -25,18 +25,116 @@
 		page_size: number;
 	};
 
+	type RunFilter = {
+		id: string;
+		label: string;
+		statuses: string[];
+	};
+
+	const runFilters: RunFilter[] = [
+		{ id: 'all', label: 'All', statuses: [] },
+		{ id: 'running', label: 'Running', statuses: ['RUNNING', 'QUEUED'] },
+		{ id: 'succeeded', label: 'Succeeded', statuses: ['SUCCEEDED'] },
+		{ id: 'error', label: 'Error', statuses: ['FAILED'] }
+	];
+
 	let runs: Run[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let totalCount = $state(0);
 	let page = $state(1);
 	let pageSize = $state(20);
+	let selectedFilter = $state(runFilters[0]);
+
+	const runStreams = new Map<string, EventSource>();
+
+	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
+
+	const closeRunStream = (id: string) => {
+		const stream = runStreams.get(id);
+		if (!stream) return;
+		stream.close();
+		runStreams.delete(id);
+	};
+
+	const closeAllRunStreams = () => {
+		for (const id of runStreams.keys()) {
+			closeRunStream(id);
+		}
+	};
+
+	const handleRunStatusEvent = (runId: string, data: { status?: string; error?: string }) => {
+		if (!data.status) return;
+		const nextStatus = data.status;
+
+		let changed = false;
+		runs = runs.map((run) => {
+			if (run.id !== runId) return run;
+			if (run.status === nextStatus && (!data.error || data.error === run.error)) {
+				return run;
+			}
+			changed = true;
+			return {
+				...run,
+				status: nextStatus,
+				error: data.error ?? run.error
+			};
+		});
+
+		if (!changed) return;
+
+		if (!isActiveRunStatus(nextStatus)) {
+			closeRunStream(runId);
+		}
+
+		// Re-fetch once on status changes so ordering, counts, and filtered rows stay correct.
+		loadRuns();
+	};
+
+	const syncRunStreams = () => {
+		if (!browser) return;
+
+		const activeRunIds = new Set(runs.filter((run) => isActiveRunStatus(run.status)).map((run) => run.id));
+
+		for (const id of runStreams.keys()) {
+			if (!activeRunIds.has(id)) {
+				closeRunStream(id);
+			}
+		}
+
+		for (const run of runs) {
+			if (!isActiveRunStatus(run.status) || runStreams.has(run.id)) {
+				continue;
+			}
+
+			try {
+				const eventSource = new EventSource(`/api/runs/${run.id}/stream`, { withCredentials: true });
+				eventSource.addEventListener('status', (event) => {
+					try {
+						const payload = JSON.parse(event.data) as { status?: string; error?: string };
+						handleRunStatusEvent(run.id, payload);
+					} catch {
+						// Ignore malformed events and keep listening.
+					}
+				});
+				eventSource.onerror = () => {
+					closeRunStream(run.id);
+				};
+				runStreams.set(run.id, eventSource);
+			} catch {
+				// Ignore SSE connection setup errors; periodic polling remains as fallback.
+			}
+		}
+	};
+
+	const getStatusQuery = () =>
+		selectedFilter.statuses.length > 0 ? `&status=${encodeURIComponent(selectedFilter.statuses.join(','))}` : '';
 
 	const loadRuns = async () => {
 		loading = true;
 		error = '';
 		try {
-			const response = await fetch(`/api/runs?page=${page}&page_size=${pageSize}`, {
+			const response = await fetch(`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}`, {
 				credentials: 'include'
 			});
 			if (!response.ok) {
@@ -45,11 +143,19 @@
 			const data: RunsResponse = await response.json();
 			runs = data.runs;
 			totalCount = data.total_count;
+			syncRunStreams();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load runs';
 		} finally {
 			loading = false;
 		}
+	};
+
+	const setFilter = (filter: RunFilter) => {
+		if (selectedFilter.id === filter.id) return;
+		selectedFilter = filter;
+		page = 1;
+		loadRuns();
 	};
 
 	onMount(() => {
@@ -58,7 +164,14 @@
 
 		// Refresh every 10 seconds
 		const interval = setInterval(loadRuns, 10000);
-		return () => clearInterval(interval);
+		return () => {
+			clearInterval(interval);
+			closeAllRunStreams();
+		};
+	});
+
+	onDestroy(() => {
+		closeAllRunStreams();
 	});
 
 	const getStatusIcon = (status: string) => {
@@ -132,7 +245,7 @@
 			</div>
 			<button
 				type="button"
-				class="flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				class="btn btn-ghost"
 				onclick={loadRuns}
 			>
 				<RefreshCw size={16} class={loading ? 'animate-spin' : ''} />
@@ -145,6 +258,18 @@
 				{error}
 			</div>
 		{/if}
+
+		<div class="flex flex-wrap gap-2">
+			{#each runFilters as filter}
+				<button
+					type="button"
+					class={`btn ${selectedFilter.id === filter.id ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+					onclick={() => setFilter(filter)}
+				>
+					{filter.label}
+				</button>
+			{/each}
+		</div>
 
 		{#if loading && runs.length === 0}
 			<div class="flex items-center justify-center py-12">
@@ -209,7 +334,7 @@
 					<div class="flex gap-2">
 						<button
 							type="button"
-							class="rounded-full border border-[var(--border-color)] px-3 py-1 transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+							class="btn btn-ghost"
 							disabled={page === 1}
 							onclick={() => { page--; loadRuns(); }}
 						>
@@ -217,7 +342,7 @@
 						</button>
 						<button
 							type="button"
-							class="rounded-full border border-[var(--border-color)] px-3 py-1 transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+							class="btn btn-ghost"
 							disabled={page * pageSize >= totalCount}
 							onclick={() => { page++; loadRuns(); }}
 						>
@@ -229,3 +354,11 @@
 		{/if}
 	</section>
 </div>
+
+<style>
+	.filter-active {
+		border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
+		color: var(--text-bright);
+	}
+</style>

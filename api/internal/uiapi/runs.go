@@ -68,13 +68,15 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		page, pageSize := parsePagination(r)
-		status := r.URL.Query().Get("status")
+		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
 
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
-		if status != "" {
-			query = query.Where("status = ?", status)
+		if len(statuses) == 1 {
+			query = query.Where("status = ?", statuses[0])
+		} else if len(statuses) > 1 {
+			query = query.Where("status IN ?", statuses)
 		}
 		if repoPath != "" {
 			// Search in payload JSON for matching repo path
@@ -152,6 +154,40 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			PageSize:   pageSize,
 		})
 	}
+}
+
+func parseStatusFilters(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	validStatuses := map[string]struct{}{
+		string(jobs.JobStatusQueued):      {},
+		string(jobs.JobStatusRunning):     {},
+		string(jobs.JobStatusSucceeded):   {},
+		string(jobs.JobStatusFailed):      {},
+		string(jobs.JobStatusRetry):       {},
+		string(runner.RunStatusCancelled): {},
+	}
+
+	parts := strings.Split(raw, ",")
+	statuses := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		status := strings.ToUpper(strings.TrimSpace(part))
+		if status == "" {
+			continue
+		}
+		if _, ok := validStatuses[status]; !ok {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		statuses = append(statuses, status)
+	}
+	return statuses
 }
 
 // RunsCreateHandler creates a new run.
