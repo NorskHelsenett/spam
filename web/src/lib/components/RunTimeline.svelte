@@ -361,10 +361,33 @@
 				}
 			}
 
+			// For k8s-started, use context-aware title/description
+			let title = stepDef.title;
+			let description = completed?.description || stepDef.defaultDescription;
+
+			if (stepDef.id === 'k8s-started' && !completed) {
+				if (stepStatus === 'running') {
+					// Pod hasn't started yet — show what's actually happening
+					if (podStatus?.waiting_reason) {
+						title = podStatus.waiting_reason;
+						description = podStatus.waiting_message || 'Waiting...';
+					} else if (podStatus?.phase === 'Pending') {
+						title = 'Scheduling Pod';
+						description = 'Waiting for pod to be scheduled';
+					} else {
+						title = 'Starting Container';
+						description = 'Waiting for pod to start';
+					}
+				} else if (stepStatus === 'error') {
+					title = podStatus?.waiting_reason || podStatus?.reason || 'Container Failed';
+					description = podStatus?.waiting_message || podStatus?.message || 'Pod failed to start';
+				}
+			}
+
 			timeline.push({
 				id: stepDef.id,
-				title: stepDef.title,
-				description: completed?.description || stepDef.defaultDescription,
+				title,
+				description,
 				timestamp: completed?.timestamp,
 				status: stepStatus,
 				icon: stepDef.icon,
