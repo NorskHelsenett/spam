@@ -410,6 +410,7 @@ func (r *Runner) runPipeline() int {
 func (r *Runner) runCommand(name string, args ...string) error {
 	cmd := exec.CommandContext(r.ctx, name, args...)
 	cmd.Dir = r.workDir
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
