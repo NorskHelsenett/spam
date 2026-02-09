@@ -108,12 +108,47 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		runs := make([]RunResponse, 0, len(jobRecords))
-		for _, job := range jobRecords {
+		parsedPayloads := make([]jobs.CreateRunPayload, len(jobRecords))
+		providerIDs := make([]string, 0, len(jobRecords))
+		seenProviderIDs := make(map[string]struct{}, len(jobRecords))
+		for i, job := range jobRecords {
 			var payload jobs.CreateRunPayload
 			if len(job.Payload) > 0 {
 				json.Unmarshal(job.Payload, &payload)
 			}
+			parsedPayloads[i] = payload
+			if payload.ProviderID == "" {
+				continue
+			}
+			if _, ok := seenProviderIDs[payload.ProviderID]; ok {
+				continue
+			}
+			seenProviderIDs[payload.ProviderID] = struct{}{}
+			providerIDs = append(providerIDs, payload.ProviderID)
+		}
+
+		providerNames := make(map[string]string, len(providerIDs))
+		if len(providerIDs) > 0 {
+			var providers []struct {
+				ID          string `gorm:"column:id"`
+				DisplayName string `gorm:"column:display_name"`
+			}
+			if err := db.WithContext(r.Context()).
+				Table("provider_instances").
+				Select("id, display_name").
+				Where("id IN ?", providerIDs).
+				Find(&providers).Error; err == nil {
+				for _, provider := range providers {
+					if provider.DisplayName != "" {
+						providerNames[provider.ID] = provider.DisplayName
+					}
+				}
+			}
+		}
+
+		runs := make([]RunResponse, 0, len(jobRecords))
+		for i, job := range jobRecords {
+			payload := parsedPayloads[i]
 
 			status := job.Status
 			errorText := job.Error
@@ -135,7 +170,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				ID:         job.ID,
 				Status:     status,
 				CloneURL:   payload.CloneURL,
-				Provider:   payload.Provider,
+				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
 				CommitSHA:  job.CommitHash,
@@ -154,6 +189,15 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			PageSize:   pageSize,
 		})
 	}
+}
+
+func displayProviderName(providerType string, providerID string, providerNames map[string]string) string {
+	if providerID != "" {
+		if providerName, ok := providerNames[providerID]; ok && providerName != "" {
+			return providerName
+		}
+	}
+	return providerType
 }
 
 func parseStatusFilters(raw string) []string {

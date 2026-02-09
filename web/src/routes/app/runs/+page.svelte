@@ -31,9 +31,13 @@
 		statuses: string[];
 	};
 
+	type SortField = 'provider' | 'duration' | 'created';
+	type SortDirection = 'asc' | 'desc';
+
 	const runFilters: RunFilter[] = [
 		{ id: 'all', label: 'All', statuses: [] },
-		{ id: 'running', label: 'Running', statuses: ['RUNNING', 'QUEUED'] },
+		{ id: 'running', label: 'Running', statuses: ['RUNNING'] },
+		{ id: 'queued', label: 'Queued', statuses: ['QUEUED'] },
 		{ id: 'succeeded', label: 'Succeeded', statuses: ['SUCCEEDED'] },
 		{ id: 'error', label: 'Error', statuses: ['FAILED'] }
 	];
@@ -45,6 +49,11 @@
 	let page = $state(1);
 	let pageSize = $state(20);
 	let selectedFilter = $state(runFilters[0]);
+	let searchInput = $state('');
+	let searchTerm = $state('');
+	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+	let sortField = $state<SortField>('created');
+	let sortDirection = $state<SortDirection>('desc');
 
 	const runStreams = new Map<string, EventSource>();
 
@@ -129,14 +138,19 @@
 
 	const getStatusQuery = () =>
 		selectedFilter.statuses.length > 0 ? `&status=${encodeURIComponent(selectedFilter.statuses.join(','))}` : '';
+	const getRepoQuery = () =>
+		searchTerm.trim().length > 0 ? `&repo_path=${encodeURIComponent(searchTerm.trim())}` : '';
 
 	const loadRuns = async () => {
 		loading = true;
 		error = '';
 		try {
-			const response = await fetch(`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}`, {
+			const response = await fetch(
+				`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}${getRepoQuery()}`,
+				{
 				credentials: 'include'
-			});
+				}
+			);
 			if (!response.ok) {
 				throw new Error('Failed to load runs');
 			}
@@ -158,6 +172,24 @@
 		loadRuns();
 	};
 
+	const applySearch = () => {
+		const next = searchInput.trim();
+		if (next === searchTerm) return;
+		searchTerm = next;
+		page = 1;
+		loadRuns();
+	};
+
+	const scheduleSearch = () => {
+		if (searchDebounce) {
+			clearTimeout(searchDebounce);
+		}
+		searchDebounce = setTimeout(() => {
+			searchDebounce = null;
+			applySearch();
+		}, 300);
+	};
+
 	onMount(() => {
 		if (!browser) return;
 		loadRuns();
@@ -171,6 +203,10 @@
 	});
 
 	onDestroy(() => {
+		if (searchDebounce) {
+			clearTimeout(searchDebounce);
+			searchDebounce = null;
+		}
 		closeAllRunStreams();
 	});
 
@@ -230,6 +266,45 @@
 		if (diff < 3600000) return `${Math.floor(diff / 60000)}m ${Math.floor((diff % 60000) / 1000)}s`;
 		return `${Math.floor(diff / 3600000)}h ${Math.floor((diff % 3600000) / 60000)}m`;
 	};
+
+	const durationMs = (run: Run) => {
+		if (!run.started_at) return 0;
+		const startDate = new Date(run.started_at).getTime();
+		const endDate = run.finished_at ? new Date(run.finished_at).getTime() : Date.now();
+		return Math.max(0, endDate - startDate);
+	};
+
+	const createdMs = (run: Run) => new Date(run.created_at).getTime();
+
+	const sortedRuns = $derived.by(() => {
+		const sorted = [...runs];
+		sorted.sort((a, b) => {
+			let compare = 0;
+			if (sortField === 'provider') {
+				compare = (a.provider || '').localeCompare(b.provider || '', undefined, { sensitivity: 'base' });
+			} else if (sortField === 'duration') {
+				compare = durationMs(a) - durationMs(b);
+			} else {
+				compare = createdMs(a) - createdMs(b);
+			}
+			return sortDirection === 'asc' ? compare : -compare;
+		});
+		return sorted;
+	});
+
+	const toggleSort = (field: SortField) => {
+		if (sortField === field) {
+			sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+			return;
+		}
+		sortField = field;
+		sortDirection = field === 'created' ? 'desc' : 'asc';
+	};
+
+	const sortIndicator = (field: SortField) => {
+		if (sortField !== field) return '';
+		return sortDirection === 'asc' ? '↑' : '↓';
+	};
 </script>
 
 <svelte:head>
@@ -259,16 +334,30 @@
 			</div>
 		{/if}
 
-		<div class="flex flex-wrap gap-2">
-			{#each runFilters as filter}
-				<button
-					type="button"
-					class={`btn ${selectedFilter.id === filter.id ? 'btn-secondary filter-active' : 'btn-ghost'}`}
-					onclick={() => setFilter(filter)}
-				>
-					{filter.label}
-				</button>
-			{/each}
+		<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+			<div class="flex flex-wrap gap-2">
+				{#each runFilters as filter}
+					<button
+						type="button"
+						class={`btn ${selectedFilter.id === filter.id ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+						onclick={() => setFilter(filter)}
+					>
+						{filter.label}
+					</button>
+				{/each}
+			</div>
+			<div class="flex items-center gap-2">
+				<input
+					type="search"
+					class="input h-9 w-48 py-2 text-sm"
+					placeholder="Search repo..."
+					bind:value={searchInput}
+					oninput={scheduleSearch}
+					onkeydown={(event) => {
+						if (event.key === 'Enter') applySearch();
+					}}
+				/>
+			</div>
 		</div>
 
 		{#if loading && runs.length === 0}
@@ -285,20 +374,32 @@
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-						<tr>
-							<th class="px-5 py-3 text-left">Status</th>
-							<th class="px-5 py-3 text-left">Repository</th>
-							<th class="px-5 py-3 text-left">Provider</th>
-							<th class="px-5 py-3 text-left">Branch</th>
-							<th class="px-5 py-3 text-left">Duration</th>
-							<th class="px-5 py-3 text-left">Created</th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-						{#each runs as run}
-							{@const StatusIcon = getStatusIcon(run.status)}
+							<tr>
+								<th class="px-5 py-3 text-left">Status</th>
+								<th class="px-5 py-3 text-left">Repository</th>
+								<th class="px-5 py-3 text-left">
+									<button type="button" class="sort-btn" onclick={() => toggleSort('provider')}>
+										Provider {sortIndicator('provider')}
+									</button>
+								</th>
+								<th class="px-5 py-3 text-left">Branch</th>
+								<th class="px-5 py-3 text-left">
+									<button type="button" class="sort-btn" onclick={() => toggleSort('duration')}>
+										Duration {sortIndicator('duration')}
+									</button>
+								</th>
+								<th class="px-5 py-3 text-left">
+									<button type="button" class="sort-btn" onclick={() => toggleSort('created')}>
+										Created {sortIndicator('created')}
+									</button>
+								</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+							{#each sortedRuns as run}
+								{@const StatusIcon = getStatusIcon(run.status)}
 					<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" onclick={() => goto(`/app/runs/${run.id}`)}>
-								<td class="px-5 py-3">
+									<td class="px-5 py-3">
 									<span class="flex items-center gap-2" style={`color: ${getStatusColor(run.status)}`}>
 										<StatusIcon size={16} class={run.status === 'RUNNING' ? 'animate-spin' : ''} />
 										<span class="text-xs font-semibold uppercase">{run.status}</span>
@@ -307,7 +408,7 @@
 								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
 									{run.repo_path || run.clone_url}
 								</td>
-								<td class="px-5 py-3 capitalize">{run.provider || '-'}</td>
+								<td class="px-5 py-3">{run.provider || '-'}</td>
 								<td class="px-5 py-3">{run.ref || 'default'}</td>
 								<td class="px-5 py-3 font-mono text-xs">
 									{formatDuration(run.started_at, run.finished_at)}
@@ -360,5 +461,20 @@
 		border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
 		background: color-mix(in srgb, var(--accent) 16%, transparent);
 		color: var(--text-bright);
+	}
+
+	.sort-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		color: inherit;
+		font: inherit;
+		background: transparent;
+		border: none;
+		padding: 0;
+	}
+
+	.sort-btn:hover {
+		color: var(--text-secondary);
 	}
 </style>
