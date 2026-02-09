@@ -41,6 +41,7 @@ type Runner struct {
 	repoRef       string
 	repoCommitSHA string
 	workDir       string
+	artifactDir   string
 	ctx           context.Context
 	cancel        context.CancelFunc
 	wsConn        *websocket.Conn
@@ -71,6 +72,7 @@ func main() {
 	// Extract repo name from clone URL
 	repoName := strings.TrimSuffix(filepath.Base(repoCloneURL), ".git")
 	workDir := filepath.Join("/work", repoName)
+	artifactDir := filepath.Join(os.TempDir(), "spam-runner", runID)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -83,6 +85,7 @@ func main() {
 		repoRef:       repoRef,
 		repoCommitSHA: repoCommitSHA,
 		workDir:       workDir,
+		artifactDir:   artifactDir,
 		ctx:           ctx,
 		cancel:        cancel,
 		logChan:       make(chan string, 100),
@@ -129,6 +132,11 @@ func main() {
 func (r *Runner) cleanup() {
 	if err := os.RemoveAll(r.workDir); err != nil {
 		log.Printf("Failed to clean work dir: %v", err)
+	}
+	if r.artifactDir != "" && r.artifactDir != "/" {
+		if err := os.RemoveAll(r.artifactDir); err != nil {
+			log.Printf("Failed to clean artifact dir: %v", err)
+		}
 	}
 }
 
@@ -216,6 +224,16 @@ func (r *Runner) runPipeline() int {
 		return 1
 	}
 
+	// Prepare artifacts directory outside the repository clone.
+	if err := os.RemoveAll(r.artifactDir); err != nil {
+		r.log(fmt.Sprintf("Failed to clean artifact dir: %v", err))
+	}
+	if err := os.MkdirAll(r.artifactDir, 0755); err != nil {
+		r.log(fmt.Sprintf("Failed to create artifact dir: %v", err))
+		return 1
+	}
+	r.log(fmt.Sprintf("Artifact directory: %s", r.artifactDir))
+
 	// Request PAT for private repos
 	pat := ""
 	if !r.localMode {
@@ -288,7 +306,9 @@ func (r *Runner) runPipeline() int {
 
 	// Run SBOM generation
 	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
-	sbomPath := filepath.Join(r.workDir, "sbom.json")
+	sbomPath := filepath.Join(r.artifactDir, "sbom.json")
+	gitleaksPath := filepath.Join(r.artifactDir, "gitleaks.json")
+	manifestsPath := filepath.Join(r.artifactDir, "manifests.json")
 
 	var sbomErr error
 	if r.sbomScanner == "trivy" {
@@ -307,15 +327,13 @@ func (r *Runner) runPipeline() int {
 	manifestFiles := r.findDependencyManifests()
 	if len(manifestFiles) > 0 {
 		r.log(fmt.Sprintf("Found %d dependency manifest file(s)", len(manifestFiles)))
-		manifests := filepath.Join(r.workDir, "manifests.json")
-		if err := r.createManifestsArchive(manifestFiles, manifests); err != nil {
+		if err := r.createManifestsArchive(manifestFiles, manifestsPath); err != nil {
 			r.log(fmt.Sprintf("Warning: failed to create manifests archive: %v", err))
 		}
 	}
 
 	// Run secret scan
 	r.log("Running gitleaks for secret detection...")
-	gitleaksPath := filepath.Join(r.workDir, "gitleaks.json")
 	if err := r.runCommand("gitleaks", "detect", "--source", r.workDir, "--report-path", gitleaksPath, "--report-format", "json", "--no-git"); err != nil {
 		// Gitleaks exits 1 if secrets found, but that's expected
 		r.log("Gitleaks scan completed")
@@ -343,7 +361,6 @@ func (r *Runner) runPipeline() int {
 		}
 
 		// Upload manifests if they exist
-		manifestsPath := filepath.Join(r.workDir, "manifests.json")
 		if _, err := os.Stat(manifestsPath); err == nil {
 			r.log("Uploading dependency manifests...")
 			if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
@@ -376,7 +393,6 @@ func (r *Runner) runPipeline() int {
 			}
 
 			// Copy manifests if they exist
-			manifestsPath := filepath.Join(r.workDir, "manifests.json")
 			if _, err := os.Stat(manifestsPath); err == nil {
 				if err := r.copyFile(manifestsPath, filepath.Join(outputDir, "manifests.json")); err != nil {
 					r.log(fmt.Sprintf("Failed to copy manifests: %v", err))
