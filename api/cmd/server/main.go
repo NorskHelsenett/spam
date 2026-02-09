@@ -18,8 +18,10 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
-	"github.com/NorskHelsenett/spam/internal/inventory"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 )
 
@@ -55,18 +57,62 @@ func run() error {
 		&auth.UserGroup{},
 		&assets.Repo{},
 		&assets.RepoCommit{},
+		&assets.ImageDigest{},
 		&artifacts.SBOM{},
 		&artifacts.SBOMBinding{},
-		&inventory.Component{},
-		&inventory.ComponentVersion{},
-		&inventory.SBOMComponent{},
+		&manifests.Manifest{},
+		&manifests.ManifestDependency{},
 		&jobs.Job{},
+		&runner.Run{},
+		&runner.RunSecret{},
+		&providerconfig.ProviderInstance{},
+		&providerconfig.ProviderSecret{},
 		&events.OutboxEvent{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
+	if err := providerconfig.EnsureDefaults(ctx, gormDB); err != nil {
+		return fmt.Errorf("seed provider defaults: %w", err)
+	}
+
+	if err := db.EnsureViews(ctx, gormDB,
+		"migrations/20260206_drop_legacy_component_tables.sql",
+		"migrations/20260204_create_materialized_view_refreshes.sql",
+		"migrations/20260203_create_sbom_component_view.sql",
+		"migrations/20260203_create_sbom_metadata_view.sql",
+	); err != nil {
+		return fmt.Errorf("bootstrap views: %w", err)
+	}
+
+	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
+	if seedSQLPath != "" {
+		if err := db.RunSeedSQL(ctx, gormDB, seedSQLPath); err != nil {
+			return fmt.Errorf("seed database: %w", err)
+		}
+	}
+
 	events.StartNotificationListener(ctx, cfg.DatabaseURL)
+
+	// Optionally create K8s client for runner endpoints (read-only)
+	var routerOpts *server.RouterOptions
+	if runnerCfg, err := config.LoadRunnerConfigOptional(); err == nil && runnerCfg.Enabled {
+		k8sClient, err := runner.NewK8sClient(runnerCfg)
+		if err != nil {
+			log.Printf("warning: failed to create k8s client for API: %v (K8s endpoints will be unavailable)", err)
+		} else {
+			routerOpts = &server.RouterOptions{
+				K8sClient: k8sClient,
+			}
+			log.Printf("K8s client enabled for API server")
+		}
+	}
+
+	if routerOpts == nil {
+		routerOpts = &server.RouterOptions{}
+	}
+
+	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,
@@ -86,7 +132,7 @@ func run() error {
 	}
 
 	shutdownCh := make(chan struct{})
-	router := server.NewRouter(gormDB, authService, shutdownCh)
+	router := server.NewRouter(gormDB, authService, shutdownCh, routerOpts)
 
 	addr := cfg.HTTPPort
 	if !strings.HasPrefix(addr, ":") {

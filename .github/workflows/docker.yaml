@@ -2,10 +2,10 @@ name: Build and Deploy
 
 on:
   push:
-    branches: [ "*" ]
     paths:
       - 'web/**'
       - 'api/**'
+      - 'runner/**'
       - '.helm/**'
       - '.github/workflows/docker.yaml'
   workflow_dispatch:
@@ -15,10 +15,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-and-deploy:
+  build-app:
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build-docker-image.outputs.digest }}
+      repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -59,6 +64,22 @@ jobs:
             image=moby/buildkit:latest
           buildkitd-flags: --debug
 
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Get git commit timestamp for reproducible builds
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
+
+      - name: Export repository info for outputs
+        id: export-vars
+        run: |
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}" >> $GITHUB_OUTPUT
+
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -77,30 +98,143 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache
           cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache,mode=max
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+
+  build-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build-runner-image.outputs.digest }}
+      repository: ${{ steps.export-vars.outputs.repository }}
+    env:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Derive registry host
+        run: |
+          set -e
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          if [ "$host" = "github.com" ]; then
+            echo "REGISTRY_HOST=ghcr.io" >> "$GITHUB_ENV"
+          else
+            echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
+
+      - name: Docker Metadata action for runner
+        uses: docker/metadata-action@v4.3.0
+        id: runner-meta
+        with:
+          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner
+          tags: |
+              type=ref,event=branch
+              type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+              type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Get git commit timestamp for reproducible builds
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
+
+      - name: Export repository info for outputs
+        id: export-vars
+        run: |
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push runner image
+        uses: docker/build-push-action@v6
+        id: build-runner-image
+        with:
+          context: ./runner
+          platforms: linux/amd64 #,linux/arm64
+          push: true
+          tags: ${{ steps.runner-meta.outputs.tags }}
+          labels: ${{ steps.runner-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache,mode=max
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+
+  deploy-helm:
+    runs-on: ubuntu-latest
+    needs: [build-app, build-runner]
+    env:
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Derive registry host
+        run: |
+          set -e
+          host="${GITHUB_SERVER_URL#https://}"
+          host="${host#http://}"
+          if [ "$host" = "github.com" ]; then
+            echo "REGISTRY_HOST=ghcr.io" >> "$GITHUB_ENV"
+          else
+            echo "REGISTRY_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
 
       - name: Install Helm
-        if: ${{ github.ref == 'refs/heads/main' }}
         uses: azure/setup-helm@v3
 
       - name: Login to OCI Registry for Helm
-        if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | helm registry login ${{ env.REGISTRY_HOST }} -u "${{ github.actor }}" --password-stdin
 
-      # Push Helm chart to GitHub Container Registry
       - name: Push Helm chart
-        if: ${{ github.ref == 'refs/heads/main' }}
         run: |
           # Query the latest published chart to derive current version (ignore errors if first publish)
           set -euo pipefail
           repo_path=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           chart_name=$(awk -F': ' '/^name:/ {print $2; exit}' .helm/Chart.yaml)
-          chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path"
+
+          # Use different chart path for dev branches
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path"
+          else
+            chart_repo="oci://${{ env.REGISTRY_HOST }}/$repo_path/helm/dev"
+          fi
           chart_ref="${chart_repo}/${chart_name}"
-          
+
           # Get version from Chart.yaml
           CHART_YAML_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' .helm/Chart.yaml | tr -d ' ')
-          
+
           tmp_chart_metadata=$(mktemp)
           if helm show chart "$chart_ref" > "$tmp_chart_metadata" 2>/dev/null; then
             PUBLISHED_VERSION=$(awk -F': ' '/^version:/ {print $2; exit}' "$tmp_chart_metadata" | tr -d ' ')
@@ -109,12 +243,12 @@ jobs:
             PUBLISHED_VERSION="0.0.0"
           fi
           rm -f "$tmp_chart_metadata"
-          
+
           # Function to compare semantic versions
           version_gt() {
             test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"
           }
-          
+
           # Determine which version to use
           if version_gt "$CHART_YAML_VERSION" "$PUBLISHED_VERSION"; then
             NEW_VERSION="$CHART_YAML_VERSION"
@@ -127,53 +261,95 @@ jobs:
             # Update version line in Chart.yaml
             sed -i -E "s/^version: .*/version: $NEW_VERSION/" .helm/Chart.yaml
           fi
-          
+
           echo "Final version: $NEW_VERSION"
-          
+
           # Inject image repository and digest
-          DIGEST=${{ steps.build-docker-image.outputs.digest }}
-          IMAGE_TAG="latest@${DIGEST}"
-          IMAGE_REPO="${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}"
-          echo "Injecting image repository: $IMAGE_REPO"
-          echo "Injecting image tag with digest: $IMAGE_TAG"
+          APP_DIGEST=${{ needs.build-app.outputs.digest }}
+          APP_TAG="latest@${APP_DIGEST}"
+          APP_REPO="${{ needs.build-app.outputs.repository }}"
+          RUNNER_DIGEST=${{ needs.build-runner.outputs.digest }}
+          RUNNER_TAG="latest@${RUNNER_DIGEST}"
+          RUNNER_REPO="${{ needs.build-runner.outputs.repository }}"
+
+          echo "Injecting app repository: $APP_REPO"
+          echo "Injecting app tag with digest: $APP_TAG"
+          echo "Injecting runner repository: $RUNNER_REPO"
+          echo "Injecting runner tag with digest: $RUNNER_TAG"
+
           python3 - <<EOF
           import pathlib
 
-          image_tag = "${IMAGE_TAG}"
-          image_repo = "${IMAGE_REPO}"
+          app_tag = "${APP_TAG}"
+          app_repo = "${APP_REPO}"
+          runner_tag = "${RUNNER_TAG}"
+          runner_repo = "${RUNNER_REPO}"
           path = pathlib.Path(".helm/values.yaml")
           lines = path.read_text().splitlines()
-          
+
           in_image_section = False
+          in_runner_section = False
+          in_runner_image_section = False
           for idx, line in enumerate(lines):
               stripped = line.lstrip()
-              
+
               # Detect if we're in the TOP-LEVEL image section (no indentation before "image:")
               if line.startswith("image:") and not line.startswith((" ", "\t")):
                   in_image_section = True
+                  in_runner_section = False
+                  in_runner_image_section = False
                   continue
-              
+
+              # Detect if we're in the runner section
+              if line.startswith("runner:") and not line.startswith((" ", "\t")):
+                  in_runner_section = True
+                  in_image_section = False
+                  continue
+
+              # Detect runner.image subsection
+              if in_runner_section and stripped.startswith("image:") and line.startswith(" "):
+                  in_runner_image_section = True
+                  continue
+
               # Exit image section when we hit another top-level key
               if in_image_section and stripped and not line.startswith((" ", "\t")):
                   in_image_section = False
-              
-              # Update repository and tag within image section
+
+              # Exit runner section when we hit another top-level key
+              if in_runner_section and stripped and not line.startswith((" ", "\t")):
+                  in_runner_section = False
+                  in_runner_image_section = False
+
+              # Exit runner.image section when indentation decreases
+              if in_runner_image_section and stripped and len(line) - len(stripped) < 4:
+                  in_runner_image_section = False
+
+              # Update repository and tag within top-level image section
               if in_image_section:
                   if stripped.startswith("repository:"):
                       indent = line[:len(line) - len(stripped)]
-                      lines[idx] = f'{indent}repository: {image_repo}'
+                      lines[idx] = f'{indent}repository: {app_repo}'
                   elif stripped.startswith("tag:"):
                       indent = line[:len(line) - len(stripped)]
-                      lines[idx] = f'{indent}tag: "{image_tag}"'
-          
+                      lines[idx] = f'{indent}tag: "{app_tag}"'
+
+              # Update repository and tag within runner.image section
+              if in_runner_image_section:
+                  if stripped.startswith("repository:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}repository: {runner_repo}'
+                  elif stripped.startswith("tag:"):
+                      indent = line[:len(line) - len(stripped)]
+                      lines[idx] = f'{indent}tag: "{runner_tag}"'
+
           path.write_text("\n".join(lines) + ("\n" if lines else ""))
           EOF
-          
+
           # Add required Helm repositories for dependencies
           echo "Adding Helm repositories..."
           helm repo add bitnami https://charts.bitnami.com/bitnami
           helm repo update
-          
+
           # Package and push (already logged in earlier step)
           (cd .helm && helm dependency build && helm package .)
           helm push ".helm/${chart_name}-${NEW_VERSION}.tgz" "$chart_repo"

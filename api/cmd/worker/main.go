@@ -6,13 +6,20 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/poller"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/runner"
+	"gorm.io/gorm"
 )
+
+var runExecutor jobs.RunExecutor
 
 func main() {
 	if err := run(); err != nil {
@@ -24,7 +31,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadWorker()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -39,11 +46,53 @@ func run() error {
 		}
 	}()
 
+	// Auto-migrate runner tables
+	if cfg.Runner.Enabled {
+		if err := gormDB.AutoMigrate(&runner.RunLog{}, &runner.RunSecret{}); err != nil {
+			return fmt.Errorf("migrate runner tables: %w", err)
+		}
+	}
+
+	// Start runner server if enabled
+	if cfg.Runner.Enabled {
+		// Create K8s client
+		k8sClient, err := runner.NewK8sClient(cfg.Runner)
+		if err != nil {
+			return fmt.Errorf("create k8s client: %w", err)
+		}
+
+		runnerServer := runner.NewServer(cfg.Runner, gormDB, k8sClient)
+
+		// Create run executor
+		runExecutor, err = runner.NewRunExecutor(cfg.Runner, runnerServer)
+		if err != nil {
+			return fmt.Errorf("create run executor: %w", err)
+		}
+
+		// Start runner HTTP server in background
+		go func() {
+			if err := runnerServer.Start(ctx); err != nil {
+				log.Printf("runner server error: %v", err)
+			}
+		}()
+
+		log.Printf("runner server enabled on port %d (local_mode=%v)", cfg.Runner.HTTPPort, cfg.Runner.LocalMode)
+	}
+
+	// Create provider store and poller for commit-based polling
+	providerStore := providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	commitPoller := poller.New(gormDB, providerStore)
+
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
 	pollInterval := 2 * time.Second
-	staleAfter := 10 * time.Minute
 
-	log.Printf("worker started: %s", workerID)
+	log.Printf("worker started: %s (concurrency=%d, stale_timeout=%s)", workerID, cfg.Concurrency, cfg.StaleTimeout)
+
+	// Semaphore to limit concurrent job processing
+	sem := make(chan struct{}, cfg.Concurrency)
+
+	// WaitGroup to track in-flight jobs for graceful shutdown
+	var wg sync.WaitGroup
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -51,40 +100,127 @@ func run() error {
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("shutdown signal received, waiting for %d in-flight jobs...", len(sem))
+			wg.Wait()
+			log.Printf("all jobs completed, shutting down")
 			return nil
+
 		case <-ticker.C:
 			now := time.Now()
-			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-staleAfter), now)
+			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
 
-			job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, now)
-			if err != nil {
-				log.Printf("claim job error: %v", err)
-				continue
-			}
-			if job == nil {
-				continue
+			// Reconcile RUNNING jobs against K8s state
+			if reconciler, ok := runExecutor.(jobs.RunReconciler); ok {
+				if n, err := reconciler.ReconcileRunningJobs(ctx, gormDB, 2*time.Minute); err != nil {
+					log.Printf("reconcile error: %v", err)
+				} else if n > 0 {
+					log.Printf("reconciled %d running jobs", n)
+				}
 			}
 
-			result, err := jobs.ProcessJob(ctx, gormDB, job)
+			// Poll providers for new commits
+			commitPoller.Poll(ctx)
+
+			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
+			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)
 			if err != nil {
-				next := (*time.Time)(nil)
-				status := jobs.JobStatusFailed
-				if job.Attempts < job.MaxAttempts {
-					retryAt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, now)
-					next = &retryAt
-					status = jobs.JobStatusRetry
+				log.Printf("count running runs error: %v", err)
+				runningRuns = int64(cfg.Concurrency) // Assume at limit on error
+			}
+
+			// Try to claim jobs up to available concurrency slots
+			for {
+				// Check if we can acquire a slot (non-blocking)
+				select {
+				case sem <- struct{}{}:
+					// Got a slot, try to claim a job
+				default:
+					// All slots busy, wait for next tick
+					goto nextTick
 				}
 
-				if _, updateErr := jobs.UpdateJobStatus(ctx, gormDB, job.ID, status, nil, err.Error(), next); updateErr != nil {
-					log.Printf("update job error: %v", updateErr)
+				// Check for shutdown
+				select {
+				case <-ctx.Done():
+					<-sem // Release the slot we just acquired
+					goto nextTick
+				default:
 				}
-				continue
-			}
 
-			if _, updateErr := jobs.UpdateJobStatus(ctx, gormDB, job.ID, jobs.JobStatusSucceeded, result, "", nil); updateErr != nil {
-				log.Printf("update job error: %v", updateErr)
+				// Determine which job types to claim based on running runs
+				var excludeTypes []jobs.JobType
+				if runningRuns >= int64(cfg.Concurrency) {
+					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
+				}
+
+				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now(), excludeTypes...)
+				if err != nil {
+					log.Printf("claim job error: %v", err)
+					<-sem // Release the slot
+					goto nextTick
+				}
+				if job == nil {
+					// No more jobs available
+					<-sem // Release the slot
+					goto nextTick
+				}
+
+				// Track if we're starting a new run
+				if job.Type == jobs.JobTypeCreateRun {
+					runningRuns++
+				}
+
+				// Process job in a goroutine
+				wg.Add(1)
+				go func(job *jobs.Job) {
+					defer wg.Done()
+					defer func() { <-sem }() // Release slot when done
+
+					processJob(ctx, gormDB, job)
+				}(job)
 			}
+		nextTick:
 		}
+	}
+}
+
+func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
+	log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
+
+	result, err := jobs.ProcessJob(ctx, db, job, runExecutor)
+	now := time.Now()
+
+	if err != nil {
+		next := (*time.Time)(nil)
+		status := jobs.JobStatusFailed
+		if jobs.IsNonRetryable(err) {
+			log.Printf("job failed (non-retryable): id=%s type=%s error=%v", job.ID, job.Type, err)
+		} else if job.Attempts < job.MaxAttempts {
+			retryAt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, now)
+			next = &retryAt
+			status = jobs.JobStatusRetry
+			log.Printf("job failed (will retry): id=%s type=%s error=%v retry_at=%s", job.ID, job.Type, err, retryAt.Format(time.RFC3339))
+		} else {
+			log.Printf("job failed (max attempts): id=%s type=%s error=%v", job.ID, job.Type, err)
+		}
+
+		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, status, nil, err.Error(), next); updateErr != nil {
+			log.Printf("update job error: %v", updateErr)
+		}
+		return
+	}
+
+	if job.Type == jobs.JobTypeCreateRun {
+		log.Printf("run started: id=%s type=%s result=%+v", job.ID, job.Type, result)
+		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusRunning, result, "", nil); updateErr != nil {
+			log.Printf("update job error: %v", updateErr)
+		}
+		return
+	}
+
+	log.Printf("job succeeded: id=%s type=%s result=%+v", job.ID, job.Type, result)
+	if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusSucceeded, result, "", nil); updateErr != nil {
+		log.Printf("update job error: %v", updateErr)
 	}
 }
 

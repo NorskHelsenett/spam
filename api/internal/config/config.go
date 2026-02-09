@@ -5,15 +5,27 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
+const (
+	// staleJobBuffer is the grace period added to runner active deadline when
+	// calculating the stale timeout. This accounts for K8s scheduling delays,
+	// pod startup time, and network latency for callbacks.
+	staleJobBuffer = 15 * time.Minute
+
+	// defaultStaleTimeout is used when the runner is disabled.
+	defaultStaleTimeout = 15 * time.Minute
+)
+
 // Config captures the runtime configuration required by the API server.
 type Config struct {
-	HTTPPort    string
-	DatabaseURL string
-	OIDC        OIDCConfig
+	HTTPPort           string
+	DatabaseURL        string
+	OIDC               OIDCConfig
+	ProviderSecretsKey []byte
 }
 
 // OIDCConfig captures configuration for the OIDC login flow and session cookies.
@@ -60,7 +72,185 @@ func Load() (Config, error) {
 	}
 	cfg.OIDC = oidcCfg
 
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
 	return cfg, nil
+}
+
+// WorkerConfig captures configuration for the background worker.
+type WorkerConfig struct {
+	DatabaseURL        string
+	Concurrency        int           // Number of concurrent job processors
+	StaleTimeout       time.Duration // Duration after which RUNNING jobs are considered stale
+	ProviderSecretsKey []byte        // Key for decrypting provider secrets (for poller)
+	Runner             RunnerConfig
+}
+
+// RunnerConfig captures configuration for the Kubernetes runner system.
+type RunnerConfig struct {
+	Enabled            bool              // Enable runner functionality
+	HMACKey            []byte            // Key for signing run tokens
+	ProviderSecretsKey []byte            // Key for encrypting provider secrets
+	Image              string            // Runner container image
+	Namespace          string            // Kubernetes namespace for runner jobs
+	ServiceAccount     string            // ServiceAccount for runner jobs
+	WorkerURL          string            // Internal callback URL (http://worker:8081)
+	HTTPPort           int               // Worker runner HTTP port (default 8081)
+	TTLSeconds         int32             // TTL for completed K8s jobs
+	ActiveDeadline     int64             // Maximum runtime for K8s jobs in seconds
+	LocalMode          bool              // Skip K8s, run Docker inline for testing
+	DockerSocket       string            // Docker socket path for local mode
+	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
+	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
+}
+
+// LoadWorker reads configuration for the worker process.
+// Only requires database connection - no OIDC or HTTP config needed.
+func LoadWorker() (WorkerConfig, error) {
+	cfg := WorkerConfig{
+		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Concurrency: parseIntEnv("WORKER_CONCURRENCY", 4),
+	}
+
+	if cfg.DatabaseURL == "" {
+		dsn, err := buildDSNFromPGEnv()
+		if err != nil {
+			return WorkerConfig{}, err
+		}
+		cfg.DatabaseURL = dsn
+	}
+
+	// Ensure concurrency is at least 1
+	if cfg.Concurrency < 1 {
+		cfg.Concurrency = 1
+	}
+
+	// Load provider secrets key (needed for poller regardless of runner)
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return WorkerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
+	// Load runner config
+	runnerCfg, err := loadRunnerConfig()
+	if err != nil {
+		return WorkerConfig{}, fmt.Errorf("runner config: %w", err)
+	}
+	cfg.Runner = runnerCfg
+
+	// Stale timeout: runner active deadline + buffer (or default if runner disabled)
+	if cfg.Runner.Enabled {
+		cfg.StaleTimeout = time.Duration(cfg.Runner.ActiveDeadline)*time.Second + staleJobBuffer
+	} else {
+		cfg.StaleTimeout = defaultStaleTimeout
+	}
+
+	return cfg, nil
+}
+
+func loadRunnerConfig() (RunnerConfig, error) {
+	enabled := parseBoolEnv("RUNNER_ENABLED", false)
+	if !enabled {
+		return RunnerConfig{}, nil
+	}
+
+	cfg := RunnerConfig{
+		Enabled:        true,
+		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
+		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
+		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
+		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
+		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
+		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
+		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
+		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
+		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
+		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+	}
+
+	// HMAC key is required when runner is enabled
+	hmacKeyStr := strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
+	if hmacKeyStr == "" {
+		return RunnerConfig{}, errors.New("RUNNER_HMAC_KEY must be set when RUNNER_ENABLED=true")
+	}
+
+	// Try base64 decode first, fall back to raw string
+	hmacKey, err := base64.StdEncoding.DecodeString(hmacKeyStr)
+	if err != nil {
+		hmacKey = []byte(hmacKeyStr)
+	}
+	if len(hmacKey) < 32 {
+		return RunnerConfig{}, errors.New("RUNNER_HMAC_KEY must be at least 32 bytes")
+	}
+	cfg.HMACKey = hmacKey
+
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return RunnerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
+	return cfg, nil
+}
+
+// LoadRunnerConfigOptional loads runner configuration for read-only access (e.g., API server).
+// Unlike loadRunnerConfig, this doesn't require HMAC key since it's only used for querying K8s.
+func LoadRunnerConfigOptional() (RunnerConfig, error) {
+	enabled := parseBoolEnv("RUNNER_ENABLED", false)
+	if !enabled {
+		return RunnerConfig{}, errors.New("runner not enabled")
+	}
+
+	cfg := RunnerConfig{
+		Enabled:        true,
+		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
+		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
+		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
+		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
+		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
+		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
+		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
+		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
+		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
+		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+	}
+
+	// HMAC key is optional for read-only access
+	hmacKeyStr := strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
+	if hmacKeyStr != "" {
+		hmacKey, err := base64.StdEncoding.DecodeString(hmacKeyStr)
+		if err != nil {
+			hmacKey = []byte(hmacKeyStr)
+		}
+		cfg.HMACKey = hmacKey
+	}
+
+	secretKey, err := parseSecretKeyEnv("PROVIDER_SECRETS_KEY")
+	if err != nil {
+		return RunnerConfig{}, err
+	}
+	cfg.ProviderSecretsKey = secretKey
+
+	return cfg, nil
+}
+
+func parseBoolEnv(key string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := parseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func buildDSNFromPGEnv() (string, error) {
@@ -90,6 +280,18 @@ func getEnv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func parseIntEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func loadOIDCConfig() (OIDCConfig, error) {
@@ -214,4 +416,45 @@ func parseBool(raw string) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid boolean: %q", raw)
 	}
+}
+
+func parseSecretKeyEnv(key string) ([]byte, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return nil, nil
+	}
+
+	if isValidBlockKey([]byte(value)) {
+		return []byte(value), nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(value)
+	if err == nil && isValidBlockKey(decoded) {
+		return decoded, nil
+	}
+
+	return nil, errors.New("PROVIDER_SECRETS_KEY must be 16, 24, or 32 bytes (raw or base64)")
+}
+
+// parseMapEnv parses a comma-separated key=value environment variable.
+// Example: "key1=value1,key2=value2" -> map[string]string{"key1": "value1", "key2": "value2"}
+func parseMapEnv(key string) map[string]string {
+	val := strings.TrimSpace(os.Getenv(key))
+	if val == "" {
+		return nil
+	}
+
+	result := make(map[string]string)
+	pairs := strings.Split(val, ",")
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
 }

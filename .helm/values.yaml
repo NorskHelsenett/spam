@@ -61,6 +61,23 @@ appSecret:
     cookieHashKey: ""   # HMAC key for cookie signing (≥32 bytes, auto-generated)
     cookieBlockKey: ""  # AES key for cookie encryption (16/24/32 bytes, auto-generated)
 
+# Provider secrets key for encrypting PATs
+providerSecrets:
+  # Set to true to create the secret automatically
+  enabled: false
+
+  # Use an existing secret instead of creating one (optional)
+  existingSecret: ""  # e.g., "spam-provider-secrets"
+
+  # Set to true to prevent secret updates (rotation requires new secret name)
+  immutable: true
+
+  # Provide a specific key (optional). If empty, auto-generate and keep across upgrades.
+  key: ""
+
+  # Optional annotations added to the provider secrets Secret
+  annotations: {}
+
 # To manually create the secret, use:
 #   kubectl create secret generic spam-app-secret \
 #     --from-literal=OIDC_ISSUER_URL='https://auth.example.com' \
@@ -215,7 +232,6 @@ postgresql:
       limits:
         memory: 512Mi
         cpu: 500m
-
     # Security context for PostgreSQL pod
     podSecurityContext:
       runAsNonRoot: true
@@ -235,6 +251,68 @@ postgresql:
       runAsNonRoot: true
       runAsUser: 999
       runAsGroup: 999
+
+
+# Worker configuration
+# The worker processes background jobs (SBOM parsing, etc.)
+worker:
+  enabled: true
+  replicaCount: 1
+  resources: {}
+    # limits:
+    #   cpu: 200m
+    #   memory: 256Mi
+    # requests:
+    #   cpu: 100m
+    #   memory: 128Mi
+
+# Runner configuration
+# The runner executes scans (SBOM generation, secret scanning) in Kubernetes jobs
+runner:
+  enabled: false
+
+  # Runner container image
+  image:
+    repository: spam-runner
+    tag: latest
+    pullPolicy: IfNotPresent
+
+  # HTTP port for runner callbacks (internal)
+  httpPort: 8081
+
+  # HMAC key for signing run tokens (auto-generated if empty)
+  hmacKey: ""
+
+  # ServiceAccount for runner jobs
+  serviceAccount:
+    create: true
+    name: ""  # Defaults to {{ .Release.Name }}-runner
+
+  # Annotations to apply to runner pods
+  # Runner jobs automatically inherit most annotations from the worker pod
+  # Excludes: kubernetes.io/*, argocd tracking IDs, and other identity-specific annotations
+  # ArgoCD will automatically discover runner jobs via labels without copied annotations
+  # Additional annotations can be specified here if needed
+  # Example:
+  #   podAnnotations:
+  #     custom-annotation: "value"
+  podAnnotations: {}
+
+  # Resource limits for runner jobs
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  # Job lifecycle settings
+  ttlSecondsAfterFinished: 3600  # TTL for completed jobs (1 hour)
+  activeDeadlineSeconds: 1800   # Maximum runtime for jobs (30 minutes)
+
+  # Local mode for testing (uses Docker instead of K8s jobs)
+  localMode: false
 
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured

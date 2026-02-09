@@ -84,6 +84,13 @@ spec:
             {{- with .Values.environments }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- if or .Values.providerSecrets.enabled .Values.providerSecrets.existingSecret }}
+            - name: PROVIDER_SECRETS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.providerSecrets.existingSecret | default (printf "%s-provider-secrets" .Release.Name) }}
+                  key: PROVIDER_SECRETS_KEY
+            {{- end }}
             {{- if .Values.postgresql.enabled }}
             - name: POSTGRES_HOST
               value: "{{ .Release.Name }}-postgresql"

@@ -10,7 +10,10 @@ A comprehensive and secure dashboard for managing all your third party component
 - CVE database and alerts
 - Plug and play git repo ingestion using OIDC login features and not API tokens
 
+Cleanup all jobs
 
-Architecture Decision Record
+```bash
+kubectl delete jobs --all -n spam
+```
 
 start `mocc with mocc --host 0.0.0.0 --users users.yaml`

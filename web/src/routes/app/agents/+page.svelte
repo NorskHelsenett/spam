@@ -1,29 +1,57 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
+	import { browser } from '$app/environment';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
+	import { FileStack, Package, GitBranch, Container } from 'lucide-svelte';
 
-	const collections = [
-		{
-			name: 'Payments platform',
-			sboms: 6,
-			description: 'Checkout, billing, and ledger workloads under PCI scope.',
-			tag: 'Critical risk surface',
-			accent: 'var(--error)'
-		},
-		{
-			name: 'Customer experience',
-			sboms: 8,
-			description: 'Frontend applications and public APIs served globally.',
-			tag: 'SLO-bound services',
-			accent: 'var(--accent)'
-		},
-		{
-			name: 'Data and analytics',
-			sboms: 5,
-			description: 'Batch pipelines and ML training environments.',
-			tag: 'Regulated datasets',
-			accent: 'var(--info)'
+	// Live stats
+	type Stats = {
+		sbom_count: number;
+		component_count: number;
+		repo_count: number;
+		image_count: number;
+	};
+
+	let stats: Stats = $state({
+		sbom_count: 0,
+		component_count: 0,
+		repo_count: 0,
+		image_count: 0
+	});
+	let statsLoading = $state(true);
+	let statsError = $state('');
+
+	const loadStats = async () => {
+		try {
+			const response = await fetch('/api/stats', { credentials: 'include' });
+			if (response.ok) {
+				stats = await response.json();
+			}
+		} catch {
+			statsError = 'Failed to load stats';
+		} finally {
+			statsLoading = false;
 		}
-	];
+	};
+
+	onMount(() => {
+		if (!browser) return;
+
+		loadStats();
+
+		// Listen for SSE updates
+		const eventSource = new EventSource('/api/app/stream');
+
+		eventSource.addEventListener('sbom_parsed', () => {
+			// Reload stats when an SBOM is parsed
+			loadStats();
+		});
+
+		return () => {
+			eventSource.close();
+		};
+	});
 
 	const sbomRows = [
 		{
@@ -137,6 +165,7 @@
 	let uploadBusy = $state(false);
 	let uploadFile: File | null = $state(null);
 	let repoUrl = $state('');
+	let uploadTarget = $state<'repo' | 'image' | 'none'>('repo');
 	let uploadForm = $state({
 		provider: 'manual',
 		org: '',
@@ -144,6 +173,12 @@
 		commitSha: '',
 		ref: '',
 		format: ''
+	});
+	let imageForm = $state({
+		registry: '',
+		repository: '',
+		digest: '',
+		ref: ''
 	});
 
 	const parseRepoUrl = (url: string) => {
@@ -177,6 +212,41 @@
 		}
 	};
 
+	const parseImageRef = (value: string) => {
+		const raw = value.trim();
+		if (!raw) return;
+
+		const atIndex = raw.indexOf('@');
+		if (atIndex === -1) return;
+
+		const namePart = raw.slice(0, atIndex);
+		const digestPart = raw.slice(atIndex + 1);
+
+		if (digestPart) {
+			imageForm.digest = digestPart;
+		}
+
+		let registry = '';
+		let repository = namePart;
+		const firstSlash = namePart.indexOf('/');
+		if (firstSlash > -1) {
+			const candidate = namePart.slice(0, firstSlash);
+			if (candidate.includes('.') || candidate.includes(':') || candidate === 'localhost') {
+				registry = candidate;
+				repository = namePart.slice(firstSlash + 1);
+			}
+		}
+
+		const lastSlash = repository.lastIndexOf('/');
+		const lastColon = repository.lastIndexOf(':');
+		if (lastColon > lastSlash) {
+			repository = repository.slice(0, lastColon);
+		}
+
+		imageForm.registry = registry;
+		imageForm.repository = repository;
+	};
+
 	const submitUpload = async () => {
 		uploadError = '';
 		uploadSuccess = '';
@@ -185,13 +255,23 @@
 			uploadError = 'Please select an SBOM file.';
 			return;
 		}
-		if (!uploadForm.commitSha.trim()) {
-			uploadError = 'Commit SHA is required.';
-			return;
+
+		if (uploadTarget === 'repo') {
+			if (!uploadForm.commitSha.trim()) {
+				uploadError = 'Commit SHA is required.';
+				return;
+			}
+			if (!uploadForm.org.trim() || !uploadForm.slug.trim()) {
+				uploadError = 'Org and repo name are required.';
+				return;
+			}
 		}
-		if (!uploadForm.org.trim() || !uploadForm.slug.trim()) {
-			uploadError = 'Org and repo name are required.';
-			return;
+
+		if (uploadTarget === 'image') {
+			if (!imageForm.registry.trim() || !imageForm.repository.trim() || !imageForm.digest.trim()) {
+				uploadError = 'Registry, image, and digest are required.';
+				return;
+			}
 		}
 
 		uploadBusy = true;
@@ -199,12 +279,21 @@
 		try {
 			const payload = new FormData();
 			payload.append('sbom_file', uploadFile);
-			payload.append('provider', uploadForm.provider.trim());
-			payload.append('org', uploadForm.org.trim());
-			payload.append('slug', uploadForm.slug.trim());
-			payload.append('commit_sha', uploadForm.commitSha.trim());
-			if (uploadForm.ref.trim()) {
-				payload.append('ref', uploadForm.ref.trim());
+
+			if (uploadTarget === 'repo') {
+				payload.append('provider', uploadForm.provider.trim());
+				payload.append('org', uploadForm.org.trim());
+				payload.append('slug', uploadForm.slug.trim());
+				payload.append('commit_sha', uploadForm.commitSha.trim());
+				if (uploadForm.ref.trim()) {
+					payload.append('ref', uploadForm.ref.trim());
+				}
+			}
+
+			if (uploadTarget === 'image') {
+				payload.append('image_registry', imageForm.registry.trim());
+				payload.append('image_repository', imageForm.repository.trim());
+				payload.append('image_digest', imageForm.digest.trim());
 			}
 			if (uploadForm.format.trim()) {
 				payload.append('format', uploadForm.format.trim());
@@ -225,7 +314,9 @@
 			uploadSuccess = 'SBOM uploaded and queued for parsing.';
 			uploadFile = null;
 			repoUrl = '';
+			uploadTarget = 'repo';
 			uploadForm = { provider: 'manual', org: '', slug: '', commitSha: '', ref: '', format: '' };
+			imageForm = { registry: '', repository: '', digest: '', ref: '' };
 			
 			// Close modal after 1 second
 			setTimeout(() => {
@@ -263,17 +354,74 @@
 				Upload SBOM
 			</button>
 		</header>
-		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-			{#each collections as collection}
-				<article class="metric-card p-5 sm:p-6">
-					<div class="flex items-center justify-between gap-3">
-						<h2 class="text-lg font-semibold text-[var(--text-bright)]">{collection.name}</h2>
-						<span class="text-2xl font-bold" style={`color: ${collection.accent}`}>{collection.sboms}</span>
+		<div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<FileStack class="h-5 w-5 text-[var(--accent)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">SBOMs</h2>
 					</div>
-					<p class="mt-2 text-sm text-[var(--text-secondary)]">{collection.description}</p>
-					<span class="mt-4 inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-tertiary)]">{collection.tag}</span>
-				</article>
-			{/each}
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.sbom_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Total ingested</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<Package class="h-5 w-5 text-[var(--info)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Components</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.component_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Unique dependencies</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<GitBranch class="h-5 w-5 text-[var(--success)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repos</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.repo_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Tracked repositories</p>
+			</article>
+
+			<article class="metric-card p-5 sm:p-6">
+				<div class="flex items-center justify-between gap-3">
+					<div class="flex items-center gap-2">
+						<Container class="h-5 w-5 text-[var(--warning)]" />
+						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Images</h2>
+					</div>
+				</div>
+				<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">
+					{#if statsLoading}
+						<span class="text-[var(--text-muted)]">...</span>
+					{:else}
+						{stats.image_count}
+					{/if}
+				</p>
+				<p class="mt-1 text-xs text-[var(--text-muted)]">Container images</p>
+			</article>
 		</div>
 	</section>
 
@@ -281,22 +429,42 @@
 		<div class="flex h-full w-full flex-col">
 			<div class="border-b border-[var(--border-color)] p-6">
 				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Upload SBOM</h2>
-				<p class="mt-1 text-sm text-[var(--text-secondary)]">Attach an SBOM to a repo commit and enqueue parsing.</p>
+				<p class="mt-1 text-sm text-[var(--text-secondary)]">
+					{#if uploadTarget === 'repo'}
+						Attach an SBOM to a repo commit and enqueue parsing.
+					{:else if uploadTarget === 'image'}
+						Attach an SBOM to a container image digest and enqueue parsing.
+					{:else}
+						Ingest an SBOM without linking it to a repo or image.
+					{/if}
+				</p>
 			</div>
 
 			<div class="flex-1 p-6">
 				<div class="grid gap-4">
-					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-						Repository URL
-						<input
-							type="text"
-							placeholder="http://git.torden.tech/jonasbg/spam"
-							class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-							bind:value={repoUrl}
-							oninput={() => parseRepoUrl(repoUrl)}
+					<div class="flex justify-center">
+						<TabSelector
+							bind:value={uploadTarget}
+							options={[
+								{ value: 'none', label: 'Unbound' },
+								{ value: 'image', label: 'Image' },
+								{ value: 'repo', label: 'Repo' }
+							]}
 						/>
-						<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a repo URL to auto-fill org, repo, and provider</span>
-					</label>
+					</div>
+					{#if uploadTarget === 'repo'}
+						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							Repository URL
+							<input
+								type="text"
+								placeholder="http://git.torden.tech/jonasbg/spam"
+								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+								bind:value={repoUrl}
+								oninput={() => parseRepoUrl(repoUrl)}
+							/>
+							<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a repo URL to auto-fill org, repo, and provider</span>
+						</label>
+					{/if}
 
 					<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
 						SBOM file
@@ -311,68 +479,140 @@
 						/>
 					</label>
 
-					<div class="grid gap-4 sm:grid-cols-2">
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Org
-							<input
-								type="text"
-								placeholder="team"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.org}
-							/>
-						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Repo
-							<input
-								type="text"
-								placeholder="service-api"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.slug}
-							/>
-						</label>
-					</div>
+					{#if uploadTarget === 'repo'}
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Org
+								<input
+									type="text"
+									placeholder="team"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.org}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Repo
+								<input
+									type="text"
+									placeholder="service-api"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.slug}
+								/>
+							</label>
+						</div>
 
-					<div class="grid gap-4 sm:grid-cols-2">
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Commit SHA
-							<input
-								type="text"
-								placeholder="Full SHA"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.commitSha}
-							/>
-						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Ref (optional)
-							<input
-								type="text"
-								placeholder="refs/heads/main"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.ref}
-							/>
-						</label>
-					</div>
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Commit SHA
+								<input
+									type="text"
+									placeholder="Full SHA"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.commitSha}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Ref (optional)
+								<input
+									type="text"
+									placeholder="refs/heads/main"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.ref}
+								/>
+							</label>
+						</div>
 
-					<div class="grid gap-4 sm:grid-cols-2">
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Provider
+								<input
+									type="text"
+									placeholder="manual"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.provider}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
+
+					{#if uploadTarget === 'image'}
 						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Provider
+							Image reference
 							<input
 								type="text"
-								placeholder="manual"
+								placeholder="myrepo.com/image:tag@sha256:..."
 								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.provider}
+								bind:value={imageForm.ref}
+								oninput={() => parseImageRef(imageForm.ref)}
 							/>
+							<span class="text-[10px] normal-case tracking-normal text-[var(--text-muted)]">Paste a full image reference to auto-fill registry, image, and digest.</span>
 						</label>
-						<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							Format (optional)
-							<input
-								type="text"
-								placeholder="cyclonedx-json"
-								class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
-								bind:value={uploadForm.format}
-							/>
-						</label>
-					</div>
+
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Registry
+								<input
+									type="text"
+									placeholder="registry.example.com"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.registry}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Image
+								<input
+									type="text"
+									placeholder="org/service-api"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.repository}
+								/>
+							</label>
+						</div>
+
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Digest
+								<input
+									type="text"
+									placeholder="sha256:..."
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={imageForm.digest}
+								/>
+							</label>
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
+
+					{#if uploadTarget === 'none'}
+						<div class="grid gap-4 sm:grid-cols-2">
+							<label class="flex flex-col gap-2 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+								Format (optional)
+								<input
+									type="text"
+									placeholder="cyclonedx-json"
+									class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]"
+									bind:value={uploadForm.format}
+								/>
+							</label>
+						</div>
+					{/if}
 
 					{#if uploadError}
 						<p class="text-sm text-[var(--error)]">{uploadError}</p>

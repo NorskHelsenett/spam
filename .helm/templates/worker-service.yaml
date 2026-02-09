@@ -1,0 +1,22 @@
+{{- if and .Values.worker.enabled .Values.runner.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-worker
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/managed-by: Helm
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.runner.httpPort | default 8081 }}
+      targetPort: runner-http
+      protocol: TCP
+      name: runner-http
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

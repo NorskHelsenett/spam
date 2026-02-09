@@ -10,41 +10,78 @@
     font-size: 0.8rem;
     font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
 
-    /* Base colors */
-    --main-content-bg: #1d2021;
-    --sidebar-bg: transparent;
-    --card-bg: #282828;
-    --hover-bg: #3c3836;
-    --hover-bg-subtle: rgba(60, 56, 54, 0.5);
-    --border-color: #504945;
+    /* Gruvbox background scale (dark to light) */
+    --bg-hard: #1d2021;
+    --bg: #282828;
+    --bg-soft: #32302f;
+    --bg1: #3c3836;
+    --bg2: #504945;
+    --bg3: #665c54;
+    --bg4: #7c6f64;
 
-    /* Text colors */
-    --text-primary: #ebdbb2;
-    --text-secondary: #d5c4a1;
-    --text-tertiary: #bdae93;
-    --text-quaternary: #a89984;
-    --text-muted: #928374;
-    --text-bright: #fbf1c7;
-    --text-dimmed: #665c54;
+    /* Gruvbox foreground scale (light to dark) */
+    --fg: #fbf1c7;
+    --fg1: #ebdbb2;
+    --fg2: #d5c4a1;
+    --fg3: #bdae93;
+    --fg4: #a89984;
+
+    /* Gruvbox palette - bright */
+    --red: #fb4934;
+    --green: #b8bb26;
+    --yellow: #fabd2f;
+    --blue: #83a598;
+    --purple: #d3869b;
+    --aqua: #8ec07c;
+    --orange: #fe8019;
+    --gray: #928374;
+
+    /* Gruvbox palette - dim */
+    --red-dim: #cc241d;
+    --green-dim: #98971a;
+    --yellow-dim: #d79921;
+    --blue-dim: #458588;
+    --purple-dim: #b16286;
+    --aqua-dim: #689d6a;
+    --orange-dim: #d65d0e;
+    --gray-dim: #a89984;
+
+    /* Semantic mappings */
+    --main-content-bg: var(--bg-hard);
+    --sidebar-bg: transparent;
+    --card-bg: var(--bg);
+    --hover-bg: var(--bg1);
+    --hover-bg-subtle: rgba(60, 56, 54, 0.5);
+    --border-color: var(--bg2);
+
+    /* Text mappings */
+    --text-primary: var(--fg1);
+    --text-secondary: var(--fg2);
+    --text-tertiary: var(--fg3);
+    --text-quaternary: var(--fg4);
+    --text-muted: var(--gray);
+    --text-bright: var(--fg);
+    --text-dimmed: var(--bg3);
 
     /* Semantic colors */
-    --accent: #fabd2f;
-    --accent-dark: #d79921;
-    --error: #fb4934;
-    --error-dark: #cc241d;
-    --success: #b8bb26;
-    --success-dark: #98971a;
-    --warning: #fabd2f;
-    --warning-dark: #d79921;
+    --accent: var(--yellow);
+    --accent-dark: var(--yellow-dim);
+    --error: var(--red);
+    --error-dark: var(--red-dim);
+    --success: var(--green);
+    --success-dark: var(--green-dim);
+    --warning: var(--orange);
+    --warning-dark: var(--orange-dim);
+    --info: var(--blue);
+    --info-dark: var(--blue-dim);
 
     /* Metric-specific colors */
-    --info: #83a598;
-    --cpu-color: #83a598;
-    --memory-color: #d3869b;
-    --disk-color: #8ec07c;
-    --temperature-color: #fe8019;
-    --network-color: #b16286;
-    --gpu-color: #689d6a;
+    --cpu-color: var(--blue);
+    --memory-color: var(--purple);
+    --disk-color: var(--aqua);
+    --temperature-color: var(--orange);
+    --network-color: var(--purple-dim);
+    --gpu-color: var(--aqua-dim);
 
     /* Battery colors */
     --charging-color: #facc15;
@@ -62,7 +99,43 @@
     color-scheme: light;
     font-size: 0.9rem;
 
-    /* Base colors */
+    /* Gruvbox light background scale (light to dark) */
+    --bg-hard: #f9f5d7;
+    --bg: #fbf1c7;
+    --bg-soft: #f2e5bc;
+    --bg1: #ebdbb2;
+    --bg2: #d5c4a1;
+    --bg3: #bdae93;
+    --bg4: #a89984;
+
+    /* Gruvbox light foreground scale (dark to light) */
+    --fg: #282828;
+    --fg1: #3c3836;
+    --fg2: #504945;
+    --fg3: #665c54;
+    --fg4: #7c6f64;
+
+    /* Gruvbox palette - dark (for light backgrounds) */
+    --red: #9d0006;
+    --green: #79740e;
+    --yellow: #b57614;
+    --blue: #076678;
+    --purple: #8f3f71;
+    --aqua: #427b58;
+    --orange: #af3a03;
+    --gray: #928374;
+
+    /* Gruvbox palette - neutral */
+    --red-dim: #cc241d;
+    --green-dim: #98971a;
+    --yellow-dim: #d79921;
+    --blue-dim: #458588;
+    --purple-dim: #b16286;
+    --aqua-dim: #689d6a;
+    --orange-dim: #d65d0e;
+    --gray-dim: #7c6f64;
+
+    /* Custom semantic mappings (softer than pure Gruvbox light) */
     --main-content-bg: #f2f3ec;
     --sidebar-bg: transparent;
     --card-bg: #fcfcfc;
@@ -70,7 +143,7 @@
     --hover-bg-subtle: rgba(236, 234, 228, 0.5);
     --border-color: #e5e7eb;
 
-    /* Text colors */
+    /* Text mappings */
     --text-primary: #1e1e1e;
     --text-secondary: #646464;
     --text-tertiary: #7a7a7a;
@@ -80,27 +153,28 @@
     --text-dimmed: #b4b4b4;
 
     /* Semantic colors */
-    --accent: #a8c5e3;
-    --accent-dark: #98b5d3;
-    --error: #ef4444;
-    --error-dark: #dc2626;
-    --success: #c9e4ca;
-    --success-dark: #b9d4ba;
-    --warning: #eeddd1;
-    --warning-dark: #e6d3cc;
+    --accent: var(--blue-dim);
+    --accent-dark: var(--blue);
+    --error: var(--red-dim);
+    --error-dark: var(--red);
+    --success: var(--green-dim);
+    --success-dark: var(--green);
+    --warning: var(--orange-dim);
+    --warning-dark: var(--orange);
+    --info: var(--blue-dim);
+    --info-dark: var(--blue);
 
     /* Metric-specific colors */
-    --info: #a8c5e3;
-    --cpu-color: #a8c5e3;
-    --memory-color: #e7e9fa;
-    --disk-color: #c9e4ca;
-    --temperature-color: #ef4444;
-    --network-color: #98b5d3;
-    --gpu-color: #e7e9fa;
+    --cpu-color: var(--blue-dim);
+    --memory-color: var(--purple-dim);
+    --disk-color: var(--aqua-dim);
+    --temperature-color: var(--red-dim);
+    --network-color: var(--purple);
+    --gpu-color: var(--aqua);
 
     /* Battery colors */
-    --charging-color: #a8c5e3;
-    --discharging-color: #ef4444;
+    --charging-color: var(--yellow-dim);
+    --discharging-color: var(--red-dim);
 
     /* Other */
     --selection-bg: rgba(238, 221, 209, 0.45);
@@ -131,4 +205,135 @@ button {
 
 button:disabled {
   @apply cursor-not-allowed opacity-50;
+}
+
+/* Shared button styles */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: transform 150ms ease, box-shadow 150ms ease, background 150ms ease, color 150ms ease;
+}
+
+.btn:active {
+  transform: scale(0.98);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--main-content-bg);
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+}
+
+.btn-secondary {
+  background: var(--hover-bg);
+  color: var(--text-bright);
+  border: 1px solid var(--border-color);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.btn-ghost:hover {
+  background: var(--hover-bg);
+  color: var(--text-bright);
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--text-bright);
+  border: 1px solid var(--accent);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* Pill / badge styles */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  padding: 0.3rem 0.75rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  border: 1px solid var(--border-color);
+}
+
+.pill-success {
+  background: color-mix(in srgb, var(--success) 20%, transparent);
+  color: var(--success);
+}
+
+.pill-warning {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+.pill-error {
+  background: color-mix(in srgb, var(--error) 18%, transparent);
+  color: var(--error);
+}
+
+.pill-info {
+  background: color-mix(in srgb, var(--info) 18%, transparent);
+  color: var(--info);
+}
+
+.pill-neutral {
+  background: color-mix(in srgb, var(--gray) 20%, transparent);
+  color: var(--text-secondary);
+}
+
+/* Badge styles – subtle bordered badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  padding: 0.25rem 0.7rem;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+/* Input styles */
+.input {
+  width: 100%;
+  border-radius: 1.25rem;
+  border: 1px solid var(--border-color);
+  background: transparent;
+  padding: 0.75rem 1rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.input-error {
+  border-color: var(--error);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--error) 25%, transparent);
+}
+
+.input-with-icon {
+  padding-right: 3rem;
 }

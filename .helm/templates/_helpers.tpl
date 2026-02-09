@@ -87,3 +87,15 @@ Compatibility aliases so legacy template names keep working even if .Chart.Name 
 {{- define "spam.serviceAccountName" -}}
 {{ include "helm.serviceAccountName" . }}
 {{- end }}
+
+{{/*
+Convert runner pod annotations map to comma-separated key=value pairs.
+Example: map[k1:v1 k2:v2] -> "k1=v1,k2=v2"
+*/}}
+{{- define "spam.runnerPodAnnotations" -}}
+{{- $pairs := list }}
+{{- range $key, $value := .Values.runner.podAnnotations }}
+{{- $pairs = append $pairs (printf "%s=%s" $key $value) }}
+{{- end }}
+{{- join "," $pairs }}
+{{- end }}
