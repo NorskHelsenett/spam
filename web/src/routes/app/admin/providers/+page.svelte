@@ -72,6 +72,12 @@
 		last_rotated_at?: string;
 	};
 
+	type ProviderSyncResponse = {
+		provider_id: string;
+		health_status: string;
+		health_message?: string;
+	};
+
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
 		if (host === 'github.com') return 'github';
 		if (host.includes('gitlab')) return 'gitlab';
@@ -389,7 +395,16 @@
 				formError = 'Failed to sync provider.';
 				return;
 			}
-			await loadProviders();
+			const synced: ProviderSyncResponse = await response.json();
+			providers = providers.map((provider) => {
+				if (provider.id !== entry.id) return provider;
+				return {
+					...provider,
+					healthStatus: synced.health_status || provider.healthStatus,
+					healthMessage: synced.health_message || '',
+					lastHealthCheck: new Date().toISOString()
+				};
+			});
 		} catch {
 			formError = 'Failed to sync provider.';
 		} finally {
