@@ -161,7 +161,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		return result, nil
 	}
 
-	var queued, skippedSame, skippedPending, healthFailed int
+	var queued, skippedSame, skippedPending int
 	for _, repo := range allRepos {
 		if repo.DefaultBranch == "" {
 			continue
@@ -173,7 +173,6 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		latestSHA, err := client.GetLatestCommit(ctx, repo.FullPath, repo.DefaultBranch)
 		if err != nil {
 			// Skip repos where we can't get the latest commit (empty repos, permission issues, etc.)
-			healthFailed++
 			continue
 		}
 
@@ -261,12 +260,6 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 	result.SkippedSame = skippedSame
 	result.SkippedPending = skippedPending
 
-	if healthFailed > 0 {
-		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthDegraded, fmt.Sprintf("%d repo health checks failed", healthFailed))
-		result.HealthStatus = providerconfig.ProviderHealthDegraded
-		result.HealthMessage = fmt.Sprintf("%d repo health checks failed", healthFailed)
-		return result, nil
-	}
 	_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthHealthy, "")
 	result.HealthStatus = providerconfig.ProviderHealthHealthy
 	result.HealthMessage = ""
