@@ -551,7 +551,7 @@ func (r *Runner) findDependencyManifests() []string {
 	patterns := []string{
 		"*.csproj", "packages.config", "*.fsproj", "*.vbproj", // .NET
 		"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", // Node.js
-		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", // Java
+		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", "gradle.properties", "settings.gradle", "settings.gradle.kts", "build.sbt", "project/build.properties", "project/plugins.sbt", // Java/Kotlin/Scala
 		"requirements.txt", "Pipfile", "Pipfile.lock", "poetry.lock", "pyproject.toml", // Python
 		"go.mod", "go.sum", // Go
 		"Cargo.toml", "Cargo.lock", // Rust
@@ -559,6 +559,15 @@ func (r *Runner) findDependencyManifests() []string {
 		"composer.json", "composer.lock", // PHP
 		"pubspec.yaml", "pubspec.lock", // Dart
 		"mix.exs", "mix.lock", // Elixir
+		"Package.swift", "Podfile", "Podfile.lock", "Cartfile", "Cartfile.resolved", "*.xcodeproj/project.pbxproj", // Swift/iOS
+		"CMakeLists.txt", "conanfile.txt", "conanfile.py", "vcpkg.json", "BUILD", "WORKSPACE", "MODULE.bazel", // C/C++/Bazel
+		"stack.yaml", "*.cabal", "cabal.project", // Haskell
+		"DESCRIPTION", "renv.lock", "packrat.lock", "install.R", // R
+		"dune", "dune-project", "opam", "opam.locked", // OCaml
+		"Project.toml", "Manifest.toml", // Julia
+		"rebar.config", "rebar.lock", // Erlang/Rebar
+		"*.rockspec", "luarocks.lock", // Lua
+		"cpanfile", "META.json", "META.yml", // Perl
 	}
 
 	err := filepath.Walk(r.workDir, func(path string, info os.FileInfo, err error) error {
