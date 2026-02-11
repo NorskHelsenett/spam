@@ -626,17 +626,19 @@
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Provider</p>
 					{#if run.base_url}
 						<a
-							href={run.base_url}
-							target="_blank"
-							rel="noopener noreferrer"
+							href="/app/providers{run.provider_id ? `?tab=${run.provider_id}` : ''}"
 							class="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--text-bright)] transition hover:text-[var(--accent)]"
 						>
 							{run.base_url.replace(/^https?:\/\//, '')}
-							<ExternalLink class="h-3 w-3 opacity-50" />
 						</a>
 						<p class="text-xs capitalize text-[var(--text-muted)]">{run.provider || ''}</p>
 					{:else}
-						<p class="mt-1 text-lg font-semibold capitalize text-[var(--text-bright)]">{run.provider || '-'}</p>
+						<a
+							href="/app/providers{run.provider ? `?tab=${run.provider}` : ''}"
+							class="mt-1 inline-flex items-center gap-1.5 text-lg font-semibold capitalize text-[var(--text-bright)] transition hover:text-[var(--accent)]"
+						>
+							{run.provider || '-'}
+						</a>
 					{/if}
 				</div>
 				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">

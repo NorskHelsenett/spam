@@ -77,7 +77,7 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 						FILTER (WHERE package_name IS NOT NULL)            AS component_count,
 					COUNT(DISTINCT kind || ':' || package_name || '@' || COALESCE(purl_version, ''))
 						FILTER (WHERE package_name IS NOT NULL)            AS component_version_count,
-					COUNT(*) FILTER (WHERE licenses IS NULL OR licenses = '') AS missing_license_count,
+					COUNT(DISTINCT kind || ':' || package_name) FILTER (WHERE licenses IS NULL OR licenses = '') AS missing_license_count,
 					COUNT(DISTINCT trim(lic)) FILTER (WHERE trim(lic) <> '') AS license_count
 				FROM sbom_component_view c
 				INNER JOIN sbom_bindings sb ON sb.sbom_id = c.sbom_id
