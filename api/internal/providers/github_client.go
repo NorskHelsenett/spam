@@ -621,6 +621,141 @@ func (c *GitHubClientImpl) getCountFromLinkHeader(ctx context.Context, url strin
 	return 1
 }
 
+// GetCommitLog fetches recent commits for a repository.
+func (c *GitHubClientImpl) GetCommitLog(ctx context.Context, owner, repo string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/commits?per_page=%d", c.baseURL, owner, repo, limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var ghCommits []struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Message string `json:"message"`
+			Author  struct {
+				Name  string    `json:"name"`
+				Email string    `json:"email"`
+				Date  time.Time `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+		HTMLURL string `json:"html_url"`
+		Author  *struct {
+			Login     string `json:"login"`
+			AvatarURL string `json:"avatar_url"`
+		} `json:"author"`
+	}
+	if err := json.Unmarshal(body, &ghCommits); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	commits := make([]CommitInfo, len(ghCommits))
+	for i, c := range ghCommits {
+		// Use first line of commit message
+		message := c.Commit.Message
+		if idx := strings.IndexByte(message, '\n'); idx > 0 {
+			message = message[:idx]
+		}
+
+		ci := CommitInfo{
+			SHA:         c.SHA,
+			Message:     message,
+			AuthorName:  c.Commit.Author.Name,
+			AuthorEmail: c.Commit.Author.Email,
+			AuthorDate:  c.Commit.Author.Date,
+			CommitURL:   c.HTMLURL,
+		}
+		if c.Author != nil {
+			ci.AuthorLogin = c.Author.Login
+			ci.AuthorAvatar = c.Author.AvatarURL
+		}
+		commits[i] = ci
+	}
+
+	return commits, nil
+}
+
+// GetContributors fetches contributors for a repository.
+func (c *GitHubClientImpl) GetContributors(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	url := fmt.Sprintf("%s/repos/%s/%s/contributors?per_page=%d&anon=false", c.baseURL, owner, repo, limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var ghContributors []struct {
+		Login         string `json:"login"`
+		AvatarURL     string `json:"avatar_url"`
+		HTMLURL       string `json:"html_url"`
+		Contributions int    `json:"contributions"`
+	}
+	if err := json.Unmarshal(body, &ghContributors); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	contributors := make([]ContributorInfo, len(ghContributors))
+	for i, c := range ghContributors {
+		contributors[i] = ContributorInfo{
+			Login:         c.Login,
+			AvatarURL:     c.AvatarURL,
+			ProfileURL:    c.HTMLURL,
+			Contributions: c.Contributions,
+		}
+	}
+
+	return contributors, nil
+}
+
 // GetReadme fetches the README content for a repository.
 func (c *GitHubClientImpl) GetReadme(ctx context.Context, owner, repo string) (string, error) {
 	url := fmt.Sprintf("%s/repos/%s/%s/readme", c.baseURL, owner, repo)

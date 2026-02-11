@@ -2,11 +2,14 @@ package uiapi
 
 import (
 	"context"
+	"crypto/md5"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -503,8 +506,138 @@ func tryGiteaDetection(ctx context.Context, client *http.Client, baseURL string)
 
 // RepoDetailsResponse is the response for repo details endpoint.
 type RepoDetailsResponse struct {
-	Details *providers.RepoDetails `json:"details"`
-	Readme  string                 `json:"readme"`
+	Details      *providers.RepoDetails      `json:"details"`
+	Readme       string                      `json:"readme"`
+	Commits      []providers.CommitInfo       `json:"commits,omitempty"`
+	Contributors []providers.ContributorInfo  `json:"contributors,omitempty"`
+}
+
+// enrichContributors fills in missing contributor data from commits and generates
+// Gravatar avatar URLs for contributors without an avatar.
+func enrichContributors(contributors []providers.ContributorInfo, commits []providers.CommitInfo) []providers.ContributorInfo {
+	if len(contributors) == 0 {
+		return contributors
+	}
+
+	// Build lookup maps from commits
+	emailByLogin := make(map[string]string)
+	avatarByLogin := make(map[string]string)
+	emailByName := make(map[string]string)
+	avatarByEmail := make(map[string]string)
+
+	for _, c := range commits {
+		if c.AuthorLogin != "" && c.AuthorEmail != "" {
+			if _, ok := emailByLogin[c.AuthorLogin]; !ok {
+				emailByLogin[c.AuthorLogin] = c.AuthorEmail
+			}
+		}
+		if c.AuthorLogin != "" && c.AuthorAvatar != "" {
+			if _, ok := avatarByLogin[c.AuthorLogin]; !ok {
+				avatarByLogin[c.AuthorLogin] = c.AuthorAvatar
+			}
+		}
+		if c.AuthorName != "" && c.AuthorEmail != "" {
+			if _, ok := emailByName[c.AuthorName]; !ok {
+				emailByName[c.AuthorName] = c.AuthorEmail
+			}
+		}
+		if c.AuthorEmail != "" && c.AuthorAvatar != "" {
+			if _, ok := avatarByEmail[c.AuthorEmail]; !ok {
+				avatarByEmail[c.AuthorEmail] = c.AuthorAvatar
+			}
+		}
+	}
+
+	for i := range contributors {
+		c := &contributors[i]
+
+		// Fill in missing email from commits
+		if c.Email == "" {
+			if c.Login != "" {
+				if email, ok := emailByLogin[c.Login]; ok {
+					c.Email = email
+				}
+			}
+			if c.Email == "" && c.Name != "" {
+				if email, ok := emailByName[c.Name]; ok {
+					c.Email = email
+				}
+			}
+		}
+
+		// Fill in missing avatar: try commit data first, then Gravatar
+		if c.AvatarURL == "" {
+			if c.Login != "" {
+				if avatar, ok := avatarByLogin[c.Login]; ok {
+					c.AvatarURL = avatar
+				}
+			}
+			if c.AvatarURL == "" && c.Email != "" {
+				if avatar, ok := avatarByEmail[c.Email]; ok {
+					c.AvatarURL = avatar
+				}
+			}
+			// Fallback to Gravatar
+			if c.AvatarURL == "" && c.Email != "" {
+				hash := md5.Sum([]byte(strings.ToLower(strings.TrimSpace(c.Email))))
+				c.AvatarURL = fmt.Sprintf("https://www.gravatar.com/avatar/%x?d=identicon&s=80", hash)
+			}
+		}
+	}
+
+	return contributors
+}
+
+// enrichCommits fills in missing commit author avatars from the enriched contributors list.
+func enrichCommits(commits []providers.CommitInfo, contributors []providers.ContributorInfo) []providers.CommitInfo {
+	if len(commits) == 0 || len(contributors) == 0 {
+		return commits
+	}
+
+	avatarByLogin := make(map[string]string)
+	avatarByEmail := make(map[string]string)
+	avatarByName := make(map[string]string)
+
+	for _, c := range contributors {
+		if c.AvatarURL == "" {
+			continue
+		}
+		if c.Login != "" {
+			avatarByLogin[c.Login] = c.AvatarURL
+		}
+		if c.Email != "" {
+			avatarByEmail[c.Email] = c.AvatarURL
+		}
+		if c.Name != "" {
+			avatarByName[c.Name] = c.AvatarURL
+		}
+	}
+
+	for i := range commits {
+		c := &commits[i]
+		if c.AuthorAvatar != "" {
+			continue
+		}
+		if c.AuthorLogin != "" {
+			if avatar, ok := avatarByLogin[c.AuthorLogin]; ok {
+				c.AuthorAvatar = avatar
+				continue
+			}
+		}
+		if c.AuthorEmail != "" {
+			if avatar, ok := avatarByEmail[c.AuthorEmail]; ok {
+				c.AuthorAvatar = avatar
+				continue
+			}
+		}
+		if c.AuthorName != "" {
+			if avatar, ok := avatarByName[c.AuthorName]; ok {
+				c.AuthorAvatar = avatar
+			}
+		}
+	}
+
+	return commits
 }
 
 // GitHubRepoDetailsHandler handles fetching GitHub repo details.
@@ -545,14 +678,47 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 			return
 		}
 
-		readme, readmeErr := client.GetReadme(r.Context(), owner, repo)
-		if readmeErr != nil {
-			log.Printf("GitHub README error for %s/%s: %v", owner, repo, readmeErr)
-		}
+		// Fetch readme, commits, and contributors in parallel
+		var readme string
+		var commits []providers.CommitInfo
+		var contributors []providers.ContributorInfo
+		var wg sync.WaitGroup
+
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			var err error
+			readme, err = client.GetReadme(r.Context(), owner, repo)
+			if err != nil {
+				log.Printf("GitHub README error for %s/%s: %v", owner, repo, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			commits, err = client.GetCommitLog(r.Context(), owner, repo, 20)
+			if err != nil {
+				log.Printf("GitHub commits error for %s/%s: %v", owner, repo, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			contributors, err = client.GetContributors(r.Context(), owner, repo, 30)
+			if err != nil {
+				log.Printf("GitHub contributors error for %s/%s: %v", owner, repo, err)
+			}
+		}()
+		wg.Wait()
+
+		contributors = enrichContributors(contributors, commits)
+		commits = enrichCommits(commits, contributors)
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
-			Details: details,
-			Readme:  readme,
+			Details:      details,
+			Readme:       readme,
+			Commits:      commits,
+			Contributors: contributors,
 		})
 	}
 }
@@ -601,14 +767,47 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 			return
 		}
 
-		readme, readmeErr := client.GetReadme(r.Context(), projectPath)
-		if readmeErr != nil {
-			log.Printf("GitLab README error for %s: %v", projectPath, readmeErr)
-		}
+		// Fetch readme, commits, and contributors in parallel
+		var readme string
+		var commits []providers.CommitInfo
+		var contributors []providers.ContributorInfo
+		var wg sync.WaitGroup
+
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			var err error
+			readme, err = client.GetReadme(r.Context(), projectPath)
+			if err != nil {
+				log.Printf("GitLab README error for %s: %v", projectPath, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			commits, err = client.GetCommitLog(r.Context(), projectPath, 20)
+			if err != nil {
+				log.Printf("GitLab commits error for %s: %v", projectPath, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			contributors, err = client.GetContributors(r.Context(), projectPath, 30)
+			if err != nil {
+				log.Printf("GitLab contributors error for %s: %v", projectPath, err)
+			}
+		}()
+		wg.Wait()
+
+		contributors = enrichContributors(contributors, commits)
+		commits = enrichCommits(commits, contributors)
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
-			Details: details,
-			Readme:  readme,
+			Details:      details,
+			Readme:       readme,
+			Commits:      commits,
+			Contributors: contributors,
 		})
 	}
 }
@@ -657,11 +856,43 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			return
 		}
 
-		readme, _ := client.GetReadme(r.Context(), owner, repo)
+		// Fetch readme, commits, and contributors in parallel
+		var readme string
+		var commits []providers.CommitInfo
+		var contributors []providers.ContributorInfo
+		var wg sync.WaitGroup
+
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			readme, _ = client.GetReadme(r.Context(), owner, repo)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			commits, err = client.GetCommitLog(r.Context(), owner, repo, 20)
+			if err != nil {
+				log.Printf("Gitea commits error for %s/%s: %v", owner, repo, err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			contributors, err = client.GetContributors(r.Context(), owner, repo, 30)
+			if err != nil {
+				log.Printf("Gitea contributors error for %s/%s: %v", owner, repo, err)
+			}
+		}()
+		wg.Wait()
+
+		contributors = enrichContributors(contributors, commits)
+		commits = enrichCommits(commits, contributors)
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
-			Details: details,
-			Readme:  readme,
+			Details:      details,
+			Readme:       readme,
+			Commits:      commits,
+			Contributors: contributors,
 		})
 	}
 }

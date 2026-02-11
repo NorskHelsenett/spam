@@ -42,9 +42,31 @@
 		size: number;
 	};
 
+	type CommitInfo = {
+		sha: string;
+		message: string;
+		author_name: string;
+		author_email: string;
+		author_date: string;
+		author_login?: string;
+		author_avatar?: string;
+		commit_url?: string;
+	};
+
+	type ContributorInfo = {
+		login?: string;
+		name?: string;
+		email?: string;
+		avatar_url?: string;
+		profile_url?: string;
+		contributions: number;
+	};
+
 	type RepoDetailsResponse = {
 		details: RepoDetails;
 		readme: string;
+		commits?: CommitInfo[];
+		contributors?: ContributorInfo[];
 	};
 
 	type SecurityData = {
@@ -95,6 +117,8 @@
 
 	let details: RepoDetails | null = $state(null);
 	let readme = $state('');
+	let commits: CommitInfo[] = $state([]);
+	let contributors: ContributorInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
@@ -165,6 +189,8 @@
 			const data: RepoDetailsResponse = await response.json();
 			details = data.details;
 			readme = data.readme;
+			commits = data.commits || [];
+			contributors = data.contributors || [];
 
 			// Fetch real security data
 			await fetchSecurityData(provider, path, data.details, data.readme);
@@ -656,10 +682,81 @@
 			{/if}
 		</section>
 
+		<!-- Recent Commits -->
+		{#if commits.length > 0}
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Commits</h2>
+				<div class="space-y-2">
+					{#each commits as commit}
+						<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+							{#if commit.author_avatar}
+								<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
+							{:else}
+								<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-xs font-medium text-[var(--accent)]">
+									{commit.author_name.charAt(0).toUpperCase()}
+								</div>
+							{/if}
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									{#if commit.commit_url}
+										<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+											{commit.message}
+										</a>
+									{:else}
+										<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
+									{/if}
+								</div>
+								<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+									<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
+									<span>{commit.author_login || commit.author_name}</span>
+									<span>committed {formatDate(commit.author_date)}</span>
+								</div>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</section>
+		{/if}
+
+		<!-- Contributors -->
+		{#if contributors.length > 0}
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Contributors</h2>
+				<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+					{#each contributors as contributor}
+						<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+							{#if contributor.avatar_url}
+								<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
+							{:else}
+								<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
+									{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
+								</div>
+							{/if}
+							<div class="min-w-0 flex-1">
+								{#if contributor.profile_url}
+									<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+										{contributor.login || contributor.name || contributor.email}
+									</a>
+								{:else}
+									<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
+								{/if}
+								{#if contributor.email}
+									<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
+								{/if}
+								<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</section>
+		{/if}
+
 		<!-- README -->
 		{#if readme}
-			<section class="panel-surface px-6 py-6 sm:px-10">
-				<Markdown content={readme} class="max-w-none text-[var(--text-secondary)]" />
+			<section class="panel-surface overflow-hidden px-6 py-6 sm:px-10">
+				<div class="overflow-x-auto overflow-y-hidden break-words">
+					<Markdown content={readme} class="max-w-none text-[var(--text-secondary)]" />
+				</div>
 			</section>
 		{/if}
 	{/if}

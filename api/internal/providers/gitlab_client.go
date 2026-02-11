@@ -604,6 +604,118 @@ func (c *GitLabClientImpl) getCountFromHeader(ctx context.Context, urlStr string
 	return 0
 }
 
+// GetCommitLog fetches recent commits for a project.
+func (c *GitLabClientImpl) GetCommitLog(ctx context.Context, projectPath string, limit int) ([]CommitInfo, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/commits?per_page=%d", c.baseURL, encodedPath, limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var glCommits []struct {
+		ID             string    `json:"id"`
+		Title          string    `json:"title"`
+		AuthorName     string    `json:"author_name"`
+		AuthorEmail    string    `json:"author_email"`
+		AuthoredDate   time.Time `json:"authored_date"`
+		WebURL         string    `json:"web_url"`
+	}
+	if err := json.Unmarshal(body, &glCommits); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	commits := make([]CommitInfo, len(glCommits))
+	for i, c := range glCommits {
+		commits[i] = CommitInfo{
+			SHA:         c.ID,
+			Message:     c.Title,
+			AuthorName:  c.AuthorName,
+			AuthorEmail: c.AuthorEmail,
+			AuthorDate:  c.AuthoredDate,
+			CommitURL:   c.WebURL,
+		}
+	}
+
+	return commits, nil
+}
+
+// GetContributors fetches contributors for a project.
+func (c *GitLabClientImpl) GetContributors(ctx context.Context, projectPath string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	encodedPath := url.PathEscape(projectPath)
+	urlStr := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=%d&order_by=commits&sort=desc", c.baseURL, encodedPath, limit)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if err := c.checkResponse(resp); err != nil {
+		return nil, err
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var glContributors []struct {
+		Name    string `json:"name"`
+		Email   string `json:"email"`
+		Commits int    `json:"commits"`
+	}
+	if err := json.Unmarshal(body, &glContributors); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	contributors := make([]ContributorInfo, len(glContributors))
+	for i, c := range glContributors {
+		contributors[i] = ContributorInfo{
+			Name:          c.Name,
+			Email:         c.Email,
+			Contributions: c.Commits,
+		}
+	}
+
+	return contributors, nil
+}
+
 // GetReadme fetches the README content for a project.
 func (c *GitLabClientImpl) GetReadme(ctx context.Context, projectPath string) (string, error) {
 	encodedPath := url.PathEscape(projectPath)
