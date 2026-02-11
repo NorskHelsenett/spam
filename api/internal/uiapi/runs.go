@@ -23,6 +23,8 @@ type RunResponse struct {
 	Status     string     `json:"status"`
 	CloneURL   string     `json:"clone_url"`
 	Provider   string     `json:"provider"`
+	ProviderID string     `json:"provider_id,omitempty"`
+	BaseURL    string     `json:"base_url,omitempty"`
 	RepoPath   string     `json:"repo_path"`
 	Ref        string     `json:"ref,omitempty"`
 	CommitSHA  string     `json:"commit_sha,omitempty"`
@@ -128,19 +130,24 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		providerNames := make(map[string]string, len(providerIDs))
+		providerBaseURLs := make(map[string]string, len(providerIDs))
 		if len(providerIDs) > 0 {
 			var providers []struct {
 				ID          string `gorm:"column:id"`
 				DisplayName string `gorm:"column:display_name"`
+				BaseURL     string `gorm:"column:base_url"`
 			}
 			if err := db.WithContext(r.Context()).
 				Table("provider_instances").
-				Select("id, display_name").
+				Select("id, display_name, base_url").
 				Where("id IN ?", providerIDs).
 				Find(&providers).Error; err == nil {
 				for _, provider := range providers {
 					if provider.DisplayName != "" {
 						providerNames[provider.ID] = provider.DisplayName
+					}
+					if provider.BaseURL != "" {
+						providerBaseURLs[provider.ID] = provider.BaseURL
 					}
 				}
 			}
@@ -171,6 +178,8 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				Status:     status,
 				CloneURL:   payload.CloneURL,
 				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
+				ProviderID: payload.ProviderID,
+				BaseURL:    providerBaseURLs[payload.ProviderID],
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
 				CommitSHA:  job.CommitHash,
@@ -402,6 +411,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Status:     job.Status,
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,
+			ProviderID: payload.ProviderID,
 			RepoPath:   extractRepoPath(payload.CloneURL),
 			Ref:        payload.Ref,
 			CommitSHA:  job.CommitHash,
@@ -410,6 +420,18 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			StartedAt:  job.LockedAt,
 			FinishedAt: job.FinishedAt,
 			K8sJobName: job.K8sJobName,
+		}
+
+		// Look up provider base URL
+		if payload.ProviderID != "" {
+			var pi struct {
+				BaseURL string
+			}
+			if err := db.WithContext(r.Context()).Table("provider_instances").
+				Where("id = ?", payload.ProviderID).
+				Select("base_url").First(&pi).Error; err == nil {
+				response.BaseURL = pi.BaseURL
+			}
 		}
 
 		// Look up associated SBOM via repo commit
