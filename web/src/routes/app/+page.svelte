@@ -194,7 +194,7 @@
 				</span>
 				<div class="space-y-2">
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl md:text-4xl">
-						Software Supply Chain Posture
+						Software Package Asset Management
 					</h1>
 					<p class="max-w-2xl text-sm text-[var(--text-tertiary)] sm:text-base">
 						Unified snapshot of repository coverage, SBOM ingestion, dependency composition, and license signals.
