@@ -90,9 +90,9 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				ORDER BY repo_id, created_at DESC
 			)
 			SELECT
-				(SELECT COUNT(DISTINCT sbom_id) FROM sbom_metadata_view) AS sbom_count,
+				(SELECT COUNT(*) FROM current_sboms) AS sbom_count,
 				(SELECT COUNT(*) FROM repos) AS repo_count,
-				(SELECT COUNT(DISTINCT repo_id) FROM sbom_metadata_view WHERE repo_id IS NOT NULL) AS repo_with_sbom_count,
+				(SELECT COUNT(DISTINCT repo_id) FROM sbom_metadata_view m INNER JOIN current_sboms cs ON cs.sbom_id = m.sbom_id WHERE m.repo_id IS NOT NULL) AS repo_with_sbom_count,
 				(SELECT COUNT(*) FROM image_digests) AS image_count,
 				(SELECT COUNT(DISTINCT kind || ':' || package_name)
 					FROM sbom_component_view c
