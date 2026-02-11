@@ -13,9 +13,9 @@ import (
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
-	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Poller checks providers with configured poll intervals for new commits.
@@ -194,9 +194,8 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			continue
 		}
 
-		// Check last scanned commit from completed runs
-		lastScannedSHA := p.getLastScannedCommit(ctx, repoRecord.ID)
-		if lastScannedSHA == latestSHA {
+		// Skip commits that already have a finished run for this repo.
+		if p.hasFinishedJobForCommit(ctx, repoRecord.ID, latestSHA) {
 			skippedSame++
 			continue
 		}
@@ -242,8 +241,15 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			"updated_at":   now,
 		}
 
-		if err := p.db.WithContext(ctx).Table("jobs").Create(job).Error; err != nil {
-			log.Printf("poller: create job for %s: %v", repo.FullPath, err)
+		tx := p.db.WithContext(ctx).Table("jobs").
+			Clauses(clause.OnConflict{DoNothing: true}).
+			Create(job)
+		if tx.Error != nil {
+			log.Printf("poller: create job for %s: %v", repo.FullPath, tx.Error)
+			continue
+		}
+		if tx.RowsAffected == 0 {
+			skippedPending++
 			continue
 		}
 
@@ -266,18 +272,20 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 	return result, nil
 }
 
-// getLastScannedCommit returns the commit_hash of the last SUCCEEDED run for a repo.
-func (p *Poller) getLastScannedCommit(ctx context.Context, repoID string) string {
-	var run runner.Run
-	err := p.db.WithContext(ctx).
-		Where("type = ? AND status = ?", jobs.JobTypeCreateRun, "SUCCEEDED").
-		Where("payload->>'repo_id' = ?", repoID).
-		Order("finished_at DESC").
-		First(&run).Error
-	if err != nil {
-		return ""
+// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for repo+commit.
+func (p *Poller) hasFinishedJobForCommit(ctx context.Context, repoID, commitSHA string) bool {
+	if repoID == "" || commitSHA == "" {
+		return false
 	}
-	return run.CommitHash
+
+	var count int64
+	p.db.WithContext(ctx).Table("jobs").
+		Where("type = ?", jobs.JobTypeCreateRun).
+		Where("finished_at IS NOT NULL").
+		Where("payload->>'repo_id' = ?", repoID).
+		Where("(commit_hash = ? OR payload->>'commit_sha' = ?)", commitSHA, commitSHA).
+		Count(&count)
+	return count > 0
 }
 
 // hasPendingJob checks if there's already a QUEUED or RUNNING job for this repo.
