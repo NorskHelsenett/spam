@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
@@ -52,7 +53,14 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
-	let syncingProviderId = $state<string | null>(null);
+	let syncingProviderIds = $state<Set<string>>(new Set());
+	let healthTooltip = $state<{
+		entryId: string;
+		message: string;
+		top: number;
+		left: number;
+	} | null>(null);
+	let healthTooltipEl: HTMLDivElement | null = $state(null);
 
 	type ApiProvider = {
 		id: string;
@@ -70,6 +78,12 @@
 		created_at: string;
 		updated_at?: string;
 		last_rotated_at?: string;
+	};
+
+	type ProviderSyncResponse = {
+		provider_id: string;
+		health_status: string;
+		health_message?: string;
 	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
@@ -181,6 +195,68 @@
 			return 'border-[var(--success)]/40 text-[var(--success)]';
 		}
 		return 'border-[var(--border-color)] text-[var(--text-tertiary)]';
+	};
+
+	const healthDetails = (entry: ProviderRow) => {
+		const health = (entry.healthStatus || '').toUpperCase();
+		if (!entry.enabled || (health !== 'FAILED' && health !== 'DEGRADED')) {
+			return '';
+		}
+		return (entry.healthMessage || '').trim();
+	};
+
+	const hasHealthDetails = (entry: ProviderRow) => Boolean(healthDetails(entry));
+
+	const TOOLTIP_OFFSET = 10;
+	const TOOLTIP_EDGE_GAP = 12;
+
+	const hideHealthTooltip = (entryId?: string) => {
+		if (!entryId || healthTooltip?.entryId === entryId) {
+			healthTooltip = null;
+		}
+	};
+
+	const showHealthTooltip = async (event: MouseEvent | FocusEvent, entry: ProviderRow) => {
+		const message = healthDetails(entry);
+		if (!message || !browser) {
+			return;
+		}
+
+		const anchor = event.currentTarget as HTMLElement | null;
+		if (!anchor) {
+			return;
+		}
+
+		const rect = anchor.getBoundingClientRect();
+		healthTooltip = {
+			entryId: entry.id,
+			message,
+			top: rect.bottom + TOOLTIP_OFFSET,
+			left: rect.left + rect.width / 2
+		};
+
+		await tick();
+
+		if (!healthTooltip || healthTooltip.entryId !== entry.id || !healthTooltipEl) {
+			return;
+		}
+
+		const tipRect = healthTooltipEl.getBoundingClientRect();
+		const maxLeft = window.innerWidth - tipRect.width - TOOLTIP_EDGE_GAP;
+		const centeredLeft = rect.left + rect.width / 2 - tipRect.width / 2;
+		const left = Math.max(TOOLTIP_EDGE_GAP, Math.min(maxLeft, centeredLeft));
+
+		let top = rect.bottom + TOOLTIP_OFFSET;
+		if (top + tipRect.height > window.innerHeight - TOOLTIP_EDGE_GAP) {
+			top = rect.top - tipRect.height - TOOLTIP_OFFSET;
+		}
+		top = Math.max(TOOLTIP_EDGE_GAP, top);
+
+		healthTooltip = {
+			...healthTooltip,
+			top,
+			left
+		};
 	};
 
 	const loadProviders = async () => {
@@ -370,7 +446,8 @@
 	};
 
 	const syncProviderNow = async (entry: ProviderRow) => {
-		syncingProviderId = entry.id;
+		if (syncingProviderIds.has(entry.id)) return;
+		syncingProviderIds = new Set(syncingProviderIds).add(entry.id);
 		formError = '';
 		try {
 			const response = await fetch(`/api/admin/providers/${entry.id}/sync`, {
@@ -381,11 +458,22 @@
 				formError = 'Failed to sync provider.';
 				return;
 			}
-			await loadProviders();
+			const synced: ProviderSyncResponse = await response.json();
+			providers = providers.map((provider) => {
+				if (provider.id !== entry.id) return provider;
+				return {
+					...provider,
+					healthStatus: synced.health_status || provider.healthStatus,
+					healthMessage: synced.health_message || '',
+					lastHealthCheck: new Date().toISOString()
+				};
+			});
 		} catch {
 			formError = 'Failed to sync provider.';
 		} finally {
-			syncingProviderId = null;
+			const next = new Set(syncingProviderIds);
+			next.delete(entry.id);
+			syncingProviderIds = next;
 		}
 	};
 
@@ -456,6 +544,17 @@
 		if (browser) {
 			loadProviders();
 			updatePreview();
+
+			const closeTooltip = () => {
+				healthTooltip = null;
+			};
+			window.addEventListener('scroll', closeTooltip, true);
+			window.addEventListener('resize', closeTooltip);
+
+			return () => {
+				window.removeEventListener('scroll', closeTooltip, true);
+				window.removeEventListener('resize', closeTooltip);
+			};
 		}
 	});
 </script>
@@ -697,20 +796,34 @@
 									/>
 								</td>
 								<td class="px-5 py-3">
-									<span class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}>
-										{statusLabel(entry)}
-									</span>
+									<div class="relative inline-flex">
+										<span
+											class={`inline-flex items-center rounded-full border px-2 py-1 text-xs ${statusClass(entry)}`}
+										>
+											<button
+												type="button"
+												class="inline-flex items-center border-0 bg-transparent p-0 text-inherit"
+												tabindex={hasHealthDetails(entry) ? 0 : -1}
+												onmouseenter={(event) => showHealthTooltip(event, entry)}
+												onmouseleave={() => hideHealthTooltip(entry.id)}
+												onfocus={(event) => showHealthTooltip(event, entry)}
+												onblur={() => hideHealthTooltip(entry.id)}
+											>
+												{statusLabel(entry)}
+											</button>
+										</span>
+									</div>
 								</td>
 								<td class="px-5 py-3">
 									<div class="flex flex-wrap gap-2">
 										<button
 											type="button"
 											class="sync-now-btn rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											class:syncing={syncingProviderId === entry.id}
+											class:syncing={syncingProviderIds.has(entry.id)}
 											onclick={() => syncProviderNow(entry)}
-											disabled={saving || syncingProviderId === entry.id}
+											disabled={saving || syncingProviderIds.has(entry.id)}
 										>
-											{#if syncingProviderId === entry.id}
+											{#if syncingProviderIds.has(entry.id)}
 												<span class="sync-label syncing-text" data-text="Syncing...">Syncing...</span>
 											{:else}
 												<span class="sync-label">Sync Now</span>
@@ -750,6 +863,16 @@
 		{/if}
 	</section>
 </div>
+
+{#if healthTooltip}
+	<div
+		bind:this={healthTooltipEl}
+		class="pointer-events-none fixed z-[200] w-80 rounded-xl border border-[var(--border-color)] bg-[var(--surface-bg)] px-3 py-2 text-[11px] leading-relaxed text-[var(--text-secondary)] shadow-xl"
+		style={`top: ${healthTooltip.top}px; left: ${healthTooltip.left}px;`}
+	>
+		{healthTooltip.message}
+	</div>
+{/if}
 
 <!-- Rotate Token Dialog -->
 <Dialog bind:open={rotateDialogOpen} onClose={closeRotateDialog} showCloseButton={false} maxWidth="max-w-xl">

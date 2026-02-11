@@ -11,6 +11,8 @@
 		status: string;
 		clone_url: string;
 		provider: string;
+		provider_id?: string;
+		base_url?: string;
 		repo_path: string;
 		ref?: string;
 		commit_sha?: string;
@@ -480,9 +482,22 @@
 		return `${baseUrl}/commit/${sha}`;
 	};
 
-	const getRepoUrl = (cloneUrl: string): string | null => {
-		if (!cloneUrl) return null;
-		return cloneUrl.replace(/\.git$/, '');
+	const getInternalRepoUrl = (run: Run): string | null => {
+		const repoPath = run.repo_path || extractRepoPath(run.clone_url);
+		if (!repoPath) return null;
+		const provider = run.provider?.toLowerCase() || 'github';
+		const params = new URLSearchParams({ provider, path: repoPath });
+		if (run.base_url) params.set('base_url', run.base_url);
+		if (run.provider_id) params.set('provider_id', run.provider_id);
+		return `/app/providers/repo?${params}`;
+	};
+
+	const extractRepoPath = (cloneUrl: string): string => {
+		if (!cloneUrl) return '';
+		let path = cloneUrl.replace(/^https?:\/\//, '').replace(/^git@[^:]+:/, '');
+		const slashIdx = path.indexOf('/');
+		if (slashIdx !== -1) path = path.substring(slashIdx + 1);
+		return path.replace(/\.git$/, '');
 	};
 </script>
 
@@ -541,9 +556,7 @@
 					{/if}
 					<div class="mt-3 flex flex-wrap items-center gap-3">
 						<a
-							href={getRepoUrl(run.clone_url) || '#'}
-							target="_blank"
-							rel="noopener noreferrer"
+							href={getInternalRepoUrl(run) || '#'}
 							class="inline-flex items-center gap-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
 						>
 							<GitBranch class="h-4 w-4" />
@@ -551,7 +564,6 @@
 							{#if run.ref}
 								<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--text-muted)]">{run.ref}</span>
 							{/if}
-							<ExternalLink class="h-3 w-3 opacity-50" />
 						</a>
 						{#if run.commit_sha}
 							{@const commitUrl = getCommitUrl(run.clone_url, run.provider, run.commit_sha)}
@@ -612,7 +624,20 @@
 			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Provider</p>
-					<p class="mt-1 text-lg font-semibold capitalize text-[var(--text-bright)]">{run.provider || '-'}</p>
+					{#if run.base_url}
+						<a
+							href={run.base_url}
+							target="_blank"
+							rel="noopener noreferrer"
+							class="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--text-bright)] transition hover:text-[var(--accent)]"
+						>
+							{run.base_url.replace(/^https?:\/\//, '')}
+							<ExternalLink class="h-3 w-3 opacity-50" />
+						</a>
+						<p class="text-xs capitalize text-[var(--text-muted)]">{run.provider || ''}</p>
+					{:else}
+						<p class="mt-1 text-lg font-semibold capitalize text-[var(--text-bright)]">{run.provider || '-'}</p>
+					{/if}
 				</div>
 				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Duration</p>

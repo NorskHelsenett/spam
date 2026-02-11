@@ -13,9 +13,9 @@ import (
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
-	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // Poller checks providers with configured poll intervals for new commits.
@@ -161,7 +161,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		return result, nil
 	}
 
-	var queued, skippedSame, skippedPending, healthFailed int
+	var queued, skippedSame, skippedPending int
 	for _, repo := range allRepos {
 		if repo.DefaultBranch == "" {
 			continue
@@ -173,7 +173,6 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		latestSHA, err := client.GetLatestCommit(ctx, repo.FullPath, repo.DefaultBranch)
 		if err != nil {
 			// Skip repos where we can't get the latest commit (empty repos, permission issues, etc.)
-			healthFailed++
 			continue
 		}
 
@@ -195,9 +194,8 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			continue
 		}
 
-		// Check last scanned commit from completed runs
-		lastScannedSHA := p.getLastScannedCommit(ctx, repoRecord.ID)
-		if lastScannedSHA == latestSHA {
+		// Skip commits that already have a finished run for this repo.
+		if p.hasFinishedJobForCommit(ctx, repoRecord.ID, latestSHA) {
 			skippedSame++
 			continue
 		}
@@ -243,8 +241,15 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			"updated_at":   now,
 		}
 
-		if err := p.db.WithContext(ctx).Table("jobs").Create(job).Error; err != nil {
-			log.Printf("poller: create job for %s: %v", repo.FullPath, err)
+		tx := p.db.WithContext(ctx).Table("jobs").
+			Clauses(clause.OnConflict{DoNothing: true}).
+			Create(job)
+		if tx.Error != nil {
+			log.Printf("poller: create job for %s: %v", repo.FullPath, tx.Error)
+			continue
+		}
+		if tx.RowsAffected == 0 {
+			skippedPending++
 			continue
 		}
 
@@ -261,30 +266,26 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 	result.SkippedSame = skippedSame
 	result.SkippedPending = skippedPending
 
-	if healthFailed > 0 {
-		_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthDegraded, fmt.Sprintf("%d repo health checks failed", healthFailed))
-		result.HealthStatus = providerconfig.ProviderHealthDegraded
-		result.HealthMessage = fmt.Sprintf("%d repo health checks failed", healthFailed)
-		return result, nil
-	}
 	_ = p.store.UpdateHealth(ctx, provider.ID, providerconfig.ProviderHealthHealthy, "")
 	result.HealthStatus = providerconfig.ProviderHealthHealthy
 	result.HealthMessage = ""
 	return result, nil
 }
 
-// getLastScannedCommit returns the commit_hash of the last SUCCEEDED run for a repo.
-func (p *Poller) getLastScannedCommit(ctx context.Context, repoID string) string {
-	var run runner.Run
-	err := p.db.WithContext(ctx).
-		Where("type = ? AND status = ?", jobs.JobTypeCreateRun, "SUCCEEDED").
-		Where("payload->>'repo_id' = ?", repoID).
-		Order("finished_at DESC").
-		First(&run).Error
-	if err != nil {
-		return ""
+// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for repo+commit.
+func (p *Poller) hasFinishedJobForCommit(ctx context.Context, repoID, commitSHA string) bool {
+	if repoID == "" || commitSHA == "" {
+		return false
 	}
-	return run.CommitHash
+
+	var count int64
+	p.db.WithContext(ctx).Table("jobs").
+		Where("type = ?", jobs.JobTypeCreateRun).
+		Where("finished_at IS NOT NULL").
+		Where("payload->>'repo_id' = ?", repoID).
+		Where("(commit_hash = ? OR payload->>'commit_sha' = ?)", commitSHA, commitSHA).
+		Count(&count)
+	return count > 0
 }
 
 // hasPendingJob checks if there's already a QUEUED or RUNNING job for this repo.

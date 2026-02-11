@@ -2,10 +2,12 @@ package uiapi
 
 import (
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
@@ -22,6 +24,166 @@ type UnifiedDependency struct {
 	RepoCount    int      `json:"repo_count"`       // How many repos use this
 	HasDirect    bool     `json:"has_direct"`       // At least one version is direct
 	Scopes       []string `json:"scopes,omitempty"` // All unique scopes across versions
+}
+
+// DependencyExportCSVHandler exports expanded dependency rows for forensics.
+// Each row represents a repo+component+version tuple merged from SBOM and manifest sources.
+func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		search := r.URL.Query().Get("q")
+		ecosystem := r.URL.Query().Get("ecosystem")
+		repoID := r.URL.Query().Get("repo_id")
+		source := r.URL.Query().Get("source") // "", "sbom", "manifest", "both"
+		parsedSearch, err := parseDependencySearchQuery(search)
+		if err != nil {
+			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		query := `
+			WITH sbom_rows AS (
+				SELECT DISTINCT
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+					NULLIF(s.purl, '') as component_purl,
+					COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
+					s.kind as ecosystem
+				FROM sbom_component_view s
+				JOIN repo_commits rc ON rc.id = s.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND s.asset_type = 'REPO_COMMIT'
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+			),
+			manifest_rows AS (
+				SELECT DISTINCT
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					COALESCE(md.version, '') as version,
+					NULL::text as component_purl,
+					md.name as component_name,
+					md.ecosystem as ecosystem
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				JOIN repos r ON r.id = m.repo_id
+				WHERE md.name IS NOT NULL
+			),
+			merged AS (
+				SELECT
+					COALESCE(s.repo_id, m.repo_id) as repo_id,
+					COALESCE(s.provider, m.provider) as provider,
+					COALESCE(s.org, m.org) as org,
+					COALESCE(s.slug, m.slug) as slug,
+					COALESCE(s.version, m.version) as version,
+					COALESCE(s.component_purl, m.component_purl, '') as component_purl,
+					COALESCE(s.component_name, m.component_name) as component_name,
+					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
+					(s.repo_id IS NOT NULL) as has_sbom,
+					(m.repo_id IS NOT NULL) as has_manifest
+				FROM sbom_rows s
+				FULL OUTER JOIN manifest_rows m
+					ON s.repo_id = m.repo_id
+					AND s.component_name = m.component_name
+					AND s.ecosystem = m.ecosystem
+					AND s.version = m.version
+			)
+			SELECT DISTINCT
+				concat_ws('/', provider, org, slug) as repo,
+				version,
+				component_purl,
+				component_name,
+				ecosystem
+			FROM merged
+			WHERE 1=1
+		`
+
+		args := []interface{}{}
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
+			query += ` AND (component_name ILIKE ? OR component_purl ILIKE ?)`
+			args = append(args, "%"+search+"%", "%"+search+"%")
+		}
+		if ecosystem != "" {
+			query += ` AND ecosystem = ?`
+			args = append(args, ecosystem)
+		}
+		if repoID != "" {
+			query += ` AND repo_id = ?`
+			args = append(args, repoID)
+		}
+
+		switch source {
+		case "sbom":
+			query += ` AND has_sbom = true AND has_manifest = false`
+		case "manifest":
+			query += ` AND has_sbom = false AND has_manifest = true`
+		case "both":
+			query += ` AND has_sbom = true AND has_manifest = true`
+		}
+
+		query += ` ORDER BY repo ASC, component_name ASC, version ASC`
+
+		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
+		if err != nil {
+			log.Printf("dependency export query error: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		filename := "dependencies-forensics-" + time.Now().Format("2006-01-02") + ".csv"
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+
+		cw := csv.NewWriter(w)
+		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem"}); err != nil {
+			log.Printf("dependency export header write error: %v", err)
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+
+		for rows.Next() {
+			var repo, version, purl, name, eco sql.NullString
+			if err := rows.Scan(&repo, &version, &purl, &name, &eco); err != nil {
+				log.Printf("dependency export scan error: %v", err)
+				continue
+			}
+			record := []string{
+				repo.String,
+				version.String,
+				purl.String,
+				name.String,
+				eco.String,
+			}
+			if err := cw.Write(record); err != nil {
+				log.Printf("dependency export row write error: %v", err)
+				http.Error(w, "csv write error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			log.Printf("dependency export flush error: %v", err)
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+	}
 }
 
 // UnifiedDependenciesResponse is the API response
@@ -55,6 +217,11 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		source := r.URL.Query().Get("source") // "sbom", "manifest", or empty for both
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order") // "asc" or "desc"
+		parsedSearch, err := parseDependencySearchQuery(search)
+		if err != nil {
+			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 
 		// Validate and set defaults for sorting
 		if sortColumn == "" {
@@ -109,7 +276,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		args := []interface{}{}
 
-		if search != "" {
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Groups)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
 			query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
 			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
@@ -141,7 +314,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		`
 
 		// Apply filters for manifest side (continue parameter numbering)
-		if search != "" {
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Groups)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
 			query += ` AND md.name ILIKE ?`
 			args = append(args, "%"+search+"%")
 		}

@@ -193,7 +193,18 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	if err != nil {
 		next := (*time.Time)(nil)
 		status := jobs.JobStatusFailed
-		if jobs.IsNonRetryable(err) {
+		if jobs.IsProviderUnavailable(err) {
+			// Provider is temporarily down. Retry with a longer backoff and
+			// roll back the attempt counter so the outage doesn't exhaust retries.
+			retryAt := now.Add(5 * time.Minute)
+			next = &retryAt
+			status = jobs.JobStatusRetry
+			log.Printf("job deferred (provider unavailable): id=%s type=%s error=%v retry_at=%s", job.ID, job.Type, err, retryAt.Format(time.RFC3339))
+			if err := db.WithContext(ctx).Model(&jobs.Job{}).Where("id = ?", job.ID).
+				Update("attempts", gorm.Expr("GREATEST(attempts - 1, 0)")).Error; err != nil {
+				log.Printf("rollback attempt counter: %v", err)
+			}
+		} else if jobs.IsNonRetryable(err) {
 			log.Printf("job failed (non-retryable): id=%s type=%s error=%v", job.ID, job.Type, err)
 		} else if job.Attempts < job.MaxAttempts {
 			retryAt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, now)

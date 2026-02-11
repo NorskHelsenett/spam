@@ -10,6 +10,79 @@
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
 
 	let appEventSource: EventSource | null = null;
+	let metricCardObserver: MutationObserver | null = null;
+
+	const formatMetricNumber = (value: string) => {
+		const normalized = value.replace(/[\s,]/g, '');
+		if (!/^-?\d+$/.test(normalized)) {
+			return value;
+		}
+
+		const parsed = Number.parseInt(normalized, 10);
+		if (!Number.isSafeInteger(parsed)) {
+			return value;
+		}
+
+		return Math.abs(parsed) < 1000 ? `${parsed}` : parsed.toLocaleString('en-US').replace(/,/g, ' ');
+	};
+
+	const formatMetricCardTextNode = (node: Text) => {
+		const value = node.nodeValue ?? '';
+		const nextValue = value.replace(/-?\d(?:[\d,\s]*\d)?/g, (token) => formatMetricNumber(token));
+		if (nextValue !== value) {
+			node.nodeValue = nextValue;
+		}
+	};
+
+	const formatMetricCardNumbers = (card: Element) => {
+		const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
+		let current = walker.nextNode();
+		while (current) {
+			formatMetricCardTextNode(current as Text);
+			current = walker.nextNode();
+		}
+	};
+
+	const setupMetricCardFormatting = () => {
+		if (!browser || metricCardObserver) {
+			return;
+		}
+
+		document.querySelectorAll('.metric-card').forEach((card) => {
+			formatMetricCardNumbers(card);
+		});
+
+		metricCardObserver = new MutationObserver((mutations) => {
+			for (const mutation of mutations) {
+				if (mutation.type === 'characterData') {
+					const parent = mutation.target.parentElement;
+					const card = parent?.closest('.metric-card');
+					if (card) {
+						formatMetricCardNumbers(card);
+					}
+					continue;
+				}
+
+				for (const node of mutation.addedNodes) {
+					if (!(node instanceof Element)) {
+						continue;
+					}
+					if (node.matches('.metric-card')) {
+						formatMetricCardNumbers(node);
+					}
+					node.querySelectorAll('.metric-card').forEach((card) => {
+						formatMetricCardNumbers(card);
+					});
+				}
+			}
+		});
+
+		metricCardObserver.observe(document.body, {
+			childList: true,
+			subtree: true,
+			characterData: true
+		});
+	};
 
 	const startAppStream = () => {
 		if (!browser || appEventSource) {
@@ -72,6 +145,7 @@
 
 				if (!cancelled) {
 					startAppStream();
+					setupMetricCardFormatting();
 				}
 			} catch (error) {
 				// Error checking auth, redirect to login
@@ -86,6 +160,10 @@
 			if (appEventSource) {
 				appEventSource.close();
 				appEventSource = null;
+			}
+			if (metricCardObserver) {
+				metricCardObserver.disconnect();
+				metricCardObserver = null;
 			}
 		};
 	});

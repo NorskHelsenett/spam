@@ -238,7 +238,7 @@
 					<h2 class="text-lg font-semibold text-[var(--text-bright)]">SBOM activity</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">latest</span>
 				</div>
-				<div class="mt-4 max-h-[26em] flex-1 overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<div class="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>

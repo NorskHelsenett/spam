@@ -23,6 +23,8 @@ type RunResponse struct {
 	Status     string     `json:"status"`
 	CloneURL   string     `json:"clone_url"`
 	Provider   string     `json:"provider"`
+	ProviderID string     `json:"provider_id,omitempty"`
+	BaseURL    string     `json:"base_url,omitempty"`
 	RepoPath   string     `json:"repo_path"`
 	Ref        string     `json:"ref,omitempty"`
 	CommitSHA  string     `json:"commit_sha,omitempty"`
@@ -68,13 +70,15 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		page, pageSize := parsePagination(r)
-		status := r.URL.Query().Get("status")
+		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
 
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
-		if status != "" {
-			query = query.Where("status = ?", status)
+		if len(statuses) == 1 {
+			query = query.Where("status = ?", statuses[0])
+		} else if len(statuses) > 1 {
+			query = query.Where("status IN ?", statuses)
 		}
 		if repoPath != "" {
 			// Search in payload JSON for matching repo path
@@ -106,12 +110,52 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		runs := make([]RunResponse, 0, len(jobRecords))
-		for _, job := range jobRecords {
+		parsedPayloads := make([]jobs.CreateRunPayload, len(jobRecords))
+		providerIDs := make([]string, 0, len(jobRecords))
+		seenProviderIDs := make(map[string]struct{}, len(jobRecords))
+		for i, job := range jobRecords {
 			var payload jobs.CreateRunPayload
 			if len(job.Payload) > 0 {
 				json.Unmarshal(job.Payload, &payload)
 			}
+			parsedPayloads[i] = payload
+			if payload.ProviderID == "" {
+				continue
+			}
+			if _, ok := seenProviderIDs[payload.ProviderID]; ok {
+				continue
+			}
+			seenProviderIDs[payload.ProviderID] = struct{}{}
+			providerIDs = append(providerIDs, payload.ProviderID)
+		}
+
+		providerNames := make(map[string]string, len(providerIDs))
+		providerBaseURLs := make(map[string]string, len(providerIDs))
+		if len(providerIDs) > 0 {
+			var providers []struct {
+				ID          string `gorm:"column:id"`
+				DisplayName string `gorm:"column:display_name"`
+				BaseURL     string `gorm:"column:base_url"`
+			}
+			if err := db.WithContext(r.Context()).
+				Table("provider_instances").
+				Select("id, display_name, base_url").
+				Where("id IN ?", providerIDs).
+				Find(&providers).Error; err == nil {
+				for _, provider := range providers {
+					if provider.DisplayName != "" {
+						providerNames[provider.ID] = provider.DisplayName
+					}
+					if provider.BaseURL != "" {
+						providerBaseURLs[provider.ID] = provider.BaseURL
+					}
+				}
+			}
+		}
+
+		runs := make([]RunResponse, 0, len(jobRecords))
+		for i, job := range jobRecords {
+			payload := parsedPayloads[i]
 
 			status := job.Status
 			errorText := job.Error
@@ -133,7 +177,9 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				ID:         job.ID,
 				Status:     status,
 				CloneURL:   payload.CloneURL,
-				Provider:   payload.Provider,
+				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
+				ProviderID: payload.ProviderID,
+				BaseURL:    providerBaseURLs[payload.ProviderID],
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
 				CommitSHA:  job.CommitHash,
@@ -152,6 +198,49 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			PageSize:   pageSize,
 		})
 	}
+}
+
+func displayProviderName(providerType string, providerID string, providerNames map[string]string) string {
+	if providerID != "" {
+		if providerName, ok := providerNames[providerID]; ok && providerName != "" {
+			return providerName
+		}
+	}
+	return providerType
+}
+
+func parseStatusFilters(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	validStatuses := map[string]struct{}{
+		string(jobs.JobStatusQueued):      {},
+		string(jobs.JobStatusRunning):     {},
+		string(jobs.JobStatusSucceeded):   {},
+		string(jobs.JobStatusFailed):      {},
+		string(jobs.JobStatusRetry):       {},
+		string(runner.RunStatusCancelled): {},
+	}
+
+	parts := strings.Split(raw, ",")
+	statuses := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		status := strings.ToUpper(strings.TrimSpace(part))
+		if status == "" {
+			continue
+		}
+		if _, ok := validStatuses[status]; !ok {
+			continue
+		}
+		if _, ok := seen[status]; ok {
+			continue
+		}
+		seen[status] = struct{}{}
+		statuses = append(statuses, status)
+	}
+	return statuses
 }
 
 // RunsCreateHandler creates a new run.
@@ -322,6 +411,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Status:     job.Status,
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,
+			ProviderID: payload.ProviderID,
 			RepoPath:   extractRepoPath(payload.CloneURL),
 			Ref:        payload.Ref,
 			CommitSHA:  job.CommitHash,
@@ -330,6 +420,18 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			StartedAt:  job.LockedAt,
 			FinishedAt: job.FinishedAt,
 			K8sJobName: job.K8sJobName,
+		}
+
+		// Look up provider base URL
+		if payload.ProviderID != "" {
+			var pi struct {
+				BaseURL string
+			}
+			if err := db.WithContext(r.Context()).Table("provider_instances").
+				Where("id = ?", payload.ProviderID).
+				Select("base_url").First(&pi).Error; err == nil {
+				response.BaseURL = pi.BaseURL
+			}
 		}
 
 		// Look up associated SBOM via repo commit

@@ -1,8 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle } from 'lucide-svelte';
+	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download } from 'lucide-svelte';
 	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
+	import Select from '$lib/components/Select.svelte';
 
 	type UnifiedDependency = {
 		name: string;
@@ -26,6 +27,7 @@
 	let page = $state(1);
 	let totalCount = $state(0);
 	let pageSize = $state(50);
+	let exporting = $state(false);
 
 	// Sorting
 	let sortColumn = $state<string>('');
@@ -36,6 +38,16 @@
 	let selectedDependency: UnifiedDependency | null = $state(null);
 
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+	const sourceOptions = [
+		{ value: '', label: 'All sources' },
+		{ value: 'sbom', label: 'SBOM only' },
+		{ value: 'manifest', label: 'Manifest only' },
+		{ value: 'both', label: 'Both (verified)' }
+	];
+	const ecosystemOptions = $derived([
+		{ value: '', label: 'All ecosystems' },
+		...ecosystems.map((eco) => ({ value: eco, label: eco }))
+	]);
 
 	const loadEcosystems = async () => {
 		try {
@@ -77,6 +89,38 @@
 			error = 'Failed to load dependencies.';
 		} finally {
 			loading = false;
+		}
+	};
+
+	const exportCsv = async () => {
+		if (exporting) return;
+		exporting = true;
+		try {
+			const params = new URLSearchParams();
+			if (searchQuery) params.set('q', searchQuery);
+			if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
+			if (selectedSource) params.set('source', selectedSource);
+
+			const response = await fetch(`/api/dependencies/export.csv?${params}`, { credentials: 'include' });
+			if (!response.ok) {
+				throw new Error(response.status === 401 ? 'Please log in.' : 'Failed to export dependencies.');
+			}
+
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			const disposition = response.headers.get('content-disposition') ?? '';
+			const match = disposition.match(/filename="([^"]+)"/);
+			link.href = url;
+			link.download = match?.[1] || 'dependencies-forensics.csv';
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(url);
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to export dependencies.';
+		} finally {
+			exporting = false;
 		}
 	};
 
@@ -135,40 +179,44 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Dependencies</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">Search dependencies from SBOMs and manifest files.</p>
 			</div>
+			<button
+				type="button"
+				class="btn btn-secondary w-full sm:w-auto"
+				onclick={exportCsv}
+				disabled={exporting || loading}
+			>
+				<Download class="h-4 w-4" />
+				{exporting ? 'Exporting...' : 'Export CSV'}
+			</button>
 		</header>
 
 		<!-- Search and filters -->
-		<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
-			<div class="relative flex-1">
-				<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-				<input
-					type="text"
-					placeholder="Search by name or PURL..."
-					class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none"
-					bind:value={searchQuery}
-					oninput={handleSearch}
-				/>
+		<div class="flex flex-col gap-4 sm:flex-row sm:items-start">
+			<div class="flex-1 sm:min-w-[20rem]">
+				<div class="relative">
+					<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
+					<input
+						type="text"
+						placeholder="Search name/PURL or use query syntax (e.g. react@19.0.1..19.2.0 || react>=20 && react<21)"
+						class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none"
+						bind:value={searchQuery}
+						oninput={handleSearch}
+					/>
+				</div>
+				<p class="mt-2 text-xs text-[var(--text-muted)]">Examples: <code>debug@4.4.2</code>, <code>react@19.0.1..19.2.0</code>, <code>react&gt;=19.0.1 &amp;&amp; react&lt;=19.2.0</code>, <code>debug &lt;=4.4 || lodash@4.17.21</code></p>
 			</div>
-			<select
-				class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] transition focus:border-[var(--accent)] focus:outline-none"
+			<Select
+				options={ecosystemOptions}
 				bind:value={selectedEcosystem}
+				class="w-full sm:w-auto sm:min-w-[12rem] sm:shrink-0"
 				onchange={handleEcosystemChange}
-			>
-				<option value="">All ecosystems</option>
-				{#each ecosystems as eco}
-					<option value={eco}>{eco}</option>
-				{/each}
-			</select>
-			<select
-				class="rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)] transition focus:border-[var(--accent)] focus:outline-none"
+			/>
+			<Select
+				options={sourceOptions}
 				bind:value={selectedSource}
+				class="w-full sm:w-auto sm:min-w-[12rem] sm:shrink-0"
 				onchange={handleSourceChange}
-			>
-				<option value="">All sources</option>
-				<option value="sbom">SBOM only</option>
-				<option value="manifest">Manifest only</option>
-				<option value="both">Both (verified)</option>
-			</select>
+			/>
 		</div>
 
 		{#if error}
