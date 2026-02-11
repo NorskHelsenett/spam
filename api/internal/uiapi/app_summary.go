@@ -68,13 +68,18 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 		var resp AppSummaryResponse
 
-		// Counts
+		// Counts – license metrics are scoped to the latest (bound) SBOM per asset
+		// to avoid inflating numbers with historical scans.
 		if err := db.WithContext(r.Context()).Raw(`
-			WITH license_items AS (
+			WITH current_sboms AS (
+				SELECT sbom_id FROM sbom_bindings
+			),
+			license_items AS (
 				SELECT trim(lic) AS license
-				FROM sbom_component_view
-				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(licenses, ''), ',')) AS lic ON TRUE
-				WHERE licenses IS NOT NULL AND licenses <> ''
+				FROM sbom_component_view c
+				INNER JOIN current_sboms cs ON cs.sbom_id = c.sbom_id
+				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(c.licenses, ''), ',')) AS lic ON TRUE
+				WHERE c.licenses IS NOT NULL AND c.licenses <> ''
 			),
 			latest_repo_secrets AS (
 				SELECT DISTINCT ON (repo_id)
@@ -90,13 +95,18 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				(SELECT COUNT(DISTINCT repo_id) FROM sbom_metadata_view WHERE repo_id IS NOT NULL) AS repo_with_sbom_count,
 				(SELECT COUNT(*) FROM image_digests) AS image_count,
 				(SELECT COUNT(DISTINCT kind || ':' || package_name)
-					FROM sbom_component_view
-					WHERE type = 'library' AND package_name IS NOT NULL) AS component_count,
+					FROM sbom_component_view c
+					INNER JOIN current_sboms cs ON cs.sbom_id = c.sbom_id
+					WHERE c.type = 'library' AND c.package_name IS NOT NULL) AS component_count,
 				(SELECT COUNT(DISTINCT kind || ':' || package_name || '@' || COALESCE(purl_version, ''))
-					FROM sbom_component_view
-					WHERE type = 'library' AND package_name IS NOT NULL) AS component_version_count,
+					FROM sbom_component_view c
+					INNER JOIN current_sboms cs ON cs.sbom_id = c.sbom_id
+					WHERE c.type = 'library' AND c.package_name IS NOT NULL) AS component_version_count,
 				(SELECT COUNT(DISTINCT license) FROM license_items WHERE license <> '') AS license_count,
-				(SELECT COUNT(*) FROM sbom_component_view WHERE type = 'library' AND (licenses IS NULL OR licenses = '')) AS missing_license_count,
+				(SELECT COUNT(*)
+					FROM sbom_component_view c
+					INNER JOIN current_sboms cs ON cs.sbom_id = c.sbom_id
+					WHERE c.type = 'library' AND (c.licenses IS NULL OR c.licenses = '')) AS missing_license_count,
 				COALESCE((SELECT SUM(finding_count) FROM latest_repo_secrets), 0) AS secrets_count
 		`).Scan(&resp.Counts).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -160,13 +170,14 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
-		// Top licenses
+		// Top licenses – scoped to current SBOMs only
 		if err := db.WithContext(r.Context()).Raw(`
 			WITH license_items AS (
 				SELECT trim(lic) AS license
-				FROM sbom_component_view
-				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(licenses, ''), ',')) AS lic ON TRUE
-				WHERE licenses IS NOT NULL AND licenses <> ''
+				FROM sbom_component_view c
+				INNER JOIN sbom_bindings sb ON sb.sbom_id = c.sbom_id
+				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(c.licenses, ''), ',')) AS lic ON TRUE
+				WHERE c.licenses IS NOT NULL AND c.licenses <> ''
 			)
 			SELECT license, COUNT(*) AS count
 			FROM license_items
