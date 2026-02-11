@@ -642,14 +642,15 @@ func (c *GiteaClientImpl) contributorsFromCommits(ctx context.Context, owner, re
 	var order []authorKey
 
 	for _, cm := range commits {
-		key := authorKey{cm.AuthorName, cm.AuthorEmail}
+		email := strings.ToLower(strings.TrimSpace(cm.AuthorEmail))
+		key := authorKey{cm.AuthorName, email}
 		if existing, ok := counts[key]; ok {
 			existing.Contributions++
 		} else {
 			counts[key] = &ContributorInfo{
 				Login:         cm.AuthorLogin,
 				Name:          cm.AuthorName,
-				Email:         cm.AuthorEmail,
+				Email:         email,
 				AvatarURL:     cm.AuthorAvatar,
 				Contributions: 1,
 			}

@@ -526,9 +526,10 @@ func enrichContributors(contributors []providers.ContributorInfo, commits []prov
 	avatarByEmail := make(map[string]string)
 
 	for _, c := range commits {
-		if c.AuthorLogin != "" && c.AuthorEmail != "" {
+		email := strings.ToLower(strings.TrimSpace(c.AuthorEmail))
+		if c.AuthorLogin != "" && email != "" {
 			if _, ok := emailByLogin[c.AuthorLogin]; !ok {
-				emailByLogin[c.AuthorLogin] = c.AuthorEmail
+				emailByLogin[c.AuthorLogin] = email
 			}
 		}
 		if c.AuthorLogin != "" && c.AuthorAvatar != "" {
@@ -536,20 +537,23 @@ func enrichContributors(contributors []providers.ContributorInfo, commits []prov
 				avatarByLogin[c.AuthorLogin] = c.AuthorAvatar
 			}
 		}
-		if c.AuthorName != "" && c.AuthorEmail != "" {
+		if c.AuthorName != "" && email != "" {
 			if _, ok := emailByName[c.AuthorName]; !ok {
-				emailByName[c.AuthorName] = c.AuthorEmail
+				emailByName[c.AuthorName] = email
 			}
 		}
-		if c.AuthorEmail != "" && c.AuthorAvatar != "" {
-			if _, ok := avatarByEmail[c.AuthorEmail]; !ok {
-				avatarByEmail[c.AuthorEmail] = c.AuthorAvatar
+		if email != "" && c.AuthorAvatar != "" {
+			if _, ok := avatarByEmail[email]; !ok {
+				avatarByEmail[email] = c.AuthorAvatar
 			}
 		}
 	}
 
 	for i := range contributors {
 		c := &contributors[i]
+
+		// Normalize existing email
+		c.Email = strings.ToLower(strings.TrimSpace(c.Email))
 
 		// Fill in missing email from commits
 		if c.Email == "" {
@@ -579,7 +583,7 @@ func enrichContributors(contributors []providers.ContributorInfo, commits []prov
 			}
 			// Fallback to Gravatar
 			if c.AvatarURL == "" && c.Email != "" {
-				hash := md5.Sum([]byte(strings.ToLower(strings.TrimSpace(c.Email))))
+				hash := md5.Sum([]byte(c.Email))
 				c.AvatarURL = fmt.Sprintf("https://www.gravatar.com/avatar/%x?d=identicon&s=80", hash)
 			}
 		}
@@ -606,7 +610,7 @@ func enrichCommits(commits []providers.CommitInfo, contributors []providers.Cont
 			avatarByLogin[c.Login] = c.AvatarURL
 		}
 		if c.Email != "" {
-			avatarByEmail[c.Email] = c.AvatarURL
+			avatarByEmail[strings.ToLower(strings.TrimSpace(c.Email))] = c.AvatarURL
 		}
 		if c.Name != "" {
 			avatarByName[c.Name] = c.AvatarURL
@@ -625,7 +629,7 @@ func enrichCommits(commits []providers.CommitInfo, contributors []providers.Cont
 			}
 		}
 		if c.AuthorEmail != "" {
-			if avatar, ok := avatarByEmail[c.AuthorEmail]; ok {
+			if avatar, ok := avatarByEmail[strings.ToLower(strings.TrimSpace(c.AuthorEmail))]; ok {
 				c.AuthorAvatar = avatar
 				continue
 			}
