@@ -6,9 +6,15 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+func isDuplicateKeyError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 var ErrBindingExists = errors.New("sbom binding already exists for this asset")
 
@@ -36,9 +42,10 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 	}
 
 	var sbom SBOM
-	result := db.WithContext(ctx).Where(SBOM{
+	where := SBOM{
 		ContentHash: input.ContentHash,
-	}).Attrs(SBOM{
+	}
+	result := db.WithContext(ctx).Where(where).Attrs(SBOM{
 		ID:               uuid.NewString(),
 		Format:           input.Format,
 		ContentBytes:     input.ContentBytes,
@@ -46,6 +53,12 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 	}).FirstOrCreate(&sbom)
 
 	if result.Error != nil {
+		if isDuplicateKeyError(result.Error) {
+			if err := db.WithContext(ctx).Where(where).First(&sbom).Error; err != nil {
+				return nil, err
+			}
+			return &sbom, nil
+		}
 		return nil, result.Error
 	}
 	return &sbom, nil

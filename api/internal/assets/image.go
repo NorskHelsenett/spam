@@ -21,16 +21,23 @@ func UpsertImageDigest(ctx context.Context, db *gorm.DB, input ImageDigestInput)
 	}
 
 	var image ImageDigest
-	result := db.WithContext(ctx).Where(ImageDigest{
+	where := ImageDigest{
 		Registry:   input.Registry,
 		Repository: input.Repository,
 		Digest:     input.Digest,
-	}).Attrs(ImageDigest{
+	}
+	result := db.WithContext(ctx).Where(where).Attrs(ImageDigest{
 		ID:              uuid.NewString(),
 		CreatedByUserID: input.CreatedByUserID,
 	}).FirstOrCreate(&image)
 
 	if result.Error != nil {
+		if isDuplicateKeyError(result.Error) {
+			if err := db.WithContext(ctx).Where(where).First(&image).Error; err != nil {
+				return nil, err
+			}
+			return &image, nil
+		}
 		return nil, result.Error
 	}
 	return &image, nil

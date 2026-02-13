@@ -6,8 +6,17 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
+
+// isDuplicateKeyError returns true when a Postgres unique-constraint violation
+// (SQLSTATE 23505) caused the error, which can happen when concurrent
+// FirstOrCreate calls race.
+func isDuplicateKeyError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
 
 type RepoInput struct {
 	Provider        string
@@ -32,16 +41,25 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	}
 
 	var repo Repo
-	result := db.WithContext(ctx).Where(Repo{
+	where := Repo{
 		Provider: provider,
 		Org:      input.Org,
 		Slug:     input.Slug,
-	}).Attrs(Repo{
+	}
+	result := db.WithContext(ctx).Where(where).Attrs(Repo{
 		ID:              uuid.NewString(),
 		CreatedByUserID: input.CreatedByUserID,
 	}).FirstOrCreate(&repo)
 
 	if result.Error != nil {
+		// Handle race condition: another request inserted the same row
+		// between our SELECT and INSERT. Retry with a plain lookup.
+		if isDuplicateKeyError(result.Error) {
+			if err := db.WithContext(ctx).Where(where).First(&repo).Error; err != nil {
+				return nil, err
+			}
+			return &repo, nil
+		}
 		return nil, result.Error
 	}
 	return &repo, nil
@@ -53,15 +71,22 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 	}
 
 	var commit RepoCommit
-	result := db.WithContext(ctx).Where(RepoCommit{
+	where := RepoCommit{
 		RepoID:    input.RepoID,
 		CommitSHA: input.CommitSHA,
-	}).Attrs(RepoCommit{
+	}
+	result := db.WithContext(ctx).Where(where).Attrs(RepoCommit{
 		ID:  uuid.NewString(),
 		Ref: input.Ref,
 	}).FirstOrCreate(&commit)
 
 	if result.Error != nil {
+		if isDuplicateKeyError(result.Error) {
+			if err := db.WithContext(ctx).Where(where).First(&commit).Error; err != nil {
+				return nil, err
+			}
+			return &commit, nil
+		}
 		return nil, result.Error
 	}
 	return &commit, nil
