@@ -114,6 +114,11 @@ func run() error {
 	}
 
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
+		for _, w := range warnings {
+			log.Printf("WARNING: provider secret key: %s", w)
+		}
+	}
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

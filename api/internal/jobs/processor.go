@@ -70,9 +70,14 @@ func NextRetryTime(attempts, maxAttempts int, now time.Time) time.Time {
 	if maxAttempts <= 0 {
 		maxAttempts = 3
 	}
+	// Exponential backoff: 1min, 2min, 4min, 8min, 16min, capped at 30min
 	delay := time.Minute
-	if attempts > 1 {
-		delay = time.Duration(attempts) * time.Minute
+	for i := 1; i < attempts; i++ {
+		delay *= 2
+	}
+	const maxDelay = 30 * time.Minute
+	if delay > maxDelay {
+		delay = maxDelay
 	}
 	return now.Add(delay)
 }
