@@ -56,6 +56,9 @@
 	let sortDirection = $state<SortDirection>('desc');
 
 	const runStreams = new Map<string, EventSource>();
+	let loadRunsInFlight = false;
+	let loadRunsQueued = false;
+	let sseReloadTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
 
@@ -70,6 +73,15 @@
 		for (const id of runStreams.keys()) {
 			closeRunStream(id);
 		}
+	};
+
+	/** Debounced reload: coalesces multiple SSE-triggered reloads into one call. */
+	const scheduleReload = () => {
+		if (sseReloadTimer) return; // already scheduled
+		sseReloadTimer = setTimeout(() => {
+			sseReloadTimer = null;
+			loadRuns();
+		}, 1000);
 	};
 
 	const handleRunStatusEvent = (runId: string, data: { status?: string; error?: string }) => {
@@ -94,10 +106,11 @@
 
 		if (!isActiveRunStatus(nextStatus)) {
 			closeRunStream(runId);
+			// Only re-fetch from the API when a run reaches a terminal state
+			// (counts and filtered rows change). Debounce so multiple completions
+			// within the same second are coalesced into a single request.
+			scheduleReload();
 		}
-
-		// Re-fetch once on status changes so ordering, counts, and filtered rows stay correct.
-		loadRuns();
 	};
 
 	const syncRunStreams = () => {
@@ -142,6 +155,11 @@
 		searchTerm.trim().length > 0 ? `&repo_path=${encodeURIComponent(searchTerm.trim())}` : '';
 
 	const loadRuns = async () => {
+		if (loadRunsInFlight) {
+			loadRunsQueued = true;
+			return;
+		}
+		loadRunsInFlight = true;
 		loading = true;
 		error = '';
 		try {
@@ -162,6 +180,11 @@
 			error = e instanceof Error ? e.message : 'Failed to load runs';
 		} finally {
 			loading = false;
+			loadRunsInFlight = false;
+			if (loadRunsQueued) {
+				loadRunsQueued = false;
+				loadRuns();
+			}
 		}
 	};
 
@@ -194,10 +217,7 @@
 		if (!browser) return;
 		loadRuns();
 
-		// Refresh every 10 seconds
-		const interval = setInterval(loadRuns, 10000);
 		return () => {
-			clearInterval(interval);
 			closeAllRunStreams();
 		};
 	});
@@ -206,6 +226,10 @@
 		if (searchDebounce) {
 			clearTimeout(searchDebounce);
 			searchDebounce = null;
+		}
+		if (sseReloadTimer) {
+			clearTimeout(sseReloadTimer);
+			sseReloadTimer = null;
 		}
 		closeAllRunStreams();
 	});
