@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/events"
@@ -395,6 +396,36 @@ func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error
 		Name:    session.Name,
 		Email:   session.Email,
 	}, nil
+}
+
+// SPAGuard wraps next to redirect unauthenticated browser navigations before the SPA loads.
+// Paths with a "." (static assets) and anything under /auth pass through unchanged.
+// Pending users are redirected to /auth/pending; everyone else to /auth/login.
+func (s *Service) SPAGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Static assets pass through.
+		if strings.Contains(r.URL.Path, ".") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Auth UI routes (login, pending) pass through.
+		if strings.HasPrefix(r.URL.Path, "/auth") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Approved session → serve the SPA.
+		if _, err := s.loadSession(r); err == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Pending session → send to waiting room.
+		if _, err := s.loadSessionAllowPending(r); err == nil {
+			http.Redirect(w, r, "/auth/pending", http.StatusFound)
+			return
+		}
+		// No session at all → send to login.
+		http.Redirect(w, r, "/auth/login", http.StatusFound)
+	})
 }
 
 func (s *Service) setSessionCookie(w http.ResponseWriter, sessionID string, expiresAt time.Time) error {

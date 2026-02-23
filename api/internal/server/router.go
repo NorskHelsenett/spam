@@ -123,8 +123,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			}
 		})
 
-		if spaHandler != nil {
-			r.Handle("/*", spaHandler)
+		if spaHandler != nil && authService != nil {
+			r.Handle("/*", authService.SPAGuard(spaHandler))
 		}
 	})
 
