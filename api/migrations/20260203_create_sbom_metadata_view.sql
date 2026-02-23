@@ -1,7 +1,7 @@
 DROP MATERIALIZED VIEW IF EXISTS sbom_metadata_view;
 DROP VIEW IF EXISTS sbom_metadata_view;
 
-CREATE MATERIALIZED VIEW sbom_metadata_view AS
+CREATE MATERIALIZED VIEW sbom_metadata_view WITH NO DATA AS
 WITH sbom_json AS (
   SELECT
     s.id AS sbom_id,

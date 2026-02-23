@@ -51,6 +51,7 @@ func run() error {
 	}()
 
 	if err := gormDB.AutoMigrate(
+		&db.ViewSchemaVersion{},
 		&auth.Session{},
 		&auth.User{},
 		&auth.Group{},
