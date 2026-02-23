@@ -59,8 +59,23 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 	return nil
 }
 
+// sbomViewRefreshLockID is a stable advisory lock key used to ensure only one
+// replica refreshes the SBOM materialized views at a time.
+const sbomViewRefreshLockID = 8_742_635_912
+
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
+// It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one
+// instance performs the refresh — others skip rather than queue up behind it.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
+	var acquired bool
+	if err := db.WithContext(ctx).Raw("SELECT pg_try_advisory_lock(?)", sbomViewRefreshLockID).Scan(&acquired).Error; err != nil {
+		return fmt.Errorf("acquire refresh lock: %w", err)
+	}
+	if !acquired {
+		return nil // another replica is already refreshing
+	}
+	defer db.Exec("SELECT pg_advisory_unlock(?)", sbomViewRefreshLockID) //nolint:errcheck
+
 	if err := db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW sbom_component_view").Error; err != nil {
 		return fmt.Errorf("refresh sbom_component_view: %w", err)
 	}
