@@ -1,7 +1,7 @@
 DROP MATERIALIZED VIEW IF EXISTS sbom_component_view;
 DROP VIEW IF EXISTS sbom_component_view;
 
-CREATE MATERIALIZED VIEW sbom_component_view WITH NO DATA AS
+CREATE MATERIALIZED VIEW sbom_component_view AS
 WITH sbom_json AS (
   SELECT
     s.id AS sbom_id,
@@ -196,7 +196,8 @@ LEFT JOIN deps d
   ON d.sbom_id = c.sbom_id
   AND d.asset_type IS NOT DISTINCT FROM c.asset_type
   AND d.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
-  AND d.component_ref = c.component_ref;
+  AND d.component_ref = c.component_ref
+WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
   ON sbom_component_view (sbom_id, component_ref, is_root);

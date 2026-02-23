@@ -1,7 +1,7 @@
 DROP MATERIALIZED VIEW IF EXISTS sbom_metadata_view;
 DROP VIEW IF EXISTS sbom_metadata_view;
 
-CREATE MATERIALIZED VIEW sbom_metadata_view WITH NO DATA AS
+CREATE MATERIALIZED VIEW sbom_metadata_view AS
 WITH sbom_json AS (
   SELECT
     s.id AS sbom_id,
@@ -79,7 +79,8 @@ FROM sbom_json sj
 LEFT JOIN scanner sc ON sc.sbom_id = sj.sbom_id
 LEFT JOIN root_component r ON r.sbom_id = sj.sbom_id
 LEFT JOIN repo_bindings rc ON rc.sbom_id = sj.sbom_id
-LEFT JOIN image_bindings ib ON ib.sbom_id = sj.sbom_id;
+LEFT JOIN image_bindings ib ON ib.sbom_id = sj.sbom_id
+WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_metadata_mv
   ON sbom_metadata_view (sbom_id);
