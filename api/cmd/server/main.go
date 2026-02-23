@@ -87,11 +87,9 @@ func run() error {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
 
-	go func() {
-		if err := db.RefreshMaterializedViews(ctx, gormDB); err != nil {
-			log.Printf("initial view refresh: %v", err)
-		}
-	}()
+	if err := db.EnsureViewsPopulated(ctx, gormDB); err != nil {
+		return fmt.Errorf("populate views: %w", err)
+	}
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
