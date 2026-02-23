@@ -207,3 +207,19 @@ CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_sbom
 
 CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_kind_name
   ON sbom_component_view (kind, package_name);
+
+-- Partial index for the common dependency query pattern
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_deps
+  ON sbom_component_view (kind, package_name, purl_version, sbom_id, asset_type, asset_ref_id)
+  WHERE is_root = false AND purl IS NOT NULL;
+
+-- Partial index for type='library' scans (summary, top components, correlated subquery)
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_library
+  ON sbom_component_view (sbom_id, kind, package_name, purl_version, licenses)
+  WHERE type = 'library' AND package_name IS NOT NULL;
+
+-- Trigram index for ILIKE search on package_name
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_pkg_trgm
+  ON sbom_component_view USING gin (package_name gin_trgm_ops)
+  WHERE package_name IS NOT NULL;

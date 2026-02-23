@@ -80,9 +80,8 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					COUNT(DISTINCT kind || ':' || package_name) FILTER (WHERE licenses IS NULL OR licenses = '') AS missing_license_count,
 					COUNT(DISTINCT trim(lic)) FILTER (WHERE trim(lic) <> '') AS license_count
 				FROM sbom_component_view c
-				INNER JOIN sbom_bindings sb ON sb.sbom_id = c.sbom_id
 				LEFT JOIN LATERAL unnest(string_to_array(c.licenses, ',')) AS lic ON TRUE
-				WHERE c.type = 'library'
+				WHERE c.type = 'library' AND c.asset_type IS NOT NULL
 			),
 			latest_repo_secrets AS (
 				SELECT DISTINCT ON (repo_id)
@@ -170,9 +169,8 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			WITH license_items AS (
 				SELECT trim(lic) AS license
 				FROM sbom_component_view c
-				INNER JOIN sbom_bindings sb ON sb.sbom_id = c.sbom_id
 				LEFT JOIN LATERAL unnest(string_to_array(COALESCE(c.licenses, ''), ',')) AS lic ON TRUE
-				WHERE c.licenses IS NOT NULL AND c.licenses <> ''
+				WHERE c.licenses IS NOT NULL AND c.licenses <> '' AND c.asset_type IS NOT NULL
 			)
 			SELECT license, COUNT(*) AS count
 			FROM license_items
