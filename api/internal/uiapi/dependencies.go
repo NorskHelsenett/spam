@@ -356,7 +356,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					ON s.name = m.name 
 					AND s.ecosystem = m.ecosystem
 			)
-			SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes FROM merged
+			SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
 		`
 
 		// Apply source filter if specified
@@ -374,21 +374,12 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		// Secondary sort by name for consistency
 		query += `, name ASC`
 
-		// Count total (before adding pagination to query/args)
-		countQuery := `SELECT COUNT(*) FROM (` + query + `) t`
-		var total int64
-		if err := db.WithContext(r.Context()).Raw(countQuery, args...).Scan(&total).Error; err != nil {
-			log.Printf("unified deps count error: %v", err)
-			http.Error(w, "database error", http.StatusInternalServerError)
-			return
-		}
-
 		// Apply pagination
 		offset := (page - 1) * perPage
 		query += ` LIMIT ? OFFSET ?`
 		args = append(args, interface{}(perPage), interface{}(offset))
 
-		// Execute query
+		// Execute query — total count comes back as a window function column
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("unified deps query error: %v", err)
@@ -397,6 +388,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		}
 		defer rows.Close()
 
+		var total int64
 		deps := make([]UnifiedDependency, 0)
 		for rows.Next() {
 			var dep UnifiedDependency
@@ -408,7 +400,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				&dep.Name, &dep.Ecosystem, &purl,
 				&sources, &dep.VersionCount,
 				&dep.SBOMCount, &dep.RepoCount,
-				&dep.HasDirect, &scopes,
+				&dep.HasDirect, &scopes, &total,
 			); err != nil {
 				log.Printf("scan error: %v", err)
 				continue
