@@ -79,6 +79,7 @@ func run() error {
 
 	if err := db.EnsureViews(ctx, gormDB,
 		"migrations/20260211_create_unique_active_create_run_jobs.sql",
+		"migrations/20260223_create_unique_active_refresh_sbom_views_jobs.sql",
 		"migrations/20260206_drop_legacy_component_tables.sql",
 		"migrations/20260204_create_materialized_view_refreshes.sql",
 		"migrations/20260203_create_sbom_component_view.sql",
