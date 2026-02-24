@@ -326,7 +326,7 @@ func (c *GiteaClientImpl) GetLatestCommit(ctx context.Context, repoPath string, 
 	}
 	owner, repo := parts[0], parts[1]
 
-	urlStr := fmt.Sprintf("%s/repos/%s/%s/git/commits?sha=%s&limit=1",
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/commits?sha=%s&limit=1",
 		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), url.QueryEscape(ref))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
@@ -499,7 +499,7 @@ func (c *GiteaClientImpl) GetCommitLog(ctx context.Context, owner, repo string, 
 	if limit <= 0 {
 		limit = 20
 	}
-	urlStr := fmt.Sprintf("%s/repos/%s/%s/git/commits?limit=%d",
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/commits?limit=%d",
 		c.baseURL, url.PathEscape(owner), url.PathEscape(repo), limit)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
