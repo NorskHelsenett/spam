@@ -188,9 +188,14 @@ SELECT
   END AS package_name,
   NULLIF(regexp_replace(split_part(c.purl, '@', 2), '[?#].*$', ''), '') AS purl_version
 FROM (
-  SELECT * FROM components
-  UNION ALL
-  SELECT * FROM root_component
+  SELECT DISTINCT ON (sbom_id, asset_type, asset_ref_id, component_ref, is_root)
+    sbom_id, asset_type, asset_ref_id, component, component_ref, purl, version, type, licenses, is_root
+  FROM (
+    SELECT * FROM components
+    UNION ALL
+    SELECT * FROM root_component
+  ) _all
+  ORDER BY sbom_id, asset_type, asset_ref_id, component_ref, is_root
 ) c
 LEFT JOIN deps d
   ON d.sbom_id = c.sbom_id
@@ -200,7 +205,7 @@ LEFT JOIN deps d
 WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
-  ON sbom_component_view (sbom_id, component_ref, is_root);
+  ON sbom_component_view (sbom_id, COALESCE(asset_type, ''), COALESCE(asset_ref_id, ''), COALESCE(component_ref, ''), is_root);
 
 CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_sbom
   ON sbom_component_view (sbom_id);
