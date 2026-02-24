@@ -24,26 +24,15 @@ func StatsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		var stats StatsResponse
 
-		if err := db.WithContext(r.Context()).Table("sboms").Count(&stats.SBOMCount).Error; err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
-			return
-		}
-
 		if err := db.WithContext(r.Context()).Raw(`
-			SELECT COUNT(DISTINCT kind || ':' || package_name)
-			FROM sbom_component_view
-			WHERE is_root = false AND package_name IS NOT NULL
-		`).Scan(&stats.ComponentCount).Error; err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
-			return
-		}
-
-		if err := db.WithContext(r.Context()).Table("repos").Count(&stats.RepoCount).Error; err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
-			return
-		}
-
-		if err := db.WithContext(r.Context()).Table("image_digests").Count(&stats.ImageCount).Error; err != nil {
+			SELECT
+				(SELECT COUNT(*) FROM sboms) AS sbom_count,
+				(SELECT COUNT(DISTINCT kind || ':' || package_name)
+				 FROM sbom_component_view
+				 WHERE is_root = false AND package_name IS NOT NULL) AS component_count,
+				(SELECT COUNT(*) FROM repos) AS repo_count,
+				(SELECT COUNT(*) FROM image_digests) AS image_count
+		`).Scan(&stats).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
