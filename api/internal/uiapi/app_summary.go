@@ -32,6 +32,7 @@ type AppSummarySBOM struct {
 	ScannerVersion string    `json:"scanner_version"`
 	AssetType      string    `json:"asset_type"`
 	RepoName       string    `json:"repo_name,omitempty"`
+	RepoProvider   string    `json:"repo_provider,omitempty"`
 	CommitSHA      string    `json:"commit_sha,omitempty"`
 	ImageRegistry  string    `json:"image_registry,omitempty"`
 	ImageRepo      string    `json:"image_repository,omitempty"`
@@ -130,12 +131,14 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				m.scanner_version,
 				m.asset_type,
 				COALESCE(m.repo_name, '') AS repo_name,
+				COALESCE(rp.provider, '') AS repo_provider,
 				COALESCE(m.commit_sha, '') AS commit_sha,
 				COALESCE(m.image_registry, '') AS image_registry,
 				COALESCE(m.image_repository, '') AS image_repository,
 				COALESCE(m.image_digest, '') AS image_digest,
 				COALESCE(lib.component_count, 0) AS component_count
 			FROM sbom_metadata_view m
+			LEFT JOIN repos rp ON rp.id = m.repo_id
 			LEFT JOIN (
 				SELECT sbom_id, COUNT(*) AS component_count
 				FROM sbom_component_view
