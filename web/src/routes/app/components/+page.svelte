@@ -1,8 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import { fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download } from 'lucide-svelte';
-	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
+	import DependencyDrawer from '$lib/components/DependencyDrawer.svelte';
 	import Select from '$lib/components/Select.svelte';
 
 	type UnifiedDependency = {
@@ -154,8 +156,13 @@
 	};
 
 	const openDetail = (dep: UnifiedDependency) => {
-		selectedDependency = dep;
-		detailOpen = true;
+		if (selectedDependency?.name === dep.name && selectedDependency?.ecosystem === dep.ecosystem && detailOpen) {
+			detailOpen = false;
+			selectedDependency = null;
+		} else {
+			selectedDependency = dep;
+			detailOpen = true;
+		}
 	};
 
 	const totalPages = $derived(Math.ceil(totalCount / pageSize));
@@ -226,7 +233,7 @@
 		{#if dependencies.length === 0 && !loading}
 			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
 		{:else if dependencies.length > 0}
-			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="relative overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>
@@ -275,7 +282,10 @@
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 						{#each dependencies as dep}
-							<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]" onclick={() => openDetail(dep)}>
+							<tr
+						class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] {detailOpen && selectedDependency?.name === dep.name && selectedDependency?.ecosystem === dep.ecosystem ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+						onclick={() => openDetail(dep)}
+					>
 								<td class="px-5 py-3">
 									<div class="flex items-center gap-2">
 										<Package class="h-4 w-4 text-[var(--accent)]" />
@@ -344,6 +354,19 @@
 						{/each}
 					</tbody>
 				</table>
+				{#if detailOpen && selectedDependency}
+					<div
+						class="absolute inset-y-0 right-0 z-10 w-[900px] border-l border-[var(--border-color)]"
+						in:fly={{ x: 900, duration: 240, easing: cubicOut, opacity: 1 }}
+					out:fly={{ x: 900, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<DependencyDrawer
+							name={selectedDependency.name}
+							ecosystem={selectedDependency.ecosystem}
+							onClose={() => { detailOpen = false; selectedDependency = null; }}
+						/>
+					</div>
+				{/if}
 			</div>
 
 			<!-- Pagination -->
@@ -375,13 +398,3 @@
 		{/if}
 	</section>
 </div>
-
-<!-- Dependency Detail Dialog -->
-{#if selectedDependency}
-	<DependencyDetail 
-		bind:open={detailOpen}
-		name={selectedDependency.name}
-		ecosystem={selectedDependency.ecosystem}
-		sources={selectedDependency.sources}
-	/>
-{/if}
