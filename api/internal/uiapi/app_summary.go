@@ -121,7 +121,7 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
-		// Recent SBOMs
+		// Recent SBOMs – join pre-aggregated library counts to avoid a correlated subquery per row.
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT
 				m.sbom_id,
@@ -134,12 +134,14 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				COALESCE(m.image_registry, '') AS image_registry,
 				COALESCE(m.image_repository, '') AS image_repository,
 				COALESCE(m.image_digest, '') AS image_digest,
-				(
-					SELECT COUNT(*)
-					FROM sbom_component_view c
-					WHERE c.sbom_id = m.sbom_id AND c.type = 'library'
-				) AS component_count
+				COALESCE(lib.component_count, 0) AS component_count
 			FROM sbom_metadata_view m
+			LEFT JOIN (
+				SELECT sbom_id, COUNT(*) AS component_count
+				FROM sbom_component_view
+				WHERE type = 'library'
+				GROUP BY sbom_id
+			) lib ON lib.sbom_id = m.sbom_id
 			ORDER BY m.created_at DESC
 			LIMIT 8
 		`).Scan(&resp.RecentSBOMs).Error; err != nil {

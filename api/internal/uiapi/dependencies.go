@@ -246,123 +246,216 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			sortOrder = "desc"
 		}
 
-		// Build unified query - group by name+ecosystem
-		query := `
-			WITH sbom_deps AS (
-				SELECT
-					scv.name,
-					scv.ecosystem,
-					MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl_base,
-					'sbom' as source,
-					COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
-					COUNT(DISTINCT scv.sbom_id) as sbom_count,
-					COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
-				FROM (
-					SELECT
-						COALESCE(s.package_name, s.normalized_name, s.name) as name,
-						s.kind as ecosystem,
-						s.purl,
-						s.purl_version,
-						s.version,
-						s.sbom_id,
-						s.asset_type,
-						s.asset_ref_id
-					FROM sbom_component_view s
-					WHERE s.is_root = false
-					  AND s.purl IS NOT NULL
-				) scv
-				WHERE scv.name IS NOT NULL
-		`
-
+		// Build the query. When a source filter is specified, short-circuit to avoid
+		// scanning both sbom_component_view and manifest_dependencies unnecessarily.
+		var query string
 		args := []interface{}{}
 
-		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Groups)
-			if predicate != "" {
-				query += ` AND ` + predicate
-				args = append(args, predicateArgs...)
+		switch source {
+		case "sbom":
+			// Skip manifest_deps CTE entirely – only scan sbom_component_view.
+			query = `
+				WITH sbom_deps AS (
+					SELECT
+						scv.name,
+						scv.ecosystem,
+						MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl,
+						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
+						COUNT(DISTINCT scv.sbom_id) as sbom_count,
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
+					FROM (
+						SELECT
+							COALESCE(s.package_name, s.normalized_name, s.name) as name,
+							s.kind as ecosystem,
+							s.purl,
+							s.purl_version,
+							s.version,
+							s.sbom_id,
+							s.asset_type,
+							s.asset_ref_id
+						FROM sbom_component_view s
+						WHERE s.is_root = false
+						  AND s.purl IS NOT NULL
+					) scv
+					WHERE scv.name IS NOT NULL
+			`
+			if parsedSearch.Structured {
+				predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Groups)
+				if predicate != "" {
+					query += ` AND ` + predicate
+					args = append(args, predicateArgs...)
+				}
+			} else if search != "" {
+				query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
+				args = append(args, "%"+search+"%", "%"+search+"%")
 			}
-		} else if search != "" {
-			query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
-			args = append(args, "%"+search+"%", "%"+search+"%")
-		}
-		if ecosystem != "" {
-			query += ` AND scv.ecosystem = ?`
-			args = append(args, ecosystem)
-		}
-		if repoID != "" {
-			query += ` AND scv.asset_ref_id = ?`
-			args = append(args, repoID)
-		}
-
-		query += `
-				GROUP BY scv.name, scv.ecosystem
-			),
-			manifest_deps AS (
-				SELECT 
-					md.name,
-					md.ecosystem,
-					'manifest' as source,
-					COUNT(DISTINCT md.version) as version_count,
-					COUNT(DISTINCT m.id) as manifest_count,
-					COUNT(DISTINCT m.repo_id) as repo_count,
-					BOOL_OR(md.direct) as has_direct,
-					ARRAY_AGG(DISTINCT md.scope) FILTER (WHERE md.scope IS NOT NULL) as scopes
-				FROM manifest_dependencies md
-				JOIN manifests m ON m.id = md.manifest_id
-				WHERE 1=1
-		`
-
-		// Apply filters for manifest side (continue parameter numbering)
-		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Groups)
-			if predicate != "" {
-				query += ` AND ` + predicate
-				args = append(args, predicateArgs...)
+			if ecosystem != "" {
+				query += ` AND scv.ecosystem = ?`
+				args = append(args, ecosystem)
 			}
-		} else if search != "" {
-			query += ` AND md.name ILIKE ?`
-			args = append(args, "%"+search+"%")
-		}
-		if ecosystem != "" {
-			query += ` AND md.ecosystem = ?`
-			args = append(args, ecosystem)
-		}
-		if repoID != "" {
-			query += ` AND m.repo_id = ?`
-			args = append(args, repoID)
-		}
+			if repoID != "" {
+				query += ` AND scv.asset_ref_id = ?`
+				args = append(args, repoID)
+			}
+			query += `
+					GROUP BY scv.name, scv.ecosystem
+				)
+				SELECT name, ecosystem, purl, 'sbom' AS sources, version_count, sbom_count, repo_count,
+				       false AS has_direct, NULL::text[] AS scopes, COUNT(*) OVER () AS total_count
+				FROM sbom_deps
+			`
 
-		query += `
-				GROUP BY md.name, md.ecosystem
-			),
-			merged AS (
-				SELECT 
-					COALESCE(s.name, m.name) as name,
-					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
-					s.purl_base as purl,
-					CASE 
-						WHEN s.name IS NOT NULL AND m.name IS NOT NULL THEN 'both'
-						WHEN s.name IS NOT NULL THEN 'sbom'
-						ELSE 'manifest'
-					END as sources,
-					GREATEST(COALESCE(s.version_count, 0), COALESCE(m.version_count, 0)) as version_count,
-					COALESCE(s.sbom_count, 0) as sbom_count,
-					COALESCE(s.repo_count, m.repo_count, 0) as repo_count,
-					COALESCE(m.has_direct, false) as has_direct,
-					m.scopes
-				FROM sbom_deps s
-				FULL OUTER JOIN manifest_deps m 
-					ON s.name = m.name 
-					AND s.ecosystem = m.ecosystem
-			)
-			SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
-		`
+		case "manifest":
+			// Skip sbom_deps CTE entirely – only scan manifest_dependencies.
+			query = `
+				WITH manifest_deps AS (
+					SELECT
+						md.name,
+						md.ecosystem,
+						COUNT(DISTINCT md.version) as version_count,
+						COUNT(DISTINCT m.id) as sbom_count,
+						COUNT(DISTINCT m.repo_id) as repo_count,
+						BOOL_OR(md.direct) as has_direct,
+						ARRAY_AGG(DISTINCT md.scope) FILTER (WHERE md.scope IS NOT NULL) as scopes
+					FROM manifest_dependencies md
+					JOIN manifests m ON m.id = md.manifest_id
+					WHERE 1=1
+			`
+			if parsedSearch.Structured {
+				predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Groups)
+				if predicate != "" {
+					query += ` AND ` + predicate
+					args = append(args, predicateArgs...)
+				}
+			} else if search != "" {
+				query += ` AND md.name ILIKE ?`
+				args = append(args, "%"+search+"%")
+			}
+			if ecosystem != "" {
+				query += ` AND md.ecosystem = ?`
+				args = append(args, ecosystem)
+			}
+			if repoID != "" {
+				query += ` AND m.repo_id = ?`
+				args = append(args, repoID)
+			}
+			query += `
+					GROUP BY md.name, md.ecosystem
+				)
+				SELECT name, ecosystem, NULL AS purl, 'manifest' AS sources, version_count, 0 AS sbom_count, repo_count,
+				       has_direct, scopes, COUNT(*) OVER () AS total_count
+				FROM manifest_deps
+			`
 
-		// Apply source filter if specified
-		if source != "" {
-			query += ` WHERE sources = ?`
-			args = append(args, source)
+		default:
+			// Both sources (or "both" filter) – FULL OUTER JOIN across all data.
+			query = `
+				WITH sbom_deps AS (
+					SELECT
+						scv.name,
+						scv.ecosystem,
+						MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl_base,
+						'sbom' as source,
+						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
+						COUNT(DISTINCT scv.sbom_id) as sbom_count,
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
+					FROM (
+						SELECT
+							COALESCE(s.package_name, s.normalized_name, s.name) as name,
+							s.kind as ecosystem,
+							s.purl,
+							s.purl_version,
+							s.version,
+							s.sbom_id,
+							s.asset_type,
+							s.asset_ref_id
+						FROM sbom_component_view s
+						WHERE s.is_root = false
+						  AND s.purl IS NOT NULL
+					) scv
+					WHERE scv.name IS NOT NULL
+			`
+			if parsedSearch.Structured {
+				predicate, predicateArgs := buildStructuredDependencyPredicate("scv.name", "COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')", parsedSearch.Groups)
+				if predicate != "" {
+					query += ` AND ` + predicate
+					args = append(args, predicateArgs...)
+				}
+			} else if search != "" {
+				query += ` AND (scv.name ILIKE ? OR scv.purl ILIKE ?)`
+				args = append(args, "%"+search+"%", "%"+search+"%")
+			}
+			if ecosystem != "" {
+				query += ` AND scv.ecosystem = ?`
+				args = append(args, ecosystem)
+			}
+			if repoID != "" {
+				query += ` AND scv.asset_ref_id = ?`
+				args = append(args, repoID)
+			}
+			query += `
+					GROUP BY scv.name, scv.ecosystem
+				),
+				manifest_deps AS (
+					SELECT
+						md.name,
+						md.ecosystem,
+						'manifest' as source,
+						COUNT(DISTINCT md.version) as version_count,
+						COUNT(DISTINCT m.id) as manifest_count,
+						COUNT(DISTINCT m.repo_id) as repo_count,
+						BOOL_OR(md.direct) as has_direct,
+						ARRAY_AGG(DISTINCT md.scope) FILTER (WHERE md.scope IS NOT NULL) as scopes
+					FROM manifest_dependencies md
+					JOIN manifests m ON m.id = md.manifest_id
+					WHERE 1=1
+			`
+			if parsedSearch.Structured {
+				predicate, predicateArgs := buildStructuredDependencyPredicate("md.name", "COALESCE(md.version, '')", parsedSearch.Groups)
+				if predicate != "" {
+					query += ` AND ` + predicate
+					args = append(args, predicateArgs...)
+				}
+			} else if search != "" {
+				query += ` AND md.name ILIKE ?`
+				args = append(args, "%"+search+"%")
+			}
+			if ecosystem != "" {
+				query += ` AND md.ecosystem = ?`
+				args = append(args, ecosystem)
+			}
+			if repoID != "" {
+				query += ` AND m.repo_id = ?`
+				args = append(args, repoID)
+			}
+			query += `
+					GROUP BY md.name, md.ecosystem
+				),
+				merged AS (
+					SELECT
+						COALESCE(s.name, m.name) as name,
+						COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
+						s.purl_base as purl,
+						CASE
+							WHEN s.name IS NOT NULL AND m.name IS NOT NULL THEN 'both'
+							WHEN s.name IS NOT NULL THEN 'sbom'
+							ELSE 'manifest'
+						END as sources,
+						GREATEST(COALESCE(s.version_count, 0), COALESCE(m.version_count, 0)) as version_count,
+						COALESCE(s.sbom_count, 0) as sbom_count,
+						COALESCE(s.repo_count, m.repo_count, 0) as repo_count,
+						COALESCE(m.has_direct, false) as has_direct,
+						m.scopes
+					FROM sbom_deps s
+					FULL OUTER JOIN manifest_deps m
+						ON s.name = m.name
+						AND s.ecosystem = m.ecosystem
+				)
+				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
+			`
+			if source == "both" {
+				query += ` WHERE sources = 'both'`
+			}
 		}
 
 		// Apply sorting
@@ -497,13 +590,15 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
-		// Aggregate versions from both SBOM and manifest sources
-		// For SBOMs: find all SBOMs containing this dependency, then count bound assets
+		// Aggregate versions from both SBOM and manifest sources.
+		// purl_base is computed once in the sbom_versions CTE and projected via MIN() OVER ()
+		// to avoid a second round-trip for the PURL lookup.
 		versionsQuery := `
 			WITH sbom_versions AS (
-				SELECT 
+				SELECT
 					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
 					COUNT(DISTINCT s.asset_ref_id) as repo_count,
+					MIN(NULLIF(split_part(s.purl, '@', 1), '')) as purl_base,
 					'sbom' as source
 				FROM sbom_component_view s
 				WHERE s.is_root = false
@@ -513,9 +608,10 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				GROUP BY COALESCE(s.version, NULLIF(s.purl_version, ''), '')
 			),
 			manifest_versions AS (
-				SELECT 
+				SELECT
 					md.version,
 					COUNT(DISTINCT m.repo_id) as repo_count,
+					NULL::text as purl_base,
 					'manifest' as source
 				FROM manifest_dependencies md
 				JOIN manifests m ON m.id = md.manifest_id
@@ -523,18 +619,19 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				GROUP BY md.version
 			),
 			merged_versions AS (
-				SELECT 
+				SELECT
 					COALESCE(s.version, m.version) as version,
 					COALESCE(s.repo_count, 0) + COALESCE(m.repo_count, 0) as repo_count,
-					CASE 
+					CASE
 						WHEN s.version IS NOT NULL AND m.version IS NOT NULL THEN 'both'
 						WHEN s.version IS NOT NULL THEN 'sbom'
 						ELSE 'manifest'
-					END as sources
+					END as sources,
+					s.purl_base
 				FROM sbom_versions s
 				FULL OUTER JOIN manifest_versions m ON s.version = m.version
 			)
-			SELECT version, repo_count, sources
+			SELECT version, repo_count, sources, MIN(purl_base) OVER () AS overall_purl
 			FROM merged_versions
 			ORDER BY repo_count DESC, version DESC
 			LIMIT 100
@@ -549,10 +646,11 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 		versions := make([]DependencyVersionInfo, 0)
 		totalRepoCount := 0
+		var overallPURL sql.NullString
 		for rows.Next() {
 			var v DependencyVersionInfo
 			var sources string
-			if err := rows.Scan(&v.Version, &v.RepoCount, &sources); err != nil {
+			if err := rows.Scan(&v.Version, &v.RepoCount, &sources, &overallPURL); err != nil {
 				log.Printf("version scan error: %v", err)
 				continue
 			}
@@ -595,20 +693,10 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
-		// Get PURL if available (for display)
-		var purl sql.NullString
-		db.WithContext(r.Context()).Raw(`
-			SELECT MIN(NULLIF(split_part(s.purl, '@', 1), ''))
-			FROM sbom_component_view s
-			WHERE s.is_root = false
-			  AND s.purl IS NOT NULL
-			  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
-		`, name, ecosystem).Row().Scan(&purl)
-
 		detail := DependencyDetail{
 			Name:         name,
 			Ecosystem:    ecosystem,
-			PURL:         purl.String,
+			PURL:         overallPURL.String,
 			VersionCount: len(versions),
 			RepoCount:    totalRepoCount,
 			ImageCount:   0, // Images only from SBOMs, we can calculate this if needed
@@ -647,6 +735,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 		// Query assets from both SBOM and manifest sources
 		// Simplified approach: find SBOMs containing this dependency, then find bound assets
+		// Single query: window function provides total count alongside paginated rows.
 		assetsQuery := `
 			WITH sbom_assets AS (
 				SELECT DISTINCT
@@ -675,7 +764,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				  AND (? = '' OR COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?)
 			),
 			manifest_assets AS (
-				SELECT 
+				SELECT
 					'REPO_COMMIT' as asset_type,
 					r.id as repo_id,
 					r.provider,
@@ -700,43 +789,16 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				UNION ALL
 				SELECT * FROM manifest_assets
 			)
-			SELECT 
+			SELECT
 				asset_type, repo_id, provider, org, slug, commit_sha,
-				version, source, manifest_path, manifest_type, direct, scope
+				version, source, manifest_path, manifest_type, direct, scope,
+				COUNT(*) OVER () AS total_count
 			FROM combined_assets
 			ORDER BY created_at DESC
-		`
-
-		// Count total - simpler: count SBOMs with this dependency, then count bound assets
-		countQuery := `
-			WITH sbom_assets AS (
-				SELECT DISTINCT sb.id
-				FROM sbom_component_view s
-				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
-				  AND sb.asset_type = 'REPO_COMMIT'
-				  AND sb.asset_ref_id = s.asset_ref_id
-				WHERE s.is_root = false
-				  AND s.purl IS NOT NULL
-				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
-				  AND (? = '' OR COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?)
-			),
-			manifest_assets AS (
-				SELECT md.id
-				FROM manifest_dependencies md
-				WHERE md.name = ? AND md.ecosystem = ?
-				  AND (? = '' OR md.version = ?)
-			)
-			SELECT (SELECT COUNT(*) FROM sbom_assets) + (SELECT COUNT(*) FROM manifest_assets)
+			LIMIT ? OFFSET ?
 		`
 
 		var total int64
-		if err := db.WithContext(r.Context()).Raw(countQuery, name, ecosystem, version, version, name, ecosystem, version, version).Scan(&total).Error; err != nil {
-			http.Error(w, "query failed", http.StatusInternalServerError)
-			return
-		}
-
-		// Apply pagination
-		assetsQuery += ` LIMIT ? OFFSET ?`
 		rows, err := db.WithContext(r.Context()).Raw(
 			assetsQuery,
 			name, ecosystem, version, version,
@@ -757,7 +819,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			if err := rows.Scan(
 				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
 				&commitSHA, &a.Version, &a.Source, &manifestPath,
-				&manifestType, &a.Direct, &scope,
+				&manifestType, &a.Direct, &scope, &total,
 			); err != nil {
 				log.Printf("asset scan error: %v", err)
 				continue

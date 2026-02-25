@@ -79,19 +79,21 @@ func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 
 		// Try to be the replica that does the refresh. Transaction-scoped advisory
 		// lock ensures the same connection is used for lock + refresh + unlock.
-		_ = db.WithContext(refreshCtx).Transaction(func(tx *gorm.DB) error {
+		if err := db.WithContext(refreshCtx).Transaction(func(tx *gorm.DB) error {
 			var acquired bool
 			if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", sbomViewRefreshLockID).Scan(&acquired).Error; err != nil || !acquired {
 				return nil // another replica is refreshing, we will poll
 			}
 			if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_component_view").Error; err != nil {
-				log.Printf("refresh sbom_component_view: %v", err)
+				return fmt.Errorf("refresh sbom_component_view: %w", err)
 			}
 			if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_metadata_view").Error; err != nil {
-				log.Printf("refresh sbom_metadata_view: %v", err)
+				return fmt.Errorf("refresh sbom_metadata_view: %w", err)
 			}
 			return nil
-		})
+		}); err != nil {
+			log.Printf("populate views: %v", err)
+		}
 
 		select {
 		case <-ctx.Done():
