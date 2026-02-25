@@ -581,7 +581,10 @@ func enrichContributors(contributors []providers.ContributorInfo, commits []prov
 					c.AvatarURL = avatar
 				}
 			}
-			// Fallback to Gravatar
+			// Fallback to Gravatar when the provider API did not supply an avatar URL.
+			// Note: this sends an MD5 hash of the contributor's email address to
+			// gravatar.com (a third party). For air-gapped or privacy-sensitive
+			// deployments, consider disabling this via a configuration option.
 			if c.AvatarURL == "" && c.Email != "" {
 				hash := md5.Sum([]byte(c.Email))
 				c.AvatarURL = fmt.Sprintf("https://www.gravatar.com/avatar/%x?d=identicon&s=80", hash)

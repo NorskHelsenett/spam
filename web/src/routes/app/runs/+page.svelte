@@ -59,6 +59,7 @@
 	let loadRunsInFlight = false;
 	let loadRunsQueued = false;
 	let sseReloadTimer: ReturnType<typeof setTimeout> | null = null;
+	let fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
 
 	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
 
@@ -141,6 +142,9 @@
 				});
 				eventSource.onerror = () => {
 					closeRunStream(run.id);
+					// Reconnect: reload the runs list which calls syncRunStreams
+					// and re-opens the stream for still-active runs.
+					scheduleReload();
 				};
 				runStreams.set(run.id, eventSource);
 			} catch {
@@ -217,6 +221,10 @@
 		if (!browser) return;
 		loadRuns();
 
+		// Fallback poll: reconcile state every 30 s in case all SSE streams
+		// drop silently (e.g. proxy timeout, network hiccup).
+		fallbackPollInterval = setInterval(loadRuns, 30_000);
+
 		return () => {
 			closeAllRunStreams();
 		};
@@ -230,6 +238,10 @@
 		if (sseReloadTimer) {
 			clearTimeout(sseReloadTimer);
 			sseReloadTimer = null;
+		}
+		if (fallbackPollInterval) {
+			clearInterval(fallbackPollInterval);
+			fallbackPollInterval = null;
 		}
 		closeAllRunStreams();
 	});

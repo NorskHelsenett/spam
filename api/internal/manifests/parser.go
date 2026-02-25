@@ -213,6 +213,8 @@ func parsePackageJSON(manifestID, content string) []ManifestDependency {
 			ID:         uuid.NewString(),
 			ManifestID: manifestID,
 			Name:       name,
+			// TrimLeft strips all leading ^ and ~ characters (semver range prefixes).
+			// Standard semver ranges only ever have one such prefix, so this is safe.
 			Version:    strings.TrimLeft(version, "^~"),
 			Constraint: version,
 			Ecosystem:  "npm",

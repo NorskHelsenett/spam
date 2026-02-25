@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -32,7 +33,7 @@ func UpsertImageDigest(ctx context.Context, db *gorm.DB, input ImageDigestInput)
 	}).FirstOrCreate(&image)
 
 	if result.Error != nil {
-		if isDuplicateKeyError(result.Error) {
+		if dbutil.IsDuplicateKeyError(result.Error) {
 			if err := db.WithContext(ctx).Where(where).First(&image).Error; err != nil {
 				return nil, err
 			}

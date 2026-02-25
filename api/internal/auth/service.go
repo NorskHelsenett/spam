@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -403,8 +404,8 @@ func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error
 // Pending users are redirected to /auth/pending; everyone else to /auth/login.
 func (s *Service) SPAGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Static assets pass through.
-		if strings.Contains(r.URL.Path, ".") {
+		// Static assets (files with an extension other than .html) pass through.
+		if ext := path.Ext(r.URL.Path); ext != "" && ext != ".html" {
 			next.ServeHTTP(w, r)
 			return
 		}

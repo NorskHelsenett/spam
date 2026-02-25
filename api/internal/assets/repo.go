@@ -5,18 +5,10 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
-
-// isDuplicateKeyError returns true when a Postgres unique-constraint violation
-// (SQLSTATE 23505) caused the error, which can happen when concurrent
-// FirstOrCreate calls race.
-func isDuplicateKeyError(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
 
 type RepoInput struct {
 	Provider        string
@@ -54,7 +46,7 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	if result.Error != nil {
 		// Handle race condition: another request inserted the same row
 		// between our SELECT and INSERT. Retry with a plain lookup.
-		if isDuplicateKeyError(result.Error) {
+		if dbutil.IsDuplicateKeyError(result.Error) {
 			if err := db.WithContext(ctx).Where(where).First(&repo).Error; err != nil {
 				return nil, err
 			}
@@ -81,7 +73,7 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 	}).FirstOrCreate(&commit)
 
 	if result.Error != nil {
-		if isDuplicateKeyError(result.Error) {
+		if dbutil.IsDuplicateKeyError(result.Error) {
 			if err := db.WithContext(ctx).Where(where).First(&commit).Error; err != nil {
 				return nil, err
 			}

@@ -313,7 +313,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						md.name,
 						md.ecosystem,
 						COUNT(DISTINCT md.version) as version_count,
-						COUNT(DISTINCT m.id) as sbom_count,
+						COUNT(DISTINCT m.id) as manifest_count,
 						COUNT(DISTINCT m.repo_id) as repo_count,
 						BOOL_OR(md.direct) as has_direct,
 						ARRAY_AGG(DISTINCT md.scope) FILTER (WHERE md.scope IS NOT NULL) as scopes
@@ -656,9 +656,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			}
 			v.Sources = []string{sources}
 			versions = append(versions, v)
-			if v.RepoCount > totalRepoCount {
-				totalRepoCount = v.RepoCount
-			}
+			totalRepoCount += v.RepoCount
 		}
 
 		// Determine sources from versions

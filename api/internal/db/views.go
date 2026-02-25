@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
@@ -38,8 +39,8 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 		hash := fmt.Sprintf("%x", sha256.Sum256(payload))
 
 		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			lockKey := int64(sha256.Sum256([]byte(path))[0])<<56 |
-				int64(sha256.Sum256([]byte(path))[1])<<48
+			sum := sha256.Sum256([]byte(path))
+			lockKey := int64(binary.BigEndian.Uint64(sum[:8]))
 			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", lockKey).Error; err != nil {
 				return fmt.Errorf("acquire advisory lock: %w", err)
 			}
@@ -63,9 +64,12 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 }
 
 // EnsureViewsPopulated blocks until all SBOM materialized views are populated.
-// It is intended to be called at startup before the HTTP server begins serving
-// traffic. One replica performs the refresh; others poll until it completes.
-// Uses context.Background() internally so a SIGTERM does not abort the refresh.
+// It must be called at startup before the HTTP server begins serving traffic.
+// One replica performs the refresh; others poll until it completes.
+// The refresh itself runs under context.Background() so a SIGTERM does not abort
+// it mid-way; the caller's ctx is only used for the polling loop. This means a
+// SIGTERM during an in-progress refresh will wait for it to finish before the
+// server shuts down.
 func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 	refreshCtx := context.Background()
 	for {
@@ -114,22 +118,22 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
 // It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one
 // instance performs the refresh — others skip rather than queue up behind it.
+// CONCURRENTLY is used so reads are not blocked during the refresh.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
-	var refreshed bool
-
 	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var acquired bool
 		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", sbomViewRefreshLockID).Scan(&acquired).Error; err != nil {
 			return fmt.Errorf("acquire refresh lock: %w", err)
 		}
 		if !acquired {
-			return nil // another replica is already refreshing
+			log.Printf("skipping materialized view refresh: another replica holds the lock")
+			return nil
 		}
 
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_component_view").Error; err != nil {
+		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_component_view").Error; err != nil {
 			return fmt.Errorf("refresh sbom_component_view: %w", err)
 		}
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_metadata_view").Error; err != nil {
+		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_metadata_view").Error; err != nil {
 			return fmt.Errorf("refresh sbom_metadata_view: %w", err)
 		}
 
@@ -145,12 +149,10 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 			return fmt.Errorf("record refresh: %w", err)
 		}
 
-		refreshed = true
 		return nil
 	}); err != nil {
 		return err
 	}
 
-	_ = refreshed
 	return nil
 }

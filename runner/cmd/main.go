@@ -586,7 +586,14 @@ func (r *Runner) findDependencyManifests() []string {
 
 		fileName := info.Name()
 		for _, pattern := range patterns {
-			matched, _ := filepath.Match(pattern, fileName)
+			// For patterns containing a path separator (e.g. "*.xcodeproj/project.pbxproj",
+			// "project/build.properties"), match against "parentDir/filename" so the
+			// directory component is checked. Plain filename patterns match as before.
+			matchTarget := fileName
+			if strings.Contains(pattern, string(filepath.Separator)) {
+				matchTarget = filepath.Join(filepath.Base(filepath.Dir(path)), fileName)
+			}
+			matched, _ := filepath.Match(pattern, matchTarget)
 			if matched {
 				manifests = append(manifests, path)
 				break

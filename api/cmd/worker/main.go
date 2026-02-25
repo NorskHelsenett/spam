@@ -53,6 +53,21 @@ func isCircuitOpen() bool {
 	return true
 }
 
+// isProviderCircuitOpen returns true when the specific provider's circuit is
+// tripped (>= cbThreshold consecutive failures and still in cooldown).
+func isProviderCircuitOpen(providerID string) bool {
+	if providerID == "" {
+		return false
+	}
+	cbMu.Lock()
+	defer cbMu.Unlock()
+	pc, ok := cbProviders[providerID]
+	if !ok {
+		return false
+	}
+	return pc.consecutiveFails >= cbThreshold && time.Now().Before(pc.openUntil)
+}
+
 func recordRunResult(providerID string, success bool) {
 	if providerID == "" {
 		return
@@ -256,6 +271,19 @@ func run() error {
 
 func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
+
+	// Per-provider circuit breaker: if this specific provider is tripped, defer
+	// the job immediately rather than attempting it and failing again.
+	if job.Type == jobs.JobTypeCreateRun {
+		if providerID := extractProviderID(job); isProviderCircuitOpen(providerID) {
+			retryAt := time.Now().Add(cbCooldown)
+			log.Printf("circuit breaker open for provider %s, deferring job %s until %s", providerID, job.ID, retryAt.Format(time.RFC3339))
+			if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusRetry, nil, "circuit breaker open", &retryAt); updateErr != nil {
+				log.Printf("update job error: %v", updateErr)
+			}
+			return
+		}
+	}
 
 	result, err := jobs.ProcessJob(ctx, db, job, runExecutor)
 	now := time.Now()

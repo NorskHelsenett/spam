@@ -5,16 +5,11 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
-
-func isDuplicateKeyError(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
-}
 
 var ErrBindingExists = errors.New("sbom binding already exists for this asset")
 
@@ -53,7 +48,7 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 	}).FirstOrCreate(&sbom)
 
 	if result.Error != nil {
-		if isDuplicateKeyError(result.Error) {
+		if dbutil.IsDuplicateKeyError(result.Error) {
 			if err := db.WithContext(ctx).Where(where).First(&sbom).Error; err != nil {
 				return nil, err
 			}
