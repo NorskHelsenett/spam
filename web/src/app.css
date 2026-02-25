@@ -97,7 +97,7 @@
   /* Light theme */
   html.light {
     color-scheme: light;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
 
     /* Gruvbox light background scale (light to dark) */
     --bg-hard: #f9f5d7;
@@ -229,6 +229,15 @@ button:disabled {
   background: var(--accent);
   color: var(--main-content-bg);
   box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+}
+
+html.light .btn,
+html.light .btn-primary {
+  box-shadow: none;
+}
+
+html.light button.shadow-md {
+  box-shadow: none;
 }
 
 .btn-secondary {
