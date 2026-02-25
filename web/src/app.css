@@ -108,32 +108,32 @@
     --bg3: #c6ccd4;
     --bg4: #b6bcc4;
 
-    /* Cool slate foreground scale (dark to light) */
-    --fg: #1f2a34;
-    --fg1: #26323d;
-    --fg2: #2f3b46;
-    --fg3: #3a4652;
-    --fg4: #4a5662;
+    /* Charcoal foreground scale (dark to light) */
+    --fg: #161b20;
+    --fg1: #1e252c;
+    --fg2: #283038;
+    --fg3: #333c46;
+    --fg4: #424d58;
 
-    /* Muted palette (low contrast) */
-    --red: #b94a48;
-    --green: #5a8f6b;
-    --yellow: #b08a3a;
-    --blue: #4b6f8f;
-    --purple: #7a5a8e;
-    --aqua: #4f8a8b;
-    --orange: #c0653b;
-    --gray: #7a8794;
+    /* Palette (higher contrast) */
+    --red: #c0423f;
+    --green: #4d8260;
+    --yellow: #b8862e;
+    --blue: #3e6a8a;
+    --purple: #6f4f88;
+    --aqua: #3f8082;
+    --orange: #cc6230;
+    --gray: #6a7784;
 
     /* Deeper variants */
-    --red-dim: #a03f3d;
-    --green-dim: #4e7c5d;
-    --yellow-dim: #9b7a33;
-    --blue-dim: #3f607c;
-    --purple-dim: #6a4d7c;
-    --aqua-dim: #437779;
-    --orange-dim: #a95532;
-    --gray-dim: #5f6b76;
+    --red-dim: #9a3535;
+    --green-dim: #3e6e4f;
+    --yellow-dim: #9a7228;
+    --blue-dim: #325871;
+    --purple-dim: #5e4372;
+    --aqua-dim: #356b6e;
+    --orange-dim: #ab4e28;
+    --gray-dim: #515e6a;
 
     /* Semantic mappings */
     --main-content-bg: #f3f6f8;
@@ -143,18 +143,18 @@
     --hover-bg-subtle: rgba(231, 236, 241, 0.6);
     --border-color: #d7dde4;
 
-    /* Text mappings */
-    --text-primary: #1f2a34;
-    --text-secondary: #4d5b67;
-    --text-tertiary: #63717d;
-    --text-quaternary: #788692;
-    --text-muted: #8b98a3;
-    --text-bright: #16202a;
-    --text-dimmed: #a3aeb8;
+    /* Text mappings (charcoal, higher contrast) */
+    --text-primary: #161b20;
+    --text-secondary: #3a4750;
+    --text-tertiary: #4f5d68;
+    --text-quaternary: #657380;
+    --text-muted: #7e8c98;
+    --text-bright: #0e1318;
+    --text-dimmed: #97a3ad;
 
-    /* Semantic colors (terracotta accent) */
-    --accent: #c7653d;
-    --accent-dark: #a45232;
+    /* Semantic colors (warm terracotta accent) */
+    --accent: #c85a2e;
+    --accent-dark: #a44824;
     --error: var(--red-dim);
     --error-dark: var(--red);
     --success: var(--green-dim);
