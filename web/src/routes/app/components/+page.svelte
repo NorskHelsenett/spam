@@ -356,7 +356,7 @@
 				</table>
 				{#if detailOpen && selectedDependency}
 					<div
-						class="absolute inset-y-0 right-0 z-10 w-[900px] border-l border-[var(--border-color)]"
+						class="absolute inset-y-0 right-0 z-10 w-[900px] border-l border-[var(--border-color)] rounded-l-[10px]"
 						in:fly={{ x: 900, duration: 240, easing: cubicOut, opacity: 1 }}
 					out:fly={{ x: 900, duration: 200, easing: cubicIn, opacity: 1 }}
 					>

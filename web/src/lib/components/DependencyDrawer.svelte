@@ -207,7 +207,7 @@
 	};
 </script>
 
-<div class="flex h-full flex-col overflow-hidden bg-[var(--bg-soft)]">
+<div class="flex h-full flex-col overflow-hidden bg-[var(--bg-soft)] rounded-l-[10px]">
 	<!-- Header -->
 	<div class="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-color)] px-4 py-3">
 		<div class="flex min-w-0 items-center gap-2">
