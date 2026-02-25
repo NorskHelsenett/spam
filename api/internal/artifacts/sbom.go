@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -36,9 +37,10 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 	}
 
 	var sbom SBOM
-	result := db.WithContext(ctx).Where(SBOM{
+	where := SBOM{
 		ContentHash: input.ContentHash,
-	}).Attrs(SBOM{
+	}
+	result := db.WithContext(ctx).Where(where).Attrs(SBOM{
 		ID:               uuid.NewString(),
 		Format:           input.Format,
 		ContentBytes:     input.ContentBytes,
@@ -46,6 +48,12 @@ func UpsertSBOM(ctx context.Context, db *gorm.DB, input SBOMInput) (*SBOM, error
 	}).FirstOrCreate(&sbom)
 
 	if result.Error != nil {
+		if dbutil.IsDuplicateKeyError(result.Error) {
+			if err := db.WithContext(ctx).Where(where).First(&sbom).Error; err != nil {
+				return nil, err
+			}
+			return &sbom, nil
+		}
 		return nil, result.Error
 	}
 	return &sbom, nil

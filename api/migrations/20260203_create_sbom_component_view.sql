@@ -188,21 +188,43 @@ SELECT
   END AS package_name,
   NULLIF(regexp_replace(split_part(c.purl, '@', 2), '[?#].*$', ''), '') AS purl_version
 FROM (
-  SELECT * FROM components
-  UNION ALL
-  SELECT * FROM root_component
+  SELECT DISTINCT ON (sbom_id, asset_type, asset_ref_id, component_ref, is_root)
+    sbom_id, asset_type, asset_ref_id, component, component_ref, purl, version, type, licenses, is_root
+  FROM (
+    SELECT * FROM components
+    UNION ALL
+    SELECT * FROM root_component
+  ) _all
+  ORDER BY sbom_id, asset_type, asset_ref_id, component_ref, is_root
 ) c
 LEFT JOIN deps d
   ON d.sbom_id = c.sbom_id
   AND d.asset_type IS NOT DISTINCT FROM c.asset_type
   AND d.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
-  AND d.component_ref = c.component_ref;
+  AND d.component_ref = c.component_ref
+WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
-  ON sbom_component_view (sbom_id, component_ref, is_root);
+  ON sbom_component_view (sbom_id, COALESCE(asset_type, ''), COALESCE(asset_ref_id, ''), COALESCE(component_ref, ''), is_root);
 
 CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_sbom
   ON sbom_component_view (sbom_id);
 
 CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_kind_name
   ON sbom_component_view (kind, package_name);
+
+-- Partial index for the common dependency query pattern
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_deps
+  ON sbom_component_view (kind, package_name, purl_version, sbom_id, asset_type, asset_ref_id)
+  WHERE is_root = false AND purl IS NOT NULL;
+
+-- Partial index for type='library' scans (summary, top components, correlated subquery)
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_library
+  ON sbom_component_view (sbom_id, kind, package_name, purl_version, licenses)
+  WHERE type = 'library' AND package_name IS NOT NULL;
+
+-- Trigram index for ILIKE search on package_name
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_pkg_trgm
+  ON sbom_component_view USING gin (package_name gin_trgm_ops)
+  WHERE package_name IS NOT NULL;

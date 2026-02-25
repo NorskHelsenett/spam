@@ -1,25 +1,10 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	
-	onMount(async () => {
-		try {
-			// Check if user is authenticated via backend API
-			const response = await fetch('/api/auth/me', {
-				credentials: 'include'
-			});
-			
-			if (response.ok) {
-				// User is logged in, redirect to app
-				goto('/app');
-			} else {
-				// Not logged in, redirect to login
-				goto('/auth/login');
-			}
-		} catch (error) {
-			// Error checking auth, redirect to login
-			goto('/auth/login');
-		}
+
+	// Server-side SPAGuard already verified authentication before serving this page.
+	onMount(() => {
+		goto('/app');
 	});
 </script>
 

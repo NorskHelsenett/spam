@@ -51,6 +51,7 @@ func run() error {
 	}()
 
 	if err := gormDB.AutoMigrate(
+		&db.ViewSchemaVersion{},
 		&auth.Session{},
 		&auth.User{},
 		&auth.Group{},
@@ -78,12 +79,17 @@ func run() error {
 
 	if err := db.EnsureViews(ctx, gormDB,
 		"migrations/20260211_create_unique_active_create_run_jobs.sql",
+		"migrations/20260223_create_unique_active_refresh_sbom_views_jobs.sql",
 		"migrations/20260206_drop_legacy_component_tables.sql",
 		"migrations/20260204_create_materialized_view_refreshes.sql",
 		"migrations/20260203_create_sbom_component_view.sql",
 		"migrations/20260203_create_sbom_metadata_view.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
+	}
+
+	if err := db.EnsureViewsPopulated(ctx, gormDB); err != nil {
+		return fmt.Errorf("populate views: %w", err)
 	}
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
@@ -114,6 +120,11 @@ func run() error {
 	}
 
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
+		for _, w := range warnings {
+			log.Printf("WARNING: provider secret key: %s", w)
+		}
+	}
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

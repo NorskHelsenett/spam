@@ -80,3 +80,25 @@ type RepoDetails struct {
 	License string    `json:"license"`
 	Size    int64     `json:"size"` // in KB
 }
+
+// CommitInfo represents a single commit from a git provider.
+type CommitInfo struct {
+	SHA          string    `json:"sha"`
+	Message      string    `json:"message"`
+	AuthorName   string    `json:"author_name"`
+	AuthorEmail  string    `json:"author_email"`
+	AuthorDate   time.Time `json:"author_date"`
+	AuthorLogin  string    `json:"author_login,omitempty"`
+	AuthorAvatar string    `json:"author_avatar,omitempty"`
+	CommitURL    string    `json:"commit_url,omitempty"`
+}
+
+// ContributorInfo represents a contributor to a repository.
+type ContributorInfo struct {
+	Login         string `json:"login,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
+	AvatarURL     string `json:"avatar_url,omitempty"`
+	ProfileURL    string `json:"profile_url,omitempty"`
+	Contributions int    `json:"contributions"`
+}

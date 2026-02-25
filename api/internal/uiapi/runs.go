@@ -161,12 +161,13 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			errorText := job.Error
 			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
 				if resultMap, err := parseRunResultMap(job.Result); err == nil {
-					events, podStatus, ok, err := loadPersistedK8sSnapshotFromResult(resultMap)
-					if err == nil && ok {
+					events, podStatus, ok, _ := loadPersistedK8sSnapshotFromResult(resultMap)
+					if ok {
 						if failed, message := inferK8sFailure(events, podStatus); failed {
-							status, errorText, _ = correctRunStatusFromSnapshot(r.Context(), db, job.ID, status, events, podStatus)
+							status = string(jobs.JobStatusFailed)
+							errorText = message
 							if errorText == "" {
-								errorText = message
+								errorText = "k8s runner failed to start"
 							}
 						}
 					}

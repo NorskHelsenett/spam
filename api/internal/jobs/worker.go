@@ -107,11 +107,12 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, n
 		for i := range jobs {
 			job := jobs[i]
 			previous := job.Status
+			runAt := NextRetryTime(job.Attempts, job.MaxAttempts, now)
 			updates := map[string]interface{}{
 				"status":     JobStatusRetry,
 				"locked_at":  nil,
 				"locked_by":  "",
-				"run_at":     now,
+				"run_at":     runAt,
 				"updated_at": now,
 			}
 
@@ -120,7 +121,7 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, staleBefore time.Time, n
 			}
 
 			job.Status = JobStatusRetry
-			job.RunAt = now
+			job.RunAt = runAt
 
 			if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{
 				JobID:       job.ID,

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +21,85 @@ import (
 )
 
 var runExecutor jobs.RunExecutor
+
+// Per-provider circuit breaker for CREATE_RUN failures.
+type providerCircuit struct {
+	consecutiveFails int
+	openUntil        time.Time
+}
+
+var (
+	cbMu        sync.Mutex
+	cbProviders = make(map[string]*providerCircuit)
+	cbThreshold = 5
+	cbCooldown  = 5 * time.Minute
+)
+
+// isCircuitOpen returns true only when ALL tracked providers are tripped.
+// If any provider is healthy (or its cooldown expired), we keep claiming
+// because the next job might be for that healthy provider.
+func isCircuitOpen() bool {
+	cbMu.Lock()
+	defer cbMu.Unlock()
+	if len(cbProviders) == 0 {
+		return false
+	}
+	now := time.Now()
+	for _, pc := range cbProviders {
+		if pc.consecutiveFails < cbThreshold || now.After(pc.openUntil) {
+			return false
+		}
+	}
+	return true
+}
+
+// isProviderCircuitOpen returns true when the specific provider's circuit is
+// tripped (>= cbThreshold consecutive failures and still in cooldown).
+func isProviderCircuitOpen(providerID string) bool {
+	if providerID == "" {
+		return false
+	}
+	cbMu.Lock()
+	defer cbMu.Unlock()
+	pc, ok := cbProviders[providerID]
+	if !ok {
+		return false
+	}
+	return pc.consecutiveFails >= cbThreshold && time.Now().Before(pc.openUntil)
+}
+
+func recordRunResult(providerID string, success bool) {
+	if providerID == "" {
+		return
+	}
+	cbMu.Lock()
+	defer cbMu.Unlock()
+	pc, ok := cbProviders[providerID]
+	if !ok {
+		pc = &providerCircuit{}
+		cbProviders[providerID] = pc
+	}
+	if success {
+		pc.consecutiveFails = 0
+		return
+	}
+	pc.consecutiveFails++
+	if pc.consecutiveFails >= cbThreshold {
+		pc.openUntil = time.Now().Add(cbCooldown)
+		log.Printf("circuit breaker open for provider %s: %d consecutive failures, cooling down until %s", providerID, pc.consecutiveFails, pc.openUntil.Format(time.RFC3339))
+	}
+}
+
+func extractProviderID(job *jobs.Job) string {
+	if len(job.Payload) == 0 {
+		return ""
+	}
+	var p jobs.CreateRunPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return ""
+	}
+	return p.ProviderID
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -81,6 +161,11 @@ func run() error {
 
 	// Create provider store and poller for commit-based polling
 	providerStore := providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	if warnings := providerStore.VerifyKey(ctx); len(warnings) > 0 {
+		for _, w := range warnings {
+			log.Printf("WARNING: provider secret key: %s", w)
+		}
+	}
 	commitPoller := poller.New(gormDB, providerStore)
 
 	workerID := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
@@ -147,9 +232,9 @@ func run() error {
 				default:
 				}
 
-				// Determine which job types to claim based on running runs
+				// Determine which job types to claim based on running runs and circuit breaker
 				var excludeTypes []jobs.JobType
-				if runningRuns >= int64(cfg.Concurrency) {
+				if runningRuns >= int64(cfg.Concurrency) || isCircuitOpen() {
 					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
 				}
 
@@ -187,8 +272,25 @@ func run() error {
 func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
 
+	// Per-provider circuit breaker: if this specific provider is tripped, defer
+	// the job immediately rather than attempting it and failing again.
+	if job.Type == jobs.JobTypeCreateRun {
+		if providerID := extractProviderID(job); isProviderCircuitOpen(providerID) {
+			retryAt := time.Now().Add(cbCooldown)
+			log.Printf("circuit breaker open for provider %s, deferring job %s until %s", providerID, job.ID, retryAt.Format(time.RFC3339))
+			if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusRetry, nil, "circuit breaker open", &retryAt); updateErr != nil {
+				log.Printf("update job error: %v", updateErr)
+			}
+			return
+		}
+	}
+
 	result, err := jobs.ProcessJob(ctx, db, job, runExecutor)
 	now := time.Now()
+
+	if job.Type == jobs.JobTypeCreateRun {
+		recordRunResult(extractProviderID(job), err == nil)
+	}
 
 	if err != nil {
 		next := (*time.Time)(nil)

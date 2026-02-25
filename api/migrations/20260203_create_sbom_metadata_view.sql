@@ -2,35 +2,54 @@ DROP MATERIALIZED VIEW IF EXISTS sbom_metadata_view;
 DROP VIEW IF EXISTS sbom_metadata_view;
 
 CREATE MATERIALIZED VIEW sbom_metadata_view AS
-WITH sbom_json AS (
+WITH sbom_docs AS (
   SELECT
     s.id AS sbom_id,
     s.format,
     s.created_at,
     s.ingested_by_user_id,
-    sb.asset_type,
-    sb.asset_ref_id,
     convert_from(s.content_bytes, 'utf8')::jsonb AS doc
   FROM sboms s
-  LEFT JOIN sbom_bindings sb ON sb.sbom_id = s.id
 ),
+sbom_json AS (
+  SELECT
+    sd.sbom_id,
+    sd.format,
+    sd.created_at,
+    sd.ingested_by_user_id,
+    sb.asset_type,
+    sb.asset_ref_id,
+    sd.doc
+  FROM sbom_docs sd
+  LEFT JOIN sbom_bindings sb ON sb.sbom_id = sd.sbom_id
+),
+-- One row per SBOM: aggregate all scanner tool names/versions.
 scanner AS (
   SELECT
-    sj.sbom_id,
-    t->>'name' AS scanner_name,
-    t->>'version' AS scanner_version
-  FROM sbom_json sj
+    sd.sbom_id,
+    COALESCE(
+      string_agg(DISTINCT t->>'name', ', ') FILTER (WHERE t->>'name' IS NOT NULL AND t->>'name' <> ''),
+      ''
+    ) AS scanner_name,
+    COALESCE(
+      string_agg(DISTINCT t->>'version', ', ') FILTER (WHERE t->>'version' IS NOT NULL AND t->>'version' <> ''),
+      ''
+    ) AS scanner_version
+  FROM sbom_docs sd
   LEFT JOIN LATERAL jsonb_array_elements(
-    COALESCE(sj.doc->'metadata'->'tools'->'components', '[]'::jsonb)
+    COALESCE(sd.doc->'metadata'->'tools'->'components', '[]'::jsonb)
   ) AS t ON TRUE
+  GROUP BY sd.sbom_id
 ),
+-- One row per SBOM: root component info.
 root_component AS (
   SELECT
-    sj.sbom_id,
-    sj.doc->'metadata'->'component'->>'bom-ref' AS root_ref,
-    sj.doc->'metadata'->'component'->>'name' AS root_name,
-    sj.doc->'metadata'->'component'->>'type' AS root_type
-  FROM sbom_json sj
+    sd.sbom_id,
+    sd.doc->'metadata'->'component'->>'bom-ref' AS root_ref,
+    sd.doc->'metadata'->'component'->>'name' AS root_name,
+    sd.doc->'metadata'->'component'->>'type' AS root_type
+  FROM sbom_docs sd
+  WHERE sd.doc->'metadata'->'component' IS NOT NULL
 ),
 repo_bindings AS (
   SELECT
@@ -78,11 +97,12 @@ SELECT
 FROM sbom_json sj
 LEFT JOIN scanner sc ON sc.sbom_id = sj.sbom_id
 LEFT JOIN root_component r ON r.sbom_id = sj.sbom_id
-LEFT JOIN repo_bindings rc ON rc.sbom_id = sj.sbom_id
-LEFT JOIN image_bindings ib ON ib.sbom_id = sj.sbom_id;
+LEFT JOIN repo_bindings rc ON rc.sbom_id = sj.sbom_id AND rc.repo_commit_id = sj.asset_ref_id
+LEFT JOIN image_bindings ib ON ib.sbom_id = sj.sbom_id AND ib.image_id = sj.asset_ref_id
+WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_metadata_mv
-  ON sbom_metadata_view (sbom_id);
+  ON sbom_metadata_view (sbom_id, COALESCE(asset_type, ''), COALESCE(asset_ref_id, ''));
 
 CREATE INDEX IF NOT EXISTS idx_sbom_metadata_mv_repo
   ON sbom_metadata_view (repo_id);

@@ -125,9 +125,9 @@
 </script>
 
 <Dialog bind:open>
-	<div class="flex h-full w-full flex-col">
+	<div class="flex min-h-0 flex-1 w-full flex-col">
 		<!-- Header -->
-		<div class="border-b border-[var(--border-color)] p-6">
+		<div class="shrink-0 border-b border-[var(--border-color)] p-6">
 			<div class="flex items-start justify-between">
 				<div class="flex-1">
 					<div class="flex items-center gap-3">
@@ -171,14 +171,14 @@
 				<p class="text-sm text-[var(--text-secondary)]">Loading details...</p>
 			</div>
 		{:else if componentDetail}
-			<div class="flex flex-1 flex-col gap-4 overflow-hidden p-6 md:flex-row">
+			<div class="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-6 md:flex-row">
 				<!-- Sidebar: Versions -->
-				<div class="w-full shrink-0 md:w-56">
+				<div class="flex flex-col w-full shrink-0 md:w-56">
 					<h3 class="mb-3 flex items-center gap-2 text-sm font-semibold text-[var(--text-bright)]">
 						<Package class="h-4 w-4" />
 						Versions
 					</h3>
-					<div class="max-h-64 space-y-1 overflow-y-auto md:max-h-full">
+					<div class="max-h-64 space-y-1 overflow-y-auto md:max-h-none md:min-h-0 md:flex-1">
 						<button
 							type="button"
 							class="w-full rounded-lg px-3 py-2 text-left text-sm transition {selectedVersion === '' ? 'bg-[var(--hover-bg)] font-medium text-[var(--text-bright)]' : 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]'}"

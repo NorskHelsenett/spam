@@ -42,11 +42,17 @@ environments: []
 appSecret:
   # Set to true to create the secret automatically
   enabled: false
-  
+
   # Use an existing secret instead of creating one (optional)
   # If set, the chart will NOT create a new secret and will use the specified one
   existingSecret: ""  # e.g., "spam-app-secret"
-  
+
+  # Set to true to prevent secret updates (rotation requires new secret name)
+  immutable: false
+
+  # Optional annotations added to the app Secret (in addition to helm.sh/resource-policy: keep)
+  annotations: {}
+
   # OIDC Configuration (required for authentication)
   oidc:
     issuerUrl: ""      # OIDC provider URL (e.g., "https://auth.example.com")
@@ -201,7 +207,13 @@ postgresql:
     # If set, the chart will NOT create a new secret and will use the specified one
     # Secret must contain keys: 'password' and 'postgres-password'
     existingSecret: ""  # e.g., "spam-postgresql-secret"
-    
+
+    # Set to true to prevent secret updates (rotation requires new secret name)
+    immutable: false
+
+    # Optional annotations added to the postgresql Secret (in addition to helm.sh/resource-policy: keep)
+    annotations: {}
+
     username: spam
     database: spam
     password: ""  # Leave empty to auto-generate a strong password (ignored if existingSecret is set)
@@ -282,6 +294,12 @@ runner:
 
   # HMAC key for signing run tokens (auto-generated if empty)
   hmacKey: ""
+
+  # Set to true to prevent secret updates (rotation requires new secret name)
+  secretImmutable: false
+
+  # Optional annotations added to the runner Secret
+  secretAnnotations: {}
 
   # ServiceAccount for runner jobs
   serviceAccount:

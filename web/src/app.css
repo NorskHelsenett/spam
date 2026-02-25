@@ -97,64 +97,64 @@
   /* Light theme */
   html.light {
     color-scheme: light;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
 
-    /* Gruvbox light background scale (light to dark) */
-    --bg-hard: #f9f5d7;
-    --bg: #fbf1c7;
-    --bg-soft: #f2e5bc;
-    --bg1: #ebdbb2;
-    --bg2: #d5c4a1;
-    --bg3: #bdae93;
-    --bg4: #a89984;
+    /* Cool slate background scale (light to dark) */
+    --bg-hard: #f5f7f9;
+    --bg: #f1f4f6;
+    --bg-soft: #e9edf1;
+    --bg1: #e1e6eb;
+    --bg2: #d5dbe2;
+    --bg3: #c6ccd4;
+    --bg4: #b6bcc4;
 
-    /* Gruvbox light foreground scale (dark to light) */
-    --fg: #282828;
-    --fg1: #3c3836;
-    --fg2: #504945;
-    --fg3: #665c54;
-    --fg4: #7c6f64;
+    /* Charcoal foreground scale (dark to light) */
+    --fg: #161b20;
+    --fg1: #1e252c;
+    --fg2: #283038;
+    --fg3: #333c46;
+    --fg4: #424d58;
 
-    /* Gruvbox palette - dark (for light backgrounds) */
-    --red: #9d0006;
-    --green: #79740e;
-    --yellow: #b57614;
-    --blue: #076678;
-    --purple: #8f3f71;
-    --aqua: #427b58;
-    --orange: #af3a03;
-    --gray: #928374;
+    /* Palette (higher contrast) */
+    --red: #c0423f;
+    --green: #4d8260;
+    --yellow: #b8862e;
+    --blue: #3e6a8a;
+    --purple: #6f4f88;
+    --aqua: #3f8082;
+    --orange: #cc6230;
+    --gray: #6a7784;
 
-    /* Gruvbox palette - neutral */
-    --red-dim: #cc241d;
-    --green-dim: #98971a;
-    --yellow-dim: #d79921;
-    --blue-dim: #458588;
-    --purple-dim: #b16286;
-    --aqua-dim: #689d6a;
-    --orange-dim: #d65d0e;
-    --gray-dim: #7c6f64;
+    /* Deeper variants */
+    --red-dim: #9a3535;
+    --green-dim: #3e6e4f;
+    --yellow-dim: #9a7228;
+    --blue-dim: #325871;
+    --purple-dim: #5e4372;
+    --aqua-dim: #356b6e;
+    --orange-dim: #ab4e28;
+    --gray-dim: #515e6a;
 
-    /* Custom semantic mappings (softer than pure Gruvbox light) */
-    --main-content-bg: #f2f3ec;
+    /* Semantic mappings */
+    --main-content-bg: #f3f6f8;
     --sidebar-bg: transparent;
-    --card-bg: #fcfcfc;
-    --hover-bg: #eceae4;
-    --hover-bg-subtle: rgba(236, 234, 228, 0.5);
-    --border-color: #e5e7eb;
+    --card-bg: #f8fafc;
+    --hover-bg: #e7ecf1;
+    --hover-bg-subtle: rgba(231, 236, 241, 0.6);
+    --border-color: #d7dde4;
 
-    /* Text mappings */
-    --text-primary: #1e1e1e;
-    --text-secondary: #646464;
-    --text-tertiary: #7a7a7a;
-    --text-quaternary: #8c8c8c;
-    --text-muted: #a0a0a0;
-    --text-bright: #141414;
-    --text-dimmed: #b4b4b4;
+    /* Text mappings (charcoal, higher contrast) */
+    --text-primary: #161b20;
+    --text-secondary: #3a4750;
+    --text-tertiary: #4f5d68;
+    --text-quaternary: #657380;
+    --text-muted: #7e8c98;
+    --text-bright: #0e1318;
+    --text-dimmed: #97a3ad;
 
-    /* Semantic colors */
-    --accent: var(--blue-dim);
-    --accent-dark: var(--blue);
+    /* Semantic colors (warm terracotta accent) */
+    --accent: #c85a2e;
+    --accent-dark: #a44824;
     --error: var(--red-dim);
     --error-dark: var(--red);
     --success: var(--green-dim);
@@ -168,7 +168,7 @@
     --cpu-color: var(--blue-dim);
     --memory-color: var(--purple-dim);
     --disk-color: var(--aqua-dim);
-    --temperature-color: var(--red-dim);
+    --temperature-color: var(--orange-dim);
     --network-color: var(--purple);
     --gpu-color: var(--aqua);
 
@@ -177,7 +177,7 @@
     --discharging-color: var(--red-dim);
 
     /* Other */
-    --selection-bg: rgba(238, 221, 209, 0.45);
+    --selection-bg: rgba(199, 101, 61, 0.2);
 
     background-color: var(--main-content-bg);
     color: var(--text-primary);
@@ -229,6 +229,15 @@ button:disabled {
   background: var(--accent);
   color: var(--main-content-bg);
   box-shadow: 0 10px 20px rgba(0, 0, 0, 0.25);
+}
+
+html.light .btn,
+html.light .btn-primary {
+  box-shadow: none;
+}
+
+html.light button.shadow-md {
+  box-shadow: none;
 }
 
 .btn-secondary {

@@ -20,6 +20,42 @@ func NewStore(db *gorm.DB, key []byte) *Store {
 	return &Store{db: db, key: key}
 }
 
+// VerifyKey checks that the configured encryption key can decrypt existing secrets.
+// Returns a list of warnings for providers whose secrets cannot be decrypted.
+// This is non-fatal so the app can start and admins can rotate broken tokens.
+func (s *Store) VerifyKey(ctx context.Context) []string {
+	var secrets []ProviderSecret
+	if err := s.db.WithContext(ctx).
+		Where("revoked_at IS NULL").
+		Order("created_at desc").
+		Find(&secrets).Error; err != nil {
+		return []string{fmt.Sprintf("failed to query provider secrets: %v", err)}
+	}
+
+	if len(secrets) == 0 {
+		return nil
+	}
+
+	if !isValidAESKey(s.key) {
+		return []string{fmt.Sprintf("PROVIDER_SECRETS_KEY is missing or invalid, but %d active secret(s) exist — token rotation via API will fail until key is set", len(secrets))}
+	}
+
+	// Check one secret per provider (most recent)
+	seen := make(map[string]bool)
+	var warnings []string
+	for _, secret := range secrets {
+		if seen[secret.ProviderID] {
+			continue
+		}
+		seen[secret.ProviderID] = true
+		if _, err := DecryptToken(s.key, secret.TokenEncrypted); err != nil {
+			warnings = append(warnings, fmt.Sprintf("provider %s: cannot decrypt secret — rotate token to fix (%v)", secret.ProviderID, err))
+		}
+	}
+
+	return warnings
+}
+
 type AdminProvider struct {
 	ID               string     `json:"id"`
 	ProviderURL      string     `json:"provider_url"`

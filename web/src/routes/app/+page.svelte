@@ -28,6 +28,7 @@
 		scanner_version: string;
 		asset_type: string;
 		repo_name?: string;
+		repo_provider?: string;
 		commit_sha?: string;
 		image_registry?: string;
 		image_repository?: string;
@@ -138,6 +139,14 @@
 
 	const sbomLabel = (sbom: RecentSBOM) => sbom.repo_name || sbom.image_repository || sbom.sbom_id.slice(0, 8);
 
+	const sbomClickTarget = (sbom: RecentSBOM): string => {
+		if (sbom.asset_type === 'REPO_COMMIT' && sbom.repo_name) {
+			const provider = sbom.repo_provider || 'github';
+			return `/app/providers/repo?provider=${encodeURIComponent(provider)}&path=${encodeURIComponent(sbom.repo_name)}`;
+		}
+		return `/app/agents?sbom_id=${sbom.sbom_id}`;
+	};
+
 	const licenseSegments = (): DonutSegment[] => {
 		if (!summary) return [];
 		const segments = (summary.top_licenses ?? []).map((license, index) => ({
@@ -194,7 +203,7 @@
 				</span>
 				<div class="space-y-2">
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl md:text-4xl">
-						Software Supply Chain Posture
+						Software Package Asset Management
 					</h1>
 					<p class="max-w-2xl text-sm text-[var(--text-tertiary)] sm:text-base">
 						Unified snapshot of repository coverage, SBOM ingestion, dependency composition, and license signals.
@@ -252,7 +261,7 @@
 							{#each summary.recent_sboms ?? [] as sbom}
 								<tr
 									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
-									on:click={() => goto(`/app/agents?sbom_id=${sbom.sbom_id}`)}
+									on:click={() => goto(sbomClickTarget(sbom))}
 								>
 									<td class="px-5 py-3">
 										<p class="font-semibold text-[var(--text-bright)]">{sbomLabel(sbom)}</p>

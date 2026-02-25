@@ -132,7 +132,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	namespace := k.cfg.Namespace
 
 	ttlSeconds := k.cfg.TTLSeconds
-	backoffLimit := int32(2)
+	backoffLimit := int32(0)
 	activeDeadline := k.cfg.ActiveDeadline
 
 	// Non-root user

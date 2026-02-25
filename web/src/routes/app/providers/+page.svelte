@@ -2,6 +2,7 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import { get } from 'svelte/store';
 	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2 } from 'lucide-svelte';
 	import { providersState } from '$lib/stores/providersState';
@@ -776,6 +777,25 @@
 		if (!browser) return;
 		const init = async () => {
 			await loadCustomProviders();
+
+			// Check for ?tab= query param (e.g. linked from run detail page)
+			const tabParam = $page.url.searchParams.get('tab');
+			if (tabParam) {
+				// Try matching a custom/managed provider by ID
+				const targetProvider = customProviders.find((p) => p.id === tabParam);
+				if (targetProvider) {
+					switchToCustomTab(targetProvider);
+					return;
+				}
+				// Try matching a built-in tab
+				if (tabParam === 'github' || tabParam === 'gitlab') {
+					activeTab = tabParam;
+					if (tabParam === 'github') fetchGitHubRepos(1);
+					else { fetchGitLabProjects(1); fetchGitLabSubgroups(); }
+					return;
+				}
+			}
+
 			// Try to restore state from store (when coming back from repo details)
 			const restored = restoreState(managedProvidersEnabled);
 			if (managedProvidersEnabled) {
