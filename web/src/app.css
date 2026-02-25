@@ -99,62 +99,62 @@
     color-scheme: light;
     font-size: 0.8rem;
 
-    /* Gruvbox light background scale (light to dark) */
-    --bg-hard: #f9f5d7;
-    --bg: #fbf1c7;
-    --bg-soft: #f2e5bc;
-    --bg1: #ebdbb2;
-    --bg2: #d5c4a1;
-    --bg3: #bdae93;
-    --bg4: #a89984;
+    /* Cool slate background scale (light to dark) */
+    --bg-hard: #f5f7f9;
+    --bg: #f1f4f6;
+    --bg-soft: #e9edf1;
+    --bg1: #e1e6eb;
+    --bg2: #d5dbe2;
+    --bg3: #c6ccd4;
+    --bg4: #b6bcc4;
 
-    /* Gruvbox light foreground scale (dark to light) */
-    --fg: #282828;
-    --fg1: #3c3836;
-    --fg2: #504945;
-    --fg3: #665c54;
-    --fg4: #7c6f64;
+    /* Cool slate foreground scale (dark to light) */
+    --fg: #1f2a34;
+    --fg1: #26323d;
+    --fg2: #2f3b46;
+    --fg3: #3a4652;
+    --fg4: #4a5662;
 
-    /* Gruvbox palette - dark (for light backgrounds) */
-    --red: #9d0006;
-    --green: #79740e;
-    --yellow: #b57614;
-    --blue: #076678;
-    --purple: #8f3f71;
-    --aqua: #427b58;
-    --orange: #af3a03;
-    --gray: #928374;
+    /* Muted palette (low contrast) */
+    --red: #b94a48;
+    --green: #5a8f6b;
+    --yellow: #b08a3a;
+    --blue: #4b6f8f;
+    --purple: #7a5a8e;
+    --aqua: #4f8a8b;
+    --orange: #c0653b;
+    --gray: #7a8794;
 
-    /* Gruvbox palette - neutral */
-    --red-dim: #cc241d;
-    --green-dim: #98971a;
-    --yellow-dim: #d79921;
-    --blue-dim: #458588;
-    --purple-dim: #b16286;
-    --aqua-dim: #689d6a;
-    --orange-dim: #d65d0e;
-    --gray-dim: #7c6f64;
+    /* Deeper variants */
+    --red-dim: #a03f3d;
+    --green-dim: #4e7c5d;
+    --yellow-dim: #9b7a33;
+    --blue-dim: #3f607c;
+    --purple-dim: #6a4d7c;
+    --aqua-dim: #437779;
+    --orange-dim: #a95532;
+    --gray-dim: #5f6b76;
 
-    /* Custom semantic mappings (softer than pure Gruvbox light) */
-    --main-content-bg: #f2f3ec;
+    /* Semantic mappings */
+    --main-content-bg: #f3f6f8;
     --sidebar-bg: transparent;
-    --card-bg: #fcfcfc;
-    --hover-bg: #eceae4;
-    --hover-bg-subtle: rgba(236, 234, 228, 0.5);
-    --border-color: #e5e7eb;
+    --card-bg: #f8fafc;
+    --hover-bg: #e7ecf1;
+    --hover-bg-subtle: rgba(231, 236, 241, 0.6);
+    --border-color: #d7dde4;
 
     /* Text mappings */
-    --text-primary: #1e1e1e;
-    --text-secondary: #646464;
-    --text-tertiary: #7a7a7a;
-    --text-quaternary: #8c8c8c;
-    --text-muted: #a0a0a0;
-    --text-bright: #141414;
-    --text-dimmed: #b4b4b4;
+    --text-primary: #1f2a34;
+    --text-secondary: #4d5b67;
+    --text-tertiary: #63717d;
+    --text-quaternary: #788692;
+    --text-muted: #8b98a3;
+    --text-bright: #16202a;
+    --text-dimmed: #a3aeb8;
 
-    /* Semantic colors */
-    --accent: var(--blue-dim);
-    --accent-dark: var(--blue);
+    /* Semantic colors (terracotta accent) */
+    --accent: #c7653d;
+    --accent-dark: #a45232;
     --error: var(--red-dim);
     --error-dark: var(--red);
     --success: var(--green-dim);
@@ -168,7 +168,7 @@
     --cpu-color: var(--blue-dim);
     --memory-color: var(--purple-dim);
     --disk-color: var(--aqua-dim);
-    --temperature-color: var(--red-dim);
+    --temperature-color: var(--orange-dim);
     --network-color: var(--purple);
     --gpu-color: var(--aqua);
 
@@ -177,7 +177,7 @@
     --discharging-color: var(--red-dim);
 
     /* Other */
-    --selection-bg: rgba(238, 221, 209, 0.45);
+    --selection-bg: rgba(199, 101, 61, 0.2);
 
     background-color: var(--main-content-bg);
     color: var(--text-primary);
