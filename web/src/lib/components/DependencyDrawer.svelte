@@ -238,11 +238,11 @@
 	<!-- Header -->
 	<div class="shrink-0 border-b border-[var(--border-color)] p-6">
 		<div class="flex items-start justify-between">
-			<div class="flex-1 min-w-0">
+			<div class="flex-1">
 				<div class="flex items-center gap-3">
-					<Package class="h-6 w-6 shrink-0 text-[var(--accent)]" />
-					<div class="min-w-0">
-						<h2 class="text-xl font-semibold text-[var(--text-bright)] truncate">{name}</h2>
+					<Package class="h-6 w-6 text-[var(--accent)]" />
+					<div>
+						<h2 class="text-xl font-semibold text-[var(--text-bright)]">{name}</h2>
 						{#if componentDetail?.purl}
 							<p class="mt-1 text-xs text-[var(--text-muted)]">{componentDetail.purl}</p>
 						{/if}
@@ -274,11 +274,11 @@
 			</div>
 			<button
 				type="button"
-				class="ml-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition hover:bg-[var(--hover-bg)]"
+				class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition hover:bg-[var(--hover-bg)]"
 				onclick={onClose}
 				aria-label="Close"
 			>
-				<X class="h-4 w-4" />
+				<X size={20} stroke-width={2} />
 			</button>
 		</div>
 	</div>
