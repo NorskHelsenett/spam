@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Package, GitBranch, Container, ChevronDown, ChevronRight } from 'lucide-svelte';
+	import { X, Package, GitBranch, Container, ChevronDown, ChevronRight, CheckCircle, Microscope, FileCode } from 'lucide-svelte';
 
 	type ComponentVersion = {
 		id: string;
@@ -66,12 +66,35 @@
 	let {
 		name,
 		ecosystem,
+		sources = [],
 		onClose = () => {}
 	}: {
 		name: string;
 		ecosystem: string;
+		sources?: string[];
 		onClose?: () => void;
 	} = $props();
+
+	const sourceBadge = $derived.by(() => {
+		const source = sources[0];
+		if (source === 'both') return { icon: CheckCircle, label: 'Both', cls: 'bg-green-500/10 text-green-400', title: 'Found in both SBOM and manifest' };
+		if (source === 'sbom') return { icon: Microscope, label: 'SBOM', cls: 'bg-blue-500/10 text-blue-400', title: 'From SBOM scanner' };
+		if (source === 'manifest') return { icon: FileCode, label: 'Manifest', cls: 'bg-purple-500/10 text-purple-400', title: 'From manifest file' };
+		return null;
+	});
+
+	const parseSemver = (v: string): number[] =>
+		v.replace(/^v/, '').split(/[.\-+]/).map((p) => parseInt(p, 10) || 0);
+
+	const compareSemver = (a: string, b: string): number => {
+		const pa = parseSemver(a);
+		const pb = parseSemver(b);
+		for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+			const diff = (pb[i] ?? 0) - (pa[i] ?? 0);
+			if (diff !== 0) return diff;
+		}
+		return 0;
+	};
 
 	let componentDetail: ComponentDetail | null = $state(null);
 	let componentAssets: ComponentAsset[] = $state([]);
@@ -126,6 +149,10 @@
 			assetsLoading = false;
 		}
 	};
+
+	const sortedVersions = $derived(
+		[...(componentDetail?.versions ?? [])].sort((a, b) => compareSemver(a.version, b.version))
+	);
 
 	const uniqueRepos = $derived.by(() => {
 		const map = new Map<string, UniqueRepo>();
@@ -209,22 +236,51 @@
 
 <div class="flex h-full flex-col overflow-hidden bg-[var(--bg-soft)] rounded-l-[10px]">
 	<!-- Header -->
-	<div class="flex shrink-0 items-center justify-between gap-2 border-b border-[var(--border-color)] px-4 py-3">
-		<div class="flex min-w-0 items-center gap-2">
-			<Package class="h-4 w-4 shrink-0 text-[var(--accent)]" />
-			<h2 class="truncate text-sm font-semibold text-[var(--text-bright)]">{name}</h2>
-			<span class="shrink-0 rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
-				{ecosystem}
-			</span>
+	<div class="shrink-0 border-b border-[var(--border-color)] p-6">
+		<div class="flex items-start justify-between">
+			<div class="flex-1 min-w-0">
+				<div class="flex items-center gap-3">
+					<Package class="h-6 w-6 shrink-0 text-[var(--accent)]" />
+					<div class="min-w-0">
+						<h2 class="text-xl font-semibold text-[var(--text-bright)] truncate">{name}</h2>
+						{#if componentDetail?.purl}
+							<p class="mt-1 text-xs text-[var(--text-muted)]">{componentDetail.purl}</p>
+						{/if}
+					</div>
+				</div>
+				<div class="mt-3 flex flex-wrap gap-2">
+					<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2.5 py-0.5 text-xs">
+						{ecosystem}
+					</span>
+					{#if sourceBadge}
+						{@const Icon = sourceBadge.icon}
+						<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs {sourceBadge.cls}" title={sourceBadge.title}>
+							<Icon class="h-3 w-3" />
+							{sourceBadge.label}
+						</span>
+					{/if}
+					{#if componentDetail}
+						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
+							{componentDetail.version_count} versions
+						</span>
+						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
+							<GitBranch class="h-3 w-3" /> {componentDetail.repo_count} repos
+						</span>
+						<span class="inline-flex items-center gap-1 text-xs text-[var(--text-secondary)]">
+							<Container class="h-3 w-3" /> {componentDetail.image_count} images
+						</span>
+					{/if}
+				</div>
+			</div>
+			<button
+				type="button"
+				class="ml-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition hover:bg-[var(--hover-bg)]"
+				onclick={onClose}
+				aria-label="Close"
+			>
+				<X class="h-4 w-4" />
+			</button>
 		</div>
-		<button
-			type="button"
-			class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg transition hover:bg-[var(--hover-bg)]"
-			onclick={onClose}
-			aria-label="Close"
-		>
-			<X class="h-3.5 w-3.5" />
-		</button>
 	</div>
 
 	{#if loading}
@@ -239,7 +295,7 @@
 					Versions
 				</h3>
 				<div class="flex flex-wrap gap-1.5">
-					{#each componentDetail.versions as v}
+					{#each sortedVersions as v}
 						<button
 							type="button"
 							class="rounded-full border px-2.5 py-0.5 text-xs transition {selectedVersion === v.version

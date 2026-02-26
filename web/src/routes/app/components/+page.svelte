@@ -363,6 +363,7 @@
 						<DependencyDrawer
 							name={selectedDependency.name}
 							ecosystem={selectedDependency.ecosystem}
+							sources={selectedDependency.sources}
 							onClose={() => { detailOpen = false; selectedDependency = null; }}
 						/>
 					</div>
