@@ -652,7 +652,7 @@
 			{:else}
 				<div class="space-y-3">
 					{#each runTimeline as run}
-						<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+						<a href="/app/runs/{run.id}" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]">
 							<div class="min-w-0 space-y-1">
 								<div class="flex items-center gap-2">
 									<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
@@ -676,7 +676,7 @@
 									{/each}
 								</div>
 							{/if}
-						</div>
+						</a>
 					{/each}
 				</div>
 			{/if}

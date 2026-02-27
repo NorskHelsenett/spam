@@ -47,6 +47,14 @@
 		contributions: number;
 	};
 
+	type ProviderInstance = {
+		id: string;
+		name: string;
+		type: string;
+		base_url: string;
+		owner_path?: string;
+	};
+
 	type UniqueRepo = {
 		key: string;
 		provider: string;
@@ -104,12 +112,28 @@
 	let expandedRepos = $state(new Set<string>());
 	let repoContributors = $state<Record<string, Contributor[]>>({});
 	let loadingContributors = $state<Record<string, boolean>>({});
+	let providerInstances: ProviderInstance[] = $state([]);
+	let providerInstancesLoaded = false;
 
 	$effect(() => {
 		if (name && ecosystem) {
 			loadDetail(name, ecosystem);
+			loadProviderInstances();
 		}
 	});
+
+	const loadProviderInstances = async () => {
+		if (providerInstancesLoaded) return;
+		providerInstancesLoaded = true;
+		try {
+			const response = await fetch('/api/providers/instances', { credentials: 'include' });
+			if (response.ok) {
+				providerInstances = await response.json();
+			}
+		} catch {
+			// ignore
+		}
+	};
 
 	const loadDetail = async (depName: string, depEcosystem: string) => {
 		loading = true;
@@ -206,7 +230,7 @@
 			next.delete(repo.key);
 		} else {
 			next.add(repo.key);
-			if (repo.provider === 'github' && !repoContributors[repo.key] && !loadingContributors[repo.key]) {
+			if (!repoContributors[repo.key] && !loadingContributors[repo.key]) {
 				loadContributors(repo);
 			}
 		}
@@ -216,9 +240,27 @@
 	const loadContributors = async (repo: UniqueRepo) => {
 		loadingContributors = { ...loadingContributors, [repo.key]: true };
 		try {
-			const response = await fetch(`/api/providers/github/${repo.org}/${repo.slug}/details`, {
-				credentials: 'include'
-			});
+			let url: string;
+			if (repo.provider === 'github') {
+				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
+			} else if (repo.provider === 'gitlab') {
+				const instance = providerInstances.find((p) => p.type === 'gitlab');
+				const baseURL = instance?.base_url ?? '';
+				const projectPath = encodeURIComponent(`${repo.org}/${repo.slug}`);
+				const params = baseURL ? `?base_url=${encodeURIComponent(baseURL)}` : '';
+				url = `/api/providers/gitlab/${projectPath}/details${params}`;
+			} else if (repo.provider === 'gitea') {
+				const instance = providerInstances.find((p) => p.type === 'gitea');
+				if (!instance?.base_url) {
+					repoContributors = { ...repoContributors, [repo.key]: [] };
+					return;
+				}
+				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?base_url=${encodeURIComponent(instance.base_url)}`;
+			} else {
+				repoContributors = { ...repoContributors, [repo.key]: [] };
+				return;
+			}
+			const response = await fetch(url, { credentials: 'include' });
 			if (response.ok) {
 				const data = await response.json();
 				repoContributors = {
