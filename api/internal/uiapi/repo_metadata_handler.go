@@ -1,6 +1,7 @@
 package uiapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -140,10 +141,18 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) 
 			}
 		}
 
+		commitSHA := row.CommitHash
+		if commitSHA == "" && len(row.Payload) > 0 {
+			var payload jobs.CreateRunPayload
+			if err := json.Unmarshal(row.Payload, &payload); err == nil {
+				commitSHA = payload.CommitSHA
+			}
+		}
+
 		summary := RepoMetadataRunSummary{
 			ID:         row.ID,
 			Status:     status,
-			CommitSHA:  row.CommitHash,
+			CommitSHA:  commitSHA,
 			StartedAt:  formatTimePtr(row.LockedAt),
 			FinishedAt: formatTimePtr(row.FinishedAt),
 		}

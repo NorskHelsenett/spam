@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Package, GitBranch, Container, ChevronDown, ChevronRight, CheckCircle, Microscope, FileCode } from 'lucide-svelte';
+	import { X, Package, GitBranch, Container, ChevronDown, ChevronRight, CheckCircle, Microscope, FileCode, Scale } from 'lucide-svelte';
 
 	type ComponentVersion = {
 		id: string;
@@ -36,6 +36,7 @@
 		image_count: number;
 		sources: string[];
 		versions: ComponentVersion[];
+		licenses?: string[];
 	};
 
 	type Contributor = {
@@ -146,8 +147,13 @@
 			const params = new URLSearchParams({ name: depName, ecosystem: depEcosystem });
 			const response = await fetch(`/api/dependencies/detail?${params}`, { credentials: 'include' });
 			if (response.ok) {
-				componentDetail = await response.json();
-				loadAssets(depName, depEcosystem, '');
+				const data: ComponentDetail = await response.json();
+				componentDetail = data;
+				const sorted = [...(data.versions ?? [])].sort((a, b) =>
+					compareSemver(a.version, b.version)
+				);
+				selectedVersion = sorted[0]?.version ?? '';
+				loadAssets(depName, depEcosystem, selectedVersion);
 			}
 		} catch {
 			// ignore
@@ -174,9 +180,10 @@
 		}
 	};
 
-	const sortedVersions = $derived(
-		[...(componentDetail?.versions ?? [])].sort((a, b) => compareSemver(a.version, b.version))
-	);
+	const sortedVersions = $derived.by(() => {
+		const versions: ComponentVersion[] = componentDetail?.versions ?? [];
+		return [...versions].sort((a, b) => compareSemver(a.version, b.version));
+	});
 
 	const uniqueRepos = $derived.by(() => {
 		const map = new Map<string, UniqueRepo>();
@@ -239,18 +246,24 @@
 
 	const loadContributors = async (repo: UniqueRepo) => {
 		loadingContributors = { ...loadingContributors, [repo.key]: true };
+		// Ensure provider instances are loaded before resolving the URL
+		await loadProviderInstances();
 		try {
 			let url: string;
-			if (repo.provider === 'github') {
+			// repo.provider may be a type string ("github", "gitlab") or a provider instance UUID
+			const instance = providerInstances.find(
+				(p) => p.id === repo.provider || p.type === repo.provider
+			);
+			const providerType = instance?.type ?? repo.provider;
+
+			if (providerType === 'github') {
 				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
-			} else if (repo.provider === 'gitlab') {
-				const instance = providerInstances.find((p) => p.type === 'gitlab');
+			} else if (providerType === 'gitlab') {
 				const baseURL = instance?.base_url ?? '';
 				const projectPath = encodeURIComponent(`${repo.org}/${repo.slug}`);
 				const params = baseURL ? `?base_url=${encodeURIComponent(baseURL)}` : '';
 				url = `/api/providers/gitlab/${projectPath}/details${params}`;
-			} else if (repo.provider === 'gitea') {
-				const instance = providerInstances.find((p) => p.type === 'gitea');
+			} else if (providerType === 'gitea') {
 				if (!instance?.base_url) {
 					repoContributors = { ...repoContributors, [repo.key]: [] };
 					return;
@@ -299,6 +312,12 @@
 						<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs {sourceBadge.cls}" title={sourceBadge.title}>
 							<Icon class="h-3 w-3" />
 							{sourceBadge.label}
+						</span>
+					{/if}
+					{#if componentDetail?.licenses?.length}
+						<span class="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-0.5 text-xs text-amber-400" title="License">
+							<Scale class="h-3 w-3" />
+							{componentDetail.licenses.join(', ')}
 						</span>
 					{/if}
 					{#if componentDetail}

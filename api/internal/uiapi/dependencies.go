@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -543,6 +544,7 @@ type DependencyDetail struct {
 	ImageCount   int                     `json:"image_count"`
 	Sources      []string                `json:"sources"`
 	Versions     []DependencyVersionInfo `json:"versions"`
+	Licenses     []string                `json:"licenses,omitempty"`
 }
 
 // DependencyVersionInfo describes a specific version of a dependency
@@ -599,6 +601,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
 					COUNT(DISTINCT s.asset_ref_id) as repo_count,
 					MIN(NULLIF(split_part(s.purl, '@', 1), '')) as purl_base,
+					MIN(NULLIF(s.licenses, '')) as licenses,
 					'sbom' as source
 				FROM sbom_component_view s
 				WHERE s.is_root = false
@@ -612,6 +615,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 					md.version,
 					COUNT(DISTINCT m.repo_id) as repo_count,
 					NULL::text as purl_base,
+					NULL::text as licenses,
 					'manifest' as source
 				FROM manifest_dependencies md
 				JOIN manifests m ON m.id = md.manifest_id
@@ -627,11 +631,12 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 						WHEN s.version IS NOT NULL THEN 'sbom'
 						ELSE 'manifest'
 					END as sources,
-					s.purl_base
+					s.purl_base,
+					COALESCE(s.licenses, '') as licenses
 				FROM sbom_versions s
 				FULL OUTER JOIN manifest_versions m ON s.version = m.version
 			)
-			SELECT version, repo_count, sources, MIN(purl_base) OVER () AS overall_purl
+			SELECT version, repo_count, sources, MIN(purl_base) OVER () AS overall_purl, MIN(NULLIF(licenses, '')) OVER () AS overall_licenses
 			FROM merged_versions
 			ORDER BY repo_count DESC, version DESC
 			LIMIT 100
@@ -647,10 +652,11 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		versions := make([]DependencyVersionInfo, 0)
 		totalRepoCount := 0
 		var overallPURL sql.NullString
+		var overallLicenses sql.NullString
 		for rows.Next() {
 			var v DependencyVersionInfo
 			var sources string
-			if err := rows.Scan(&v.Version, &v.RepoCount, &sources, &overallPURL); err != nil {
+			if err := rows.Scan(&v.Version, &v.RepoCount, &sources, &overallPURL, &overallLicenses); err != nil {
 				log.Printf("version scan error: %v", err)
 				continue
 			}
@@ -691,6 +697,16 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
+		var licenses []string
+		if overallLicenses.Valid && overallLicenses.String != "" {
+			for _, l := range strings.Split(overallLicenses.String, ",") {
+				l = strings.TrimSpace(l)
+				if l != "" {
+					licenses = append(licenses, l)
+				}
+			}
+		}
+
 		detail := DependencyDetail{
 			Name:         name,
 			Ecosystem:    ecosystem,
@@ -700,6 +716,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			ImageCount:   0, // Images only from SBOMs, we can calculate this if needed
 			Sources:      sources,
 			Versions:     versions,
+			Licenses:     licenses,
 		}
 
 		writeJSON(w, http.StatusOK, detail)
