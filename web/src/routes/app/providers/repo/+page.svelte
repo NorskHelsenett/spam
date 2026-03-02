@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
@@ -400,15 +399,15 @@
 		}
 	};
 
-	onMount(() => {
-		if (browser) {
-			fetchRepoDetails();
-			checkActiveScans();
+	$effect(() => {
+		if (!browser) return;
+		// Re-fetch whenever URL params change (handles same-route navigation)
+		const _ = $page.url.href;
+		fetchRepoDetails();
+		checkActiveScans();
 
-			// Periodically check for active scans
-			const interval = setInterval(checkActiveScans, 10000);
-			return () => clearInterval(interval);
-		}
+		const interval = setInterval(checkActiveScans, 10000);
+		return () => clearInterval(interval);
 	});
 </script>
 

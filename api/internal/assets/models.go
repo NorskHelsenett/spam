@@ -4,12 +4,13 @@ import "time"
 
 // Repo identifies a source code repository.
 type Repo struct {
-	ID              string `gorm:"primaryKey;size:36"`
-	Provider        string `gorm:"size:32;not null;default:manual;uniqueIndex:ux_repo_identity"`
-	Org             string `gorm:"size:255;not null;uniqueIndex:ux_repo_identity"`
-	Slug            string `gorm:"size:255;not null;uniqueIndex:ux_repo_identity"`
-	CreatedAt       time.Time
-	CreatedByUserID string `gorm:"size:36"`
+	ID                string     `gorm:"primaryKey;size:36"`
+	Provider          string     `gorm:"size:32;not null;default:manual;uniqueIndex:ux_repo_identity"`
+	Org               string     `gorm:"size:255;not null;uniqueIndex:ux_repo_identity"`
+	Slug              string     `gorm:"size:255;not null;uniqueIndex:ux_repo_identity"`
+	CreatedAt         time.Time
+	CreatedByUserID   string     `gorm:"size:36"`
+	ProviderUpdatedAt *time.Time `gorm:"column:provider_updated_at;autoUpdateTime:false"`
 }
 
 // RepoCommit identifies a commit within a repository.

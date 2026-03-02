@@ -10,11 +10,13 @@ import (
 )
 
 type RepoSearchResult struct {
-	ID       string  `json:"id"`
-	Provider string  `json:"provider"`
-	Org      string  `json:"org"`
-	Slug     string  `json:"slug"`
-	Score    float64 `json:"score"`
+	ID         string  `json:"id"`
+	Provider   string  `json:"provider"`
+	Org        string  `json:"org"`
+	Slug       string  `json:"slug"`
+	Score      float64 `json:"score"`
+	ProviderID string  `json:"provider_id,omitempty"`
+	BaseURL    string  `json:"base_url,omitempty"`
 }
 
 type RepoSearchResponse struct {
@@ -48,21 +50,45 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		var rows []RepoSearchResult
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT
-				id,
-				provider,
-				org,
-				slug,
+				r.id,
+				r.provider,
+				r.org,
+				r.slug,
 				GREATEST(
-					word_similarity(?, slug),
-					word_similarity(?, org)
-				) AS score
-			FROM repos
-			WHERE
-				slug ILIKE '%' || ? || '%'
-				OR org  ILIKE '%' || ? || '%'
-				OR ? <% slug
-				OR ? <% org
-			ORDER BY score DESC, org ASC, slug ASC
+					word_similarity(?, r.slug),
+					word_similarity(?, r.org)
+				) AS score,
+				COALESCE(pi.id, '')       AS provider_id,
+				COALESCE(pi.base_url, '') AS base_url
+			FROM repos r
+			LEFT JOIN LATERAL (
+				SELECT pi.id, pi.base_url
+				FROM provider_instances pi
+				WHERE pi.type = r.provider
+				  AND pi.enabled = true
+				  AND (
+				    pi.owner_path = ''
+				    OR r.org = pi.owner_path
+				    OR r.org LIKE pi.owner_path || '/%'
+				  )
+				ORDER BY
+					CASE WHEN pi.owner_path != '' THEN 0 ELSE 1 END,
+					pi.created_at
+				LIMIT 1
+			) pi ON true
+			WHERE (
+				r.slug ILIKE '%' || ? || '%'
+				OR r.org  ILIKE '%' || ? || '%'
+				OR ? <% r.slug
+				OR ? <% r.org
+			)
+			AND (
+				NOT EXISTS (
+					SELECT 1 FROM provider_instances pi2 WHERE pi2.type = r.provider
+				)
+				OR pi.id IS NOT NULL
+			)
+			ORDER BY score DESC, r.org ASC, r.slug ASC
 			LIMIT ?
 		`, q, q, q, q, q, q, limit).Scan(&rows).Error
 		if err != nil {

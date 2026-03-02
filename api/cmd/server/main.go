@@ -24,6 +24,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
+	"github.com/NorskHelsenett/spam/internal/uiapi"
 )
 
 func main() {
@@ -128,6 +129,8 @@ func run() error {
 			log.Printf("WARNING: provider secret key: %s", w)
 		}
 	}
+
+	uiapi.WarmCache(gormDB, routerOpts.ProviderStore, routerOpts.Cache)
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

@@ -10,7 +10,6 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
-	"gorm.io/gorm"
 )
 
 const contributorCacheTTL = 15 * time.Minute
@@ -23,7 +22,7 @@ type RepoContributorsResponse struct {
 // from the appropriate provider API and cached for contributorCacheTTL.
 //
 // GET /api/repos/contributors?repo_id=provider:org:slug&provider_id=<uuid>
-func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
+func RepoContributorsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -50,13 +49,13 @@ func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *prov
 			return
 		}
 
-		token, err := resolveProviderTokenByBaseURL(r, store, providerType, repoPath)
+		providerID := r.URL.Query().Get("provider_id")
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerType, r.URL.Query().Get("base_url"), repoPath)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
 		}
 
-		baseURL := r.URL.Query().Get("base_url")
 		client := providerconfig.NewProviderClient(providerType, baseURL, token)
 		if client == nil {
 			writeJSON(w, http.StatusOK, RepoContributorsResponse{Contributors: []providers.ContributorInfo{}})

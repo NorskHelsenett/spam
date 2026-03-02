@@ -12,11 +12,53 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
+	"gorm.io/gorm"
 )
+
+// indexReposAsync upserts a slice of provider repos into the local repos table
+// in a background goroutine so they appear in search without requiring a scan.
+func indexReposAsync(db *gorm.DB, providerType string, repos []providers.RepoData) {
+	if db == nil || len(repos) == 0 {
+		return
+	}
+	go func() {
+		ctx := context.Background()
+		for _, r := range repos {
+			path := strings.Trim(r.FullPath, "/")
+			idx := strings.LastIndex(path, "/")
+			if idx < 0 {
+				continue
+			}
+			org := path[:idx]
+			slug := path[idx+1:]
+			if org == "" || slug == "" {
+				continue
+			}
+			// Use PushedAt as the best proxy for last commit date, fall back to UpdatedAt.
+			providerUpdatedAt := r.PushedAt
+			if providerUpdatedAt.IsZero() {
+				providerUpdatedAt = r.UpdatedAt
+			}
+			var providerUpdatedAtPtr *time.Time
+			if !providerUpdatedAt.IsZero() {
+				providerUpdatedAtPtr = &providerUpdatedAt
+			}
+			if _, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
+				Provider:          providerType,
+				Org:               org,
+				Slug:              slug,
+				ProviderUpdatedAt: providerUpdatedAtPtr,
+			}); err != nil {
+				log.Printf("indexReposAsync: upsert %s/%s: %v", org, slug, err)
+			}
+		}
+	}()
+}
 
 // GitHubReposResponse is the response for the GitHub repos endpoint.
 type GitHubReposResponse struct {
@@ -61,15 +103,16 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 
 // resolveProviderTokenByBaseURL resolves the provider token using provider_id if present,
 // otherwise falls back to looking up the provider by base_url and repoPath.
+// base_url is optional: NormalizeBaseURL will apply defaults for github/gitlab.
 func resolveProviderTokenByBaseURL(r *http.Request, store *providerconfig.Store, providerType, repoPath string) (string, error) {
 	token, err := resolveProviderToken(r, store)
 	if err != nil || token != "" {
 		return token, err
 	}
-	baseURL := r.URL.Query().Get("base_url")
-	if baseURL == "" || store == nil {
+	if store == nil {
 		return "", nil
 	}
+	baseURL := r.URL.Query().Get("base_url")
 	return store.GetActiveTokenByBaseURL(r.Context(), providerType, baseURL, repoPath)
 }
 
@@ -85,7 +128,7 @@ func resolvePollTTL(r *http.Request, store *providerconfig.Store) time.Duration 
 	return store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
 }
 
-func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
+func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -149,13 +192,14 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
+		indexReposAsync(db, providerconfig.ProviderGitHub, repos)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
 // GitLabProjectsHandler handles the GitLab projects endpoint.
 // GET /api/providers/gitlab/{group}/projects?base_url=https://gitlab.example.com
-func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
+func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -166,17 +210,18 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 
 		page, pageSize := parsePagination(r)
 		includeSubgroups := r.URL.Query().Get("include_subgroups") == "true"
-		baseURL := r.URL.Query().Get("base_url") // Custom instance URL
+		rawBaseURL := r.URL.Query().Get("base_url") // Custom instance URL
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
 
-		cacheKey := fmt.Sprintf("gitlab:projects:%s:%s:p%d:ps%d:sub%v:s%s:o%s", baseURL, group, page, pageSize, includeSubgroups, sortColumn, sortOrder)
+		cacheKey := fmt.Sprintf("gitlab:projects:%s:%s:p%d:ps%d:sub%v:s%s:o%s", rawBaseURL, group, page, pageSize, includeSubgroups, sortColumn, sortOrder)
 		if cached, ok, _ := cache.GetJSON[GitLabProjectsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		providerID := r.URL.Query().Get("provider_id")
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, rawBaseURL, group)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
@@ -219,6 +264,7 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
+		indexReposAsync(db, providerconfig.ProviderGitLab, projects)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -233,15 +279,16 @@ func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Sto
 
 		group := r.PathValue("group")
 		page, pageSize := parsePagination(r)
-		baseURL := r.URL.Query().Get("base_url")
+		rawBaseURL := r.URL.Query().Get("base_url")
 
-		cacheKey := fmt.Sprintf("gitlab:subgroups:%s:%s:p%d:ps%d", baseURL, group, page, pageSize)
+		cacheKey := fmt.Sprintf("gitlab:subgroups:%s:%s:p%d:ps%d", rawBaseURL, group, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GitLabGroupsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		providerID := r.URL.Query().Get("provider_id")
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, rawBaseURL, group)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
@@ -306,7 +353,7 @@ type GiteaOrgsResponse struct {
 // GiteaReposHandler handles the Gitea repos endpoint.
 // GET /api/providers/gitea/repos?base_url=https://gitea.example.com
 // GET /api/providers/gitea/{owner}/repos?base_url=https://gitea.example.com
-func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
+func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store, db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -365,6 +412,7 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
+		indexReposAsync(db, providerconfig.ProviderGitea, repos)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -818,8 +866,8 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 			projectPath = decoded
 		}
 
-		baseURL := r.URL.Query().Get("base_url")
-		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitLab, projectPath)
+		providerID := r.URL.Query().Get("provider_id")
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, r.URL.Query().Get("base_url"), projectPath)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return

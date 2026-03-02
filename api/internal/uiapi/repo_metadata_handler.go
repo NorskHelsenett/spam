@@ -68,12 +68,16 @@ func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadata
 	meta.Slug = parts[2]
 
 	var repo struct {
-		ID string
+		ID                string
+		ProviderUpdatedAt *time.Time
 	}
 	if err := db.WithContext(r.Context()).Table("repos").
-		Select("id").
+		Select("id, provider_updated_at").
 		Where("provider = ? AND org = ? AND slug = ?", parts[0], parts[1], parts[2]).
 		First(&repo).Error; err == nil {
+		if repo.ProviderUpdatedAt != nil && !repo.ProviderUpdatedAt.IsZero() {
+			meta.UpdatedAt = repo.ProviderUpdatedAt.UTC().Format(time.RFC3339)
+		}
 		return meta, repo.ID
 	}
 

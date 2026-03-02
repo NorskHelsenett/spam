@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
@@ -11,10 +12,11 @@ import (
 )
 
 type RepoInput struct {
-	Provider        string
-	Org             string
-	Slug            string
-	CreatedByUserID string
+	Provider          string
+	Org               string
+	Slug              string
+	CreatedByUserID   string
+	ProviderUpdatedAt *time.Time
 }
 
 type RepoCommitInput struct {
@@ -54,6 +56,11 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		}
 		return nil, result.Error
 	}
+
+	if input.ProviderUpdatedAt != nil && !input.ProviderUpdatedAt.IsZero() {
+		db.WithContext(ctx).Model(&repo).UpdateColumn("provider_updated_at", input.ProviderUpdatedAt)
+	}
+
 	return &repo, nil
 }
 

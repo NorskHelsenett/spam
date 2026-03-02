@@ -9,6 +9,8 @@
 		org: string;
 		slug: string;
 		score: number;
+		provider_id?: string;
+		base_url?: string;
 	};
 
 	type ComponentResult = {
@@ -36,7 +38,7 @@
 	};
 
 	type RepoPreview = {
-		repo: { provider: string; org: string; slug: string };
+		repo: { provider: string; org: string; slug: string; updated_at?: string };
 		latest_commit?: { sha: string; committed_at?: string };
 		runs: { total: number; latest?: { status: string; finished_at?: string } };
 		sbom: { latest?: { component_count: number; format: string } };
@@ -157,7 +159,14 @@
 
 	const selectItem = (item: SearchItem) => {
 		if (item.kind === 'repo') {
-			goto(`/app/providers/repo?provider=${encodeURIComponent(item.data.provider)}&path=${encodeURIComponent(item.data.org + '/' + item.data.slug)}`);
+			const d = item.data;
+			const params = new URLSearchParams({
+				provider: d.provider,
+				path: d.org + '/' + d.slug
+			});
+			if (d.provider_id) params.set('provider_id', d.provider_id);
+			if (d.base_url) params.set('base_url', d.base_url);
+			goto(`/app/providers/repo?${params}`);
 		} else {
 			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
@@ -230,6 +239,11 @@
 		const hrs = Math.floor(mins / 60);
 		if (hrs < 24) return `${hrs}h ago`;
 		return `${Math.floor(hrs / 24)}d ago`;
+	};
+
+	const shortDate = (iso: string | undefined) => {
+		if (!iso) return '';
+		return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 	};
 
 	const selectedItem = $derived(flatItems[selectedIndex] ?? null);
@@ -352,7 +366,14 @@
 											<span title={repoPreview.latest_commit.sha} style="cursor: default;">
 												{relativeTime(repoPreview.latest_commit.committed_at)}
 											</span>
+											<span style="opacity: 0.6;">· {shortDate(repoPreview.latest_commit.committed_at)}</span>
 											<span style="font-family: monospace; opacity: 0.5;">{repoPreview.latest_commit.sha.slice(0, 7)}</span>
+										</p>
+									{:else if repoPreview.repo.updated_at}
+										<p class="mt-1 text-[10px]" style="color: var(--text-muted);">
+											Last activity
+											<span>{relativeTime(repoPreview.repo.updated_at)}</span>
+											<span style="opacity: 0.6;">· {shortDate(repoPreview.repo.updated_at)}</span>
 										</p>
 									{/if}
 								</div>

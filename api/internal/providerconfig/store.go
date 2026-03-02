@@ -404,17 +404,30 @@ func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID strin
 }
 
 // FindProviderMatch finds the best provider instance for a given repo path.
+// When baseURL is empty and no match is found at the default URL, it falls
+// back to searching all enabled providers of that type by owner-path so that
+// self-hosted instances are discovered without an explicit base_url.
 func FindProviderMatch(ctx context.Context, db *gorm.DB, providerType, baseURL, repoPath string) (*ProviderInstance, error) {
-	baseURL = NormalizeBaseURL(providerType, baseURL)
-	if baseURL == "" {
-		return nil, nil
-	}
+	explicitBaseURL := baseURL
+	normalizedURL := NormalizeBaseURL(providerType, baseURL)
 
 	var providers []ProviderInstance
-	if err := db.WithContext(ctx).
-		Where("type = ? AND base_url = ? AND enabled = true", providerType, baseURL).
-		Find(&providers).Error; err != nil {
-		return nil, err
+	if normalizedURL != "" {
+		if err := db.WithContext(ctx).
+			Where("type = ? AND base_url = ? AND enabled = true", providerType, normalizedURL).
+			Find(&providers).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	// No match at the (possibly defaulted) URL and no explicit base_url was
+	// given: search across all instances of this type using owner-path only.
+	if len(providers) == 0 && explicitBaseURL == "" {
+		if err := db.WithContext(ctx).
+			Where("type = ? AND enabled = true", providerType).
+			Find(&providers).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	if len(providers) == 0 {
@@ -490,6 +503,45 @@ func (s *Store) GetActiveTokenByBaseURL(ctx context.Context, providerType, baseU
 	return GetActiveToken(ctx, s.db, p.ID, s.key)
 }
 
+// ResolveProviderAccess returns the effective base URL and active token for a
+// provider. It resolves by provider_id first (from providerID), then by
+// base_url+repoPath. When baseURL is empty and a match is found via
+// owner-path, the provider's stored BaseURL is returned as resolvedBaseURL so
+// callers can construct the correct API client even without an explicit base_url.
+func (s *Store) ResolveProviderAccess(ctx context.Context, providerID, providerType, baseURL, repoPath string) (resolvedBaseURL, token string, err error) {
+	if s == nil {
+		return baseURL, "", nil
+	}
+	resolvedBaseURL = baseURL
+
+	if providerID != "" {
+		token, err = s.GetActiveToken(ctx, providerID)
+		if err != nil {
+			return resolvedBaseURL, "", err
+		}
+		if baseURL == "" && token != "" {
+			var p ProviderInstance
+			if dbErr := s.db.WithContext(ctx).First(&p, "id = ?", providerID).Error; dbErr == nil {
+				resolvedBaseURL = p.BaseURL
+			}
+		}
+		return resolvedBaseURL, token, nil
+	}
+
+	p, err := FindProviderMatch(ctx, s.db, providerType, baseURL, repoPath)
+	if err != nil || p == nil {
+		return resolvedBaseURL, "", err
+	}
+	token, err = GetActiveToken(ctx, s.db, p.ID, s.key)
+	if err != nil {
+		return resolvedBaseURL, "", err
+	}
+	if baseURL == "" {
+		resolvedBaseURL = p.BaseURL
+	}
+	return resolvedBaseURL, token, nil
+}
+
 // GetPollInterval returns the configured poll_interval for a provider as a
 // Duration. Falls back to defaultTTL if the provider is not found or has no
 // poll_interval set.
@@ -511,6 +563,16 @@ func (s *Store) GetPollInterval(ctx context.Context, providerID string, defaultT
 }
 
 // ListEnabledWithPolling returns providers where polling is enabled.
+func (s *Store) ListEnabled(ctx context.Context) ([]ProviderInstance, error) {
+	var providers []ProviderInstance
+	if err := s.db.WithContext(ctx).
+		Where("enabled = true").
+		Find(&providers).Error; err != nil {
+		return nil, err
+	}
+	return providers, nil
+}
+
 func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance, error) {
 	var providers []ProviderInstance
 	if err := s.db.WithContext(ctx).
