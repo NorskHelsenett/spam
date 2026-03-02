@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
 )
@@ -74,7 +75,9 @@ func resolveProviderTokenByBaseURL(r *http.Request, store *providerconfig.Store,
 
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
-func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+const repoListCacheTTL = 5 * time.Minute
+
+func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -89,6 +92,12 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) 
 		page, pageSize := parsePagination(r)
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
+
+		cacheKey := fmt.Sprintf("github:repos:%s:p%d:ps%d:s%s:o%s", owner, page, pageSize, sortColumn, sortOrder)
+		if cached, ok, _ := cache.GetJSON[GitHubReposResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
 
 		token, err := resolveProviderToken(r, store)
 		if err != nil {
@@ -112,32 +121,33 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) 
 				return
 			}
 			if errors.Is(err, providers.ErrRateLimited) {
-				http.Error(w, "rate limited", http.StatusTooManyRequests)
+				http.Error(w, "Rate limited by GitHub API. Try again later.", http.StatusTooManyRequests)
 				return
 			}
 			http.Error(w, "failed to fetch repos", http.StatusInternalServerError)
 			return
 		}
 
-		// Apply sorting if requested
 		if sortColumn != "" {
 			sortRepos(repos, sortColumn, sortOrder)
 		}
 
-		writeJSON(w, http.StatusOK, GitHubReposResponse{
+		resp := GitHubReposResponse{
 			Repos:       repos,
 			TotalCount:  pageInfo.TotalCount,
 			Page:        page,
 			PageSize:    pageSize,
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
 // GitLabProjectsHandler handles the GitLab projects endpoint.
 // GET /api/providers/gitlab/{group}/projects?base_url=https://gitlab.example.com
-func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -151,6 +161,12 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 		baseURL := r.URL.Query().Get("base_url") // Custom instance URL
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
+
+		cacheKey := fmt.Sprintf("gitlab:projects:%s:%s:p%d:ps%d:sub%v:s%s:o%s", baseURL, group, page, pageSize, includeSubgroups, sortColumn, sortOrder)
+		if cached, ok, _ := cache.GetJSON[GitLabProjectsResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
 
 		token, err := resolveProviderToken(r, store)
 		if err != nil {
@@ -182,19 +198,20 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 			return
 		}
 
-		// Apply sorting if requested
 		if sortColumn != "" {
 			sortRepos(projects, sortColumn, sortOrder)
 		}
 
-		writeJSON(w, http.StatusOK, GitLabProjectsResponse{
+		resp := GitLabProjectsResponse{
 			Projects:    projects,
 			TotalCount:  pageInfo.TotalCount,
 			Page:        page,
 			PageSize:    pageSize,
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -275,7 +292,7 @@ type GiteaOrgsResponse struct {
 // GiteaReposHandler handles the Gitea repos endpoint.
 // GET /api/providers/gitea/repos?base_url=https://gitea.example.com
 // GET /api/providers/gitea/{owner}/repos?base_url=https://gitea.example.com
-func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -287,6 +304,12 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) h
 
 		if baseURL == "" {
 			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
+			return
+		}
+
+		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", baseURL, owner, page, pageSize)
+		if cached, ok, _ := cache.GetJSON[GiteaReposResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
@@ -319,14 +342,16 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store) h
 			return
 		}
 
-		writeJSON(w, http.StatusOK, GiteaReposResponse{
+		resp := GiteaReposResponse{
 			Repos:       repos,
 			TotalCount:  pageInfo.TotalCount,
 			Page:        page,
 			PageSize:    pageSize,
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -663,7 +688,7 @@ func enrichCommits(commits []providers.CommitInfo, contributors []providers.Cont
 
 // GitHubRepoDetailsHandler handles fetching GitHub repo details.
 // GET /api/providers/github/{owner}/{repo}/details
-func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -724,11 +749,19 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 		}()
 		go func() {
 			defer wg.Done()
+			repoPath := owner + "/" + repo
+			cacheKey := fmt.Sprintf("contributors:github:%s", repoPath)
+			if cached, ok, _ := cache.GetJSON[[]providers.ContributorInfo](r.Context(), c, cacheKey); ok {
+				contributors = cached
+				return
+			}
 			var err error
-			contributors, err = client.GetContributors(r.Context(), owner, repo, 30)
+			contributors, err = client.GetContributors(r.Context(), repoPath, 30)
 			if err != nil {
 				log.Printf("GitHub contributors error for %s/%s: %v", owner, repo, err)
+				return
 			}
+			_ = cache.SetJSON(r.Context(), c, cacheKey, contributors, contributorCacheTTL)
 		}()
 		wg.Wait()
 
@@ -746,7 +779,7 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 
 // GitLabRepoDetailsHandler handles fetching GitLab project details.
 // GET /api/providers/gitlab/{projectPath}/details?base_url=...
-func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -813,11 +846,18 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 		}()
 		go func() {
 			defer wg.Done()
+			cacheKey := fmt.Sprintf("contributors:gitlab:%s", projectPath)
+			if cached, ok, _ := cache.GetJSON[[]providers.ContributorInfo](r.Context(), c, cacheKey); ok {
+				contributors = cached
+				return
+			}
 			var err error
 			contributors, err = client.GetContributors(r.Context(), projectPath, 30)
 			if err != nil {
 				log.Printf("GitLab contributors error for %s: %v", projectPath, err)
+				return
 			}
+			_ = cache.SetJSON(r.Context(), c, cacheKey, contributors, contributorCacheTTL)
 		}()
 		wg.Wait()
 
@@ -835,7 +875,7 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 
 // GiteaRepoDetailsHandler handles fetching Gitea repo details.
 // GET /api/providers/gitea/{owner}/{repo}/details?base_url=...
-func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -898,11 +938,19 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 		}()
 		go func() {
 			defer wg.Done()
+			repoPath := owner + "/" + repo
+			cacheKey := fmt.Sprintf("contributors:gitea:%s", repoPath)
+			if cached, ok, _ := cache.GetJSON[[]providers.ContributorInfo](r.Context(), c, cacheKey); ok {
+				contributors = cached
+				return
+			}
 			var err error
-			contributors, err = client.GetContributors(r.Context(), owner, repo, 30)
+			contributors, err = client.GetContributors(r.Context(), repoPath, 30)
 			if err != nil {
 				log.Printf("Gitea contributors error for %s/%s: %v", owner, repo, err)
+				return
 			}
+			_ = cache.SetJSON(r.Context(), c, cacheKey, contributors, contributorCacheTTL)
 		}()
 		wg.Wait()
 

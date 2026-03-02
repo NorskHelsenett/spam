@@ -29,6 +29,10 @@ type Client interface {
 	// GetLatestCommit returns the SHA of the latest commit on the given ref (branch).
 	GetLatestCommit(ctx context.Context, repoPath string, ref string) (string, error)
 
+	// GetContributors returns the top contributors for a repository.
+	// repoPath is "owner/repo". limit caps the result set (0 = provider default).
+	GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error)
+
 	// BaseURL returns the base URL of the provider API.
 	BaseURL() string
 

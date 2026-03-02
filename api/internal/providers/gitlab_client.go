@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,6 +52,69 @@ func (c *GitLabClientImpl) BaseURL() string {
 
 func (c *GitLabClientImpl) ProviderType() string {
 	return "gitlab"
+}
+
+// gitLabContributor is the GitLab repository contributor API shape.
+type gitLabContributor struct {
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	Commits int    `json:"commits"`
+}
+
+// GetContributors returns top contributors from the GitLab repository/contributors API.
+// Avatars are derived from email via Gravatar since GitLab's contributors endpoint
+// does not return avatar URLs.
+func (c *GitLabClientImpl) GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	encoded := url.PathEscape(repoPath)
+	apiURL := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=%d&order_by=commits&sort=desc", c.baseURL, encoded, limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, ErrInvalidResponse
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []gitLabContributor
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+
+	out := make([]ContributorInfo, 0, len(raw))
+	for _, r := range raw {
+		hash := fmt.Sprintf("%x", md5sum(strings.ToLower(strings.TrimSpace(r.Email))))
+		out = append(out, ContributorInfo{
+			Name:          r.Name,
+			Email:         r.Email,
+			AvatarURL:     "https://www.gravatar.com/avatar/" + hash + "?d=identicon&s=80",
+			Contributions: r.Commits,
+		})
+	}
+	return out, nil
+}
+
+func md5sum(s string) []byte {
+	h := md5.New()
+	h.Write([]byte(s))
+	return h.Sum(nil)
 }
 
 // gitLabProject represents a project from the GitLab API.
@@ -661,59 +725,6 @@ func (c *GitLabClientImpl) GetCommitLog(ctx context.Context, projectPath string,
 	}
 
 	return commits, nil
-}
-
-// GetContributors fetches contributors for a project.
-func (c *GitLabClientImpl) GetContributors(ctx context.Context, projectPath string, limit int) ([]ContributorInfo, error) {
-	if limit <= 0 {
-		limit = 30
-	}
-	encodedPath := url.PathEscape(projectPath)
-	urlStr := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=%d&order_by=commits&sort=desc", c.baseURL, encodedPath, limit)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.token != "" {
-		req.Header.Set("PRIVATE-TOKEN", c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if err := c.checkResponse(resp); err != nil {
-		return nil, err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var glContributors []struct {
-		Name    string `json:"name"`
-		Email   string `json:"email"`
-		Commits int    `json:"commits"`
-	}
-	if err := json.Unmarshal(body, &glContributors); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
-	}
-
-	contributors := make([]ContributorInfo, len(glContributors))
-	for i, c := range glContributors {
-		contributors[i] = ContributorInfo{
-			Name:          c.Name,
-			Email:         c.Email,
-			Contributions: c.Commits,
-		}
-	}
-
-	return contributors, nil
 }
 
 // GetReadme fetches the README content for a project.

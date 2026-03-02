@@ -26,8 +26,18 @@
 		| { kind: 'repo'; data: RepoResult }
 		| { kind: 'component'; data: ComponentResult };
 
+	type Contributor = {
+		login?: string;
+		name?: string;
+		email?: string;
+		avatar_url?: string;
+		profile_url?: string;
+		contributions: number;
+	};
+
 	type RepoPreview = {
 		repo: { provider: string; org: string; slug: string };
+		latest_commit?: { sha: string; committed_at?: string };
 		runs: { total: number; latest?: { status: string; finished_at?: string } };
 		sbom: { latest?: { component_count: number; format: string } };
 		dependencies: { total: number };
@@ -41,12 +51,15 @@
 	let loading = $state(false);
 	let selectedIndex = $state(0);
 	let repoPreview = $state<RepoPreview | null>(null);
+	let contributors = $state<Contributor[]>([]);
 	let previewLoading = $state(false);
 	let inputEl: HTMLInputElement | undefined = $state();
 
 	const previewCache = new Map<string, RepoPreview>();
+	const contributorsCache = new Map<string, Contributor[]>();
 	let searchTimer: ReturnType<typeof setTimeout>;
 	let previewTimer: ReturnType<typeof setTimeout>;
+	let contributorsTimer: ReturnType<typeof setTimeout>;
 
 	const flatItems = $derived<SearchItem[]>([
 		...repoResults.map((d) => ({ kind: 'repo' as const, data: d })),
@@ -61,6 +74,7 @@
 		repoResults = [];
 		componentResults = [];
 		repoPreview = null;
+		contributors = [];
 		selectedIndex = 0;
 	};
 
@@ -95,29 +109,45 @@
 		const key = `${result.provider}:${result.org}:${result.slug}`;
 		if (previewCache.has(key)) {
 			repoPreview = previewCache.get(key)!;
-			return;
+		} else {
+			clearTimeout(previewTimer);
+			previewLoading = true;
+			previewTimer = setTimeout(async () => {
+				try {
+					const res = await fetch(`/api/repos/metadata?repo_id=${encodeURIComponent(key)}`);
+					if (res.ok) {
+						const data = await res.json();
+						previewCache.set(key, data);
+						repoPreview = data;
+					}
+				} finally {
+					previewLoading = false;
+				}
+			}, 120);
 		}
-		clearTimeout(previewTimer);
-		previewLoading = true;
-		previewTimer = setTimeout(async () => {
-			try {
-				const res = await fetch(`/api/repos/metadata?repo_id=${encodeURIComponent(key)}`);
+		// Contributors fetched in parallel, slightly longer debounce
+		if (contributorsCache.has(key)) {
+			contributors = contributorsCache.get(key)!;
+		} else {
+			contributors = [];
+			clearTimeout(contributorsTimer);
+			contributorsTimer = setTimeout(async () => {
+				const res = await fetch(`/api/repos/contributors?repo_id=${encodeURIComponent(key)}`);
 				if (res.ok) {
 					const data = await res.json();
-					previewCache.set(key, data);
-					repoPreview = data;
+					const list = data.contributors ?? [];
+					contributorsCache.set(key, list);
+					contributors = list;
 				}
-			} finally {
-				previewLoading = false;
-			}
-		}, 120);
+			}, 200);
+		}
 	};
 
 	$effect(() => {
 		const item = flatItems[selectedIndex];
-		if (!item) { repoPreview = null; return; }
+		if (!item) { repoPreview = null; contributors = []; return; }
 		if (item.kind === 'repo') fetchRepoPreview(item.data);
-		else { repoPreview = null; clearTimeout(previewTimer); previewLoading = false; }
+		else { repoPreview = null; contributors = []; clearTimeout(previewTimer); clearTimeout(contributorsTimer); previewLoading = false; }
 	});
 
 	const handleInput = () => {
@@ -150,7 +180,11 @@
 	const handleGlobalKeydown = (e: KeyboardEvent) => {
 		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 			e.preventDefault();
-			open ? close() : (open = true);
+			if (open) {
+				inputEl?.focus();
+			} else {
+				open = true;
+			}
 		} else if (e.key === 'Escape' && open) {
 			close();
 		}
@@ -312,6 +346,15 @@
 									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
 										{repoPreview.repo.org}<span style="color: var(--text-muted);">/</span>{repoPreview.repo.slug}
 									</p>
+									{#if repoPreview.latest_commit}
+										<p class="mt-1 text-[10px]" style="color: var(--text-muted);">
+											Last commit
+											<span title={repoPreview.latest_commit.sha} style="cursor: default;">
+												{relativeTime(repoPreview.latest_commit.committed_at)}
+											</span>
+											<span style="font-family: monospace; opacity: 0.5;">{repoPreview.latest_commit.sha.slice(0, 7)}</span>
+										</p>
+									{/if}
 								</div>
 								<div class="space-y-2.5">
 									<div class="flex items-center gap-2.5">
@@ -360,6 +403,37 @@
 										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{repoPreview.runs.total}</span>
 									</div>
 								</div>
+
+								{#if contributors.length > 0}
+									<div class="mt-4">
+										<p class="mb-2 text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-muted);">Contributors</p>
+										<div class="grid grid-cols-2 gap-x-3 gap-y-2.5">
+											{#each contributors.slice(0, 5) as c}
+												<div class="flex min-w-0 items-center gap-2">
+													{#if c.avatar_url}
+														<img
+															src={c.avatar_url}
+															alt={c.login ?? c.name ?? ''}
+															class="h-6 w-6 flex-shrink-0 rounded-full"
+															style="background: var(--bg2);"
+														/>
+													{:else}
+														<div class="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-[9px] font-semibold" style="background: var(--bg2); color: var(--text-muted);">
+															{(c.login ?? c.name ?? '?')[0].toUpperCase()}
+														</div>
+													{/if}
+													<div class="min-w-0 flex-1">
+														<p class="truncate text-[11px] font-medium leading-tight" style="color: var(--text-primary);">{c.login ?? c.name ?? '—'}</p>
+														{#if c.email}
+															<p class="truncate text-[9px] leading-tight" style="color: var(--text-muted);">{c.email}</p>
+														{/if}
+													</div>
+												</div>
+											{/each}
+										</div>
+									</div>
+								{/if}
+
 								<button
 									type="button"
 									onclick={() => selectItem(selectedItem)}
