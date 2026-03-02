@@ -5,8 +5,11 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"gorm.io/gorm"
 )
+
+const appSummaryCacheTTL = 60 * time.Second
 
 type AppSummaryCounts struct {
 	SBOMCount             int64 `json:"sbom_count"`
@@ -61,9 +64,15 @@ type AppSummaryResponse struct {
 }
 
 // AppSummaryHandler returns dashboard metrics derived from SBOM views.
-func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		const cacheKey = "app:summary"
+		if cached, ok, _ := cache.GetJSON[AppSummaryResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
@@ -188,6 +197,7 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, appSummaryCacheTTL)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

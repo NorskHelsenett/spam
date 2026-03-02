@@ -217,17 +217,21 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 
 // GitLabSubgroupsHandler handles the GitLab subgroups endpoint.
 // GET /api/providers/gitlab/{group}/subgroups?base_url=https://gitlab.example.com
-func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
 		group := r.PathValue("group")
-		// group can be empty for top-level groups
-
 		page, pageSize := parsePagination(r)
-		baseURL := r.URL.Query().Get("base_url") // Custom instance URL
+		baseURL := r.URL.Query().Get("base_url")
+
+		cacheKey := fmt.Sprintf("gitlab:subgroups:%s:%s:p%d:ps%d", baseURL, group, page, pageSize)
+		if cached, ok, _ := cache.GetJSON[GitLabGroupsResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
 
 		token, err := resolveProviderToken(r, store)
 		if err != nil {
@@ -258,14 +262,16 @@ func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Sto
 			return
 		}
 
-		writeJSON(w, http.StatusOK, GitLabGroupsResponse{
+		resp := GitLabGroupsResponse{
 			Groups:      groups,
 			TotalCount:  pageInfo.TotalCount,
 			Page:        page,
 			PageSize:    pageSize,
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -357,7 +363,7 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 
 // GiteaOrgsHandler handles the Gitea orgs endpoint.
 // GET /api/providers/gitea/orgs?base_url=https://gitea.example.com
-func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -368,6 +374,12 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) ht
 
 		if baseURL == "" {
 			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
+			return
+		}
+
+		cacheKey := fmt.Sprintf("gitea:orgs:%s:p%d:ps%d", baseURL, page, pageSize)
+		if cached, ok, _ := cache.GetJSON[GiteaOrgsResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
@@ -396,14 +408,16 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store) ht
 			return
 		}
 
-		writeJSON(w, http.StatusOK, GiteaOrgsResponse{
+		resp := GiteaOrgsResponse{
 			Orgs:        orgs,
 			TotalCount:  pageInfo.TotalCount,
 			Page:        page,
 			PageSize:    pageSize,
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 

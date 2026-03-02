@@ -7,13 +7,16 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"gorm.io/gorm"
 )
 
+const repoMetadataCacheTTL = 30 * time.Second
+
 // RepoMetadataHandler returns a unified metadata response for a repo.
 // GET /api/repos/metadata?repo_id=provider:org:slug
-func RepoMetadataHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -25,6 +28,12 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 			return
 		}
 
+		cacheKey := "repo:metadata:" + repoID
+		if cached, ok, _ := cache.GetJSON[RepoMetadataResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+
 		repoMeta, repoDBID := loadRepoMetadata(r, db, repoID)
 		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
 		runs := loadRepoRuns(r, db, repoID, repoDBID)
@@ -32,7 +41,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
 
-		writeJSON(w, http.StatusOK, RepoMetadataResponse{
+		resp := RepoMetadataResponse{
 			Repo:            repoMeta,
 			LatestCommit:    latestCommit,
 			Runs:            runs,
@@ -41,7 +50,9 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 			Secrets:         secrets,
 			Hygiene:         RepoMetadataHygiene{},
 			Vulnerabilities: RepoMetadataVulnerabilities{},
-		})
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoMetadataCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 

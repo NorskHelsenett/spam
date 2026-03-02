@@ -74,7 +74,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
-				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService))
+				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
 
 				// Ecosystems endpoint
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService))
@@ -92,19 +92,19 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
 				api.Get("/repos/contributors", uiapi.RepoContributorsHandler(db, authService, providerStore, appCache))
 				api.Get("/repos/security", uiapi.RepoSecurityCountsHandler(db, authService))
-				api.Get("/repos/metadata", uiapi.RepoMetadataHandler(db, authService))
+				api.Get("/repos/metadata", uiapi.RepoMetadataHandler(db, authService, appCache))
 				api.Get("/providers/instances", uiapi.ProvidersInstancesHandler(db, authService, providerStore))
 				api.Get("/providers/detect", uiapi.ProvidersDetectHandler(authService))
 				api.Get("/providers/github/{owner}/repos", uiapi.GitHubReposHandler(authService, providerStore, appCache))
 				api.Get("/providers/github/{owner}/{repo}/details", uiapi.GitHubRepoDetailsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitlab/projects", uiapi.GitLabProjectsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitlab/{group}/projects", uiapi.GitLabProjectsHandler(authService, providerStore, appCache))
-				api.Get("/providers/gitlab/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore))
-				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore))
+				api.Get("/providers/gitlab/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore, appCache))
+				api.Get("/providers/gitlab/{group}/subgroups", uiapi.GitLabSubgroupsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitlab/{projectPath}/details", uiapi.GitLabRepoDetailsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/repos", uiapi.GiteaReposHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService, providerStore, appCache))
-				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore))
+				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
 
 				// Runs endpoints
