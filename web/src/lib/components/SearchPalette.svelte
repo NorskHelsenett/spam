@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Search, GitBranch, Box, ShieldCheck, Play, ArrowRight } from 'lucide-svelte';
+	import { Search, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox } from 'lucide-svelte';
 
 	type RepoResult = {
 		id: string;
@@ -354,11 +354,22 @@
 
 			{:else if !query.trim()}
 				<!-- Idle hint panel -->
-				<div style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1em; text-align: center;">
-					<Search size={32} style="color: var(--bg3);" />
-					<div>
-						<p class="text-xs font-medium" style="color: var(--text-secondary);">Search across all providers</p>
-						<p class="text-[11px] mt-1" style="color: var(--text-muted);">GitHub · GitLab · Gitea · Forgejo</p>
+				<div style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em; display: flex; align-items: center; justify-content: center;">
+					<div style="display: flex; flex-direction: column; gap: 2em; width: 100%;">
+						<div style="display: flex; align-items: center; gap: 1.5em;">
+							<Codesandbox size={28} style="color: var(--text-muted); flex-shrink: 0;" />
+							<div>
+								<p style="color: var(--text-primary); font-size: 1em; font-weight: 500;">Repositories</p>
+								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">GitHub · GitLab · Gitea · Forgejo</p>
+							</div>
+						</div>
+						<div style="display: flex; align-items: center; gap: 1.5em;">
+							<Package size={28} style="color: var(--text-muted); flex-shrink: 0;" />
+							<div>
+								<p style="color: var(--text-primary); font-size: 1em; font-weight: 500;">Components</p>
+								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">npm · Maven · PyPI · NuGet · Go</p>
+							</div>
+						</div>
 					</div>
 				</div>
 			{/if}
