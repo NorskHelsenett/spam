@@ -58,6 +58,20 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 	return store.GetActiveToken(r.Context(), providerID)
 }
 
+// resolveProviderTokenByBaseURL resolves the provider token using provider_id if present,
+// otherwise falls back to looking up the provider by base_url and repoPath.
+func resolveProviderTokenByBaseURL(r *http.Request, store *providerconfig.Store, providerType, repoPath string) (string, error) {
+	token, err := resolveProviderToken(r, store)
+	if err != nil || token != "" {
+		return token, err
+	}
+	baseURL := r.URL.Query().Get("base_url")
+	if baseURL == "" || store == nil {
+		return "", nil
+	}
+	return store.GetActiveTokenByBaseURL(r.Context(), providerType, baseURL, repoPath)
+}
+
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
 func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
@@ -750,7 +764,7 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 		}
 
 		baseURL := r.URL.Query().Get("base_url")
-		token, err := resolveProviderToken(r, store)
+		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitLab, projectPath)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
@@ -840,7 +854,7 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitea, owner+"/"+repo)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return

@@ -259,19 +259,18 @@
 			if (providerType === 'github') {
 				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
 			} else if (providerType === 'gitlab') {
-				const projectPath = encodeURIComponent(`${repo.org}/${repo.slug}`);
-				const p = new URLSearchParams();
-				if (instance?.base_url) p.set('base_url', instance.base_url);
-				if (instance?.id) p.set('provider_id', instance.id);
-				url = `/api/providers/gitlab/${projectPath}/details?${p}`;
-			} else if (providerType === 'gitea') {
-				if (!instance?.base_url) {
+				if (!instance) {
 					repoContributors = { ...repoContributors, [repo.key]: [] };
 					return;
 				}
-				const p = new URLSearchParams({ base_url: instance.base_url });
-				if (instance.id) p.set('provider_id', instance.id);
-				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?${p}`;
+				const projectPath = encodeURIComponent(`${repo.org}/${repo.slug}`);
+				url = `/api/providers/gitlab/${projectPath}/details?base_url=${encodeURIComponent(instance.base_url)}`;
+			} else if (providerType === 'gitea') {
+				if (!instance) {
+					repoContributors = { ...repoContributors, [repo.key]: [] };
+					return;
+				}
+				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?base_url=${encodeURIComponent(instance.base_url)}`;
 			} else {
 				repoContributors = { ...repoContributors, [repo.key]: [] };
 				return;

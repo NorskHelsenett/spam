@@ -477,6 +477,19 @@ func (s *Store) GetActiveToken(ctx context.Context, providerID string) (string, 
 	return GetActiveToken(ctx, s.db, providerID, s.key)
 }
 
+// GetActiveTokenByBaseURL looks up the best matching provider instance for the
+// given providerType, baseURL, and repoPath, then returns its active token.
+func (s *Store) GetActiveTokenByBaseURL(ctx context.Context, providerType, baseURL, repoPath string) (string, error) {
+	if s == nil {
+		return "", nil
+	}
+	p, err := FindProviderMatch(ctx, s.db, providerType, baseURL, repoPath)
+	if err != nil || p == nil {
+		return "", err
+	}
+	return GetActiveToken(ctx, s.db, p.ID, s.key)
+}
+
 // ListEnabledWithPolling returns providers where polling is enabled.
 func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance, error) {
 	var providers []ProviderInstance

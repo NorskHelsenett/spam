@@ -245,7 +245,7 @@
 				<div class="flex" style="border-top: 1px solid var(--bg2);">
 
 					<!-- Left: results list -->
-					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-hard); border-right: 1px solid var(--bg2);">
+					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft);">
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped()] as [provider, repos]}
@@ -293,7 +293,7 @@
 					</div>
 
 					<!-- Right: preview panel -->
-					<div class="flex min-w-0 flex-1 flex-col overflow-y-auto" style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em;">
+					<div class="flex min-w-0 flex-1 flex-col overflow-y-auto" style="background: var(--bg-soft); min-height: 25em; padding: 4em;">
 
 						{#if selectedItem?.kind === 'repo'}
 							{#if previewLoading}
