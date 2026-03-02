@@ -11,61 +11,90 @@
 		score: number;
 	};
 
-	type Preview = {
+	type ComponentResult = {
+		name: string;
+		ecosystem: string;
+		purl?: string;
+		sources: string[];
+		version_count: number;
+		sbom_count: number;
+		repo_count: number;
+		has_direct: boolean;
+	};
+
+	type SearchItem =
+		| { kind: 'repo'; data: RepoResult }
+		| { kind: 'component'; data: ComponentResult };
+
+	type RepoPreview = {
 		repo: { provider: string; org: string; slug: string };
-		runs: {
-			total: number;
-			latest?: { status: string; finished_at?: string; commit_sha?: string };
-		};
-		sbom: { latest?: { component_count: number; format: string; created_at: string } };
-		dependencies: { total: number; from_sbom: number; from_manifest: number };
-		secrets: { latest_count: number; latest_run_id?: string };
+		runs: { total: number; latest?: { status: string; finished_at?: string } };
+		sbom: { latest?: { component_count: number; format: string } };
+		dependencies: { total: number };
+		secrets: { latest_count: number };
 	};
 
 	let open = $state(false);
 	let query = $state('');
-	let results = $state<RepoResult[]>([]);
+	let repoResults = $state<RepoResult[]>([]);
+	let componentResults = $state<ComponentResult[]>([]);
 	let loading = $state(false);
 	let selectedIndex = $state(0);
-	let preview = $state<Preview | null>(null);
+	let repoPreview = $state<RepoPreview | null>(null);
 	let previewLoading = $state(false);
 	let inputEl: HTMLInputElement | undefined = $state();
 
-	const previewCache = new Map<string, Preview>();
+	const previewCache = new Map<string, RepoPreview>();
 	let searchTimer: ReturnType<typeof setTimeout>;
 	let previewTimer: ReturnType<typeof setTimeout>;
+
+	const flatItems = $derived<SearchItem[]>([
+		...repoResults.map((d) => ({ kind: 'repo' as const, data: d })),
+		...componentResults.map((d) => ({ kind: 'component' as const, data: d }))
+	]);
+
+	const hasResults = $derived(flatItems.length > 0);
 
 	const close = () => {
 		open = false;
 		query = '';
-		results = [];
-		preview = null;
+		repoResults = [];
+		componentResults = [];
+		repoPreview = null;
 		selectedIndex = 0;
 	};
 
 	const search = async (q: string) => {
 		if (!q.trim()) {
-			results = [];
-			preview = null;
+			repoResults = [];
+			componentResults = [];
+			repoPreview = null;
 			return;
 		}
 		loading = true;
 		try {
-			const res = await fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=12`);
-			if (res.ok) {
-				const data = await res.json();
-				results = data.results ?? [];
-				selectedIndex = 0;
+			const [repoRes, compRes] = await Promise.all([
+				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=8`),
+				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=8`)
+			]);
+			if (repoRes.ok) {
+				const data = await repoRes.json();
+				repoResults = data.results ?? [];
 			}
+			if (compRes.ok) {
+				const data = await compRes.json();
+				componentResults = data.dependencies ?? [];
+			}
+			selectedIndex = 0;
 		} finally {
 			loading = false;
 		}
 	};
 
-	const fetchPreview = (result: RepoResult) => {
+	const fetchRepoPreview = (result: RepoResult) => {
 		const key = `${result.provider}:${result.org}:${result.slug}`;
 		if (previewCache.has(key)) {
-			preview = previewCache.get(key)!;
+			repoPreview = previewCache.get(key)!;
 			return;
 		}
 		clearTimeout(previewTimer);
@@ -76,7 +105,7 @@
 				if (res.ok) {
 					const data = await res.json();
 					previewCache.set(key, data);
-					preview = data;
+					repoPreview = data;
 				}
 			} finally {
 				previewLoading = false;
@@ -85,9 +114,10 @@
 	};
 
 	$effect(() => {
-		const result = results[selectedIndex];
-		if (result) fetchPreview(result);
-		else preview = null;
+		const item = flatItems[selectedIndex];
+		if (!item) { repoPreview = null; return; }
+		if (item.kind === 'repo') fetchRepoPreview(item.data);
+		else { repoPreview = null; clearTimeout(previewTimer); previewLoading = false; }
 	});
 
 	const handleInput = () => {
@@ -95,8 +125,12 @@
 		searchTimer = setTimeout(() => search(query), 180);
 	};
 
-	const selectRepo = (result: RepoResult) => {
-		goto(`/app/providers/repo?repo_id=${result.provider}:${result.org}:${result.slug}`);
+	const selectItem = (item: SearchItem) => {
+		if (item.kind === 'repo') {
+			goto(`/app/providers/repo?repo_id=${item.data.provider}:${item.data.org}:${item.data.slug}`);
+		} else {
+			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
+		}
 		close();
 	};
 
@@ -104,17 +138,17 @@
 		if (!open) return;
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
-			selectedIndex = Math.min(selectedIndex + 1, results.length - 1);
+			selectedIndex = Math.min(selectedIndex + 1, flatItems.length - 1);
 		} else if (e.key === 'ArrowUp') {
 			e.preventDefault();
 			selectedIndex = Math.max(selectedIndex - 1, 0);
-		} else if (e.key === 'Enter' && results[selectedIndex]) {
-			selectRepo(results[selectedIndex]);
+		} else if (e.key === 'Enter' && flatItems[selectedIndex]) {
+			selectItem(flatItems[selectedIndex]);
 		}
 	};
 
 	const handleGlobalKeydown = (e: KeyboardEvent) => {
-		if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+		if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
 			e.preventDefault();
 			open ? close() : (open = true);
 		} else if (e.key === 'Escape' && open) {
@@ -135,19 +169,15 @@
 	const providerLabel = (p: string) =>
 		({ github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea', forgejo: 'Forgejo' })[p] ?? p;
 
-	// Group results by provider for category headers
-	const grouped = $derived(() => {
+	const repoGrouped = $derived(() => {
 		const map = new Map<string, RepoResult[]>();
-		for (const r of results) {
+		for (const r of repoResults) {
 			const list = map.get(r.provider) ?? [];
 			list.push(r);
 			map.set(r.provider, list);
 		}
 		return map;
 	});
-
-	// Flat index lookup per result (for selectedIndex tracking across groups)
-	const flatResults = $derived(results);
 
 	const statusColor = (status: string) => {
 		if (status === 'SUCCEEDED') return 'var(--success)';
@@ -167,16 +197,16 @@
 		if (hrs < 24) return `${hrs}h ago`;
 		return `${Math.floor(hrs / 24)}d ago`;
 	};
+
+	const selectedItem = $derived(flatItems[selectedIndex] ?? null);
 </script>
 
 {#if open}
-	<!-- Backdrop -->
 	<div
 		class="fixed inset-0 z-50 bg-black/55"
 		onclick={(e) => { if (e.target === e.currentTarget) close(); }}
 		role="presentation"
 	>
-		<!-- Palette shell -->
 		<div
 			class="fixed left-1/2 top-[16%] z-50 w-[95vw] max-w-2xl -translate-x-1/2 overflow-hidden rounded-2xl shadow-2xl"
 			style="background: var(--bg-soft); border: 1px solid var(--bg2);"
@@ -188,7 +218,7 @@
 			<div class="flex items-center gap-3 px-5 py-4">
 				<Search
 					size={17}
-					style="color: var(--text-muted); flex-shrink: 0; {loading ? 'opacity: 0.35' : 'opacity: 1'}; transition: opacity 200ms;"
+					style="color: var(--text-muted); flex-shrink: 0; opacity: {loading ? 0.35 : 1}; transition: opacity 200ms;"
 				/>
 				<input
 					bind:this={inputEl}
@@ -196,14 +226,14 @@
 					oninput={handleInput}
 					onkeydown={handleKeydown}
 					type="text"
-					placeholder="Search repositories…"
+					placeholder="Search…"
 					style="flex: 1; background: transparent; color: var(--text-bright); caret-color: var(--accent); font-size: 1rem; font-weight: 500; outline: none;"
 					class="placeholder:font-normal placeholder:text-[var(--text-muted)]"
 				/>
 				{#if query}
 					<button
 						type="button"
-						onclick={() => { query = ''; results = []; preview = null; inputEl?.focus(); }}
+						onclick={() => { query = ''; repoResults = []; componentResults = []; repoPreview = null; inputEl?.focus(); }}
 						style="color: var(--text-muted); background: var(--bg1); border-radius: 999px; width: 18px; height: 18px; font-size: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"
 						aria-label="Clear"
 					>✕</button>
@@ -211,149 +241,187 @@
 			</div>
 
 			<!-- Two-panel body -->
-			{#if results.length > 0}
+			{#if hasResults}
 				<div class="flex" style="border-top: 1px solid var(--bg2);">
 
 					<!-- Left: results list -->
-					<div
-						class="w-52 shrink-0 overflow-y-auto"
-						style="background: var(--bg-hard); border-right: 1px solid var(--bg2);"
-					>
-						{#each [...grouped()] as [provider, repos]}
-							<!-- Category header -->
-							<p
-								class="px-4 pb-1 pt-3 text-[9px] font-semibold uppercase tracking-[0.18em]"
-								style="color: var(--text-muted);"
-							>{providerLabel(provider)}</p>
+					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-hard); border-right: 1px solid var(--bg2);">
 
-							{#each repos as result}
-								{@const flatIdx = flatResults.indexOf(result)}
+						{#if repoResults.length > 0}
+							{#each [...repoGrouped()] as [provider, repos]}
+								<p class="px-4 pb-1 pt-3 text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-muted);">
+									{providerLabel(provider)}
+								</p>
+								{#each repos as result}
+									{@const flatIdx = flatItems.findIndex(i => i.kind === 'repo' && i.data === result)}
+									<button
+										type="button"
+										onclick={() => selectItem({ kind: 'repo', data: result })}
+										onmouseenter={() => (selectedIndex = flatIdx)}
+										class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
+										style="background: {flatIdx === selectedIndex ? 'var(--bg1)' : 'transparent'};"
+									>
+										<GitBranch size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--bg4)'};" />
+										<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--text-bright)' : 'var(--text-secondary)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
+											{result.slug}
+										</span>
+									</button>
+								{/each}
+							{/each}
+						{/if}
+
+						{#if componentResults.length > 0}
+							<p class="px-4 pb-1 pt-3 text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-muted);">
+								Components
+							</p>
+							{#each componentResults as result}
+								{@const flatIdx = flatItems.findIndex(i => i.kind === 'component' && i.data === result)}
 								<button
 									type="button"
-									onclick={() => selectRepo(result)}
+									onclick={() => selectItem({ kind: 'component', data: result })}
 									onmouseenter={() => (selectedIndex = flatIdx)}
 									class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
 									style="background: {flatIdx === selectedIndex ? 'var(--bg1)' : 'transparent'};"
 								>
-									<GitBranch
-										size={12}
-										style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--bg4)'};"
-									/>
+									<Package size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--bg4)'};" />
 									<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--text-bright)' : 'var(--text-secondary)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
-										{result.slug}
+										{result.name}
 									</span>
 								</button>
 							{/each}
-						{/each}
+						{/if}
 					</div>
 
 					<!-- Right: preview panel -->
 					<div class="flex min-w-0 flex-1 flex-col overflow-y-auto" style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em;">
-						{#if previewLoading}
-							<!-- Skeleton -->
-							<div class="space-y-3 pt-1">
-								<div class="h-4 w-3/4 rounded-lg" style="background: var(--bg1);"></div>
-								<div class="h-3 w-1/2 rounded-lg" style="background: var(--bg1);"></div>
-								<div class="mt-4 space-y-2">
-									{#each [1,2,3,4] as _}
-										<div class="h-3 w-full rounded" style="background: var(--bg1);"></div>
-									{/each}
-								</div>
-							</div>
-						{:else if preview}
-							<!-- Repo title -->
-							<div class="mb-4">
-								<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">{providerLabel(preview.repo.provider)}</p>
-								<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
-									{preview.repo.org}<span style="color: var(--text-muted);">/</span>{preview.repo.slug}
-								</p>
-							</div>
 
-							<!-- Metadata rows -->
+						{#if selectedItem?.kind === 'repo'}
+							{#if previewLoading}
+								<div class="space-y-3 pt-1">
+									<div class="h-4 w-3/4 rounded-lg" style="background: var(--bg1);"></div>
+									<div class="h-3 w-1/2 rounded-lg" style="background: var(--bg1);"></div>
+									<div class="mt-4 space-y-2">
+										{#each [1,2,3,4] as _}
+											<div class="h-3 w-full rounded" style="background: var(--bg1);"></div>
+										{/each}
+									</div>
+								</div>
+							{:else if repoPreview}
+								<div class="mb-4">
+									<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">{providerLabel(repoPreview.repo.provider)}</p>
+									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
+										{repoPreview.repo.org}<span style="color: var(--text-muted);">/</span>{repoPreview.repo.slug}
+									</p>
+								</div>
+								<div class="space-y-2.5">
+									<div class="flex items-center gap-2.5">
+										<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Dependencies</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
+											{repoPreview.dependencies.total > 0 ? repoPreview.dependencies.total : '—'}
+										</span>
+									</div>
+									{#if repoPreview.sbom.latest}
+										<div class="flex items-center gap-2.5">
+											<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
+											<span class="text-[11px]" style="color: var(--text-muted);">SBOM</span>
+											<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
+												{repoPreview.sbom.latest.format} · {repoPreview.sbom.latest.component_count} components
+											</span>
+										</div>
+									{/if}
+									<div class="flex items-center gap-2.5">
+										<ShieldCheck size={13} style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-muted)'}; flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Secrets</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-primary)'};">
+											{repoPreview.secrets.latest_count > 0 ? `${repoPreview.secrets.latest_count} found` : 'None found'}
+										</span>
+									</div>
+									{#if repoPreview.runs.latest}
+										<div class="flex items-center gap-2.5">
+											<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
+											<span class="text-[11px]" style="color: var(--text-muted);">Last run</span>
+											<span class="ml-auto flex items-center gap-1.5 text-[11px] font-medium">
+												<span style="color: {statusColor(repoPreview.runs.latest.status)};">●</span>
+												<span style="color: var(--text-primary);">{repoPreview.runs.latest.status}</span>
+												<span style="color: var(--text-muted);">{relativeTime(repoPreview.runs.latest.finished_at)}</span>
+											</span>
+										</div>
+									{:else}
+										<div class="flex items-center gap-2.5">
+											<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
+											<span class="text-[11px]" style="color: var(--text-muted);">Last run</span>
+											<span class="ml-auto text-[11px]" style="color: var(--text-muted);">Never scanned</span>
+										</div>
+									{/if}
+									<div class="flex items-center gap-2.5">
+										<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Total scans</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{repoPreview.runs.total}</span>
+									</div>
+								</div>
+								<button
+									type="button"
+									onclick={() => selectItem(selectedItem)}
+									class="mt-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
+									style="color: var(--accent);"
+								>
+									Open repository <ArrowRight size={11} />
+								</button>
+							{/if}
+
+						{:else if selectedItem?.kind === 'component'}
+							{@const c = selectedItem.data}
+							<div class="mb-4">
+								<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">{c.ecosystem}</p>
+								<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">{c.name}</p>
+							</div>
 							<div class="space-y-2.5">
-								<!-- Dependencies -->
+								<div class="flex items-center gap-2.5">
+									<Package size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Versions</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{c.version_count}</span>
+								</div>
+								<div class="flex items-center gap-2.5">
+									<GitBranch size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Repositories</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{c.repo_count}</span>
+								</div>
+								<div class="flex items-center gap-2.5">
+									<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">SBOMs</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{c.sbom_count}</span>
+								</div>
 								<div class="flex items-center gap-2.5">
 									<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />
-									<span class="text-[11px]" style="color: var(--text-muted);">Dependencies</span>
-									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-										{preview.dependencies.total > 0 ? preview.dependencies.total : '—'}
-									</span>
-								</div>
-
-								<!-- SBOM -->
-								{#if preview.sbom.latest}
-									<div class="flex items-center gap-2.5">
-										<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
-										<span class="text-[11px]" style="color: var(--text-muted);">SBOM</span>
-										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-											{preview.sbom.latest.format} · {preview.sbom.latest.component_count} components
-										</span>
-									</div>
-								{/if}
-
-								<!-- Secrets -->
-								<div class="flex items-center gap-2.5">
-									<ShieldCheck size={13} style="color: {preview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-muted)'}; flex-shrink:0;" />
-									<span class="text-[11px]" style="color: var(--text-muted);">Secrets</span>
-									<span class="ml-auto text-[11px] font-medium" style="color: {preview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-primary)'};">
-										{preview.secrets.latest_count > 0 ? `${preview.secrets.latest_count} found` : 'None found'}
-									</span>
-								</div>
-
-								<!-- Latest run -->
-								{#if preview.runs.latest}
-									<div class="flex items-center gap-2.5">
-										<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
-										<span class="text-[11px]" style="color: var(--text-muted);">Last run</span>
-										<span class="ml-auto flex items-center gap-1.5 text-[11px] font-medium">
-											<span style="color: {statusColor(preview.runs.latest.status)};">●</span>
-											<span style="color: var(--text-primary);">{preview.runs.latest.status}</span>
-											<span style="color: var(--text-muted);">{relativeTime(preview.runs.latest.finished_at)}</span>
-										</span>
-									</div>
-								{:else}
-									<div class="flex items-center gap-2.5">
-										<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
-										<span class="text-[11px]" style="color: var(--text-muted);">Last run</span>
-										<span class="ml-auto text-[11px]" style="color: var(--text-muted);">Never scanned</span>
-									</div>
-								{/if}
-
-								<!-- Scan count -->
-								<div class="flex items-center gap-2.5">
-									<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
-									<span class="text-[11px]" style="color: var(--text-muted);">Total scans</span>
-									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{preview.runs.total}</span>
+									<span class="text-[11px]" style="color: var(--text-muted);">Sources</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{c.sources.join(', ')}</span>
 								</div>
 							</div>
-
-							<!-- Open button -->
 							<button
 								type="button"
-								onclick={() => selectRepo(results[selectedIndex])}
+								onclick={() => selectItem(selectedItem)}
 								class="mt-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
 								style="color: var(--accent);"
 							>
-								Open repository <ArrowRight size={11} />
+								View component <ArrowRight size={11} />
 							</button>
+
 						{:else}
-							<!-- Empty preview state -->
 							<div class="flex flex-col items-center justify-center gap-2 py-10 text-center">
-								<GitBranch size={28} style="color: var(--bg3);" />
-								<p class="text-[11px]" style="color: var(--text-muted);">Select a repository to preview</p>
+								<Search size={28} style="color: var(--bg3);" />
+								<p class="text-[11px]" style="color: var(--text-muted);">Select a result to preview</p>
 							</div>
 						{/if}
 					</div>
 				</div>
 
 			{:else if query.trim() && !loading}
-				<!-- No results -->
 				<div style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em; display: flex; align-items: center; justify-content: center;">
-					<p class="text-sm" style="color: var(--text-muted);">No repositories found for <span style="color: var(--text-primary);">"{query}"</span></p>
+					<p class="text-sm" style="color: var(--text-muted);">No results for <span style="color: var(--text-primary);">"{query}"</span></p>
 				</div>
 
 			{:else if !query.trim()}
-				<!-- Idle hint panel -->
 				<div style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em; display: flex; align-items: center; justify-content: center;">
 					<div style="display: flex; flex-direction: column; gap: 2em; width: 100%;">
 						<div style="display: flex; align-items: center; gap: 1.5em;">
