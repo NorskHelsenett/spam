@@ -75,7 +75,15 @@ func resolveProviderTokenByBaseURL(r *http.Request, store *providerconfig.Store,
 
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
-const repoListCacheTTL = 5 * time.Minute
+// defaultListCacheTTL is used when no provider_id is present or poll_interval is unset.
+const defaultListCacheTTL = 10 * time.Minute
+
+// resolvePollTTL returns the provider's configured poll_interval as a cache TTL,
+// falling back to defaultListCacheTTL if the provider_id param is absent or unset.
+func resolvePollTTL(r *http.Request, store *providerconfig.Store) time.Duration {
+	providerID := r.URL.Query().Get("provider_id")
+	return store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
+}
 
 func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +148,7 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -210,7 +218,7 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -270,7 +278,7 @@ func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Sto
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -356,7 +364,7 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -416,7 +424,7 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store, c 
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoListCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

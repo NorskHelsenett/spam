@@ -157,7 +157,7 @@
 
 	const selectItem = (item: SearchItem) => {
 		if (item.kind === 'repo') {
-			goto(`/app/providers/repo?repo_id=${item.data.provider}:${item.data.org}:${item.data.slug}`);
+			goto(`/app/providers/repo?provider=${encodeURIComponent(item.data.provider)}&path=${encodeURIComponent(item.data.org + '/' + item.data.slug)}`);
 		} else {
 			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}

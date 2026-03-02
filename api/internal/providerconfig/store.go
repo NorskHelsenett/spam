@@ -490,6 +490,26 @@ func (s *Store) GetActiveTokenByBaseURL(ctx context.Context, providerType, baseU
 	return GetActiveToken(ctx, s.db, p.ID, s.key)
 }
 
+// GetPollInterval returns the configured poll_interval for a provider as a
+// Duration. Falls back to defaultTTL if the provider is not found or has no
+// poll_interval set.
+func (s *Store) GetPollInterval(ctx context.Context, providerID string, defaultTTL time.Duration) time.Duration {
+	if s == nil || providerID == "" {
+		return defaultTTL
+	}
+	var row struct {
+		PollInterval *int
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&ProviderInstance{}).
+		Select("poll_interval").
+		Where("id = ?", providerID).
+		Scan(&row).Error; err != nil || row.PollInterval == nil || *row.PollInterval <= 0 {
+		return defaultTTL
+	}
+	return time.Duration(*row.PollInterval) * time.Second
+}
+
 // ListEnabledWithPolling returns providers where polling is enabled.
 func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance, error) {
 	var providers []ProviderInstance
