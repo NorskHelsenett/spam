@@ -259,16 +259,19 @@
 			if (providerType === 'github') {
 				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
 			} else if (providerType === 'gitlab') {
-				const baseURL = instance?.base_url ?? '';
 				const projectPath = encodeURIComponent(`${repo.org}/${repo.slug}`);
-				const params = baseURL ? `?base_url=${encodeURIComponent(baseURL)}` : '';
-				url = `/api/providers/gitlab/${projectPath}/details${params}`;
+				const p = new URLSearchParams();
+				if (instance?.base_url) p.set('base_url', instance.base_url);
+				if (instance?.id) p.set('provider_id', instance.id);
+				url = `/api/providers/gitlab/${projectPath}/details?${p}`;
 			} else if (providerType === 'gitea') {
 				if (!instance?.base_url) {
 					repoContributors = { ...repoContributors, [repo.key]: [] };
 					return;
 				}
-				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?base_url=${encodeURIComponent(instance.base_url)}`;
+				const p = new URLSearchParams({ base_url: instance.base_url });
+				if (instance.id) p.set('provider_id', instance.id);
+				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?${p}`;
 			} else {
 				repoContributors = { ...repoContributors, [repo.key]: [] };
 				return;

@@ -8,6 +8,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
+	import SearchPalette from '$lib/components/SearchPalette.svelte';
 
 	let appEventSource: EventSource | null = null;
 	let metricCardObserver: MutationObserver | null = null;
@@ -380,6 +381,7 @@ let isAdmin = $state(false);
 </div>
 
 <AccountDialog bind:open={accountDialogOpen} />
+<SearchPalette />
 
 
 <style>

@@ -82,6 +82,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies/export.csv", uiapi.DependencyExportCSVHandler(db, authService))
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
+				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
 				api.Get("/repos/security", uiapi.RepoSecurityCountsHandler(db, authService))
 				api.Get("/repos/metadata", uiapi.RepoMetadataHandler(db, authService))
 				api.Get("/providers/instances", uiapi.ProvidersInstancesHandler(db, authService, providerStore))
