@@ -290,7 +290,7 @@
 
 			<!-- Two-panel body -->
 			{#if hasResults}
-				<div class="flex" style="border-top: 1px solid var(--bg2);">
+				<div class="flex">
 
 					<!-- Left: results list -->
 					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft);">
