@@ -12,11 +12,12 @@ import (
 )
 
 type RepoInput struct {
-	Provider          string
-	Org               string
-	Slug              string
-	CreatedByUserID   string
-	ProviderUpdatedAt *time.Time
+	Provider           string
+	ProviderInstanceID string
+	Org                string
+	Slug               string
+	CreatedByUserID    string
+	ProviderUpdatedAt  *time.Time
 }
 
 type RepoCommitInput struct {
@@ -35,14 +36,28 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	}
 
 	var repo Repo
-	where := Repo{
-		Provider: provider,
-		Org:      input.Org,
-		Slug:     input.Slug,
+	var where Repo
+	var providerInstanceIDPtr *string
+	if input.ProviderInstanceID != "" {
+		providerInstanceIDPtr = &input.ProviderInstanceID
+		where = Repo{
+			ProviderInstanceID: providerInstanceIDPtr,
+			Org:                input.Org,
+			Slug:               input.Slug,
+		}
+	} else {
+		where = Repo{
+			Provider: provider,
+			Org:      input.Org,
+			Slug:     input.Slug,
+		}
 	}
+
 	result := db.WithContext(ctx).Where(where).Attrs(Repo{
-		ID:              uuid.NewString(),
-		CreatedByUserID: input.CreatedByUserID,
+		ID:                 uuid.NewString(),
+		Provider:           provider,
+		ProviderInstanceID: providerInstanceIDPtr,
+		CreatedByUserID:    input.CreatedByUserID,
 	}).FirstOrCreate(&repo)
 
 	if result.Error != nil {

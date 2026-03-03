@@ -217,6 +217,14 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 					return
 				}
 
+				// Resolve provider instance ID before upserting the repo
+				resolvedProviderID := providerID
+				if resolvedProviderID == "" {
+					if match, err := providerconfig.FindProviderMatch(ctx, db, provider, baseURL, r.FullPath); err == nil && match != nil {
+						resolvedProviderID = match.ID
+					}
+				}
+
 				// Upsert repo
 				org := ""
 				slug := r.FullPath
@@ -226,22 +234,16 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 				}
 
 				repoRecord, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
-					Provider: provider,
-					Org:      org,
-					Slug:     slug,
+					Provider:           provider,
+					Org:                org,
+					Slug:               slug,
+					ProviderInstanceID: resolvedProviderID,
 				})
 				if err != nil {
 					mu.Lock()
 					*errors = append(*errors, fmt.Sprintf("%s: %v", r.Name, err))
 					mu.Unlock()
 					return
-				}
-
-				resolvedProviderID := providerID
-				if resolvedProviderID == "" {
-					if match, err := providerconfig.FindProviderMatch(ctx, db, provider, baseURL, r.FullPath); err == nil && match != nil {
-						resolvedProviderID = match.ID
-					}
 				}
 
 				// Create job payload

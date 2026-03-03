@@ -285,9 +285,10 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
-			Provider: req.Provider,
-			Org:      org,
-			Slug:     slug,
+			Provider:           req.Provider,
+			Org:                org,
+			Slug:               slug,
+			ProviderInstanceID: providerID,
 		})
 		if err != nil {
 			log.Printf("failed to upsert repo: %v", err)

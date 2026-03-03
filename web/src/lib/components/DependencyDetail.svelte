@@ -13,6 +13,7 @@
 		asset_type: string;
 		repo_id?: string;
 		provider?: string;
+		provider_base_url?: string;
 		org?: string;
 		slug?: string;
 		commit_sha?: string;

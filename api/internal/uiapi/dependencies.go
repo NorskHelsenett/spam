@@ -263,7 +263,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl,
 						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
 						COUNT(DISTINCT scv.sbom_id) as sbom_count,
-						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
+						COUNT(DISTINCT rc.repo_id) as repo_count
 					FROM (
 						SELECT
 							COALESCE(s.package_name, s.normalized_name, s.name) as name,
@@ -278,6 +278,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						WHERE s.is_root = false
 						  AND s.purl IS NOT NULL
 					) scv
+					JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
 					WHERE scv.name IS NOT NULL
 			`
 			if parsedSearch.Structured {
@@ -295,7 +296,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				args = append(args, ecosystem)
 			}
 			if repoID != "" {
-				query += ` AND scv.asset_ref_id = ?`
+				query += ` AND rc.repo_id = ?`
 				args = append(args, repoID)
 			}
 			query += `
@@ -359,7 +360,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						'sbom' as source,
 						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
 						COUNT(DISTINCT scv.sbom_id) as sbom_count,
-						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN scv.asset_ref_id END) as repo_count
+						COUNT(DISTINCT rc.repo_id) as repo_count
 					FROM (
 						SELECT
 							COALESCE(s.package_name, s.normalized_name, s.name) as name,
@@ -374,6 +375,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						WHERE s.is_root = false
 						  AND s.purl IS NOT NULL
 					) scv
+					JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
 					WHERE scv.name IS NOT NULL
 			`
 			if parsedSearch.Structured {
@@ -391,7 +393,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				args = append(args, ecosystem)
 			}
 			if repoID != "" {
-				query += ` AND scv.asset_ref_id = ?`
+				query += ` AND rc.repo_id = ?`
 				args = append(args, repoID)
 			}
 			query += `
@@ -556,18 +558,19 @@ type DependencyVersionInfo struct {
 
 // DependencyAsset describes where a dependency is used (from SBOM or manifest)
 type DependencyAsset struct {
-	AssetType    string  `json:"asset_type"` // "REPO_COMMIT" only for now
-	RepoID       string  `json:"repo_id,omitempty"`
-	Provider     string  `json:"provider,omitempty"`
-	Org          string  `json:"org,omitempty"`
-	Slug         string  `json:"slug,omitempty"`
-	CommitSHA    *string `json:"commit_sha,omitempty"`
-	Version      string  `json:"version"`
-	Source       string  `json:"source"` // "sbom" or "manifest"
-	ManifestPath *string `json:"manifest_path,omitempty"`
-	ManifestType *string `json:"manifest_type,omitempty"`
-	Direct       bool    `json:"direct,omitempty"`
-	Scope        *string `json:"scope,omitempty"`
+	AssetType       string  `json:"asset_type"` // "REPO_COMMIT" only for now
+	RepoID          string  `json:"repo_id,omitempty"`
+	Provider        string  `json:"provider,omitempty"`
+	ProviderBaseURL string  `json:"provider_base_url,omitempty"`
+	Org             string  `json:"org,omitempty"`
+	Slug            string  `json:"slug,omitempty"`
+	CommitSHA       *string `json:"commit_sha,omitempty"`
+	Version         string  `json:"version"`
+	Source          string  `json:"source"` // "sbom" or "manifest"
+	ManifestPath    *string `json:"manifest_path,omitempty"`
+	ManifestType    *string `json:"manifest_type,omitempty"`
+	Direct          bool    `json:"direct,omitempty"`
+	Scope           *string `json:"scope,omitempty"`
 }
 
 type dependencyAssetsResponse struct {
@@ -805,11 +808,16 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				SELECT * FROM manifest_assets
 			)
 			SELECT
-				asset_type, repo_id, provider, org, slug, commit_sha,
-				version, source, manifest_path, manifest_type, direct, scope,
+				ca.asset_type, ca.repo_id,
+				COALESCE(pi.display_name, ca.provider) as provider,
+				ca.org, ca.slug, ca.commit_sha,
+				ca.version, ca.source, ca.manifest_path, ca.manifest_type, ca.direct, ca.scope,
+				COALESCE(pi.base_url, '') as provider_base_url,
 				COUNT(*) OVER () AS total_count
-			FROM combined_assets
-			ORDER BY created_at DESC
+			FROM combined_assets ca
+			LEFT JOIN repos r ON r.id = ca.repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+			ORDER BY ca.created_at DESC
 			LIMIT ? OFFSET ?
 		`
 
@@ -834,7 +842,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			if err := rows.Scan(
 				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
 				&commitSHA, &a.Version, &a.Source, &manifestPath,
-				&manifestType, &a.Direct, &scope, &total,
+				&manifestType, &a.Direct, &scope, &a.ProviderBaseURL, &total,
 			); err != nil {
 				log.Printf("asset scan error: %v", err)
 				continue

@@ -61,21 +61,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				COALESCE(pi.id, '')       AS provider_id,
 				COALESCE(pi.base_url, '') AS base_url
 			FROM repos r
-			LEFT JOIN LATERAL (
-				SELECT pi.id, pi.base_url
-				FROM provider_instances pi
-				WHERE pi.type = r.provider
-				  AND pi.enabled = true
-				  AND (
-				    pi.owner_path = ''
-				    OR r.org = pi.owner_path
-				    OR r.org LIKE pi.owner_path || '/%'
-				  )
-				ORDER BY
-					CASE WHEN pi.owner_path != '' THEN 0 ELSE 1 END,
-					pi.created_at
-				LIMIT 1
-			) pi ON true
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
 			WHERE (
 				r.slug ILIKE '%' || ? || '%'
 				OR r.org  ILIKE '%' || ? || '%'
