@@ -1,5 +1,8 @@
--- Backfill provider_instance_id on repos that can be matched to a provider instance.
--- Uses the same heuristic as the former LATERAL JOIN in repo_search.go.
+-- Backfill provider_instance_id only when the match is unambiguous:
+--   (a) There is a specific owner_path match for this repo's org, OR
+--   (b) There is exactly one enabled provider instance of this type.
+-- Repos with multiple candidate instances (same type, no owner_path distinction)
+-- are left NULL so they don't get silently assigned to the wrong provider.
 UPDATE repos r SET provider_instance_id = (
     SELECT pi.id
     FROM provider_instances pi
@@ -9,9 +12,25 @@ UPDATE repos r SET provider_instance_id = (
     ORDER BY CASE WHEN pi.owner_path != '' THEN 0 ELSE 1 END, pi.created_at
     LIMIT 1
 )
-WHERE provider_instance_id IS NULL;
+WHERE provider_instance_id IS NULL
+  AND (
+      -- Unambiguous: specific owner_path matches this repo's org
+      EXISTS (
+          SELECT 1 FROM provider_instances pi
+          WHERE pi.type = r.provider
+            AND pi.enabled = true
+            AND pi.owner_path != ''
+            AND (r.org = pi.owner_path OR r.org LIKE pi.owner_path || '/%')
+      )
+      OR
+      -- Unambiguous: only one instance of this provider type exists
+      1 = (
+          SELECT COUNT(*) FROM provider_instances pi
+          WHERE pi.type = r.provider AND pi.enabled = true
+      )
+  );
 
--- Drop the old provider+org+slug unique index (was created by GORM auto-migrate).
+-- Drop the old provider+org+slug unique index (created by GORM auto-migrate).
 DROP INDEX IF EXISTS ux_repo_identity;
 
 -- Unique index for provider-linked repos (provider_instance_id NOT NULL).

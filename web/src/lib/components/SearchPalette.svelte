@@ -215,11 +215,15 @@
 
 
 	const repoGrouped = $derived(() => {
-		const map = new Map<string, RepoResult[]>();
+		const map = new Map<string, { provider: string; base_url: string; repos: RepoResult[] }>();
 		for (const r of repoResults) {
-			const list = map.get(r.provider) ?? [];
-			list.push(r);
-			map.set(r.provider, list);
+			const key = r.provider_id || r.provider;
+			const existing = map.get(key);
+			if (existing) {
+				existing.repos.push(r);
+			} else {
+				map.set(key, { provider: r.provider, base_url: r.base_url || '', repos: [r] });
+			}
 		}
 		return map;
 	});
@@ -298,28 +302,38 @@
 					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft);">
 
 						{#if repoResults.length > 0}
-							{#each [...repoGrouped()] as [provider, repos]}
-								<div class="flex items-center gap-1.5 px-4 pb-1 pt-3" style="color: var(--text-muted);">
-									{#if provider === 'github'}
-										<Github size={11} style="flex-shrink:0" />
-									{:else if provider === 'gitlab'}
-										<Gitlab size={11} style="flex-shrink:0" />
-									{:else}
-										<Gitea size={11} />
+							{#each [...repoGrouped()] as [, group]}
+								<div class="flex flex-col gap-0.5 px-4 pb-1 pt-3">
+									<div class="flex items-center gap-1.5" style="color: var(--text-secondary);">
+										{#if group.provider === 'github'}
+											<Github size={11} style="flex-shrink:0" />
+										{:else if group.provider === 'gitlab'}
+											<Gitlab size={11} style="flex-shrink:0" />
+										{:else}
+											<Gitea size={11} />
+										{/if}
+										<span class="text-[9px] font-semibold uppercase tracking-[0.18em]">{providerLabel(group.provider)}</span>
+									</div>
+									{#if group.base_url}
+										<span class="truncate text-[8px]" style="color: var(--text-muted); opacity: 0.7; padding-left: 15px;">{group.base_url}</span>
 									{/if}
-									<span class="text-[9px] font-semibold uppercase tracking-[0.18em]">{providerLabel(provider)}</span>
 								</div>
-								{#each repos as result}
+								{#each group.repos as result}
 									{@const flatIdx = flatItems.findIndex(i => i.kind === 'repo' && i.data === result)}
 									<button
 										type="button"
 										onclick={() => selectItem({ kind: 'repo', data: result })}
 										onmouseenter={() => (selectedIndex = flatIdx)}
 										class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
-										style="background: {flatIdx === selectedIndex ? 'var(--bg1)' : 'transparent'};"
 									>
-										<GitBranch size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--bg4)'};" />
-										<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--text-bright)' : 'var(--text-secondary)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
+										{#if result.provider === 'github'}
+											<Github size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'};" />
+										{:else if result.provider === 'gitlab'}
+											<Gitlab size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'};" />
+										{:else}
+											<Gitea size={12} />
+										{/if}
+										<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
 											{result.slug}
 										</span>
 									</button>
@@ -338,10 +352,9 @@
 									onclick={() => selectItem({ kind: 'component', data: result })}
 									onmouseenter={() => (selectedIndex = flatIdx)}
 									class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
-									style="background: {flatIdx === selectedIndex ? 'var(--bg1)' : 'transparent'};"
 								>
-									<Package size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--bg4)'};" />
-									<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--text-bright)' : 'var(--text-secondary)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
+									<Package size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'};" />
+									<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
 										{result.name}
 									</span>
 								</button>
@@ -374,6 +387,9 @@
 											<Gitea size={12} />
 										{/if}
 										<span class="text-[10px] uppercase tracking-widest">{providerLabel(repoPreview.repo.provider)}</span>
+										{#if selectedItem?.kind === 'repo' && selectedItem.data.base_url}
+											<span class="truncate text-[9px]" style="opacity: 0.6;">{selectedItem.data.base_url}</span>
+										{/if}
 									</div>
 									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
 										{repoPreview.repo.org}<span style="color: var(--text-muted);">/</span>{repoPreview.repo.slug}
