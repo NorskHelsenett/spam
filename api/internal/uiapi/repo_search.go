@@ -82,12 +82,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				OR ? <% r.slug
 				OR ? <% r.org
 			)
-			AND (
-				NOT EXISTS (
-					SELECT 1 FROM provider_instances pi2 WHERE pi2.type = r.provider
-				)
-				OR pi.id IS NOT NULL
-			)
+			AND pi.id IS NOT NULL
 			ORDER BY score DESC, r.org ASC, r.slug ASC
 			LIMIT ?
 		`, q, q, q, q, q, q, limit).Scan(&rows).Error
