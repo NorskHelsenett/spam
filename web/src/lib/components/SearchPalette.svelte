@@ -91,8 +91,8 @@
 		loading = true;
 		try {
 			const [repoRes, compRes] = await Promise.all([
-				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=8`),
-				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=8`)
+				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=30`),
+				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=20`)
 			]);
 			if (repoRes.ok) {
 				const data = await repoRes.json();
@@ -213,6 +213,8 @@
 	const providerLabel = (p: string) =>
 		({ github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea', forgejo: 'Forgejo' })[p] ?? p;
 
+	const stripScheme = (url: string) => url.replace(/^https?:\/\//, '');
+
 
 	const repoGrouped = $derived(() => {
 		const map = new Map<string, { provider: string; base_url: string; repos: RepoResult[] }>();
@@ -299,23 +301,14 @@
 				<div class="flex">
 
 					<!-- Left: results list -->
-					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft);">
+					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped()] as [, group]}
 								<div class="flex flex-col gap-0.5 px-4 pb-1 pt-3">
-									<div class="flex items-center gap-1.5" style="color: var(--text-secondary);">
-										{#if group.provider === 'github'}
-											<Github size={11} style="flex-shrink:0" />
-										{:else if group.provider === 'gitlab'}
-											<Gitlab size={11} style="flex-shrink:0" />
-										{:else}
-											<Gitea size={11} />
-										{/if}
-										<span class="text-[9px] font-semibold uppercase tracking-[0.18em]">{providerLabel(group.provider)}</span>
-									</div>
+									<span class="text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-secondary);">{providerLabel(group.provider)}</span>
 									{#if group.base_url}
-										<span class="truncate text-[8px]" style="color: var(--text-muted); opacity: 0.7; padding-left: 15px;">{group.base_url}</span>
+										<span class="truncate text-[8px]" style="color: var(--text-muted); opacity: 0.7;">{stripScheme(group.base_url)}</span>
 									{/if}
 								</div>
 								{#each group.repos as result}
@@ -388,7 +381,7 @@
 										{/if}
 										<span class="text-[10px] uppercase tracking-widest">{providerLabel(repoPreview.repo.provider)}</span>
 										{#if selectedItem?.kind === 'repo' && selectedItem.data.base_url}
-											<span class="truncate text-[9px]" style="opacity: 0.6;">{selectedItem.data.base_url}</span>
+											<span class="truncate text-[9px]" style="opacity: 0.6;">{stripScheme(selectedItem.data.base_url)}</span>
 										{/if}
 									</div>
 									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
