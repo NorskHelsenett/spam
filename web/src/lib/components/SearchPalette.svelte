@@ -175,10 +175,8 @@
 	const selectItem = (item: SearchItem) => {
 		if (item.kind === 'repo') {
 			const d = item.data;
-			const params = new URLSearchParams({
-				provider: d.provider,
-				path: d.org + '/' + d.slug
-			});
+			const params = new URLSearchParams({ provider: d.provider, path: d.org + '/' + d.slug });
+			if (d.id) params.set('repo_id', d.id);
 			if (d.provider_id) params.set('provider_id', d.provider_id);
 			else if (d.base_url) params.set('base_url', d.base_url);
 			goto(`/app/providers/repo?${params}`);
@@ -373,7 +371,7 @@
 					</div>
 
 					<!-- Right: preview panel -->
-					<div class="flex min-w-0 flex-1 flex-col overflow-y-auto" style="background: var(--bg-soft); min-height: 25em; padding: 4em;">
+					<div class="flex min-w-0 flex-1 flex-col overflow-y-auto" style="background: var(--bg-soft); min-height: 25em; padding: 0em 2em; margin-top: 0.5em;">
 
 						{#if selectedItem?.kind === 'repo'}
 							{#if previewLoading}
@@ -389,16 +387,18 @@
 							{:else if repoPreview}
 								<div class="mb-4">
 									<div class="flex items-center gap-1.5" style="color: var(--text-muted);">
-										{#if repoPreview.repo.provider === 'github'}
-											<Github size={12} style="flex-shrink:0" />
-										{:else if repoPreview.repo.provider === 'gitlab'}
-											<Gitlab size={12} style="flex-shrink:0" />
-										{:else}
-											<Gitea size={12} />
-										{/if}
-										<span class="text-[10px] uppercase tracking-widest">{providerLabel(repoPreview.repo.provider)}</span>
-										{#if selectedItem?.kind === 'repo' && selectedItem.data.base_url}
-											<span class="truncate text-[9px]" style="opacity: 0.6;">{providerDisplay(selectedItem.data.base_url || '', selectedItem.data.owner_path)}</span>
+										{#if selectedItem?.kind === 'repo'}
+											{#if selectedItem.data.provider === 'github'}
+												<Github size={12} style="flex-shrink:0" />
+											{:else if selectedItem.data.provider === 'gitlab'}
+												<Gitlab size={12} style="flex-shrink:0" />
+											{:else}
+												<Gitea size={12} />
+											{/if}
+											<span class="text-[10px] uppercase tracking-widest">{providerLabel(selectedItem.data.provider)}</span>
+											{#if selectedItem.data.base_url}
+												<span class="truncate text-[9px]" style="opacity: 0.6;">{providerDisplay(selectedItem.data.base_url, selectedItem.data.owner_path)}</span>
+											{/if}
 										{/if}
 									</div>
 									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
@@ -502,7 +502,7 @@
 								<button
 									type="button"
 									onclick={() => selectItem(selectedItem)}
-									class="mt-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
+									class="mt-auto mb-4 ml-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
 									style="color: var(--accent);"
 								>
 									Open repository <ArrowRight size={11} />

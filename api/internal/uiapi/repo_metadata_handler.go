@@ -60,25 +60,36 @@ func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadata
 	meta := RepoMetadataRepo{ID: repoID}
 
 	var repo struct {
-		ID                string
-		Provider          string
-		Org               string
-		Slug              string
-		ProviderUpdatedAt *time.Time
+		ID                 string
+		Provider           string
+		ProviderInstanceID *string
+		Org                string
+		Slug               string
+		ProviderUpdatedAt  *time.Time
 	}
 	if err := db.WithContext(r.Context()).Table("repos").
-		Select("id, provider, org, slug, provider_updated_at").
+		Select("id, provider, provider_instance_id, org, slug, provider_updated_at").
 		Where("id = ?", repoID).
 		First(&repo).Error; err != nil {
 		return meta, ""
 	}
 
-	meta.Provider = repo.Provider
 	meta.Org = repo.Org
 	meta.Slug = repo.Slug
 	if repo.ProviderUpdatedAt != nil && !repo.ProviderUpdatedAt.IsZero() {
 		meta.UpdatedAt = repo.ProviderUpdatedAt.UTC().Format(time.RFC3339)
 	}
+
+	if repo.ProviderInstanceID != nil && *repo.ProviderInstanceID != "" {
+		meta.ProviderID = *repo.ProviderInstanceID
+		var baseURL string
+		_ = db.WithContext(r.Context()).Table("provider_instances").
+			Select("base_url").
+			Where("id = ?", *repo.ProviderInstanceID).
+			Scan(&baseURL).Error
+		meta.ProviderBaseURL = baseURL
+	}
+
 	return meta, repo.ID
 }
 

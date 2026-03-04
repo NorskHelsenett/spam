@@ -133,13 +133,14 @@
 
 	// Get query params
 	const getParams = () => {
-		if (!browser) return { provider: '', path: '', baseUrl: '', providerId: '' };
+		if (!browser) return { provider: 'github', path: '', baseUrl: '', providerId: '', repoDbId: '' };
 		const params = $page.url.searchParams;
 		return {
 			provider: params.get('provider') || 'github',
 			path: params.get('path') || '',
 			baseUrl: params.get('base_url') || '',
-			providerId: params.get('provider_id') || ''
+			providerId: params.get('provider_id') || '',
+			repoDbId: params.get('repo_id') || ''
 		};
 	};
 
@@ -154,25 +155,35 @@
 		loading = true;
 		error = '';
 
-		try {
-			let url: string;
-			const params = new URLSearchParams();
-			if (baseUrl) params.set('base_url', baseUrl);
-			if (providerId) params.set('provider_id', providerId);
+		const buildTypeUrl = () => {
+				const q = new URLSearchParams();
+				if (baseUrl) q.set('base_url', baseUrl);
+				if (provider === 'gitlab') {
+					return `/api/providers/gitlab/${encodeURIComponent(path)}/details?${q}`;
+				} else if (provider === 'gitea' || provider === 'forgejo') {
+					return `/api/providers/gitea/${path}/details?${q}`;
+				} else {
+					const qs = q.toString();
+					return `/api/providers/github/${path}/details${qs ? `?${qs}` : ''}`;
+				}
+			};
 
-			if (provider === 'github') {
-				// path is owner/repo
-				const query = params.toString();
-				url = `/api/providers/github/${path}/details${query ? `?${query}` : ''}`;
-			} else if (provider === 'gitlab') {
-				// path is full project path (url encoded)
-				url = `/api/providers/gitlab/${encodeURIComponent(path)}/details?${params}`;
+			try {
+			let response: Response;
+
+			if (providerId) {
+				// Try unified endpoint first (resolves base_url/token from DB)
+				response = await fetch(
+					`/api/providers/details?provider_id=${encodeURIComponent(providerId)}&path=${encodeURIComponent(path)}`,
+					{ credentials: 'include' }
+				);
+				// If provider_id is stale (DB reset), fall back to type-specific endpoint
+				if (response.status === 404) {
+					response = await fetch(buildTypeUrl(), { credentials: 'include' });
+				}
 			} else {
-				// gitea/forgejo - path is owner/repo
-				url = `/api/providers/gitea/${path}/details?${params}`;
+				response = await fetch(buildTypeUrl(), { credentials: 'include' });
 			}
-
-			const response = await fetch(url, { credentials: 'include' });
 
 			if (!response.ok) {
 				if (response.status === 404) {
@@ -202,17 +213,13 @@
 
 	// Fetch real security data from API
 	const fetchSecurityData = async (provider: string, repoPath: string, repo: RepoDetails, readmeContent: string) => {
-		// Build repo_id as provider:org:slug
-		const pathParts = repoPath.split('/');
-		const repoID = pathParts.length >= 2 ? `${provider}:${pathParts[0]}:${pathParts[1]}` : '';
-
-		if (!repoID) {
-			// Fall back to mock data if we can't construct repo_id
+		const { repoDbId } = getParams();
+		if (!repoDbId) {
 			generateMockSecurityData(repo, readmeContent);
 			return;
 		}
 
-		const metadata = await fetchRepoMetadata(repoID);
+		const metadata = await fetchRepoMetadata(repoDbId);
 		const sbomComponents = metadata?.dependencies?.from_sbom || 0;
 		const manifestComponents = metadata?.dependencies?.from_manifest || 0;
 		const totalComponents = Math.max(sbomComponents, manifestComponents);

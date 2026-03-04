@@ -519,7 +519,7 @@ func (s *Store) ResolveProviderAccess(ctx context.Context, providerID, providerT
 		if err != nil {
 			return resolvedBaseURL, "", err
 		}
-		if baseURL == "" && token != "" {
+		if baseURL == "" {
 			var p ProviderInstance
 			if dbErr := s.db.WithContext(ctx).First(&p, "id = ?", providerID).Error; dbErr == nil {
 				resolvedBaseURL = p.BaseURL

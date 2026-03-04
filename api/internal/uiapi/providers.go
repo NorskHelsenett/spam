@@ -22,7 +22,7 @@ import (
 
 // indexReposAsync upserts a slice of provider repos into the local repos table
 // in a background goroutine so they appear in search without requiring a scan.
-func indexReposAsync(db *gorm.DB, providerType string, repos []providers.RepoData) {
+func indexReposAsync(db *gorm.DB, providerType, providerInstanceID string, repos []providers.RepoData) {
 	if db == nil || len(repos) == 0 {
 		return
 	}
@@ -49,10 +49,11 @@ func indexReposAsync(db *gorm.DB, providerType string, repos []providers.RepoDat
 				providerUpdatedAtPtr = &providerUpdatedAt
 			}
 			if _, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
-				Provider:          providerType,
-				Org:               org,
-				Slug:              slug,
-				ProviderUpdatedAt: providerUpdatedAtPtr,
+				Provider:           providerType,
+				ProviderInstanceID: providerInstanceID,
+				Org:                org,
+				Slug:               slug,
+				ProviderUpdatedAt:  providerUpdatedAtPtr,
 			}); err != nil {
 				log.Printf("indexReposAsync: upsert %s/%s: %v", org, slug, err)
 			}
@@ -192,7 +193,7 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
-		indexReposAsync(db, providerconfig.ProviderGitHub, repos)
+		indexReposAsync(db, providerconfig.ProviderGitHub, r.URL.Query().Get("provider_id"), repos)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -264,7 +265,7 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
-		indexReposAsync(db, providerconfig.ProviderGitLab, projects)
+		indexReposAsync(db, providerconfig.ProviderGitLab, r.URL.Query().Get("provider_id"), projects)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -412,7 +413,7 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 			NextPage:    pageInfo.NextPage,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
-		indexReposAsync(db, providerconfig.ProviderGitea, repos)
+		indexReposAsync(db, providerconfig.ProviderGitea, r.URL.Query().Get("provider_id"), repos)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -790,6 +791,10 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 				http.Error(w, "authentication required for this GitHub repo", http.StatusUnauthorized)
 				return
 			}
+			if errors.Is(err, providers.ErrRateLimited) {
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
 			return
 		}
@@ -983,6 +988,10 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 				http.Error(w, "authentication required for this Gitea/Forgejo repo", http.StatusUnauthorized)
 				return
 			}
+			if errors.Is(err, providers.ErrRateLimited) {
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
 			return
 		}
@@ -1033,6 +1042,164 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			Commits:      commits,
 			Contributors: contributors,
 		})
+	}
+}
+
+// ProviderRepoDetailsHandler handles fetching repo details using only provider_id + path.
+// GET /api/providers/details?provider_id=<uuid>&path=<org/repo>
+//
+// This is the preferred endpoint when provider_id is known: it resolves provider type
+// and base_url from the database, so the caller does not need to pass them separately.
+func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store, db *gorm.DB, c cache.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+		repoPath := strings.TrimSpace(r.URL.Query().Get("path"))
+		if providerID == "" || repoPath == "" {
+			http.Error(w, "provider_id and path are required", http.StatusBadRequest)
+			return
+		}
+
+		var instance struct {
+			Type    string
+			BaseURL string
+		}
+		if err := db.WithContext(r.Context()).
+			Table("provider_instances").
+			Select("type, base_url").
+			Where("id = ?", providerID).
+			Scan(&instance).Error; err != nil || instance.Type == "" {
+			http.Error(w, "provider not found", http.StatusNotFound)
+			return
+		}
+
+		token, err := store.GetActiveToken(r.Context(), providerID)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+
+		cacheKey := fmt.Sprintf("provider:details:%s:%s", providerID, repoPath)
+		if cached, ok, _ := cache.GetJSON[RepoDetailsResponse](r.Context(), c, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+
+		var details *providers.RepoDetails
+		var readme string
+		var commits []providers.CommitInfo
+		var contributors []providers.ContributorInfo
+
+		switch instance.Type {
+		case providerconfig.ProviderGitHub:
+			parts := strings.SplitN(repoPath, "/", 2)
+			if len(parts) != 2 {
+				http.Error(w, "path must be owner/repo for GitHub", http.StatusBadRequest)
+				return
+			}
+			client := providers.NewGitHubClient(instance.BaseURL, token)
+			d, err := client.GetRepoDetails(r.Context(), parts[0], parts[1])
+			if err != nil {
+				if errors.Is(err, providers.ErrNotFound) {
+					http.Error(w, "repository not found", http.StatusNotFound)
+					return
+				}
+				if errors.Is(err, providers.ErrRateLimited) {
+					http.Error(w, "rate limited", http.StatusTooManyRequests)
+					return
+				}
+				http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
+				return
+			}
+			details = d
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), parts[0], parts[1]) }()
+			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10) }()
+			go func() {
+				defer wg.Done()
+				contributors, _ = client.GetContributors(r.Context(), repoPath, 10)
+			}()
+			wg.Wait()
+
+		case providerconfig.ProviderGitLab:
+			client := providers.NewGitLabClient(instance.BaseURL, token)
+			d, err := client.GetRepoDetails(r.Context(), repoPath)
+			if err != nil {
+				if errors.Is(err, providers.ErrNotFound) {
+					http.Error(w, "project not found", http.StatusNotFound)
+					return
+				}
+				if errors.Is(err, providers.ErrRateLimited) {
+					http.Error(w, "rate limited", http.StatusTooManyRequests)
+					return
+				}
+				http.Error(w, "failed to fetch project details", http.StatusInternalServerError)
+				return
+			}
+			details = d
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), repoPath) }()
+			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), repoPath, 10) }()
+			go func() { defer wg.Done(); contributors, _ = client.GetContributors(r.Context(), repoPath, 10) }()
+			wg.Wait()
+
+		case providerconfig.ProviderGitea, providerconfig.ProviderForgejo:
+			parts := strings.SplitN(repoPath, "/", 2)
+			if len(parts) != 2 {
+				http.Error(w, "path must be owner/repo for Gitea/Forgejo", http.StatusBadRequest)
+				return
+			}
+			client := providers.NewGiteaClient(instance.BaseURL, token)
+			d, err := client.GetRepoDetails(r.Context(), parts[0], parts[1])
+			if err != nil {
+				if errors.Is(err, providers.ErrNotFound) {
+					http.Error(w, "repository not found", http.StatusNotFound)
+					return
+				}
+				if errors.Is(err, providers.ErrRateLimited) {
+					http.Error(w, "rate limited", http.StatusTooManyRequests)
+					return
+				}
+				http.Error(w, "failed to fetch repo details", http.StatusInternalServerError)
+				return
+			}
+			details = d
+			var wg sync.WaitGroup
+			wg.Add(3)
+			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), parts[0], parts[1]) }()
+			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10) }()
+			go func() {
+				defer wg.Done()
+				contributors, _ = client.GetContributors(r.Context(), repoPath, 10)
+			}()
+			wg.Wait()
+
+		default:
+			http.Error(w, "unsupported provider type", http.StatusBadRequest)
+			return
+		}
+
+		if commits == nil {
+			commits = []providers.CommitInfo{}
+		}
+		if contributors == nil {
+			contributors = []providers.ContributorInfo{}
+		}
+		commits = enrichCommits(commits, contributors)
+
+		resp := RepoDetailsResponse{
+			Details:      details,
+			Readme:       readme,
+			Commits:      commits,
+			Contributors: contributors,
+		}
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, 5*time.Minute)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
