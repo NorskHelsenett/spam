@@ -67,6 +67,7 @@ func run() error {
 		&manifests.ManifestDependency{},
 		&jobs.Job{},
 		&runner.Run{},
+		&runner.RunLog{},
 		&runner.RunSecret{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},

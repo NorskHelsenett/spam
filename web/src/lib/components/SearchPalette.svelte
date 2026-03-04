@@ -12,6 +12,7 @@
 		score: number;
 		provider_id?: string;
 		base_url?: string;
+		owner_path?: string;
 	};
 
 	type ComponentResult = {
@@ -64,10 +65,18 @@
 	let previewTimer: ReturnType<typeof setTimeout>;
 	let contributorsTimer: ReturnType<typeof setTimeout>;
 
-	const flatItems = $derived<SearchItem[]>([
-		...repoResults.map((d) => ({ kind: 'repo' as const, data: d })),
-		...componentResults.map((d) => ({ kind: 'component' as const, data: d }))
-	]);
+	const flatItems = $derived.by<SearchItem[]>(() => {
+		const items: SearchItem[] = [];
+		for (const [, group] of repoGrouped) {
+			for (const r of group.repos) {
+				items.push({ kind: 'repo', data: r });
+			}
+		}
+		for (const d of componentResults) {
+			items.push({ kind: 'component', data: d });
+		}
+		return items;
+	});
 
 	const hasResults = $derived(flatItems.length > 0);
 
@@ -153,6 +162,11 @@
 		else { repoPreview = null; contributors = []; clearTimeout(previewTimer); clearTimeout(contributorsTimer); previewLoading = false; }
 	});
 
+	$effect(() => {
+		if (!browser) return;
+		document.querySelector(`[data-search-idx="${selectedIndex}"]`)?.scrollIntoView({ block: 'nearest' });
+	});
+
 	const handleInput = () => {
 		clearTimeout(searchTimer);
 		searchTimer = setTimeout(() => search(query), 180);
@@ -213,18 +227,19 @@
 	const providerLabel = (p: string) =>
 		({ github: 'GitHub', gitlab: 'GitLab', gitea: 'Gitea', forgejo: 'Forgejo' })[p] ?? p;
 
-	const stripScheme = (url: string) => url.replace(/^https?:\/\//, '');
+	const providerDisplay = (base_url: string, owner_path?: string) =>
+		base_url.replace(/^https?:\/\//, '') + (owner_path ? '/' + owner_path : '');
 
 
-	const repoGrouped = $derived(() => {
-		const map = new Map<string, { provider: string; base_url: string; repos: RepoResult[] }>();
+	const repoGrouped = $derived.by(() => {
+		const map = new Map<string, { provider: string; base_url: string; label: string; repos: RepoResult[] }>();
 		for (const r of repoResults) {
 			const key = r.provider_id || r.provider;
 			const existing = map.get(key);
 			if (existing) {
 				existing.repos.push(r);
 			} else {
-				map.set(key, { provider: r.provider, base_url: r.base_url || '', repos: [r] });
+				map.set(key, { provider: r.provider, base_url: r.base_url || '', label: providerDisplay(r.base_url || '', r.owner_path), repos: [r] });
 			}
 		}
 		return map;
@@ -304,17 +319,18 @@
 					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
 
 						{#if repoResults.length > 0}
-							{#each [...repoGrouped()] as [, group]}
+							{#each [...repoGrouped] as [, group]}
 								<div class="flex flex-col gap-0.5 px-4 pb-1 pt-3">
 									<span class="text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-secondary);">{providerLabel(group.provider)}</span>
-									{#if group.base_url}
-										<span class="truncate text-[8px]" style="color: var(--text-muted); opacity: 0.7;">{stripScheme(group.base_url)}</span>
+									{#if group.label}
+										<span class="truncate text-[8px]" style="color: var(--text-muted); opacity: 0.7;">{group.label}</span>
 									{/if}
 								</div>
 								{#each group.repos as result}
 									{@const flatIdx = flatItems.findIndex(i => i.kind === 'repo' && i.data === result)}
 									<button
 										type="button"
+										data-search-idx={flatIdx}
 										onclick={() => selectItem({ kind: 'repo', data: result })}
 										onmouseenter={() => (selectedIndex = flatIdx)}
 										class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
@@ -342,6 +358,7 @@
 								{@const flatIdx = flatItems.findIndex(i => i.kind === 'component' && i.data === result)}
 								<button
 									type="button"
+									data-search-idx={flatIdx}
 									onclick={() => selectItem({ kind: 'component', data: result })}
 									onmouseenter={() => (selectedIndex = flatIdx)}
 									class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
@@ -381,7 +398,7 @@
 										{/if}
 										<span class="text-[10px] uppercase tracking-widest">{providerLabel(repoPreview.repo.provider)}</span>
 										{#if selectedItem?.kind === 'repo' && selectedItem.data.base_url}
-											<span class="truncate text-[9px]" style="opacity: 0.6;">{stripScheme(selectedItem.data.base_url)}</span>
+											<span class="truncate text-[9px]" style="opacity: 0.6;">{providerDisplay(selectedItem.data.base_url || '', selectedItem.data.owner_path)}</span>
 										{/if}
 									</div>
 									<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">

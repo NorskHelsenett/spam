@@ -10,13 +10,14 @@ import (
 )
 
 type RepoSearchResult struct {
-	ID         string  `json:"id"`
-	Provider   string  `json:"provider"`
-	Org        string  `json:"org"`
-	Slug       string  `json:"slug"`
-	Score      float64 `json:"score"`
-	ProviderID string  `json:"provider_id,omitempty"`
-	BaseURL    string  `json:"base_url,omitempty"`
+	ID          string  `json:"id"`
+	Provider    string  `json:"provider"`
+	Org         string  `json:"org"`
+	Slug        string  `json:"slug"`
+	Score       float64 `json:"score"`
+	ProviderID  string  `json:"provider_id,omitempty"`
+	BaseURL     string  `json:"base_url,omitempty"`
+	OwnerPath   string  `json:"owner_path,omitempty"`
 }
 
 type RepoSearchResponse struct {
@@ -58,8 +59,9 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 					word_similarity(?, r.slug),
 					word_similarity(?, r.org)
 				) AS score,
-				COALESCE(pi.id, '')       AS provider_id,
-				COALESCE(pi.base_url, '') AS base_url
+				COALESCE(pi.id, '')         AS provider_id,
+				COALESCE(pi.base_url, '')   AS base_url,
+				COALESCE(pi.owner_path, '') AS owner_path
 			FROM repos r
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE (
