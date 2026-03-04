@@ -10,6 +10,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
+	"gorm.io/gorm"
 )
 
 const contributorCacheTTL = 15 * time.Minute
@@ -21,8 +22,8 @@ type RepoContributorsResponse struct {
 // RepoContributorsHandler returns the top contributors for a repo, fetched
 // from the appropriate provider API and cached for contributorCacheTTL.
 //
-// GET /api/repos/contributors?repo_id=provider:org:slug&provider_id=<uuid>
-func RepoContributorsHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
+// GET /api/repos/contributors?repo_id=<uuid>
+func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
@@ -34,23 +35,36 @@ func RepoContributorsHandler(authService *auth.Service, store *providerconfig.St
 			return
 		}
 
-		parts := strings.SplitN(repoID, ":", 3)
-		if len(parts) != 3 {
-			http.Error(w, "repo_id must be provider:org:slug", http.StatusBadRequest)
+		// Look up provider type, org, slug, and provider_instance_id from the repo UUID.
+		var repo struct {
+			Provider           string
+			Org                string
+			Slug               string
+			ProviderInstanceID *string
+		}
+		if err := db.WithContext(r.Context()).Table("repos").
+			Select("provider, org, slug, provider_instance_id").
+			Where("id = ?", repoID).
+			First(&repo).Error; err != nil {
+			writeJSON(w, http.StatusOK, RepoContributorsResponse{Contributors: []providers.ContributorInfo{}})
 			return
 		}
-		providerType, org, slug := parts[0], parts[1], parts[2]
-		repoPath := org + "/" + slug
 
-		// Cache check
+		providerType := repo.Provider
+		repoPath := repo.Org + "/" + repo.Slug
+		providerID := ""
+		if repo.ProviderInstanceID != nil {
+			providerID = *repo.ProviderInstanceID
+		}
+
+		// Cache check (keyed by repo UUID for uniqueness).
 		cacheKey := fmt.Sprintf("contributors:%s", repoID)
 		if cached, ok, _ := cache.GetJSON[RepoContributorsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		providerID := r.URL.Query().Get("provider_id")
-		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerType, r.URL.Query().Get("base_url"), repoPath)
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerType, "", repoPath)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return

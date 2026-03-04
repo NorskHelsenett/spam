@@ -405,9 +405,6 @@
 		const _ = $page.url.href;
 		fetchRepoDetails();
 		checkActiveScans();
-
-		const interval = setInterval(checkActiveScans, 10000);
-		return () => clearInterval(interval);
 	});
 </script>
 

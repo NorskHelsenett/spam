@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Search, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab } from 'lucide-svelte';
+	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type RepoResult = {
@@ -118,7 +118,7 @@
 	};
 
 	const fetchRepoPreview = (result: RepoResult) => {
-		const key = `${result.provider}:${result.org}:${result.slug}`;
+		const key = result.id;
 		if (previewCache.has(key)) {
 			repoPreview = previewCache.get(key)!;
 		} else {
@@ -180,7 +180,7 @@
 				path: d.org + '/' + d.slug
 			});
 			if (d.provider_id) params.set('provider_id', d.provider_id);
-			if (d.base_url) params.set('base_url', d.base_url);
+			else if (d.base_url) params.set('base_url', d.base_url);
 			goto(`/app/providers/repo?${params}`);
 		} else {
 			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
@@ -557,7 +557,11 @@
 
 			{:else if query.trim() && !loading}
 				<div style="border-top: 1px solid rgba(80, 73, 69, 0); background: var(--bg-soft); min-height: 25em; padding: 4em; display: flex; align-items: center; justify-content: center;">
-					<p class="text-sm" style="color: var(--text-muted);">No results for <span style="color: var(--text-primary);">"{query}"</span></p>
+					<div class="flex flex-col items-center gap-3 text-center">
+						<SearchX size={32} style="color: var(--bg3);" />
+						<p class="text-sm font-medium" style="color: var(--text-primary);">No results found</p>
+						<p class="text-[11px]" style="color: var(--text-muted);">No results for <span style="color: var(--text-secondary);">"{query}"</span></p>
+					</div>
 				</div>
 
 			{:else if !query.trim()}

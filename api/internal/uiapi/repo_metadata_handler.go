@@ -15,7 +15,7 @@ import (
 const repoMetadataCacheTTL = 30 * time.Second
 
 // RepoMetadataHandler returns a unified metadata response for a repo.
-// GET /api/repos/metadata?repo_id=provider:org:slug
+// GET /api/repos/metadata?repo_id=<uuid>
 func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
@@ -36,8 +36,8 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 
 		repoMeta, repoDBID := loadRepoMetadata(r, db, repoID)
 		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
-		runs := loadRepoRuns(r, db, repoID, repoDBID)
-		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoID, repoDBID)
+		runs := loadRepoRuns(r, db, repoMeta.Org, repoMeta.Slug, repoDBID)
+		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
 
@@ -58,30 +58,28 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 
 func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadataRepo, string) {
 	meta := RepoMetadataRepo{ID: repoID}
-	parts := strings.SplitN(repoID, ":", 3)
-	if len(parts) != 3 {
-		return meta, ""
-	}
-
-	meta.Provider = parts[0]
-	meta.Org = parts[1]
-	meta.Slug = parts[2]
 
 	var repo struct {
 		ID                string
+		Provider          string
+		Org               string
+		Slug              string
 		ProviderUpdatedAt *time.Time
 	}
 	if err := db.WithContext(r.Context()).Table("repos").
-		Select("id, provider_updated_at").
-		Where("provider = ? AND org = ? AND slug = ?", parts[0], parts[1], parts[2]).
-		First(&repo).Error; err == nil {
-		if repo.ProviderUpdatedAt != nil && !repo.ProviderUpdatedAt.IsZero() {
-			meta.UpdatedAt = repo.ProviderUpdatedAt.UTC().Format(time.RFC3339)
-		}
-		return meta, repo.ID
+		Select("id, provider, org, slug, provider_updated_at").
+		Where("id = ?", repoID).
+		First(&repo).Error; err != nil {
+		return meta, ""
 	}
 
-	return meta, ""
+	meta.Provider = repo.Provider
+	meta.Org = repo.Org
+	meta.Slug = repo.Slug
+	if repo.ProviderUpdatedAt != nil && !repo.ProviderUpdatedAt.IsZero() {
+		meta.UpdatedAt = repo.ProviderUpdatedAt.UTC().Format(time.RFC3339)
+	}
+	return meta, repo.ID
 }
 
 func loadRepoLatestCommit(r *http.Request, db *gorm.DB, repoDBID string) *RepoMetadataCommit {
@@ -108,20 +106,15 @@ func loadRepoLatestCommit(r *http.Request, db *gorm.DB, repoDBID string) *RepoMe
 	}
 }
 
-func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) RepoMetadataRuns {
+func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID string) RepoMetadataRuns {
 	response := RepoMetadataRuns{
 		Total:    0,
 		Timeline: []RepoMetadataRunSummary{},
 	}
 
-	repoPath := ""
-	if parts := strings.SplitN(repoID, ":", 3); len(parts) == 3 {
-		repoPath = parts[1] + "/" + parts[2]
-	}
-
 	query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", "CREATE_RUN")
-	if repoPath != "" {
-		query = query.Where("payload::text LIKE ?", "%"+repoPath+"%")
+	if org != "" && slug != "" {
+		query = query.Where("payload::text LIKE ?", "%"+org+"/"+slug+"%")
 	}
 
 	query.Count(&response.Total)
@@ -174,7 +167,7 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) 
 		if row.LockedAt != nil && row.FinishedAt != nil {
 			summary.DurationMs = row.FinishedAt.Sub(*row.LockedAt).Milliseconds()
 		}
-		summary.Artifacts = loadRunArtifacts(r, db, row.ID, repoID, repoDBID)
+		summary.Artifacts = loadRunArtifacts(r, db, row.ID, repoDBID)
 		response.Timeline = append(response.Timeline, summary)
 	}
 
@@ -185,7 +178,7 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, repoID string, repoDBID string) 
 	return response
 }
 
-func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoID, repoDBID string) []string {
+func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoDBID string) []string {
 	artifacts := make([]string, 0, 3)
 
 	var secretsCount int64
@@ -195,21 +188,11 @@ func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoID, repoDBID stri
 		artifacts = append(artifacts, "secrets")
 	}
 
-	var sbomID string
-	if err := db.WithContext(r.Context()).Table("sbom_bindings").
-		Select("sbom_id").
-		Where("asset_ref_id = ?", repoID).
-		Order("created_at DESC").
-		Limit(1).
-		Scan(&sbomID).Error; err == nil && sbomID != "" {
-		artifacts = append(artifacts, "sbom")
-		return artifacts
-	}
-
 	if repoDBID == "" {
 		return artifacts
 	}
 
+	var sbomID string
 	var commitID string
 	if err := db.WithContext(r.Context()).Table("repo_commits").
 		Select("id").
@@ -232,18 +215,9 @@ func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoID, repoDBID stri
 	return artifacts
 }
 
-func loadRepoSBOM(r *http.Request, db *gorm.DB, repoID, repoDBID string) (RepoMetadataSBOM, int64) {
+func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSBOM, int64) {
 	var sbomID string
-	if err := db.WithContext(r.Context()).Table("sbom_bindings").
-		Select("sbom_id").
-		Where("asset_ref_id = ?", repoID).
-		Order("created_at DESC").
-		Limit(1).
-		Scan(&sbomID).Error; err != nil {
-		return RepoMetadataSBOM{}, 0
-	}
-
-	if sbomID == "" && repoDBID != "" {
+	if repoDBID != "" {
 		var commitID string
 		if err := db.WithContext(r.Context()).Table("repo_commits").
 			Select("id").
