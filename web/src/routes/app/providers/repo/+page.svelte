@@ -190,6 +190,8 @@
 					error = 'Repository not found. Private instances may require authentication.';
 				} else if (response.status === 401) {
 					error = 'Authentication required. This instance requires a token to access project details.';
+				} else if (response.status === 429) {
+					error = 'rate_limited';
 				} else {
 					error = `Failed to fetch repository details (${response.status}).`;
 				}
@@ -433,6 +435,12 @@
 	{#if loading}
 		<div class="flex items-center justify-center py-20">
 			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+		</div>
+	{:else if error === 'rate_limited'}
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
+			<Clock class="mx-auto h-12 w-12 text-yellow-500" />
+			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Rate Limited</p>
+			<p class="mt-2 text-sm text-[var(--text-secondary)]">GitHub API rate limit reached. Please try again later.</p>
 		</div>
 	{:else if error}
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
