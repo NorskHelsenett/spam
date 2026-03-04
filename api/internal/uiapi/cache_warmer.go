@@ -40,7 +40,7 @@ func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 
 func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store, c cache.Store, p providerconfig.ProviderInstance) {
 	token, err := store.GetActiveToken(ctx, p.ID)
-	if err != nil || token == "" {
+	if err != nil {
 		return
 	}
 
@@ -92,10 +92,11 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 			providerUpdatedAtPtr = &providerUpdatedAt
 		}
 		if _, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
-			Provider:          p.Type,
-			Org:               org,
-			Slug:              slug,
-			ProviderUpdatedAt: providerUpdatedAtPtr,
+			Provider:           p.Type,
+			ProviderInstanceID: p.ID,
+			Org:                org,
+			Slug:               slug,
+			ProviderUpdatedAt:  providerUpdatedAtPtr,
 		}); err != nil {
 			log.Printf("cache warmer: upsert repo %s: %v", path, err)
 			continue
