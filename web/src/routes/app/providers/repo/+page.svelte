@@ -169,6 +169,7 @@
 		const buildTypeUrl = () => {
 				const q = new URLSearchParams();
 				if (baseUrl) q.set('base_url', baseUrl);
+				if (providerId) q.set('provider_id', providerId);
 				if (provider === 'gitlab') {
 					return `/api/providers/gitlab/${encodeURIComponent(path)}/details?${q}`;
 				} else if (provider === 'gitea' || provider === 'forgejo') {
