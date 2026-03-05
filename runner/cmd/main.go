@@ -256,7 +256,7 @@ func (r *Runner) runPipeline() int {
 	r.log(fmt.Sprintf("Cloning %s...", r.repoCloneURL))
 	if r.repoCommitSHA != "" {
 		// Pinned-commit mode: clone without --depth=1, then checkout exact SHA
-		cloneArgs := []string{"clone", "--no-tags"}
+		cloneArgs := []string{"clone", "-c", "credential.helper=", "--no-tags"}
 		if r.repoRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
 		}
@@ -274,7 +274,7 @@ func (r *Runner) runPipeline() int {
 		}
 	} else {
 		// Standard shallow clone
-		cloneArgs := []string{"clone", "--depth=1"}
+		cloneArgs := []string{"clone", "-c", "credential.helper=", "--depth=1"}
 		if r.repoRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
 		}
