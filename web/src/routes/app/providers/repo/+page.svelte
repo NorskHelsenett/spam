@@ -433,8 +433,7 @@
 		if (!browser) return;
 		// Re-fetch whenever URL params change (handles same-route navigation)
 		const _ = $page.url.href;
-		fetchRepoDetails();
-		checkActiveScans();
+		fetchRepoDetails().then(() => checkActiveScans());
 	});
 </script>
 
