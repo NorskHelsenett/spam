@@ -34,6 +34,7 @@ type RunResponse struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	RetryAt    *time.Time `json:"retry_at,omitempty"`
 	K8sJobName string     `json:"k8s_job_name,omitempty"`
 	SBOMID     string     `json:"sbom_id,omitempty"`
 	SecretID   string     `json:"secret_id,omitempty"`

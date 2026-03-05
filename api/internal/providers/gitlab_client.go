@@ -340,6 +340,11 @@ func (c *GitLabClientImpl) ListPublicGroups(ctx context.Context, parentPath stri
 }
 
 func (c *GitLabClientImpl) checkResponse(resp *http.Response) error {
+	// Some self-hosted GitLab proxies return 404 when rate-limited instead of 429.
+	// Check for Retry-After header first before mapping on status code.
+	if resp.Header.Get("Retry-After") != "" {
+		return ErrRateLimited
+	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return nil

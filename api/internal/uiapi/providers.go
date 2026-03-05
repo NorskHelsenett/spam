@@ -892,6 +892,10 @@ func GitLabRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 				http.Error(w, "authentication required for this GitLab instance", http.StatusUnauthorized)
 				return
 			}
+			if errors.Is(err, providers.ErrRateLimited) {
+				http.Error(w, "rate limited", http.StatusTooManyRequests)
+				return
+			}
 			http.Error(w, "failed to fetch project details", http.StatusInternalServerError)
 			return
 		}
