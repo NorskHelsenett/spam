@@ -74,6 +74,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		page, pageSize := parsePagination(r)
 		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
+		repoID := r.URL.Query().Get("repo_id")
 
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
@@ -82,7 +83,9 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		} else if len(statuses) > 1 {
 			query = query.Where("status IN ?", statuses)
 		}
-		if repoPath != "" {
+		if repoID != "" {
+			query = query.Where("payload->>'repo_id' = ?", repoID)
+		} else if repoPath != "" {
 			// Search in payload JSON for matching repo path
 			query = query.Where("payload::text LIKE ?", "%"+repoPath+"%")
 		}

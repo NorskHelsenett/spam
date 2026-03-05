@@ -185,9 +185,10 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		}
 
 		repoRecord, err := assets.UpsertRepo(ctx, p.db, assets.RepoInput{
-			Provider: provider.Type,
-			Org:      org,
-			Slug:     slug,
+			Provider:           provider.Type,
+			ProviderInstanceID: provider.ID,
+			Org:                org,
+			Slug:               slug,
 		})
 		if err != nil {
 			log.Printf("poller: upsert repo %s: %v", repo.FullPath, err)

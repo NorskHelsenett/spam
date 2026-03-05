@@ -41,6 +41,8 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		Attrs(Repo{
 			ID:                 uuid.NewString(),
 			Provider:           provider,
+			Org:                input.Org,
+			Slug:               input.Slug,
 			ProviderInstanceID: input.ProviderInstanceID,
 			CreatedByUserID:    input.CreatedByUserID,
 		}).FirstOrCreate(&repo)

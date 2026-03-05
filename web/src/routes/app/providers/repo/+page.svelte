@@ -88,6 +88,13 @@
 	};
 
 	type RepoMetadataResponse = {
+		repo: {
+			id: string;
+			org: string;
+			slug: string;
+			provider_id?: string;
+			provider_base_url?: string;
+		};
 		runs: {
 			total: number;
 			latest?: RepoMetadataRun;
@@ -155,7 +162,7 @@
 		// When only repo_id is provided, resolve path and provider info from metadata
 		if (repoDbId && !path) {
 			const meta = await fetchRepoMetadata(repoDbId);
-			if (meta) {
+			if (meta?.repo?.org && meta.repo.slug) {
 				path = `${meta.repo.org}/${meta.repo.slug}`;
 				providerId = providerId || meta.repo.provider_id || '';
 				baseUrl = baseUrl || meta.repo.provider_base_url || '';
@@ -357,11 +364,11 @@
 
 	// Check for active scans on this repo
 	const checkActiveScans = async () => {
-		const path = resolvedPath;
-		if (!path) return;
+		const { repoDbId } = getParams();
+		if (!repoDbId) return;
 
 		try {
-			const response = await fetch(`/api/runs?repo_path=${encodeURIComponent(path)}&page_size=1`, {
+			const response = await fetch(`/api/runs?repo_id=${encodeURIComponent(repoDbId)}&page_size=1`, {
 				credentials: 'include'
 			});
 			if (response.ok) {

@@ -1,3 +1,11 @@
+-- Delete repos with no usable identity (empty org/slug) that have no associated data.
+DELETE FROM repos
+WHERE (org = '' OR slug = '')
+  AND id NOT IN (SELECT DISTINCT repo_id FROM repo_commits);
+
+-- Normalize empty-string provider_instance_id to NULL before backfill.
+UPDATE repos SET provider_instance_id = NULL WHERE provider_instance_id = '';
+
 -- Aggressive backfill: assign any remaining NULL provider_instance_id rows
 -- by picking the best-matching enabled provider instance (most specific owner_path wins).
 UPDATE repos r SET provider_instance_id = (
