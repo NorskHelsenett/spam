@@ -180,7 +180,7 @@
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
-	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<section class="panel-surface flex flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10 h-[calc(100vh-7rem)]">
 		<header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 			<div>
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Dependencies</h1>
@@ -233,8 +233,9 @@
 		{#if dependencies.length === 0 && !loading}
 			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
 		{:else if dependencies.length > 0}
-			<div class="relative overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+			<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<div class="flex-1 overflow-y-auto">
+			<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 						<tr>
 							<th class="px-5 py-3 text-left cursor-pointer hover:text-[var(--text-secondary)] transition" onclick={() => handleSort('name')}>
@@ -354,6 +355,7 @@
 						{/each}
 					</tbody>
 				</table>
+			</div>
 				{#if detailOpen && selectedDependency}
 					<div
 						class="absolute inset-y-0 right-0 z-10 w-[900px] border-l border-[var(--border-color)] rounded-l-[10px]"
