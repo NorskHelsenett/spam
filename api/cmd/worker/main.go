@@ -203,8 +203,8 @@ func run() error {
 				}
 			}
 
-			// Poll providers for new commits
-			commitPoller.Poll(ctx)
+			// Poll providers for new commits (non-blocking — don't delay job claiming)
+			go commitPoller.Poll(ctx)
 
 			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
 			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)
