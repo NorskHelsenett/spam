@@ -6,6 +6,7 @@
 	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import { providerSyncStates, initSyncStates } from '$lib/stores/providerSync';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -53,7 +54,7 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
-	let syncingProviderIds = $state<Set<string>>(new Set());
+	const syncStates = providerSyncStates;
 	let healthTooltip = $state<{
 		entryId: string;
 		message: string;
@@ -78,12 +79,6 @@
 		created_at: string;
 		updated_at?: string;
 		last_rotated_at?: string;
-	};
-
-	type ProviderSyncResponse = {
-		provider_id: string;
-		health_status: string;
-		health_message?: string;
 	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
@@ -445,35 +440,22 @@
 		}
 	};
 
+	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
+
 	const syncProviderNow = async (entry: ProviderRow) => {
-		if (syncingProviderIds.has(entry.id)) return;
-		syncingProviderIds = new Set(syncingProviderIds).add(entry.id);
+		if (isSyncing(entry.id)) return;
 		formError = '';
 		try {
 			const response = await fetch(`/api/admin/providers/${entry.id}/sync`, {
 				method: 'POST',
 				credentials: 'include'
 			});
-			if (!response.ok) {
+			// 202 = started, 409 = already running — both are fine
+			if (!response.ok && response.status !== 409) {
 				formError = 'Failed to sync provider.';
-				return;
 			}
-			const synced: ProviderSyncResponse = await response.json();
-			providers = providers.map((provider) => {
-				if (provider.id !== entry.id) return provider;
-				return {
-					...provider,
-					healthStatus: synced.health_status || provider.healthStatus,
-					healthMessage: synced.health_message || '',
-					lastHealthCheck: new Date().toISOString()
-				};
-			});
 		} catch {
 			formError = 'Failed to sync provider.';
-		} finally {
-			const next = new Set(syncingProviderIds);
-			next.delete(entry.id);
-			syncingProviderIds = next;
 		}
 	};
 
@@ -544,6 +526,12 @@
 		if (browser) {
 			loadProviders();
 			updatePreview();
+
+			// Restore sync states for any in-progress syncs (e.g. after navigating away and back).
+			fetch('/api/admin/providers/sync/status', { credentials: 'include' })
+				.then((r) => (r.ok ? r.json() : null))
+				.then((data) => { if (data) initSyncStates(data); })
+				.catch(() => {});
 
 			const closeTooltip = () => {
 				healthTooltip = null;
@@ -819,11 +807,11 @@
 										<button
 											type="button"
 											class="sync-now-btn rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											class:syncing={syncingProviderIds.has(entry.id)}
+											class:syncing={isSyncing(entry.id)}
 											onclick={() => syncProviderNow(entry)}
-											disabled={saving || syncingProviderIds.has(entry.id)}
+											disabled={saving || isSyncing(entry.id)}
 										>
-											{#if syncingProviderIds.has(entry.id)}
+											{#if isSyncing(entry.id)}
 												<span class="sync-label syncing-text" data-text="Syncing...">Syncing...</span>
 											{:else}
 												<span class="sync-label">Sync Now</span>

@@ -9,6 +9,7 @@
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
 	import SearchPalette from '$lib/components/SearchPalette.svelte';
+	import { updateSyncState, initSyncStates } from '$lib/stores/providerSync';
 
 	let appEventSource: EventSource | null = null;
 	let metricCardObserver: MutationObserver | null = null;
@@ -102,6 +103,11 @@
 
 		appEventSource.addEventListener('ready', (event) => {
 			console.info('sse ready', parsePayload(event));
+			// Restore any in-progress or recent sync states after reconnect/navigation.
+			fetch('/api/admin/providers/sync/status', { credentials: 'include' })
+				.then((r) => (r.ok ? r.json() : null))
+				.then((data) => { if (data) initSyncStates(data); })
+				.catch(() => {});
 		});
 
 		appEventSource.addEventListener('heartbeat', (event) => {
@@ -110,6 +116,22 @@
 
 		appEventSource.addEventListener('sbom_parsed', (event) => {
 			console.info('sse sbom parsed', parsePayload(event));
+		});
+
+		appEventSource.addEventListener('provider_sync_started', (event) => {
+			updateSyncState(parsePayload(event));
+		});
+
+		appEventSource.addEventListener('provider_sync_progress', (event) => {
+			updateSyncState(parsePayload(event));
+		});
+
+		appEventSource.addEventListener('provider_sync_completed', (event) => {
+			updateSyncState(parsePayload(event));
+		});
+
+		appEventSource.addEventListener('provider_sync_failed', (event) => {
+			updateSyncState(parsePayload(event));
 		});
 
 		appEventSource.addEventListener('shutting_down', (event) => {

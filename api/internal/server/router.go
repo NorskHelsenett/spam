@@ -37,6 +37,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		appCache = cache.NewMemory()
 	}
 
+	var syncMgr *uiapi.SyncManager
+	if providerStore != nil {
+		syncMgr = uiapi.NewSyncManager(db, providerStore, appCache)
+	}
+
 	// Health check endpoint without middleware to avoid noise in logs
 	r.Get("/api/healthz", health.Handler(db))
 
@@ -67,7 +72,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/admin/providers", uiapi.AdminProvidersCreateHandler(authService, providerStore))
 				api.Patch("/admin/providers/{id}", uiapi.AdminProvidersUpdateHandler(authService, providerStore))
 				api.Post("/admin/providers/{id}/rotate", uiapi.AdminProvidersRotateHandler(authService, providerStore))
-				api.Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(db, authService, providerStore))
+				api.Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(authService, providerStore, syncMgr))
+				api.Get("/admin/providers/sync/status", uiapi.AdminProvidersSyncStatusHandler(authService, providerStore, syncMgr))
 				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))

@@ -91,20 +91,20 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		if !providerUpdatedAt.IsZero() {
 			providerUpdatedAtPtr = &providerUpdatedAt
 		}
-		if _, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
+		repoRecord, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
 			Provider:           p.Type,
 			ProviderInstanceID: p.ID,
 			Org:                org,
 			Slug:               slug,
 			ProviderUpdatedAt:  providerUpdatedAtPtr,
-		}); err != nil {
+		})
+		if err != nil {
 			log.Printf("cache warmer: upsert repo %s: %v", path, err)
 			continue
 		}
 
-		// Pre-fetch and cache contributors.
-		repoID := fmt.Sprintf("%s:%s:%s", p.Type, org, slug)
-		cacheKey := fmt.Sprintf("contributors:%s", repoID)
+		// Pre-fetch and cache contributors keyed by DB repo UUID (matches RepoContributorsHandler).
+		cacheKey := fmt.Sprintf("contributors:%s", repoRecord.ID)
 		if _, ok, _ := cache.GetJSON[RepoContributorsResponse](ctx, c, cacheKey); ok {
 			continue // already cached
 		}
