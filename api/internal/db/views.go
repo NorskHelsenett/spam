@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -115,6 +117,41 @@ func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 	}
 }
 
+// refreshView refreshes a single materialized view. It checks the view's own
+// ispopulated flag to decide between CONCURRENTLY (non-blocking) and a plain
+// refresh (required when the view has never been populated). If CONCURRENTLY
+// fails with SQLSTATE 55000 (object not in prerequisite state — view not yet
+// populated or no unique index), it falls back to a plain refresh so a race
+// between EnsureViews recreating the view and this function doesn't cause
+// permanent job failures.
+func refreshView(ctx context.Context, db *gorm.DB, view string) error {
+	var populated bool
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(ispopulated, false) FROM pg_matviews WHERE matviewname = ?", view,
+	).Scan(&populated)
+
+	if populated {
+		err := db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY " + view).Error
+		if err == nil {
+			return nil
+		}
+		// SQLSTATE 55000: view not yet populated or no suitable unique index.
+		// Fall through to a plain (blocking) refresh.
+		if !isSQLState(err, "55000") {
+			return err
+		}
+		log.Printf("CONCURRENTLY failed for %s (55000), falling back to plain refresh", view)
+	}
+	return db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW " + view).Error
+}
+
+// isSQLState reports whether err contains a PostgreSQL error with the given
+// five-character SQLSTATE code.
+func isSQLState(err error, code string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == code
+}
+
 func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	var populated bool
 	err := db.WithContext(ctx).Raw(
@@ -150,22 +187,10 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 	}
 	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
 
-	var populated bool
-	if err := db.WithContext(ctx).Raw(
-		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN ('sbom_component_view', 'sbom_metadata_view')",
-	).Scan(&populated).Error; err != nil {
-		return fmt.Errorf("check view population: %w", err)
-	}
-
-	refresh := "REFRESH MATERIALIZED VIEW CONCURRENTLY"
-	if !populated {
-		refresh = "REFRESH MATERIALIZED VIEW"
-	}
-	if err := db.WithContext(ctx).Exec(refresh + " sbom_component_view").Error; err != nil {
-		return fmt.Errorf("refresh sbom_component_view: %w", err)
-	}
-	if err := db.WithContext(ctx).Exec(refresh + " sbom_metadata_view").Error; err != nil {
-		return fmt.Errorf("refresh sbom_metadata_view: %w", err)
+	for _, view := range []string{"sbom_component_view", "sbom_metadata_view"} {
+		if err := refreshView(ctx, db, view); err != nil {
+			return fmt.Errorf("refresh %s: %w", view, err)
+		}
 	}
 
 	refreshedAt := time.Now().UTC()
