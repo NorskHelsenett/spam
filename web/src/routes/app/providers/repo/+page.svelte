@@ -669,8 +669,7 @@
 					</div>
 				</div>
 				<div class="mt-2 space-y-1 text-xs text-[var(--text-muted)]">
-					{#if securityData.componentsFromSBOM > 0 || securityData.componentsFromManifest > 0}
-						<div class="flex items-center justify-between">
+											<div class="flex items-center justify-between">
 							<span class="flex items-center gap-1">
 								<Microscope class="h-3 w-3 text-blue-400" />
 								From SBOM
@@ -684,7 +683,6 @@
 							</span>
 							<span class="font-semibold text-[var(--text-secondary)]">{securityData.componentsFromManifest}</span>
 						</div>
-					{/if}
 					{#if details.size}
 						<div class="pt-1 text-[var(--text-muted)]">
 							Repository size: {formatSize(details.size)}
