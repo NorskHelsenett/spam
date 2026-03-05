@@ -261,9 +261,19 @@
 
 	const createdMs = (run: Run) => new Date(run.created_at).getTime();
 
+	const statusPriority = (status: string) => {
+		if (status === 'RUNNING') return 0;
+		if (status === 'QUEUED') return 1;
+		return 2;
+	};
+
 	const sortedRuns = $derived.by(() => {
 		const sorted = [...runs];
 		sorted.sort((a, b) => {
+			if (selectedFilter.id === 'all') {
+				const priorityDiff = statusPriority(a.status) - statusPriority(b.status);
+				if (priorityDiff !== 0) return priorityDiff;
+			}
 			let compare = 0;
 			if (sortField === 'provider') {
 				compare = (a.provider || '').localeCompare(b.provider || '', undefined, { sensitivity: 'base' });
