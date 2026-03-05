@@ -319,6 +319,15 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 
 		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, status, nil, err.Error(), next); updateErr != nil {
 			log.Printf("update job error: %v", updateErr)
+			// If transitioning to RETRY failed (likely a unique constraint conflict
+			// because a newer queued job of the same type already exists), fall back
+			// to FAILED so the row is cleaned up rather than staying stuck in RUNNING
+			// until the stale-job reaper fires.
+			if status == jobs.JobStatusRetry {
+				if _, failErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusFailed, nil, err.Error(), nil); failErr != nil {
+					log.Printf("fallback-to-failed error: %v", failErr)
+				}
+			}
 		}
 		return
 	}
