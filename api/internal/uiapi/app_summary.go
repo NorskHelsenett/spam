@@ -39,6 +39,7 @@ type AppSummarySBOM struct {
 	ScannerName    string    `json:"scanner_name"`
 	ScannerVersion string    `json:"scanner_version"`
 	AssetType      string    `json:"asset_type"`
+	RepoID         string    `json:"repo_id,omitempty"`
 	RepoName       string    `json:"repo_name,omitempty"`
 	RepoProvider   string    `json:"repo_provider,omitempty"`
 	CommitSHA      string    `json:"commit_sha,omitempty"`
@@ -198,6 +199,7 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			m.scanner_name,
 			m.scanner_version,
 			m.asset_type,
+			COALESCE(m.repo_id::text, '') AS repo_id,
 			COALESCE(m.repo_name, '') AS repo_name,
 			COALESCE(rp.provider, '') AS repo_provider,
 			COALESCE(m.commit_sha, '') AS commit_sha,

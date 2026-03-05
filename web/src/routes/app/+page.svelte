@@ -27,6 +27,7 @@
 		scanner_name: string;
 		scanner_version: string;
 		asset_type: string;
+		repo_id?: string;
 		repo_name?: string;
 		repo_provider?: string;
 		commit_sha?: string;
@@ -140,9 +141,14 @@
 	const sbomLabel = (sbom: RecentSBOM) => sbom.repo_name || sbom.image_repository || sbom.sbom_id.slice(0, 8);
 
 	const sbomClickTarget = (sbom: RecentSBOM): string => {
-		if (sbom.asset_type === 'REPO_COMMIT' && sbom.repo_name) {
-			const provider = sbom.repo_provider || 'github';
-			return `/app/providers/repo?provider=${encodeURIComponent(provider)}&path=${encodeURIComponent(sbom.repo_name)}`;
+		if (sbom.asset_type === 'REPO_COMMIT') {
+			if (sbom.repo_id) {
+				return `/app/providers/repo?repo_id=${encodeURIComponent(sbom.repo_id)}`;
+			}
+			if (sbom.repo_name) {
+				const provider = sbom.repo_provider || 'github';
+				return `/app/providers/repo?provider=${encodeURIComponent(provider)}&path=${encodeURIComponent(sbom.repo_name)}`;
+			}
 		}
 		return `/app/agents?sbom_id=${sbom.sbom_id}`;
 	};
