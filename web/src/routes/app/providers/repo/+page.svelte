@@ -467,7 +467,7 @@
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
 			<Clock class="mx-auto h-12 w-12 text-yellow-500" />
 			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Rate Limited</p>
-			<p class="mt-2 text-sm text-[var(--text-secondary)]">GitHub API rate limit reached. Please try again later.</p>
+			<p class="mt-2 text-sm text-[var(--text-secondary)]">API rate limit reached. Please try again later.</p>
 		</div>
 	{:else if error}
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
