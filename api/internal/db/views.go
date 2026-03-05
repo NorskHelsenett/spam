@@ -193,7 +193,11 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 	}
 	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
 
-	for _, view := range []string{"sbom_component_view", "sbom_metadata_view"} {
+	// Refresh metadata first so that any SBOM visible in sbom_metadata_view is
+	// guaranteed to already have its components in sbom_component_view (which
+	// takes a later snapshot). Reversing this order would cause recent SBOMs
+	// committed between the two snapshot times to show component_count = 0.
+	for _, view := range []string{"sbom_metadata_view", "sbom_component_view"} {
 		if err := refreshView(ctx, db, view); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)
 		}
