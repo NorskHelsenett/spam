@@ -8,7 +8,7 @@ type Repo struct {
 	Provider           string     `gorm:"size:32;not null;default:manual"`
 	Org                string     `gorm:"size:255;not null"`
 	Slug               string     `gorm:"size:255;not null"`
-	ProviderInstanceID *string    `gorm:"size:36;index"`
+	ProviderInstanceID string     `gorm:"size:36;not null;index"`
 	CreatedAt          time.Time
 	CreatedByUserID    string     `gorm:"size:36"`
 	ProviderUpdatedAt  *time.Time `gorm:"column:provider_updated_at;autoUpdateTime:false"`

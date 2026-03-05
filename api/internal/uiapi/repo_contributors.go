@@ -40,7 +40,7 @@ func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *prov
 			Provider           string
 			Org                string
 			Slug               string
-			ProviderInstanceID *string
+			ProviderInstanceID string
 		}
 		if err := db.WithContext(r.Context()).Table("repos").
 			Select("provider, org, slug, provider_instance_id").
@@ -52,10 +52,7 @@ func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *prov
 
 		providerType := repo.Provider
 		repoPath := repo.Org + "/" + repo.Slug
-		providerID := ""
-		if repo.ProviderInstanceID != nil {
-			providerID = *repo.ProviderInstanceID
-		}
+		providerID := repo.ProviderInstanceID
 
 		// Cache check (keyed by repo UUID for uniqueness).
 		cacheKey := fmt.Sprintf("contributors:%s", repoID)

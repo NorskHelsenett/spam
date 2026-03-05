@@ -15,6 +15,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"gorm.io/gorm"
 )
 
@@ -279,11 +280,21 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 func resolveRepo(ctx context.Context, tx *gorm.DB, repoID, provider, org, slug, createdBy string) (*assets.Repo, error) {
 	if org != "" && slug != "" {
+		var providerInstanceID string
+		var pi providerconfig.ProviderInstance
+		err := tx.WithContext(ctx).
+			Where("type = ? AND enabled = true AND (owner_path = '' OR ? = owner_path OR ? LIKE owner_path || '/%')", provider, org, org).
+			Order("CASE WHEN owner_path != '' THEN 0 ELSE 1 END, created_at").
+			First(&pi).Error
+		if err == nil {
+			providerInstanceID = pi.ID
+		}
 		return assets.UpsertRepo(ctx, tx, assets.RepoInput{
-			Provider:        provider,
-			Org:             org,
-			Slug:            slug,
-			CreatedByUserID: createdBy,
+			Provider:           provider,
+			Org:                org,
+			Slug:               slug,
+			CreatedByUserID:    createdBy,
+			ProviderInstanceID: providerInstanceID,
 		})
 	}
 
