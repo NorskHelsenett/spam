@@ -347,11 +347,27 @@ func countComponentsFromContent(format string, content []byte) int {
 	}
 	switch format {
 	case "cyclonedx-json":
-		components, err := extractCycloneDXComponents(content)
-		if err != nil {
+		var doc struct {
+			Metadata struct {
+				Component struct {
+					BomRef string `json:"bom-ref"`
+				} `json:"component"`
+			} `json:"metadata"`
+			Components []struct {
+				BomRef string `json:"bom-ref"`
+			} `json:"components"`
+		}
+		if err := json.Unmarshal(content, &doc); err != nil {
 			return 0
 		}
-		return len(components)
+		rootRef := doc.Metadata.Component.BomRef
+		count := 0
+		for _, c := range doc.Components {
+			if rootRef == "" || c.BomRef != rootRef {
+				count++
+			}
+		}
+		return count
 	case "spdx-json":
 		var doc struct {
 			Packages []struct{} `json:"packages"`
