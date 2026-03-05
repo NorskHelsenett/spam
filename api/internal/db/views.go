@@ -94,6 +94,14 @@ func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 			if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_metadata_view").Error; err != nil {
 				return fmt.Errorf("refresh sbom_metadata_view: %w", err)
 			}
+			refreshedAt := time.Now().UTC()
+			if err := tx.Exec(`
+				INSERT INTO materialized_view_refreshes (name, refreshed_at)
+				VALUES ('sbom_component_view', ?), ('sbom_metadata_view', ?)
+				ON CONFLICT (name) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+			`, refreshedAt, refreshedAt).Error; err != nil {
+				return fmt.Errorf("record refresh time: %w", err)
+			}
 			return nil
 		}); err != nil {
 			log.Printf("populate views: %v", err)

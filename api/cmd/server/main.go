@@ -97,6 +97,16 @@ func run() error {
 		return fmt.Errorf("populate views: %w", err)
 	}
 
+	// Enqueue a refresh so the worker picks up any data accumulated since
+	// the last refresh (e.g. across a server restart). The unique index on
+	// active REFRESH_SBOM_VIEWS jobs means this is a no-op if one is already
+	// queued; the error is intentionally ignored.
+	if _, err := jobs.CreateJob(ctx, gormDB, jobs.CreateJobInput{
+		Type: jobs.JobTypeRefreshSBOMViews,
+	}); err != nil {
+		log.Printf("startup view refresh job (may already be queued): %v", err)
+	}
+
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
 		if err := db.RunSeedSQL(ctx, gormDB, seedSQLPath); err != nil {
