@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2, FileCode, Microscope
+		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 
@@ -475,13 +475,19 @@
 			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
 		</div>
 	{:else if details}
-		<!-- Header -->
-		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+		<!-- Header + Stats -->
+		<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
 			<div class="flex items-start justify-between gap-4">
 				<div class="min-w-0 flex-1">
 					<div class="flex items-center gap-3">
 						<GitBranch class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
 						<h1 class="truncate text-2xl font-semibold text-[var(--text-bright)]">{details.name}</h1>
+						{#if details.is_private}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--text-muted)]/20 px-2 py-0.5 text-xs text-[var(--text-muted)]"><Lock class="h-3 w-3" /> Private</span>
+						{:else}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]"><Globe class="h-3 w-3" /> Public</span>
+						{/if}
+
 						{#if details.is_archived}
 							<span class="rounded-full bg-[var(--text-muted)]/20 px-2 py-0.5 text-xs text-[var(--text-muted)]">Archived</span>
 						{/if}
@@ -533,7 +539,7 @@
 						rel="noopener noreferrer"
 						class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
 					>
-						View on {getParams().provider === 'github' ? 'GitHub' : getParams().provider === 'gitlab' ? 'GitLab' : 'Gitea'}
+						View on {resolvedBaseUrl ? new URL(resolvedBaseUrl).hostname : resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
 						<ExternalLink class="h-4 w-4" />
 					</a>
 				</div>
@@ -546,26 +552,37 @@
 			{/if}
 
 			<!-- Quick stats row -->
-			<div class="flex flex-wrap gap-4 border-t border-[var(--border-color)]/60 pt-4 text-sm text-[var(--text-secondary)]">
+			<div class="flex flex-wrap gap-4 pt-4 text-sm text-[var(--text-secondary)]">
 				<span class="flex items-center gap-1.5"><Star class="h-4 w-4" /> {details.stats.stars.toLocaleString()} stars</span>
 				<span class="flex items-center gap-1.5"><GitFork class="h-4 w-4" /> {details.stats.forks.toLocaleString()} forks</span>
 				<span class="flex items-center gap-1.5"><Eye class="h-4 w-4" /> {details.stats.watchers.toLocaleString()} watching</span>
 				{#if details.languages && details.languages.length > 0}
 					{#each details.languages as lang}
-						<span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {lang}</span>
+						<span class="flex items-center gap-1.5" style="display:none"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {lang}</span>
 					{/each}
 				{/if}
 				{#if details.license}
 					<span class="flex items-center gap-1.5"><Scale class="h-4 w-4" /> {details.license}</span>
 				{/if}
-				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Updated {formatDate(details.updated_at)}</span>
+				<span class="flex items-center gap-1.5">
+					<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+						{#if resolvedProvider === 'gitlab'}
+							<path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.45.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024" />
+						{:else if resolvedProvider === 'gitea' || resolvedProvider === 'forgejo'}
+							<path d="M11.955.49A11.955 11.955 0 000 12.444a11.955 11.955 0 0011.955 11.955 11.955 11.955 0 0011.955-11.955A11.955 11.955 0 0011.955.49zm-.414 7.41l2.36 7.51-5.14-3.732 2.78-3.778zm.828 0l2.78 3.778-5.14 3.731 2.36-7.51zm-5.42 4.902l4.87 3.538-1.987 1.43-2.883-4.968zm10.012 0l-2.883 4.967-1.987-1.43 4.87-3.537zM8.04 18.16l2.055-1.48.912 2.9L8.04 18.16zm7.84 0l-2.967 1.42.912-2.9 2.055 1.48z" />
+						{:else}
+							<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+						{/if}
+					</svg>
+					{resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
+				</span>
+				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Last activity {formatDate(details.updated_at)}</span>
 			</div>
-		</section>
 
-		<!-- Stats Cards Grid -->
-		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<!-- Stats grid -->
+			<div class="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-4">
 			<!-- Repository Stats -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repository</h3>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
@@ -588,7 +605,7 @@
 			</div>
 
 			<!-- Vulnerabilities -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
@@ -611,7 +628,7 @@
 			</div>
 
 			<!-- Secrets & Issues -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Secrets & Issues</h3>
 				<div class="space-y-2">
 					<div class="flex items-center justify-between">
@@ -642,7 +659,7 @@
 			</div>
 
 			<!-- Components -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Dependencies</h3>
 				<div class="flex items-center gap-4">
 					<Package class="h-10 w-10 text-[var(--accent)]" />
@@ -675,7 +692,8 @@
 					{/if}
 				</div>
 			</div>
-		</div>
+			</div>
+		</article>
 
 		<!-- Recent Runs -->
 		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
