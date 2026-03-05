@@ -23,6 +23,8 @@ type RepoSearchResult struct {
 type RepoSearchResponse struct {
 	Query   string             `json:"query"`
 	Results []RepoSearchResult `json:"results"`
+	HasMore bool               `json:"has_more"`
+	Offset  int                `json:"offset"`
 }
 
 // RepoSearchHandler performs fuzzy search over repos by slug and org name.
@@ -44,8 +46,13 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		limit := 20
-		if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
+		if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 200 {
 			limit = l
+		}
+
+		offset := 0
+		if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o > 0 {
+			offset = o
 		}
 
 		var rows []RepoSearchResult
@@ -72,8 +79,8 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			)
 			AND pi.id IS NOT NULL
 			ORDER BY score DESC, r.org ASC, r.slug ASC
-			LIMIT ?
-		`, q, q, q, q, q, q, limit).Scan(&rows).Error
+			LIMIT ? OFFSET ?
+		`, q, q, q, q, q, q, limit, offset).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "search failed", http.StatusInternalServerError)
 			return
@@ -86,6 +93,8 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		writeJSON(w, http.StatusOK, RepoSearchResponse{
 			Query:   q,
 			Results: rows,
+			HasMore: len(rows) == limit,
+			Offset:  offset,
 		})
 	}
 }

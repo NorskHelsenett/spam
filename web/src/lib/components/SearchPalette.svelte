@@ -53,11 +53,15 @@
 	let repoResults = $state<RepoResult[]>([]);
 	let componentResults = $state<ComponentResult[]>([]);
 	let loading = $state(false);
+	let loadingMore = $state(false);
+	let hasMore = $state(false);
+	let repoOffset = $state(0);
 	let selectedIndex = $state(0);
 	let repoPreview = $state<RepoPreview | null>(null);
 	let contributors = $state<Contributor[]>([]);
 	let previewLoading = $state(false);
 	let inputEl: HTMLInputElement | undefined = $state();
+	let resultsListEl: HTMLDivElement | undefined = $state();
 
 	const previewCache = new Map<string, RepoPreview>();
 	const contributorsCache = new Map<string, Contributor[]>();
@@ -80,6 +84,8 @@
 
 	const hasResults = $derived(flatItems.length > 0);
 
+	const LIMIT = 30;
+
 	const close = () => {
 		open = false;
 		query = '';
@@ -88,6 +94,8 @@
 		repoPreview = null;
 		contributors = [];
 		selectedIndex = 0;
+		hasMore = false;
+		repoOffset = 0;
 	};
 
 	const search = async (q: string) => {
@@ -95,17 +103,22 @@
 			repoResults = [];
 			componentResults = [];
 			repoPreview = null;
+			hasMore = false;
+			repoOffset = 0;
 			return;
 		}
 		loading = true;
+		repoOffset = 0;
 		try {
 			const [repoRes, compRes] = await Promise.all([
-				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=30`),
+				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=${LIMIT}&offset=0`),
 				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=20`)
 			]);
 			if (repoRes.ok) {
 				const data = await repoRes.json();
 				repoResults = data.results ?? [];
+				hasMore = data.has_more ?? false;
+				repoOffset = repoResults.length;
 			}
 			if (compRes.ok) {
 				const data = await compRes.json();
@@ -116,6 +129,37 @@
 			loading = false;
 		}
 	};
+
+	const loadMore = async () => {
+		if (loadingMore || !hasMore || !query.trim()) return;
+		loadingMore = true;
+		try {
+			const res = await fetch(`/api/repos/search?q=${encodeURIComponent(query)}&limit=${LIMIT}&offset=${repoOffset}`);
+			if (res.ok) {
+				const data = await res.json();
+				repoResults = [...repoResults, ...(data.results ?? [])];
+				hasMore = data.has_more ?? false;
+				repoOffset += data.results?.length ?? 0;
+			}
+		} finally {
+			loadingMore = false;
+		}
+	};
+
+	const handleResultsScroll = () => {
+		if (!resultsListEl || loadingMore || !hasMore) return;
+		const { scrollTop, scrollHeight, clientHeight } = resultsListEl;
+		if (scrollHeight - scrollTop - clientHeight < 80) {
+			loadMore();
+		}
+	};
+
+	// Trigger load more when keyboard navigation reaches near the end of results
+	$effect(() => {
+		if (hasMore && !loadingMore && selectedIndex >= flatItems.length - 5) {
+			loadMore();
+		}
+	});
 
 	const fetchRepoPreview = (result: RepoResult) => {
 		const key = result.id;
@@ -314,7 +358,7 @@
 				<div class="flex">
 
 					<!-- Left: results list -->
-					<div class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
+					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped] as [, group]}
@@ -368,6 +412,7 @@
 								</button>
 							{/each}
 						{/if}
+
 					</div>
 
 					<!-- Right: preview panel -->
