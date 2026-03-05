@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -466,6 +467,71 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+// ActiveRunStatus is the minimal status payload streamed to clients.
+type ActiveRunStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// RunsActiveStreamHandler streams the status of all active (QUEUED/RUNNING) runs via SSE.
+// A single connection from the list page replaces per-run SSE streams.
+// GET /api/runs/active/stream
+func RunsActiveStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		send := func() bool {
+			var active []ActiveRunStatus
+			if err := db.WithContext(r.Context()).Table("jobs").
+				Where("type = ? AND status IN ?", jobs.JobTypeCreateRun, []string{
+					string(jobs.JobStatusQueued),
+					string(jobs.JobStatusRunning),
+				}).
+				Select("id, status, error").
+				Order("created_at DESC").
+				Find(&active).Error; err != nil {
+				return r.Context().Err() == nil
+			}
+			data, _ := json.Marshal(active)
+			fmt.Fprintf(w, "event: active_runs\ndata: %s\n\n", data)
+			flusher.Flush()
+			return true
+		}
+
+		if !send() {
+			return
+		}
+
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if !send() {
+					return
+				}
+			}
+		}
 	}
 }
 

@@ -55,102 +55,17 @@
 	let sortField = $state<SortField>('created');
 	let sortDirection = $state<SortDirection>('desc');
 
-	const runStreams = new Map<string, EventSource>();
 	let loadRunsInFlight = false;
 	let loadRunsQueued = false;
-	let sseReloadTimer: ReturnType<typeof setTimeout> | null = null;
-	let fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
 
-	const closeRunStream = (id: string) => {
-		const stream = runStreams.get(id);
-		if (!stream) return;
-		stream.close();
-		runStreams.delete(id);
-	};
-
-	const closeAllRunStreams = () => {
-		for (const id of runStreams.keys()) {
-			closeRunStream(id);
-		}
-	};
-
-	/** Debounced reload: coalesces multiple SSE-triggered reloads into one call. */
-	const scheduleReload = () => {
-		if (sseReloadTimer) return; // already scheduled
-		sseReloadTimer = setTimeout(() => {
-			sseReloadTimer = null;
-			loadRuns();
-		}, 1000);
-	};
-
-	const handleRunStatusEvent = (runId: string, data: { status?: string; error?: string }) => {
-		if (!data.status) return;
-		const nextStatus = data.status;
-
-		let changed = false;
-		runs = runs.map((run) => {
-			if (run.id !== runId) return run;
-			if (run.status === nextStatus && (!data.error || data.error === run.error)) {
-				return run;
-			}
-			changed = true;
-			return {
-				...run,
-				status: nextStatus,
-				error: data.error ?? run.error
-			};
-		});
-
-		if (!changed) return;
-
-		if (!isActiveRunStatus(nextStatus)) {
-			closeRunStream(runId);
-			// Only re-fetch from the API when a run reaches a terminal state
-			// (counts and filtered rows change). Debounce so multiple completions
-			// within the same second are coalesced into a single request.
-			scheduleReload();
-		}
-	};
-
-	const syncRunStreams = () => {
-		if (!browser) return;
-
-		const activeRunIds = new Set(runs.filter((run) => isActiveRunStatus(run.status)).map((run) => run.id));
-
-		for (const id of runStreams.keys()) {
-			if (!activeRunIds.has(id)) {
-				closeRunStream(id);
-			}
-		}
-
-		for (const run of runs) {
-			if (!isActiveRunStatus(run.status) || runStreams.has(run.id)) {
-				continue;
-			}
-
-			try {
-				const eventSource = new EventSource(`/api/runs/${run.id}/stream`, { withCredentials: true });
-				eventSource.addEventListener('status', (event) => {
-					try {
-						const payload = JSON.parse(event.data) as { status?: string; error?: string };
-						handleRunStatusEvent(run.id, payload);
-					} catch {
-						// Ignore malformed events and keep listening.
-					}
-				});
-				eventSource.onerror = () => {
-					closeRunStream(run.id);
-					// Reconnect: reload the runs list which calls syncRunStreams
-					// and re-opens the stream for still-active runs.
-					scheduleReload();
-				};
-				runStreams.set(run.id, eventSource);
-			} catch {
-				// Ignore SSE connection setup errors; periodic polling remains as fallback.
-			}
-		}
+	/** Restart the polling interval based on whether there are active runs. */
+	const reschedulePoll = () => {
+		if (pollTimer) clearInterval(pollTimer);
+		const hasActive = runs.some((r) => isActiveRunStatus(r.status));
+		pollTimer = setInterval(loadRuns, hasActive ? 5_000 : 30_000);
 	};
 
 	const getStatusQuery = () =>
@@ -179,7 +94,7 @@
 			const data: RunsResponse = await response.json();
 			runs = data.runs;
 			totalCount = data.total_count;
-			syncRunStreams();
+			reschedulePoll();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load runs';
 		} finally {
@@ -217,17 +132,44 @@
 		}, 300);
 	};
 
+	let activeRunStream: EventSource | null = null;
+
+	const startActiveRunStream = () => {
+		if (!browser || activeRunStream) return;
+		activeRunStream = new EventSource('/api/runs/active/stream', { withCredentials: true });
+		activeRunStream.addEventListener('active_runs', (event) => {
+			try {
+				const active = JSON.parse(event.data) as Array<{ id: string; status: string; error?: string }>;
+				const activeById = new Map(active.map((r) => [r.id, r]));
+				let needsReload = false;
+				runs = runs.map((run) => {
+					const update = activeById.get(run.id);
+					if (!update || update.status === run.status) return run;
+					if (isActiveRunStatus(run.status) && !isActiveRunStatus(update.status)) {
+						needsReload = true;
+					}
+					return { ...run, status: update.status, error: update.error ?? run.error };
+				});
+				if (needsReload && !loadRunsInFlight) {
+					setTimeout(loadRuns, 500);
+				}
+			} catch {
+				// ignore malformed events
+			}
+		});
+	};
+
+	const stopActiveRunStream = () => {
+		if (activeRunStream) {
+			activeRunStream.close();
+			activeRunStream = null;
+		}
+	};
+
 	onMount(() => {
 		if (!browser) return;
 		loadRuns();
-
-		// Fallback poll: reconcile state every 30 s in case all SSE streams
-		// drop silently (e.g. proxy timeout, network hiccup).
-		fallbackPollInterval = setInterval(loadRuns, 30_000);
-
-		return () => {
-			closeAllRunStreams();
-		};
+		startActiveRunStream();
 	});
 
 	onDestroy(() => {
@@ -235,15 +177,11 @@
 			clearTimeout(searchDebounce);
 			searchDebounce = null;
 		}
-		if (sseReloadTimer) {
-			clearTimeout(sseReloadTimer);
-			sseReloadTimer = null;
+		if (pollTimer) {
+			clearInterval(pollTimer);
+			pollTimer = null;
 		}
-		if (fallbackPollInterval) {
-			clearInterval(fallbackPollInterval);
-			fallbackPollInterval = null;
-		}
-		closeAllRunStreams();
+		stopActiveRunStream();
 	});
 
 	const getStatusIcon = (status: string) => {

@@ -45,6 +45,27 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// Health check endpoint without middleware to avoid noise in logs
 	r.Get("/api/healthz", health.Handler(db))
 
+	// SSE / long-lived streaming endpoints — registered without the 60 s timeout
+	// so the server doesn't kill the connection mid-stream.
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.RequestID)
+		r.Use(middleware.RealIP)
+		r.Use(middleware.Logger)
+		r.Use(middleware.Recoverer)
+
+		if authService != nil {
+			r.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
+			r.Get("/api/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
+			r.Get("/api/runs/active/stream", uiapi.RunsActiveStreamHandler(db, authService))
+			r.Get("/api/runs/{id}/stream", uiapi.RunStreamHandler(db, authService, func() *runner.K8sClient {
+				if opts != nil {
+					return opts.K8sClient
+				}
+				return nil
+			}()))
+		}
+	})
+
 	// Apply middleware to all other routes
 	r.Group(func(r chi.Router) {
 		r.Use(middleware.RequestID)
@@ -61,8 +82,6 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 					authRouter.Get("/me", authService.MeHandler())
 					authRouter.Post("/logout", authService.LogoutHandler())
 				})
-				api.Get("/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
-				api.Get("/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
 				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
 				api.Get("/sboms/{id}", uiapi.SBOMGetHandler(db, authService))
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
@@ -119,12 +138,6 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
 				api.Post("/scan-all", uiapi.ScanAllHandler(db, authService))
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
-				api.Get("/runs/{id}/stream", uiapi.RunStreamHandler(db, authService, func() *runner.K8sClient {
-					if opts != nil {
-						return opts.K8sClient
-					}
-					return nil
-				}()))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
 				// Kubernetes integration endpoints (only available if runner is enabled)
