@@ -232,9 +232,10 @@ func run() error {
 				default:
 				}
 
-				// Determine which job types to claim based on running runs and circuit breaker
+				// Determine which job types to claim based on running runs.
+				// Per-provider circuit breaking is handled in processJob itself.
 				var excludeTypes []jobs.JobType
-				if runningRuns >= int64(cfg.Concurrency) || isCircuitOpen() {
+				if runningRuns >= int64(cfg.Concurrency) {
 					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
 				}
 
