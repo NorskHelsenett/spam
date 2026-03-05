@@ -165,7 +165,7 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		SELECT
 			(SELECT COUNT(*) FROM sbom_bindings) AS sbom_count,
 			(SELECT COUNT(*) FROM repos) AS repo_count,
-			(SELECT COUNT(DISTINCT m.repo_id) FROM sbom_metadata_view m INNER JOIN sbom_bindings sb ON sb.sbom_id = m.sbom_id WHERE m.repo_id IS NOT NULL) AS repo_with_sbom_count,
+			(SELECT COUNT(DISTINCT repo_id) FROM sbom_metadata_view WHERE repo_id IS NOT NULL) AS repo_with_sbom_count,
 			(SELECT COUNT(*) FROM image_digests) AS image_count,
 			cs.component_count,
 			cs.component_version_count,

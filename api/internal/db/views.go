@@ -118,40 +118,58 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
 // It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one
 // instance performs the refresh — others skip rather than queue up behind it.
-// CONCURRENTLY is used so reads are not blocked during the refresh.
+// CONCURRENTLY is used so reads are not blocked during the refresh, but it must run
+// outside a transaction block, so a session-level advisory lock is used instead.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
-	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var acquired bool
-		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", sbomViewRefreshLockID).Scan(&acquired).Error; err != nil {
-			return fmt.Errorf("acquire refresh lock: %w", err)
-		}
-		if !acquired {
-			log.Printf("skipping materialized view refresh: another replica holds the lock")
-			return nil
-		}
+	// Session-level advisory lock: must acquire and release on the same connection.
+	sqlDB, err := db.WithContext(ctx).DB()
+	if err != nil {
+		return fmt.Errorf("get raw db: %w", err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire db connection: %w", err)
+	}
+	defer conn.Close()
 
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_component_view").Error; err != nil {
-			return fmt.Errorf("refresh sbom_component_view: %w", err)
-		}
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_metadata_view").Error; err != nil {
-			return fmt.Errorf("refresh sbom_metadata_view: %w", err)
-		}
-
-		refreshedAt := time.Now().UTC()
-		if err := tx.Exec(`
-			INSERT INTO materialized_view_refreshes (name, refreshed_at)
-			VALUES
-				('sbom_component_view', ?),
-				('sbom_metadata_view', ?)
-			ON CONFLICT (name)
-			DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-		`, refreshedAt, refreshedAt).Error; err != nil {
-			return fmt.Errorf("record refresh: %w", err)
-		}
-
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", sbomViewRefreshLockID).Scan(&acquired); err != nil {
+		return fmt.Errorf("acquire refresh lock: %w", err)
+	}
+	if !acquired {
+		log.Printf("skipping materialized view refresh: another replica holds the lock")
 		return nil
-	}); err != nil {
-		return err
+	}
+	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
+
+	var populated bool
+	if err := db.WithContext(ctx).Raw(
+		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN ('sbom_component_view', 'sbom_metadata_view')",
+	).Scan(&populated).Error; err != nil {
+		return fmt.Errorf("check view population: %w", err)
+	}
+
+	refresh := "REFRESH MATERIALIZED VIEW CONCURRENTLY"
+	if !populated {
+		refresh = "REFRESH MATERIALIZED VIEW"
+	}
+	if err := db.WithContext(ctx).Exec(refresh + " sbom_component_view").Error; err != nil {
+		return fmt.Errorf("refresh sbom_component_view: %w", err)
+	}
+	if err := db.WithContext(ctx).Exec(refresh + " sbom_metadata_view").Error; err != nil {
+		return fmt.Errorf("refresh sbom_metadata_view: %w", err)
+	}
+
+	refreshedAt := time.Now().UTC()
+	if err := db.WithContext(ctx).Exec(`
+		INSERT INTO materialized_view_refreshes (name, refreshed_at)
+		VALUES
+			('sbom_component_view', ?),
+			('sbom_metadata_view', ?)
+		ON CONFLICT (name)
+		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+	`, refreshedAt, refreshedAt).Error; err != nil {
+		return fmt.Errorf("record refresh: %w", err)
 	}
 
 	return nil
