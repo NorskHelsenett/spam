@@ -41,7 +41,6 @@ type AppSummarySBOM struct {
 	AssetType      string    `json:"asset_type"`
 	RepoID         string    `json:"repo_id,omitempty"`
 	RepoName       string    `json:"repo_name,omitempty"`
-	RepoProvider   string    `json:"repo_provider,omitempty"`
 	CommitSHA      string    `json:"commit_sha,omitempty"`
 	ImageRegistry  string    `json:"image_registry,omitempty"`
 	ImageRepo      string    `json:"image_repository,omitempty"`
@@ -201,14 +200,12 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			m.asset_type,
 			COALESCE(m.repo_id::text, '') AS repo_id,
 			COALESCE(m.repo_name, '') AS repo_name,
-			COALESCE(rp.provider, '') AS repo_provider,
 			COALESCE(m.commit_sha, '') AS commit_sha,
 			COALESCE(m.image_registry, '') AS image_registry,
 			COALESCE(m.image_repository, '') AS image_repository,
 			COALESCE(m.image_digest, '') AS image_digest,
 			COALESCE(lib.component_count, 0) AS component_count
 		FROM sbom_metadata_view m
-		LEFT JOIN repos rp ON rp.id = m.repo_id
 		LEFT JOIN (
 			SELECT sbom_id, COUNT(*) AS component_count
 			FROM sbom_component_view
