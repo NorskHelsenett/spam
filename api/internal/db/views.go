@@ -160,9 +160,15 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	return populated, err
 }
 
+// ErrRefreshLockHeld is returned by RefreshMaterializedViews when another
+// process holds the advisory lock. Callers should treat this as a transient
+// condition and retry rather than silently succeeding.
+var ErrRefreshLockHeld = errors.New("materialized view refresh lock held by another process")
+
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
 // It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one
-// instance performs the refresh — others skip rather than queue up behind it.
+// instance performs the refresh at a time. If the lock is already held, it returns
+// ErrRefreshLockHeld so the caller can retry after the current refresh completes.
 // CONCURRENTLY is used so reads are not blocked during the refresh, but it must run
 // outside a transaction block, so a session-level advisory lock is used instead.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
@@ -182,8 +188,8 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("acquire refresh lock: %w", err)
 	}
 	if !acquired {
-		log.Printf("skipping materialized view refresh: another replica holds the lock")
-		return nil
+		log.Printf("refresh lock held by another process, will retry")
+		return ErrRefreshLockHeld
 	}
 	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
 
