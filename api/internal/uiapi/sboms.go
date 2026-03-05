@@ -317,6 +317,44 @@ func detectSBOMFormat(payload []byte) string {
 	return ""
 }
 
+// cycloneDXComponent holds the fields extracted from a CycloneDX component
+// entry, mirroring what the sbom_component_view materialized view computes in SQL.
+type cycloneDXComponent struct {
+	BomRef  string
+	Purl    string
+	Name    string
+	Version string
+	Type    string
+}
+
+// extractCycloneDXComponents parses a CycloneDX JSON SBOM and returns the
+// list of components declared in the top-level "components" array.
+func extractCycloneDXComponents(payload []byte) ([]cycloneDXComponent, error) {
+	var doc struct {
+		Components []struct {
+			BomRef  string `json:"bom-ref"`
+			Purl    string `json:"purl"`
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Type    string `json:"type"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return nil, err
+	}
+	out := make([]cycloneDXComponent, 0, len(doc.Components))
+	for _, c := range doc.Components {
+		out = append(out, cycloneDXComponent{
+			BomRef:  c.BomRef,
+			Purl:    c.Purl,
+			Name:    c.Name,
+			Version: c.Version,
+			Type:    c.Type,
+		})
+	}
+	return out, nil
+}
+
 // SBOMDownloadHandler downloads an SBOM by ID.
 // GET /api/sboms/{id}/download
 func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
