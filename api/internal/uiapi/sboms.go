@@ -338,6 +338,39 @@ type cycloneDXComponent struct {
 	Type    string
 }
 
+// countComponentsFromContent parses raw SBOM bytes and returns the component
+// count without relying on the materialized view. Used as a fallback when the
+// view has not yet been refreshed after a run completes.
+func countComponentsFromContent(format string, content []byte) int {
+	if len(content) == 0 {
+		return 0
+	}
+	switch format {
+	case "cyclonedx-json":
+		components, err := extractCycloneDXComponents(content)
+		if err != nil {
+			return 0
+		}
+		return len(components)
+	case "spdx-json":
+		var doc struct {
+			Packages []struct{} `json:"packages"`
+		}
+		if err := json.Unmarshal(content, &doc); err != nil {
+			return 0
+		}
+		// Exclude the root "describes" package by subtracting 1 when present.
+		// A well-formed SPDX document always has at least one root package, so
+		// non-root packages are those beyond the first.
+		n := len(doc.Packages)
+		if n > 1 {
+			return n - 1
+		}
+		return n
+	}
+	return 0
+}
+
 // extractCycloneDXComponents parses a CycloneDX JSON SBOM and returns the
 // list of components declared in the top-level "components" array.
 func extractCycloneDXComponents(payload []byte) ([]cycloneDXComponent, error) {
@@ -420,14 +453,18 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// Count components linked to this SBOM (from materialized view)
+		// Count components from the materialized view; fall back to parsing the
+		// raw content when the view has not yet been refreshed (e.g. immediately
+		// after a run completes and the refresh job is still queued).
 		var componentCount int64
 		if err := db.WithContext(r.Context()).
 			Table("sbom_component_view").
 			Where("sbom_id = ? AND is_root = false", sbomID).
 			Count(&componentCount).Error; err != nil {
 			log.Printf("failed to count sbom components: %v", err)
-			componentCount = 0
+		}
+		if componentCount == 0 {
+			componentCount = int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
