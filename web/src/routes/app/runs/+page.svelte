@@ -42,7 +42,7 @@
 		statuses: string[];
 	};
 
-	type SortField = 'provider' | 'duration' | 'created';
+	type SortField = 'status' | 'provider' | 'duration' | 'created';
 	type SortDirection = 'asc' | 'desc';
 
 	const runFilters: RunFilter[] = [
@@ -63,8 +63,8 @@
 	let searchInput = $state('');
 	let searchTerm = $state('');
 	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
-	let sortField = $state<SortField>('created');
-	let sortDirection = $state<SortDirection>('desc');
+	let sortField = $state<SortField>('status');
+	let sortDirection = $state<SortDirection>('asc');
 
 	let loadRunsInFlight = false;
 	let loadRunsQueued = false;
@@ -264,18 +264,17 @@
 	const statusPriority = (status: string) => {
 		if (status === 'RUNNING') return 0;
 		if (status === 'QUEUED') return 1;
-		return 2;
+		if (status === 'FAILED') return 2;
+		return 3;
 	};
 
 	const sortedRuns = $derived.by(() => {
 		const sorted = [...runs];
 		sorted.sort((a, b) => {
-			if (selectedFilter.id === 'all') {
-				const priorityDiff = statusPriority(a.status) - statusPriority(b.status);
-				if (priorityDiff !== 0) return priorityDiff;
-			}
 			let compare = 0;
-			if (sortField === 'provider') {
+			if (sortField === 'status') {
+				compare = statusPriority(a.status) - statusPriority(b.status);
+			} else if (sortField === 'provider') {
 				compare = (a.provider || '').localeCompare(b.provider || '', undefined, { sensitivity: 'base' });
 			} else if (sortField === 'duration') {
 				compare = durationMs(a) - durationMs(b);
@@ -294,6 +293,7 @@
 		}
 		sortField = field;
 		sortDirection = field === 'created' ? 'desc' : 'asc';
+		// status sort: asc = running first (priority 0→3), desc = finished first
 	};
 
 	const sortIndicator = (field: SortField) => {
@@ -370,7 +370,11 @@
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
-								<th class="px-5 py-3 text-left">Status</th>
+								<th class="px-5 py-3 text-left">
+									<button type="button" class="sort-btn" onclick={() => toggleSort('status')}>
+										Status {sortIndicator('status')}
+									</button>
+								</th>
 								<th class="px-5 py-3 text-left">Repository</th>
 								<th class="px-5 py-3 text-left">
 									<button type="button" class="sort-btn" onclick={() => toggleSort('provider')}>
