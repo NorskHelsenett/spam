@@ -17,6 +17,7 @@
 		created_at: string;
 		started_at?: string;
 		finished_at?: string;
+		retry_at?: string;
 		k8s_job_name?: string;
 	};
 
@@ -423,7 +424,7 @@
 							{#if run.error}
 								<tr class="bg-[var(--error)]/5">
 									<td colspan="6" class="px-5 py-2 text-xs text-[var(--error)]">
-										Error: {run.error}
+										Error: {run.error}{#if run.retry_at} — retry at {new Date(run.retry_at).toLocaleTimeString()}{/if}
 									</td>
 								</tr>
 							{/if}

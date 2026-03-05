@@ -101,12 +101,13 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			CreatedAt  time.Time
 			LockedAt   *time.Time
 			FinishedAt *time.Time
-			K8sJobName string `gorm:"column:k8s_job_name"`
+			RunAt      time.Time `gorm:"column:run_at"`
+			K8sJobName string    `gorm:"column:k8s_job_name"`
 			Result     []byte
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name, result").
+		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
 			Order("created_at DESC").
 			Offset(offset).
 			Limit(pageSize).
@@ -165,6 +166,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 			status := job.Status
 			errorText := job.Error
+			var retryAt *time.Time
+			if status == string(jobs.JobStatusRetry) && job.RunAt.After(time.Now()) {
+				t := job.RunAt
+				retryAt = &t
+			}
 			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
 				if resultMap, err := parseRunResultMap(job.Result); err == nil {
 					events, podStatus, ok, _ := loadPersistedK8sSnapshotFromResult(resultMap)
@@ -195,6 +201,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				CreatedAt:  job.CreatedAt,
 				StartedAt:  job.LockedAt,
 				FinishedAt: job.FinishedAt,
+				RetryAt:    retryAt,
 				K8sJobName: job.K8sJobName,
 			})
 		}
