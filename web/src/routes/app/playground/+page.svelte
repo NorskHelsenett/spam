@@ -209,6 +209,28 @@
 			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
+			<button
+				type="button"
+				class="mt-auto mb-4 ml-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
+				style="color: var(--accent);"
+			>
+				Open repository
+				<svg
+					xmlns="http://www.w3.org/2000/svg"
+					width="11"
+					height="11"
+					viewBox="0 0 24 24"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					class="lucide-icon lucide lucide-arrow-right"
+				>
+					<path d="M5 12h14"></path>
+					<path d="m12 5 7 7-7 7"></path>
+				</svg>
+			</button>
 			<button type="button" class="btn btn-ghost" onclick={handleRefresh} disabled={refreshing}>
 				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
 					<RotateCw size={14} />
