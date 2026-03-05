@@ -5,9 +5,10 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe
+		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe, Cog
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -357,6 +358,7 @@
 	};
 
 	// Scan functionality
+	let activeTab = $state('runs');
 	let scanning = $state(false);
 	let scanError = $state('');
 	let activeRunId = $state<string | null>(null);
@@ -691,119 +693,130 @@
 				</div>
 			</div>
 			</div>
-		</article>
+			<!-- Activity Tabs -->
+			<div class="pt-4">
+					<TabSelector
+						options={[
+							{ value: 'runs', label: 'Runs' },
+							{ value: 'commits', label: 'Commits' },
+							{ value: 'contributors', label: 'Contributors' }
+						]}
+						bind:value={activeTab}
+					/>
 
-		<!-- Recent Runs -->
-		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Runs</h2>
-				{#if totalRuns > 0}
-					<span class="text-xs text-[var(--text-muted)]">{totalRuns} total</span>
-				{/if}
-			</div>
-			{#if runTimeline.length === 0}
-				<p class="text-sm text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
-			{:else}
-				<div class="space-y-3">
-					{#each runTimeline as run}
-						<a href="/app/runs/{run.id}" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]">
-							<div class="min-w-0 space-y-1">
-								<div class="flex items-center gap-2">
-									<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
-										{run.status}
-									</span>
-									<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
-									{#if run.duration_ms}
-										<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
-									{/if}
+					<div class="mt-[2em]">
+					{#if activeTab === 'runs'}
+						<div class="space-y-2">
+							{#if totalRuns > 0}
+								<p class="text-xs text-[var(--text-muted)]">{totalRuns} total runs</p>
+							{/if}
+							{#if runTimeline.length === 0}
+								<div class="flex flex-col items-center justify-center py-8">
+									<Cog class="h-8 w-8 text-[var(--text-muted)] mb-2" />
+									<p class="text-sm text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
 								</div>
-								{#if run.commit_sha}
-									<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
-								{/if}
-							</div>
-							{#if run.artifacts && run.artifacts.length > 0}
-								<div class="flex flex-wrap gap-2 text-xs">
-									{#each run.artifacts as artifact}
-										<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
-											{artifact.toUpperCase()}
-										</span>
+							{:else}
+								<div class="space-y-3">
+									{#each runTimeline as run}
+										<a href="/app/runs/{run.id}" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]">
+											<div class="min-w-0 space-y-1">
+												<div class="flex items-center gap-2">
+													<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
+														{run.status}
+													</span>
+													<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
+													{#if run.duration_ms}
+														<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
+													{/if}
+												</div>
+												{#if run.commit_sha}
+													<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
+												{/if}
+											</div>
+											{#if run.artifacts && run.artifacts.length > 0}
+												<div class="flex flex-wrap gap-2 text-xs">
+													{#each run.artifacts as artifact}
+														<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
+															{artifact.toUpperCase()}
+														</span>
+													{/each}
+												</div>
+											{/if}
+										</a>
 									{/each}
 								</div>
 							{/if}
-						</a>
-					{/each}
-				</div>
-			{/if}
-		</section>
-
-		<!-- Recent Commits -->
-		{#if commits.length > 0}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Commits</h2>
-				<div class="space-y-2">
-					{#each commits as commit}
-						<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
-							{#if commit.author_avatar}
-								<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
-							{:else}
-								<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-xs font-medium text-[var(--accent)]">
-									{commit.author_name.charAt(0).toUpperCase()}
-								</div>
-							{/if}
-							<div class="min-w-0 flex-1">
-								<div class="flex items-center gap-2">
-									{#if commit.commit_url}
-										<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-											{commit.message}
-										</a>
-									{:else}
-										<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
-									{/if}
-								</div>
-								<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
-									<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
-									<span>{commit.author_login || commit.author_name}</span>
-									<span>committed {formatDate(commit.author_date)}</span>
-								</div>
-							</div>
 						</div>
-					{/each}
-				</div>
-			</section>
-		{/if}
-
-		<!-- Contributors -->
-		{#if contributors.length > 0}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Contributors</h2>
-				<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-					{#each contributors as contributor}
-						<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
-							{#if contributor.avatar_url}
-								<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
-							{:else}
-								<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
-									{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
-								</div>
-							{/if}
-							<div class="min-w-0 flex-1">
-								{#if contributor.profile_url}
-									<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-										{contributor.login || contributor.name || contributor.email}
-									</a>
-								{:else}
-									<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
-								{/if}
-								{#if contributor.email}
-									<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
-								{/if}
-								<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+					{:else if activeTab === 'commits'}
+						{#if commits.length === 0}
+							<p class="text-sm text-[var(--text-muted)]">No commits available.</p>
+						{:else}
+							<div class="space-y-2">
+								{#each commits as commit}
+									<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+										{#if commit.author_avatar}
+											<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
+										{:else}
+											<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-xs font-medium text-[var(--accent)]">
+												{commit.author_name.charAt(0).toUpperCase()}
+											</div>
+										{/if}
+										<div class="min-w-0 flex-1">
+											<div class="flex items-center gap-2">
+												{#if commit.commit_url}
+													<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+														{commit.message}
+													</a>
+												{:else}
+													<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
+												{/if}
+											</div>
+											<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+												<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
+												<span>{commit.author_login || commit.author_name}</span>
+												<span>committed {formatDate(commit.author_date)}</span>
+											</div>
+										</div>
+									</div>
+								{/each}
 							</div>
-						</div>
-					{/each}
-				</div>
-			</section>
-		{/if}
+						{/if}
+					{:else if activeTab === 'contributors'}
+						{#if contributors.length === 0}
+							<p class="text-sm text-[var(--text-muted)]">No contributors available.</p>
+						{:else}
+							<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+								{#each contributors as contributor}
+									<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+										{#if contributor.avatar_url}
+											<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
+										{:else}
+											<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
+												{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
+											</div>
+										{/if}
+										<div class="min-w-0 flex-1">
+											{#if contributor.profile_url}
+												<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+													{contributor.login || contributor.name || contributor.email}
+												</a>
+											{:else}
+												<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
+											{/if}
+											{#if contributor.email}
+												<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
+											{/if}
+											<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					{/if}
+					</div>
+			</div>
+		</article>
+
 
 		<!-- README -->
 		{#if readme}
