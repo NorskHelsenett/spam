@@ -9,6 +9,8 @@
 		status: string;
 		clone_url: string;
 		provider: string;
+		provider_id?: string;
+		repo_id?: string;
 		repo_path: string;
 		ref?: string;
 		error?: string;
@@ -16,6 +18,15 @@
 		started_at?: string;
 		finished_at?: string;
 		k8s_job_name?: string;
+	};
+
+	const getRepoUrl = (run: Run): string => {
+		if (run.repo_id) {
+			const params = new URLSearchParams({ repo_id: run.repo_id });
+			if (run.provider_id) params.set('provider_id', run.provider_id);
+			return `/app/providers/repo?${params}`;
+		}
+		return `/app/runs/${run.id}`;
 	};
 
 	type RunsResponse = {
@@ -380,7 +391,11 @@
 									</span>
 								</td>
 								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
-									{run.repo_path || run.clone_url}
+									<a
+										href={getRepoUrl(run)}
+										class="hover:text-[var(--accent)] hover:underline"
+										onclick={(e) => e.stopPropagation()}
+									>{run.repo_path || run.clone_url}</a>
 								</td>
 								<td class="px-5 py-3">{run.provider || '-'}</td>
 								<td class="px-5 py-3">{run.ref || 'default'}</td>

@@ -145,7 +145,18 @@
 	};
 
 	const fetchRepoDetails = async () => {
-		const { provider, path, baseUrl, providerId } = getParams();
+		let { provider, path, baseUrl, providerId, repoDbId } = getParams();
+
+		// When only repo_id is provided, resolve path and provider info from metadata
+		if (repoDbId && !path) {
+			const meta = await fetchRepoMetadata(repoDbId);
+			if (meta) {
+				path = `${meta.repo.org}/${meta.repo.slug}`;
+				providerId = providerId || meta.repo.provider_id || '';
+				baseUrl = baseUrl || meta.repo.provider_base_url || '';
+			}
+		}
+
 		if (!path) {
 			error = 'No repository path specified.';
 			loading = false;

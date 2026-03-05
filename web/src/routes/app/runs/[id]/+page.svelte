@@ -12,6 +12,7 @@
 		clone_url: string;
 		provider: string;
 		provider_id?: string;
+		repo_id?: string;
 		base_url?: string;
 		repo_path: string;
 		ref?: string;
@@ -483,6 +484,11 @@
 	};
 
 	const getInternalRepoUrl = (run: Run): string | null => {
+		if (run.repo_id) {
+			const params = new URLSearchParams({ repo_id: run.repo_id });
+			if (run.provider_id) params.set('provider_id', run.provider_id);
+			return `/app/providers/repo?${params}`;
+		}
 		const repoPath = run.repo_path || extractRepoPath(run.clone_url);
 		if (!repoPath) return null;
 		const provider = run.provider?.toLowerCase() || 'github';

@@ -25,6 +25,7 @@ type RunResponse struct {
 	CloneURL   string     `json:"clone_url"`
 	Provider   string     `json:"provider"`
 	ProviderID string     `json:"provider_id,omitempty"`
+	RepoID     string     `json:"repo_id,omitempty"`
 	BaseURL    string     `json:"base_url,omitempty"`
 	RepoPath   string     `json:"repo_path"`
 	Ref        string     `json:"ref,omitempty"`
@@ -181,6 +182,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				CloneURL:   payload.CloneURL,
 				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
 				ProviderID: payload.ProviderID,
+				RepoID:     payload.RepoID,
 				BaseURL:    providerBaseURLs[payload.ProviderID],
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
@@ -415,6 +417,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,
 			ProviderID: payload.ProviderID,
+			RepoID:     payload.RepoID,
 			RepoPath:   extractRepoPath(payload.CloneURL),
 			Ref:        payload.Ref,
 			CommitSHA:  job.CommitHash,
