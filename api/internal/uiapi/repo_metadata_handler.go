@@ -128,7 +128,7 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID strin
 		query = query.Where("payload::text LIKE ?", "%"+org+"/"+slug+"%")
 	}
 
-	query.Count(&response.Total)
+	query.Where("finished_at IS NOT NULL").Count(&response.Total)
 
 	var rows []struct {
 		ID         string

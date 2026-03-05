@@ -299,6 +299,18 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
+		// Prevent duplicate queuing: reject if there's already a QUEUED or RUNNING job for this repo
+		var pendingCount int64
+		db.WithContext(r.Context()).Table("jobs").
+			Where("type = ?", jobs.JobTypeCreateRun).
+			Where("status IN ?", []string{"QUEUED", "RUNNING"}).
+			Where("payload->>'repo_id' = ?", repo.ID).
+			Count(&pendingCount)
+		if pendingCount > 0 {
+			http.Error(w, "a scan is already queued or running for this repository", http.StatusConflict)
+			return
+		}
+
 		// Create job payload
 		payload := jobs.CreateRunPayload{
 			RepoID:       repo.ID,
