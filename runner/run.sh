@@ -115,9 +115,17 @@ if [ -n "$REPO_REF" ]; then
     CLONE_ARGS="$CLONE_ARGS --branch $REPO_REF"
 fi
 
+# Abort clone if it stalls (e.g. due to 429 rate limiting):
+#   - http.lowSpeedLimit: fail if transfer drops below 1 KB/s
+#   - http.lowSpeedTime: ... for more than 30 seconds
+# No hard timeout — large repos can take several minutes to clone.
+
 # Clone and capture output
 CLONE_LOG="$WORK_DIR/clone.log"
-if git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1; then
+if GIT_CONFIG_COUNT=2 \
+   GIT_CONFIG_KEY_0="http.lowSpeedLimit" GIT_CONFIG_VALUE_0="1024" \
+   GIT_CONFIG_KEY_1="http.lowSpeedTime"  GIT_CONFIG_VALUE_1="30" \
+   git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1; then
     # Log the output
     while IFS= read -r line; do
         log "$line"
@@ -127,7 +135,7 @@ else
     while IFS= read -r line; do
         log "$line"
     done < "$CLONE_LOG"
-    log "ERROR: Failed to clone repository"
+    log "ERROR: Failed to clone repository (rate limit, auth failure, or stalled transfer)"
     send_done 1
     exit 1
 fi
