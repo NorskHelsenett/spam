@@ -57,6 +57,12 @@
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
+	let componentsLoading = $state(true);
+
+	$effect(() => {
+		const t = setTimeout(() => (componentsLoading = false), 800);
+		return () => clearTimeout(t);
+	});
 
 	const handleRefresh = () => {
 		if (refreshing) return;
@@ -340,7 +346,10 @@
 			<p class="text-sm text-[var(--text-tertiary)]">Svelte components rendered with mock data.</p>
 		</header>
 
-		<div class="grid gap-6 lg:grid-cols-2">
+		{#if componentsLoading}
+			<Loading message="Loading components" variant="bar" size="sm" />
+		{:else}
+		<div class="grid gap-6 lg:grid-cols-3">
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Loading spinner</p>
 				<Loading message="Syncing assets" variant="spinner" size="md" />
@@ -348,6 +357,12 @@
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Loading bar</p>
 				<Loading message="Indexing dependencies" variant="bar" size="sm" />
+			</div>
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Loading circle</p>
+				<div class="flex items-center justify-center py-5">
+					<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+				</div>
 			</div>
 		</div>
 
@@ -430,6 +445,7 @@
 				/>
 			</div>
 		</div>
+		{/if}
 	</section>
 
 	<section class="panel-surface space-y-8 px-6 py-8 sm:px-10 sm:py-10">
