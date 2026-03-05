@@ -772,7 +772,7 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitHub, owner+"/"+repo)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
