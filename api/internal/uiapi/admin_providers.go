@@ -2,10 +2,12 @@ package uiapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 )
 
@@ -230,7 +232,7 @@ func AdminProvidersRotateHandler(authService *auth.Service, store *providerconfi
 	}
 }
 
-func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if adminProviderGuard(w, r, authService, store) == nil {
 			return
@@ -241,10 +243,18 @@ func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfi
 			return
 		}
 
-		if err := store.Delete(r.Context(), providerID); err != nil {
+		deletedRepoIDs, err := store.Delete(r.Context(), providerID)
+		if err != nil {
 			http.Error(w, "failed to delete provider", http.StatusInternalServerError)
 			return
 		}
+
+		// Evict per-repo cache entries.
+		for _, repoID := range deletedRepoIDs {
+			_ = c.Delete(r.Context(), fmt.Sprintf("contributors:%s", repoID))
+		}
+		// Evict aggregate caches that include provider data.
+		_ = c.Delete(r.Context(), "app:summary")
 
 		w.WriteHeader(http.StatusNoContent)
 	}

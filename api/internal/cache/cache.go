@@ -23,6 +23,7 @@ import (
 type Store interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
+	Delete(ctx context.Context, key string) error
 }
 
 // GetJSON retrieves a cached value and unmarshals it into T.
@@ -80,6 +81,13 @@ func (m *Memory) Get(_ context.Context, key string) ([]byte, bool, error) {
 func (m *Memory) Set(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	m.mu.Lock()
 	m.items[key] = memoryEntry{value: value, expiresAt: time.Now().Add(ttl)}
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	delete(m.items, key)
 	m.mu.Unlock()
 	return nil
 }

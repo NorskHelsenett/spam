@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/assets"
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -350,8 +353,107 @@ func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, 
 	return s.getAdminByID(ctx, providerID)
 }
 
-func (s *Store) Delete(ctx context.Context, providerID string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+// Delete removes a provider and all data that belongs exclusively to it:
+// repos, repo commits, SBOMs, manifests, runs, run logs, run secrets, and
+// provider secrets. SBOMs shared with other assets are left intact.
+// Returns the repo IDs that were deleted so callers can evict caches.
+func (s *Store) Delete(ctx context.Context, providerID string) ([]string, error) {
+	var deletedRepoIDs []string
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Collect repo IDs owned by this provider.
+		var repoIDs []string
+		if err := tx.Model(&assets.Repo{}).
+			Where("provider_instance_id = ?", providerID).
+			Pluck("id", &repoIDs).Error; err != nil {
+			return err
+		}
+
+		if len(repoIDs) > 0 {
+			// Collect commit IDs for those repos.
+			var commitIDs []string
+			if err := tx.Model(&assets.RepoCommit{}).
+				Where("repo_id IN ?", repoIDs).
+				Pluck("id", &commitIDs).Error; err != nil {
+				return err
+			}
+
+			if len(commitIDs) > 0 {
+				// Collect SBOM IDs bound to these commits.
+				var sbomIDs []string
+				if err := tx.Model(&artifacts.SBOMBinding{}).
+					Where("asset_type = ? AND asset_ref_id IN ?", artifacts.AssetTypeRepoCommit, commitIDs).
+					Pluck("sbom_id", &sbomIDs).Error; err != nil {
+					return err
+				}
+
+				// Delete the bindings.
+				if err := tx.Where("asset_type = ? AND asset_ref_id IN ?", artifacts.AssetTypeRepoCommit, commitIDs).
+					Delete(&artifacts.SBOMBinding{}).Error; err != nil {
+					return err
+				}
+
+				// Delete SBOMs that are now fully orphaned (no remaining bindings).
+				if len(sbomIDs) > 0 {
+					subq := tx.Model(&artifacts.SBOMBinding{}).Select("sbom_id").Where("sbom_id IN ?", sbomIDs)
+					if err := tx.Where("id IN ? AND id NOT IN (?)", sbomIDs, subq).
+						Delete(&artifacts.SBOM{}).Error; err != nil {
+						return err
+					}
+				}
+
+				// Delete repo commits.
+				if err := tx.Where("id IN ?", commitIDs).Delete(&assets.RepoCommit{}).Error; err != nil {
+					return err
+				}
+			}
+
+			// Delete manifest dependencies then manifests.
+			var manifestIDs []string
+			if err := tx.Model(&manifests.Manifest{}).
+				Where("repo_id IN ?", repoIDs).
+				Pluck("id", &manifestIDs).Error; err != nil {
+				return err
+			}
+			if len(manifestIDs) > 0 {
+				if err := tx.Where("manifest_id IN ?", manifestIDs).
+					Delete(&manifests.ManifestDependency{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&manifests.Manifest{}).Error; err != nil {
+				return err
+			}
+
+			// Delete run_secrets for these repos.
+			if err := tx.Exec("DELETE FROM run_secrets WHERE repo_id IN (?)", repoIDs).Error; err != nil {
+				return err
+			}
+
+			// Find jobs (runs) whose payload references these repos.
+			var runIDs []string
+			if err := tx.Table("jobs").
+				Where("payload->>'repo_id' IN ?", repoIDs).
+				Pluck("id", &runIDs).Error; err != nil {
+				return err
+			}
+			if len(runIDs) > 0 {
+				if err := tx.Exec("DELETE FROM run_logs WHERE run_id IN (?)", runIDs).Error; err != nil {
+					return err
+				}
+				if err := tx.Exec("DELETE FROM jobs WHERE id IN (?)", runIDs).Error; err != nil {
+					return err
+				}
+			}
+
+			// Finally delete the repos themselves.
+			if err := tx.Where("id IN ?", repoIDs).Delete(&assets.Repo{}).Error; err != nil {
+				return err
+			}
+
+			deletedRepoIDs = repoIDs
+		}
+
+		// Delete provider secrets and the provider instance.
 		if err := tx.Where("provider_id = ?", providerID).Delete(&ProviderSecret{}).Error; err != nil {
 			return err
 		}
@@ -360,6 +462,10 @@ func (s *Store) Delete(ctx context.Context, providerID string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedRepoIDs, nil
 }
 
 // revokeActiveTokensTx revokes all active tokens for a provider, recording who revoked them.
