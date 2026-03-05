@@ -120,6 +120,11 @@
 	let contributors: ContributorInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	// Resolved params (may differ from URL when page loads via repo_id only)
+	let resolvedPath = $state('');
+	let resolvedProvider = $state('');
+	let resolvedBaseUrl = $state('');
+	let resolvedProviderId = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
 	let totalRuns = $state(0);
 	let securityData: SecurityData = $state({
@@ -156,6 +161,12 @@
 				baseUrl = baseUrl || meta.repo.provider_base_url || '';
 			}
 		}
+
+		// Store resolved params for use in triggerScan
+		resolvedPath = path;
+		resolvedProvider = provider;
+		resolvedBaseUrl = baseUrl;
+		resolvedProviderId = providerId;
 
 		if (!path) {
 			error = 'No repository path specified.';
@@ -346,7 +357,7 @@
 
 	// Check for active scans on this repo
 	const checkActiveScans = async () => {
-		const { path } = getParams();
+		const path = resolvedPath;
 		if (!path) return;
 
 		try {
@@ -374,7 +385,6 @@
 	const triggerScan = async () => {
 		if (!details) return;
 
-		const { provider, path, baseUrl, providerId } = getParams();
 		scanning = true;
 		scanError = '';
 
@@ -384,10 +394,10 @@
 				credentials: 'include',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					provider,
-					repo_path: path,
-					base_url: baseUrl || undefined,
-					provider_id: providerId || undefined,
+					provider: resolvedProvider,
+					repo_path: resolvedPath,
+					base_url: resolvedBaseUrl || undefined,
+					provider_id: resolvedProviderId || undefined,
 					ref: details.default_branch || undefined,
 					repo_disabled: details.is_disabled || undefined
 				})
