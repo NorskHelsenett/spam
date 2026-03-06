@@ -143,11 +143,11 @@ func (m *SyncManager) runSync(providerID string) {
 	})
 	m.emitEvent(events.StreamEventProviderSyncProgress, state)
 
-	// Phase 2: warm contributor cache for all repos.
+	// Phase 2: refresh repo details/contributors cache for all repos.
 	var provider providerconfig.ProviderInstance
 	if err := m.db.WithContext(ctx).Where("id = ?", providerID).First(&provider).Error; err == nil {
 		log.Printf("sync manager: warming cache for %s", provider.DisplayName)
-		warmProvider(ctx, m.db, m.store, m.cache, provider)
+		warmProvider(ctx, m.db, m.store, m.cache, provider, true)
 	}
 
 	now := time.Now()

@@ -46,7 +46,7 @@ func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 				log.Printf("cache warmer: restored %s from DB (no API calls)", p.DisplayName)
 				continue
 			}
-			warmProvider(ctx, db, store, c, p)
+			warmProvider(ctx, db, store, c, p, false)
 		}
 
 		log.Printf("cache warmer: done")
@@ -115,9 +115,8 @@ func rebuildFromDB(ctx context.Context, db *gorm.DB, c cache.Store, p providerco
 //
 // On subsequent sync runs (within TTL), stale checks skip the API and restore
 // directly from DB — so provider API quota is only consumed once per TTL.
-//
-// Called by WarmCache on startup and by SyncManager after a manual/scheduled sync.
-func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store, c cache.Store, p providerconfig.ProviderInstance) {
+// Set forceRefresh to true to always refresh repo details/contributors.
+func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store, c cache.Store, p providerconfig.ProviderInstance, forceRefresh bool) {
 	token, err := store.GetActiveToken(ctx, p.ID)
 	if err != nil {
 		return
@@ -195,32 +194,34 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		detailsCacheKey := fmt.Sprintf("provider:details:%s:%s", p.ID, path)
 		contribCacheKey := fmt.Sprintf("contributors:%s", repoRecord.ID)
 
-		// Skip full API fetch if the repo hasn't been pushed since our last cache
-		// and the cache isn't older than maxRepoCacheAge.
-		if dbCache, dbErr := assets.GetRepoCache(ctx, db, repoRecord.ID); dbErr == nil {
-			pushedAt := repo.PushedAt
-			if pushedAt.IsZero() {
-				pushedAt = repo.UpdatedAt
-			}
-			repoChanged := pushedAt.IsZero() || pushedAt.After(dbCache.SyncedAt)
-			cacheStale := time.Since(dbCache.SyncedAt) >= maxRepoCacheAge
-
-			if !repoChanged && !cacheStale {
-				// Nothing changed — restore to in-memory if needed, skip API.
-				if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
-					var details providers.RepoDetails
-					var commits []providers.CommitInfo
-					var contribs []providers.ContributorInfo
-					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
-						_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
-						_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
-						resp := RepoDetailsResponse{Details: &details, Readme: dbCache.ReadmeContent, Commits: commits, Contributors: contribs}
-						_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
-						_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
-					}
+		if !forceRefresh {
+			// Skip full API fetch if the repo hasn't been pushed since our last cache
+			// and the cache isn't older than maxRepoCacheAge.
+			if dbCache, dbErr := assets.GetRepoCache(ctx, db, repoRecord.ID); dbErr == nil {
+				pushedAt := repo.PushedAt
+				if pushedAt.IsZero() {
+					pushedAt = repo.UpdatedAt
 				}
-				skipped++
-				continue
+				repoChanged := pushedAt.IsZero() || pushedAt.After(dbCache.SyncedAt)
+				cacheStale := time.Since(dbCache.SyncedAt) >= maxRepoCacheAge
+
+				if !repoChanged && !cacheStale {
+					// Nothing changed — restore to in-memory if needed, skip API.
+					if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
+						var details providers.RepoDetails
+						var commits []providers.CommitInfo
+						var contribs []providers.ContributorInfo
+						if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
+							_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
+							_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
+							resp := RepoDetailsResponse{Details: &details, Readme: dbCache.ReadmeContent, Commits: commits, Contributors: contribs}
+							_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
+							_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
+						}
+					}
+					skipped++
+					continue
+				}
 			}
 		}
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -63,49 +64,72 @@ func (c *GiteaClientImpl) GetContributors(ctx context.Context, repoPath string, 
 	if len(parts) != 2 {
 		return nil, ErrInvalidResponse
 	}
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/contributors?limit=%d", c.baseURL, url.PathEscape(parts[0]), url.PathEscape(parts[1]), limit)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "token "+c.token)
-	}
+	// Infer contributors from commit authors (Gitea has no contributors endpoint on this instance).
+	return c.inferContributorsFromCommits(ctx, parts[0], parts[1], limit)
+}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, ErrInvalidResponse
-	}
-
-	body, err := io.ReadAll(resp.Body)
+func (c *GiteaClientImpl) inferContributorsFromCommits(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
+	commits, err := c.GetCommitLog(ctx, owner, repo, limit)
 	if err != nil {
 		return nil, err
 	}
 
-	var raw []giteaContributor
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, err
-	}
-
-	out := make([]ContributorInfo, 0, len(raw))
-	for _, r := range raw {
-		name := r.FullName
-		if name == "" {
-			name = r.Login
+	byKey := make(map[string]*ContributorInfo)
+	for _, cm := range commits {
+		email := strings.TrimSpace(cm.AuthorEmail)
+		name := strings.TrimSpace(cm.AuthorName)
+		login := strings.TrimSpace(cm.AuthorLogin)
+		if email == "" && name == "" && login == "" {
+			continue
 		}
-		out = append(out, ContributorInfo{
-			Login:         r.Login,
-			Name:          name,
-			Email:         r.Email,
-			AvatarURL:     r.AvatarURL,
-			ProfileURL:    r.HTMLURL,
-			Contributions: r.Contributions,
-		})
+
+		key := strings.ToLower(login)
+		if key == "" {
+			key = strings.ToLower(email)
+		}
+		if key == "" {
+			key = strings.ToLower(name)
+		}
+
+		entry, ok := byKey[key]
+		if !ok {
+			entry = &ContributorInfo{
+				Login:     login,
+				Name:      name,
+				Email:     email,
+				AvatarURL: cm.AuthorAvatar,
+			}
+			byKey[key] = entry
+		}
+
+		if entry.Login == "" && login != "" {
+			entry.Login = login
+		}
+		if entry.Name == "" && name != "" {
+			entry.Name = name
+		}
+		if entry.Email == "" && email != "" {
+			entry.Email = email
+		}
+		if entry.AvatarURL == "" && cm.AuthorAvatar != "" {
+			entry.AvatarURL = cm.AuthorAvatar
+		}
+		entry.Contributions++
+	}
+
+	out := make([]ContributorInfo, 0, len(byKey))
+	for _, v := range byKey {
+		out = append(out, *v)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Contributions == out[j].Contributions {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Contributions > out[j].Contributions
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

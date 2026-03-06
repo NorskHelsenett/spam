@@ -7,7 +7,7 @@
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Select from '$lib/components/Select.svelte';
-	import { providerSyncStates, initSyncStates } from '$lib/stores/providerSync';
+	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -446,6 +446,17 @@
 
 	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
 
+	const refreshSyncStatuses = async () => {
+		try {
+			const response = await fetch('/api/admin/providers/sync/status', { credentials: 'include' });
+			if (!response.ok) return;
+			const data = await response.json();
+			initSyncStates(data);
+		} catch {
+			// Ignore transient sync status refresh errors.
+		}
+	};
+
 	const syncProviderNow = async (entry: ProviderRow) => {
 		if (isSyncing(entry.id)) return;
 		formError = '';
@@ -454,8 +465,13 @@
 				method: 'POST',
 				credentials: 'include'
 			});
-			// 202 = started, 409 = already running — both are fine
-			if (!response.ok && response.status !== 409) {
+			// 202 = started, 409 = already running — both include current state.
+			if (response.ok || response.status === 409) {
+				const state = await response.json();
+				updateSyncState(state);
+				return;
+			}
+			if (!response.ok) {
 				formError = 'Failed to sync provider.';
 			}
 		} catch {
@@ -532,10 +548,7 @@
 			updatePreview();
 
 			// Restore sync states for any in-progress syncs (e.g. after navigating away and back).
-			fetch('/api/admin/providers/sync/status', { credentials: 'include' })
-				.then((r) => (r.ok ? r.json() : null))
-				.then((data) => { if (data) initSyncStates(data); })
-				.catch(() => {});
+			refreshSyncStatuses();
 
 			const closeTooltip = () => {
 				healthTooltip = null;
@@ -549,6 +562,7 @@
 			};
 		}
 	});
+
 </script>
 
 <svelte:head>
