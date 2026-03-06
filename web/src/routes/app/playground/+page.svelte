@@ -15,6 +15,8 @@
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
+	import Download from 'lucide-svelte/icons/download';
+	import ChevronDown from 'lucide-svelte/icons/chevron-down';
 
 	import {
 		mockDonut,
@@ -57,6 +59,17 @@
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
+	let splitDropdownOpen = $state(false);
+	let splitBtnEl: HTMLDivElement | undefined = $state();
+
+	$effect(() => {
+		if (!splitDropdownOpen) return;
+		const handler = (e: MouseEvent) => {
+			if (splitBtnEl && !splitBtnEl.contains(e.target as Node)) splitDropdownOpen = false;
+		};
+		document.addEventListener('mousedown', handler);
+		return () => document.removeEventListener('mousedown', handler);
+	});
 	let componentsLoading = $state(true);
 
 	$effect(() => {
@@ -214,6 +227,44 @@
 			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
+			<!-- Split button: single pill, left = primary action, right = darker dropdown trigger -->
+			<div class="relative" bind:this={splitBtnEl}>
+				<div class="flex overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)]">
+					<button type="button"
+						class="flex items-center gap-2 px-[1.1rem] py-[0.55rem] text-[0.85rem] font-semibold tracking-[0.02em] text-[var(--text-bright)] transition hover:brightness-110"
+						onclick={() => {}}>
+						<Download class="h-4 w-4" /> Export CSV
+					</button>
+					<div class="w-px self-stretch bg-[var(--border-color)]"></div>
+					<button type="button"
+						class="flex items-center bg-black/[0.06] px-3 py-[0.55rem] text-[var(--text-bright)] transition hover:bg-black/[0.12]"
+						onclick={() => (splitDropdownOpen = !splitDropdownOpen)} aria-label="More options">
+						<ChevronDown class="h-4 w-4" />
+					</button>
+				</div>
+				{#if splitDropdownOpen}
+					<div class="absolute left-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--bg-soft)] py-1 shadow-xl">
+						<p class="px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">Section label</p>
+						<button type="button"
+							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+							onclick={() => (splitDropdownOpen = false)}>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Option A
+						</button>
+						<div class="mx-3 my-1 border-t border-[var(--border-color)]/60"></div>
+						<p class="px-3.5 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">Another section</p>
+						<button type="button"
+							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+							onclick={() => (splitDropdownOpen = false)}>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Option B
+						</button>
+						<button type="button"
+							class="flex w-full cursor-not-allowed items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-muted)] opacity-50"
+							disabled>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Disabled option
+						</button>
+					</div>
+				{/if}
+			</div>
 			<button
 				type="button"
 				class="mt-auto mb-4 ml-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
