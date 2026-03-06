@@ -16,7 +16,12 @@ import (
 	"gorm.io/gorm"
 )
 
-const defaultSyncTTL = time.Hour
+const (
+	defaultSyncTTL = time.Hour
+	// maxRepoCacheAge caps how long we skip a full API fetch even if PushedAt
+	// hasn't changed, so dormant repos still get a periodic consistency check.
+	maxRepoCacheAge = 7 * 24 * time.Hour
+)
 
 // WarmCache pre-populates the in-memory cache on startup for all enabled
 // providers. It first attempts to restore from the DB (no API calls); only
@@ -149,8 +154,10 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, allRepos, ttl)
 	}
 
-	log.Printf("cache warmer: warming %d repos for %s", len(allRepos), p.DisplayName)
+	log.Printf("cache warmer: syncing %d repos for %s", len(allRepos), p.DisplayName)
 
+	skipped := 0
+	fetched := 0
 	for _, repo := range allRepos {
 		path := strings.Trim(repo.FullPath, "/")
 		idx := strings.LastIndex(path, "/")
@@ -188,24 +195,36 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		detailsCacheKey := fmt.Sprintf("provider:details:%s:%s", p.ID, path)
 		contribCacheKey := fmt.Sprintf("contributors:%s", repoRecord.ID)
 
-		// Check DB cache freshness — if still valid, restore to in-memory and skip API.
-		if dbCache, dbErr := assets.GetRepoCache(ctx, db, repoRecord.ID); dbErr == nil && time.Since(dbCache.SyncedAt) < ttl {
-			if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
-				var details providers.RepoDetails
-				var commits []providers.CommitInfo
-				var contribs []providers.ContributorInfo
-				if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
-					_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
-					_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
-					resp := RepoDetailsResponse{Details: &details, Readme: dbCache.ReadmeContent, Commits: commits, Contributors: contribs}
-					_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
-					_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
-				}
+		// Skip full API fetch if the repo hasn't been pushed since our last cache
+		// and the cache isn't older than maxRepoCacheAge.
+		if dbCache, dbErr := assets.GetRepoCache(ctx, db, repoRecord.ID); dbErr == nil {
+			pushedAt := repo.PushedAt
+			if pushedAt.IsZero() {
+				pushedAt = repo.UpdatedAt
 			}
-			continue
+			repoChanged := pushedAt.IsZero() || pushedAt.After(dbCache.SyncedAt)
+			cacheStale := time.Since(dbCache.SyncedAt) >= maxRepoCacheAge
+
+			if !repoChanged && !cacheStale {
+				// Nothing changed — restore to in-memory if needed, skip API.
+				if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
+					var details providers.RepoDetails
+					var commits []providers.CommitInfo
+					var contribs []providers.ContributorInfo
+					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
+						_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
+						_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
+						resp := RepoDetailsResponse{Details: &details, Readme: dbCache.ReadmeContent, Commits: commits, Contributors: contribs}
+						_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
+						_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
+					}
+				}
+				skipped++
+				continue
+			}
 		}
 
-		// DB cache is missing or stale — fetch fresh data from provider API.
+		// Repo changed or no cache — fetch fresh data from provider API.
 		var details *providers.RepoDetails
 		var readme string
 		var commits []providers.CommitInfo
@@ -241,9 +260,11 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		}
 		_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
 
+		fetched++
 		// Throttle to avoid hammering provider APIs.
 		time.Sleep(200 * time.Millisecond)
 	}
+	log.Printf("cache warmer: %s done — %d fetched, %d skipped (unchanged)", p.DisplayName, fetched, skipped)
 }
 
 // fetchRepoFullData fetches details, readme, commits, and contributors for a
