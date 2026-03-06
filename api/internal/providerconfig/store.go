@@ -369,6 +369,11 @@ func (s *Store) Delete(ctx context.Context, providerID string) ([]string, error)
 		}
 
 		if len(repoIDs) > 0 {
+			// Delete cached provider data for these repos.
+			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&assets.RepoCache{}).Error; err != nil {
+				return err
+			}
+
 			// Collect commit IDs for those repos.
 			var commitIDs []string
 			if err := tx.Model(&assets.RepoCommit{}).

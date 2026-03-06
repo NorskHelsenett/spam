@@ -2,9 +2,11 @@ package uiapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/assets"
@@ -14,8 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
+const defaultSyncTTL = time.Hour
+
 // WarmCache pre-populates the in-memory cache on startup for all enabled
-// providers: repos are indexed and contributor lists are fetched and stored.
+// providers. It first attempts to restore from the DB (no API calls); only
+// when DB data is missing or stale does it fall through to a full API warm.
 // Runs in a background goroutine so it never blocks server startup.
 func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 	go func() {
@@ -31,6 +36,11 @@ func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 		}
 
 		for _, p := range providerList {
+			ttl := providerTTL(p)
+			if rebuildFromDB(ctx, db, c, p, ttl) {
+				log.Printf("cache warmer: restored %s from DB (no API calls)", p.DisplayName)
+				continue
+			}
 			warmProvider(ctx, db, store, c, p)
 		}
 
@@ -38,6 +48,70 @@ func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 	}()
 }
 
+// providerTTL returns the effective cache TTL based on the provider's poll_interval.
+func providerTTL(p providerconfig.ProviderInstance) time.Duration {
+	if p.PollInterval != nil && *p.PollInterval > 0 {
+		return time.Duration(*p.PollInterval) * time.Second
+	}
+	return defaultSyncTTL
+}
+
+// rebuildFromDB attempts to restore the in-memory cache for a provider from
+// persisted DB data without making any provider API calls.
+// Returns true if enough fresh cache entries were found and restored.
+func rebuildFromDB(ctx context.Context, db *gorm.DB, c cache.Store, p providerconfig.ProviderInstance, ttl time.Duration) bool {
+	dbCaches, err := assets.ListRepoCacheByProvider(ctx, db, p.ID)
+	if err != nil || len(dbCaches) == 0 {
+		return false
+	}
+
+	var repoList []providers.RepoData
+	freshCount := 0
+
+	for _, dc := range dbCaches {
+		var details providers.RepoDetails
+		if json.Unmarshal([]byte(dc.DetailsJSON), &details) != nil || details.FullPath == "" {
+			continue
+		}
+		repoList = append(repoList, details.RepoData)
+
+		fresh := time.Since(dc.SyncedAt) < ttl
+		if !fresh {
+			continue
+		}
+		freshCount++
+
+		var commits []providers.CommitInfo
+		var contribs []providers.ContributorInfo
+		_ = json.Unmarshal([]byte(dc.CommitsJSON), &commits)
+		_ = json.Unmarshal([]byte(dc.ContributorsJSON), &contribs)
+
+		detailsKey := fmt.Sprintf("provider:details:%s:%s", p.ID, strings.Trim(details.FullPath, "/"))
+		resp := RepoDetailsResponse{Details: &details, Readme: dc.ReadmeContent, Commits: commits, Contributors: contribs}
+		_ = cache.SetJSON(ctx, c, detailsKey, resp, ttl)
+		_ = cache.SetJSON(ctx, c, fmt.Sprintf("contributors:%s", dc.RepoID), RepoContributorsResponse{Contributors: contribs}, ttl)
+	}
+
+	// Only consider it a successful rebuild if a strict majority of repos are fresh.
+	if freshCount == 0 || freshCount*2 <= len(dbCaches) {
+		return false
+	}
+
+	if len(repoList) > 0 {
+		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, repoList, ttl)
+	}
+
+	return true
+}
+
+// warmProvider syncs all repos for a provider: repos are upserted to DB, and
+// for each repo the full detail set (details, readme, commits, contributors)
+// is fetched and stored in both DB and in-memory cache.
+//
+// On subsequent sync runs (within TTL), stale checks skip the API and restore
+// directly from DB — so provider API quota is only consumed once per TTL.
+//
+// Called by WarmCache on startup and by SyncManager after a manual/scheduled sync.
 func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store, c cache.Store, p providerconfig.ProviderInstance) {
 	token, err := store.GetActiveToken(ctx, p.ID)
 	if err != nil {
@@ -48,6 +122,8 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 	if client == nil {
 		return
 	}
+
+	ttl := providerTTL(p)
 
 	// Fetch all repos (paginated).
 	var allRepos []providers.RepoData
@@ -68,6 +144,11 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		page++
 	}
 
+	// Cache the full repo list for list-page DB-backed fallback.
+	if len(allRepos) > 0 {
+		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, allRepos, ttl)
+	}
+
 	log.Printf("cache warmer: warming %d repos for %s", len(allRepos), p.DisplayName)
 
 	for _, repo := range allRepos {
@@ -82,7 +163,7 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 			continue
 		}
 
-		// Index the repo with provider's last-activity date.
+		// Use PushedAt as the best proxy for last commit date, fall back to UpdatedAt.
 		providerUpdatedAt := repo.PushedAt
 		if providerUpdatedAt.IsZero() {
 			providerUpdatedAt = repo.UpdatedAt
@@ -91,6 +172,7 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		if !providerUpdatedAt.IsZero() {
 			providerUpdatedAtPtr = &providerUpdatedAt
 		}
+
 		repoRecord, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
 			Provider:           p.Type,
 			ProviderInstanceID: p.ID,
@@ -103,24 +185,110 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 			continue
 		}
 
-		// Pre-fetch and cache contributors keyed by DB repo UUID (matches RepoContributorsHandler).
-		cacheKey := fmt.Sprintf("contributors:%s", repoRecord.ID)
-		if _, ok, _ := cache.GetJSON[RepoContributorsResponse](ctx, c, cacheKey); ok {
-			continue // already cached
+		detailsCacheKey := fmt.Sprintf("provider:details:%s:%s", p.ID, path)
+		contribCacheKey := fmt.Sprintf("contributors:%s", repoRecord.ID)
+
+		// Check DB cache freshness — if still valid, restore to in-memory and skip API.
+		if dbCache, dbErr := assets.GetRepoCache(ctx, db, repoRecord.ID); dbErr == nil && time.Since(dbCache.SyncedAt) < ttl {
+			if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
+				var details providers.RepoDetails
+				var commits []providers.CommitInfo
+				var contribs []providers.ContributorInfo
+				if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
+					_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
+					_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
+					resp := RepoDetailsResponse{Details: &details, Readme: dbCache.ReadmeContent, Commits: commits, Contributors: contribs}
+					_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
+					_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
+				}
+			}
+			continue
 		}
 
-		contribs, err := client.GetContributors(ctx, repo.FullPath, 5)
-		if err != nil {
-			contribs = []providers.ContributorInfo{}
-		}
+		// DB cache is missing or stale — fetch fresh data from provider API.
+		var details *providers.RepoDetails
+		var readme string
+		var commits []providers.CommitInfo
+		var contribs []providers.ContributorInfo
+
+		fetchRepoFullData(ctx, p, token, path, &details, &readme, &commits, &contribs)
+
 		if contribs == nil {
 			contribs = []providers.ContributorInfo{}
 		}
+		if commits == nil {
+			commits = []providers.CommitInfo{}
+		}
+		contribs = enrichContributors(contribs, commits)
+		commits = enrichCommits(commits, contribs)
 
-		resp := RepoContributorsResponse{Contributors: contribs}
-		_ = cache.SetJSON(ctx, c, cacheKey, resp, contributorCacheTTL)
+		// Persist to DB so subsequent syncs and restarts can skip the API.
+		if details != nil {
+			detailsBytes, _ := json.Marshal(details)
+			commitsBytes, _ := json.Marshal(commits)
+			contribsBytes, _ := json.Marshal(contribs)
+			if dbErr := assets.UpsertRepoCache(ctx, db, repoRecord.ID,
+				string(detailsBytes), readme, string(commitsBytes), string(contribsBytes),
+			); dbErr != nil {
+				log.Printf("cache warmer: persist cache %s: %v", path, dbErr)
+			}
+		}
+
+		// Populate in-memory cache — skip details if the API call failed.
+		if details != nil {
+			resp := RepoDetailsResponse{Details: details, Readme: readme, Commits: commits, Contributors: contribs}
+			_ = cache.SetJSON(ctx, c, detailsCacheKey, resp, ttl)
+		}
+		_ = cache.SetJSON(ctx, c, contribCacheKey, RepoContributorsResponse{Contributors: contribs}, ttl)
 
 		// Throttle to avoid hammering provider APIs.
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// fetchRepoFullData fetches details, readme, commits, and contributors for a
+// single repo in parallel (4 concurrent provider API calls).
+func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, token, repoPath string,
+	details **providers.RepoDetails, readme *string, commits *[]providers.CommitInfo, contribs *[]providers.ContributorInfo,
+) {
+	if repoPath == "" {
+		return
+	}
+	var wg sync.WaitGroup
+
+	switch p.Type {
+	case providerconfig.ProviderGitHub:
+		parts := strings.SplitN(repoPath, "/", 2)
+		if len(parts) != 2 {
+			return
+		}
+		cl := providers.NewGitHubClient(p.BaseURL, token)
+		wg.Add(4)
+		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, parts[0], parts[1], 10) }()
+		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
+
+	case providerconfig.ProviderGitLab:
+		cl := providers.NewGitLabClient(p.BaseURL, token)
+		wg.Add(4)
+		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, repoPath) }()
+		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, repoPath) }()
+		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, repoPath, 10) }()
+		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
+
+	case providerconfig.ProviderGitea, providerconfig.ProviderForgejo:
+		parts := strings.SplitN(repoPath, "/", 2)
+		if len(parts) != 2 {
+			return
+		}
+		cl := providers.NewGiteaClient(p.BaseURL, token)
+		wg.Add(4)
+		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, parts[0], parts[1], 10) }()
+		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
+	}
+
+	wg.Wait()
 }

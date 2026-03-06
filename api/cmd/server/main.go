@@ -59,6 +59,7 @@ func run() error {
 		&auth.Group{},
 		&auth.UserGroup{},
 		&assets.Repo{},
+		&assets.RepoCache{},
 		&assets.RepoCommit{},
 		&assets.ImageDigest{},
 		&artifacts.SBOM{},

@@ -3,6 +3,7 @@ package uiapi
 import (
 	"context"
 	"crypto/md5"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -151,6 +152,15 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			return
 		}
 
+		// Serve from provider-level repo list cache (populated by sync/warm).
+		providerIDParam := r.URL.Query().Get("provider_id")
+		if served := serveFromProviderRepoList(w, r, c, store, db, providerIDParam, owner, page, pageSize, sortColumn, sortOrder,
+			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
+				return GitHubReposResponse{Repos: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
+			}); served {
+			return
+		}
+
 		token, err := resolveProviderToken(r, store)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
@@ -222,6 +232,15 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 		}
 
 		providerID := r.URL.Query().Get("provider_id")
+
+		// Serve from provider-level repo list cache (populated by sync/warm).
+		if served := serveFromProviderRepoList(w, r, c, store, db, providerID, group, page, pageSize, sortColumn, sortOrder,
+			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
+				return GitLabProjectsResponse{Projects: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
+			}); served {
+			return
+		}
+
 		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, rawBaseURL, group)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
@@ -362,6 +381,8 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 
 		owner := r.PathValue("owner") // can be empty
 		page, pageSize := parsePagination(r)
+		sortColumn := r.URL.Query().Get("sort")
+		sortOrder := r.URL.Query().Get("order")
 		baseURL := r.URL.Query().Get("base_url")
 
 		if baseURL == "" {
@@ -372,6 +393,15 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", baseURL, owner, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GiteaReposResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+
+		// Serve from provider-level repo list cache (populated by sync/warm).
+		giteaProviderID := r.URL.Query().Get("provider_id")
+		if served := serveFromProviderRepoList(w, r, c, store, db, giteaProviderID, owner, page, pageSize, sortColumn, sortOrder,
+			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
+				return GiteaReposResponse{Repos: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
+			}); served {
 			return
 		}
 
@@ -1092,6 +1122,31 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			return
 		}
 
+		// DB cache fallback: serve from persisted data if fresh enough.
+		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
+		if db != nil {
+			if repoID := lookupRepoID(r.Context(), db, providerID, repoPath); repoID != "" {
+				if dbCache, dbErr := assets.GetRepoCache(r.Context(), db, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
+					var details providers.RepoDetails
+					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
+						var commits []providers.CommitInfo
+						var contribs []providers.ContributorInfo
+						_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
+						_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
+						resp := RepoDetailsResponse{
+							Details:      &details,
+							Readme:       dbCache.ReadmeContent,
+							Commits:      commits,
+							Contributors: contribs,
+						}
+						_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
+						writeJSON(w, http.StatusOK, resp)
+						return
+					}
+				}
+			}
+		}
+
 		var details *providers.RepoDetails
 		var readme string
 		var commits []providers.CommitInfo
@@ -1196,15 +1251,121 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		}
 		commits = enrichCommits(commits, contributors)
 
+		// Persist to DB so subsequent requests and restarts can skip the API.
+		if db != nil && details != nil {
+			if repoID := lookupRepoID(r.Context(), db, providerID, repoPath); repoID != "" {
+				detailsBytes, _ := json.Marshal(details)
+				commitsBytes, _ := json.Marshal(commits)
+				contribBytes, _ := json.Marshal(contributors)
+				_ = assets.UpsertRepoCache(r.Context(), db, repoID,
+					string(detailsBytes), readme, string(commitsBytes), string(contribBytes))
+			}
+		}
+
 		resp := RepoDetailsResponse{
 			Details:      details,
 			Readme:       readme,
 			Commits:      commits,
 			Contributors: contributors,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, 5*time.Minute)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// lookupRepoID returns the DB repo UUID for the given provider+path, or "" if not found.
+// repoPath must be in "org/slug" form.
+func lookupRepoID(ctx context.Context, db *gorm.DB, providerID, repoPath string) string {
+	idx := strings.LastIndex(repoPath, "/")
+	if idx <= 0 {
+		return ""
+	}
+	org := repoPath[:idx]
+	slug := repoPath[idx+1:]
+	var row struct{ ID string }
+	if err := db.WithContext(ctx).Table("repos").Select("id").
+		Where("provider_instance_id = ? AND org = ? AND slug = ?", providerID, org, slug).
+		Scan(&row).Error; err != nil {
+		return ""
+	}
+	return row.ID
+}
+
+// filterReposByOwner returns repos whose FullPath starts with owner+"/"
+// so the provider-level cache can serve paginated list requests.
+func filterReposByOwner(repos []providers.RepoData, owner string) []providers.RepoData {
+	if owner == "" {
+		return repos
+	}
+	prefix := strings.TrimRight(owner, "/") + "/"
+	var result []providers.RepoData
+	for _, r := range repos {
+		if strings.HasPrefix(r.FullPath, prefix) {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+// serveFromProviderRepoList tries to serve a paginated list from the
+// provider-level cache ("provider:repos:{id}"), falling back to the DB when
+// the in-memory cache is cold. Returns false if no data is available.
+func serveFromProviderRepoList(w http.ResponseWriter, r *http.Request, c cache.Store, store *providerconfig.Store, db *gorm.DB,
+	providerID, owner string, page, pageSize int, sortColumn, sortOrder string,
+	buildResp func([]providers.RepoData, int, int, int, bool, int) any,
+) bool {
+	if providerID == "" {
+		return false
+	}
+
+	ttl := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
+
+	allRepos, ok, _ := cache.GetJSON[[]providers.RepoData](r.Context(), c, "provider:repos:"+providerID)
+	if !ok || len(allRepos) == 0 {
+		// In-memory cache cold — try DB (fresh entries only).
+		if db != nil {
+			dbCaches, err := assets.ListRepoCacheByProvider(r.Context(), db, providerID)
+			if err == nil {
+				for _, dc := range dbCaches {
+					if time.Since(dc.SyncedAt) >= ttl {
+						continue
+					}
+					var details providers.RepoDetails
+					if json.Unmarshal([]byte(dc.DetailsJSON), &details) == nil && details.FullPath != "" {
+						allRepos = append(allRepos, details.RepoData)
+					}
+				}
+				if len(allRepos) > 0 {
+					_ = cache.SetJSON(r.Context(), c, "provider:repos:"+providerID, allRepos, ttl)
+				}
+			}
+		}
+		if len(allRepos) == 0 {
+			return false
+		}
+	}
+
+	filtered := filterReposByOwner(allRepos, owner)
+	if sortColumn != "" {
+		sortRepos(filtered, sortColumn, sortOrder)
+	}
+	total := len(filtered)
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	hasNext := end < total
+	nextPage := 0
+	if hasNext {
+		nextPage = page + 1
+	}
+	resp := buildResp(filtered[start:end], total, page, pageSize, hasNext, nextPage)
+	writeJSON(w, http.StatusOK, resp)
+	return true
 }
 
 // sortRepos sorts a slice of RepoData by the specified column and order.

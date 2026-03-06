@@ -9,6 +9,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type RepoInput struct {
@@ -91,6 +92,48 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 		return nil, result.Error
 	}
 	return &commit, nil
+}
+
+// UpsertRepoCache saves or updates cached provider data for a repo.
+// All string fields are sanitized to valid UTF-8 before storage because
+// provider READMEs and commit messages may contain non-UTF-8 bytes.
+func UpsertRepoCache(ctx context.Context, db *gorm.DB, repoID, detailsJSON, readmeContent, commitsJSON, contributorsJSON string) error {
+	rc := &RepoCache{
+		RepoID:           repoID,
+		DetailsJSON:      strings.ToValidUTF8(detailsJSON, ""),
+		ReadmeContent:    strings.ToValidUTF8(readmeContent, ""),
+		CommitsJSON:      strings.ToValidUTF8(commitsJSON, ""),
+		ContributorsJSON: strings.ToValidUTF8(contributorsJSON, ""),
+		SyncedAt:         time.Now(),
+	}
+	return db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "repo_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"details_json", "readme_content", "commits_json", "contributors_json", "synced_at",
+			}),
+		}).
+		Create(rc).Error
+}
+
+// GetRepoCache retrieves the cached provider data for a repo.
+// Returns gorm.ErrRecordNotFound if no entry exists.
+func GetRepoCache(ctx context.Context, db *gorm.DB, repoID string) (*RepoCache, error) {
+	var rc RepoCache
+	if err := db.WithContext(ctx).First(&rc, "repo_id = ?", repoID).Error; err != nil {
+		return nil, err
+	}
+	return &rc, nil
+}
+
+// ListRepoCacheByProvider returns all cache entries for repos belonging to a provider instance.
+func ListRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string) ([]RepoCache, error) {
+	var caches []RepoCache
+	err := db.WithContext(ctx).
+		Joins("JOIN repos ON repos.id = repo_caches.repo_id").
+		Where("repos.provider_instance_id = ?", providerInstanceID).
+		Find(&caches).Error
+	return caches, err
 }
 
 func FindRepo(ctx context.Context, db *gorm.DB, repoID string) (*Repo, error) {

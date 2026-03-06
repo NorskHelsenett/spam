@@ -2,6 +2,18 @@ package assets
 
 import "time"
 
+// RepoCache stores provider-fetched metadata for a repository, enabling the
+// HTTP layer to serve responses without re-hitting provider APIs on every
+// request. Entries are keyed by repo UUID and refreshed on each sync cycle.
+type RepoCache struct {
+	RepoID           string    `gorm:"primaryKey;size:36"`
+	DetailsJSON      string    `gorm:"type:text"`
+	ReadmeContent    string    `gorm:"type:text"`
+	CommitsJSON      string    `gorm:"type:text"`
+	ContributorsJSON string    `gorm:"type:text"`
+	SyncedAt         time.Time `gorm:"not null;autoUpdateTime:false"`
+}
+
 // Repo identifies a source code repository.
 type Repo struct {
 	ID                 string     `gorm:"primaryKey;size:36"`
