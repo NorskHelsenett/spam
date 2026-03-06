@@ -116,7 +116,7 @@ func snippetAround(source, query string) string {
 	lowerQ := strings.ToLower(q)
 	pos := strings.Index(lowerSrc, lowerQ)
 	if pos < 0 {
-		return compactSnippet(src)
+		return ""
 	}
 	start := pos - 90
 	if start < 0 {
@@ -155,15 +155,24 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				r.slug,
 				COALESCE(m.path, m.type, '') AS title,
 				COALESCE(m.type, '') AS value,
-				LEFT(COALESCE(m.path, '') || E'\n' || COALESCE(m.type, '') || E'\n' || COALESCE(m.content, ''), 8000) AS source_text,
+				CASE
+					WHEN strpos(lower(hs.haystack), lower(?)) > 0 THEN
+						(CASE WHEN strpos(lower(hs.haystack), lower(?)) > 90 THEN '...' ELSE '' END) ||
+						substr(hs.haystack, GREATEST(1, strpos(lower(hs.haystack), lower(?)) - 90), length(?) + 220) ||
+						(CASE WHEN strpos(lower(hs.haystack), lower(?)) + length(?) + 130 < length(hs.haystack) THEN '...' ELSE '' END)
+					ELSE LEFT(hs.haystack, 240)
+				END AS source_text,
 				m.created_at
 			FROM manifests m
 			JOIN repos r ON r.id = m.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+			CROSS JOIN LATERAL (
+				SELECT COALESCE(m.path, '') || E'\n' || COALESCE(m.type, '') || E'\n' || COALESCE(m.content, '') AS haystack
+			) hs
 			WHERE m.path ILIKE ? OR m.type ILIKE ? OR m.content ILIKE ?
 			ORDER BY m.created_at DESC
 			LIMIT ?
-		`, like, like, like, perTargetLimit).Scan(&rows).Error
+		`, query, query, query, query, query, query, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
 	case "sbom":
 		err := db.WithContext(r.Context()).Raw(`
@@ -176,11 +185,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				s.format AS title,
-				rc.commit_sha AS value,
-				LEFT(COALESCE(s.format, '') || E'\n' || COALESCE(convert_from(s.content_bytes, 'utf8'), ''), 8000) AS source_text,
-				s.created_at
+					r.slug,
+					s.format AS title,
+					rc.commit_sha AS value,
+					LEFT(COALESCE(s.format, '') || E'\n' || COALESCE(convert_from(s.content_bytes, 'utf8'), ''), 60000) AS source_text,
+					s.created_at
 			FROM sboms s
 			JOIN sbom_bindings sb ON sb.sbom_id = s.id AND sb.asset_type = 'REPO_COMMIT'
 			JOIN repo_commits rc ON rc.id = sb.asset_ref_id
@@ -202,11 +211,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				'Secret findings' AS title,
-				COALESCE(rs.run_id, '') AS value,
-				LEFT(COALESCE(rs.findings::text, ''), 8000) AS source_text,
-				rs.created_at
+					r.slug,
+					'Secret findings' AS title,
+					COALESCE(rs.run_id, '') AS value,
+					LEFT(COALESCE(rs.findings::text, ''), 60000) AS source_text,
+					rs.created_at
 			FROM run_secrets rs
 			JOIN repos r ON r.id = rs.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
@@ -226,11 +235,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				'Contributors' AS title,
-				'' AS value,
-				LEFT(COALESCE(rc.contributors_json, ''), 8000) AS source_text,
-				rc.synced_at AS created_at
+					r.slug,
+					'Contributors' AS title,
+					'' AS value,
+					LEFT(COALESCE(rc.contributors_json, ''), 60000) AS source_text,
+					rc.synced_at AS created_at
 			FROM repo_caches rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
@@ -250,11 +259,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				'Languages' AS title,
-				'' AS value,
-				LEFT(COALESCE(rc.details_json, ''), 8000) AS source_text,
-				rc.synced_at AS created_at
+					r.slug,
+					'Languages' AS title,
+					'' AS value,
+					LEFT(COALESCE(rc.details_json, ''), 60000) AS source_text,
+					rc.synced_at AS created_at
 			FROM repo_caches rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
@@ -274,11 +283,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				'Commit' AS title,
-				c.commit_sha AS value,
-				LEFT(COALESCE(c.commit_sha, '') || E'\n' || COALESCE(c.ref, ''), 8000) AS source_text,
-				c.created_at
+					r.slug,
+					'Commit' AS title,
+					c.commit_sha AS value,
+					LEFT(COALESCE(c.commit_sha, '') || E'\n' || COALESCE(c.ref, ''), 60000) AS source_text,
+					c.created_at
 			FROM repo_commits c
 			JOIN repos r ON r.id = c.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
@@ -298,11 +307,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				r.org || '/' || r.slug AS title,
-				r.provider AS value,
-				LEFT((r.org || '/' || r.slug || E'\n' || COALESCE(r.provider, '')), 8000) AS source_text,
-				r.created_at
+					r.slug,
+					r.org || '/' || r.slug AS title,
+					r.provider AS value,
+					LEFT((r.org || '/' || r.slug || E'\n' || COALESCE(r.provider, '')), 60000) AS source_text,
+					r.created_at
 			FROM repos r
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE r.org ILIKE ? OR r.slug ILIKE ? OR (r.org || '/' || r.slug) ILIKE ?
@@ -321,11 +330,11 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				COALESCE(pi.base_url, '') AS base_url,
 				COALESCE(pi.owner_path, '') AS owner_path,
 				r.org,
-				r.slug,
-				'README' AS title,
-				'' AS value,
-				LEFT(COALESCE(rc.readme_content, ''), 8000) AS source_text,
-				rc.synced_at AS created_at
+					r.slug,
+					'README' AS title,
+					'' AS value,
+					LEFT(COALESCE(rc.readme_content, ''), 60000) AS source_text,
+					rc.synced_at AS created_at
 			FROM repo_caches rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true

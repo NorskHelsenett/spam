@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab } from 'lucide-svelte';
+	import { Search, SearchX, X, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab } from 'lucide-svelte';
 	import Select from '$lib/components/Select.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Loading from '$lib/components/Loading.svelte';
@@ -288,17 +288,35 @@
 			<p class="text-sm text-[var(--text-tertiary)]">Search inside manifests, SBOMs, secrets, contributors, languages, commit IDs, repositories, and README files.</p>
 		</header>
 
-		<div class="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
-			<div class="relative">
-				<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-				<input
-					type="text"
-					bind:value={query}
-					oninput={scheduleSearch}
-					placeholder="Search for java, pom.xml, commit SHA, secrets, contributor email, README text..."
-					class="h-11 w-full rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] pl-11 pr-4 text-sm text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
-				/>
-			</div>
+			<div class="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
+				<div class="relative">
+					<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
+					<input
+						type="text"
+						bind:value={query}
+						oninput={scheduleSearch}
+						placeholder="Search for java, pom.xml, commit SHA, secrets, contributor email, README text..."
+						class="h-11 w-full rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] pl-11 pr-10 text-sm text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
+					/>
+					{#if query.trim()}
+						<button
+							type="button"
+							class="absolute right-4 top-1/2 inline-flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
+							onclick={() => {
+								query = '';
+								results = [];
+								hasMore = false;
+								error = '';
+								searchPending = false;
+								loading = false;
+								if (searchTimeout) clearTimeout(searchTimeout);
+							}}
+							aria-label="Clear search"
+						>
+							<X class="h-3.5 w-3.5" />
+						</button>
+					{/if}
+				</div>
 			<Select value={target} options={targetOptions} onchange={() => loadResults()} class="w-full sm:w-[13rem]" />
 		</div>
 
