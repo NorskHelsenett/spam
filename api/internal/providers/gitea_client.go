@@ -46,12 +46,12 @@ func (c *GiteaClientImpl) ProviderType() string {
 
 // giteaContributor is the Gitea API contributor shape.
 type giteaContributor struct {
-	Login       string `json:"login"`
-	FullName    string `json:"full_name"`
-	Email       string `json:"email"`
-	AvatarURL   string `json:"avatar_url"`
-	HTMLURL     string `json:"html_url"`
-	Contributions int  `json:"contributions"`
+	Login         string `json:"login"`
+	FullName      string `json:"full_name"`
+	Email         string `json:"email"`
+	AvatarURL     string `json:"avatar_url"`
+	HTMLURL       string `json:"html_url"`
+	Contributions int    `json:"contributions"`
 }
 
 // GetContributors returns top contributors for the given owner/repo.
@@ -63,7 +63,7 @@ func (c *GiteaClientImpl) GetContributors(ctx context.Context, repoPath string, 
 	if len(parts) != 2 {
 		return nil, ErrInvalidResponse
 	}
-	apiURL := fmt.Sprintf("%s/repos/%s/%s/contributors?limit=%d", c.baseURL, parts[0], parts[1], limit)
+	apiURL := fmt.Sprintf("%s/repos/%s/%s/contributors?limit=%d", c.baseURL, url.PathEscape(parts[0]), url.PathEscape(parts[1]), limit)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, err
@@ -486,6 +486,7 @@ func (c *GiteaClientImpl) GetRepoDetails(ctx context.Context, owner, repo string
 	stats.Commits = c.getCommitCount(ctx, owner, repo)
 	stats.Branches = c.getBranchCount(ctx, owner, repo)
 	stats.Releases = c.getReleaseCount(ctx, owner, repo)
+	stats.Contributors = c.getContributorCount(ctx, owner, repo)
 
 	return &RepoDetails{
 		RepoData: RepoData{
@@ -520,6 +521,11 @@ func (c *GiteaClientImpl) getBranchCount(ctx context.Context, owner, repo string
 
 func (c *GiteaClientImpl) getReleaseCount(ctx context.Context, owner, repo string) int {
 	urlStr := fmt.Sprintf("%s/repos/%s/%s/releases?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GiteaClientImpl) getContributorCount(ctx context.Context, owner, repo string) int {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/contributors?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
 	return c.getCountFromHeader(ctx, urlStr)
 }
 

@@ -648,8 +648,8 @@ func tryGiteaDetection(ctx context.Context, client *http.Client, baseURL string)
 type RepoDetailsResponse struct {
 	Details      *providers.RepoDetails      `json:"details"`
 	Readme       string                      `json:"readme"`
-	Commits      []providers.CommitInfo       `json:"commits,omitempty"`
-	Contributors []providers.ContributorInfo  `json:"contributors,omitempty"`
+	Commits      []providers.CommitInfo      `json:"commits,omitempty"`
+	Contributors []providers.ContributorInfo `json:"contributors,omitempty"`
 }
 
 // enrichContributors fills in missing contributor data from commits and generates
@@ -872,6 +872,9 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 
 		contributors = enrichContributors(contributors, commits)
 		commits = enrichCommits(commits, contributors)
+		if details != nil && details.Stats.Contributors == 0 && len(contributors) > 0 {
+			details.Stats.Contributors = len(contributors)
+		}
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
 			Details:      details,
@@ -1079,11 +1082,12 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 	}
 }
 
-// ProviderRepoDetailsHandler handles fetching repo details using only provider_id + path.
+// ProviderRepoDetailsHandler handles fetching repo details for a repo.
+// GET /api/providers/details?repo_id=<uuid>
 // GET /api/providers/details?provider_id=<uuid>&path=<org/repo>
 //
-// This is the preferred endpoint when provider_id is known: it resolves provider type
-// and base_url from the database, so the caller does not need to pass them separately.
+// Preferred usage is repo_id (unique DB id). When repo_id is present, provider_id and
+// path are resolved from the repos table and used as canonical values.
 func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig.Store, db *gorm.DB, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
@@ -1093,8 +1097,30 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
 		repoPath := strings.TrimSpace(r.URL.Query().Get("path"))
 		repoDBID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
+		if repoDBID != "" {
+			var repoRow struct {
+				ProviderInstanceID string
+				Org                string
+				Slug               string
+			}
+			if err := db.WithContext(r.Context()).
+				Table("repos").
+				Select("provider_instance_id, org, slug").
+				Where("id = ?", repoDBID).
+				First(&repoRow).Error; err != nil {
+				http.Error(w, "repo not found", http.StatusNotFound)
+				return
+			}
+			// repo_id is canonical; it uniquely identifies the provider instance and repo path.
+			if repoRow.ProviderInstanceID != "" {
+				providerID = repoRow.ProviderInstanceID
+			}
+			if repoRow.Org != "" && repoRow.Slug != "" {
+				repoPath = repoRow.Org + "/" + repoRow.Slug
+			}
+		}
 		if providerID == "" || repoPath == "" {
-			http.Error(w, "provider_id and path are required", http.StatusBadRequest)
+			http.Error(w, "repo_id or provider_id and path are required", http.StatusBadRequest)
 			return
 		}
 
@@ -1256,6 +1282,9 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			contributors = []providers.ContributorInfo{}
 		}
 		commits = enrichCommits(commits, contributors)
+		if details != nil && details.Stats.Contributors == 0 && len(contributors) > 0 {
+			details.Stats.Contributors = len(contributors)
+		}
 
 		// Persist to DB so subsequent requests and restarts can skip the API.
 		if db != nil && details != nil {

@@ -9,6 +9,7 @@
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -568,15 +569,17 @@
 					<span class="flex items-center gap-1.5"><Scale class="h-4 w-4" /> {details.license}</span>
 				{/if}
 				<span class="flex items-center gap-1.5">
-					<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-						{#if resolvedProvider === 'gitlab'}
+					{#if resolvedProvider === 'gitlab'}
+						<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 							<path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.45.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024" />
-						{:else if resolvedProvider === 'gitea' || resolvedProvider === 'forgejo'}
-							<path d="M11.955.49A11.955 11.955 0 000 12.444a11.955 11.955 0 0011.955 11.955 11.955 11.955 0 0011.955-11.955A11.955 11.955 0 0011.955.49zm-.414 7.41l2.36 7.51-5.14-3.732 2.78-3.778zm.828 0l2.78 3.778-5.14 3.731 2.36-7.51zm-5.42 4.902l4.87 3.538-1.987 1.43-2.883-4.968zm10.012 0l-2.883 4.967-1.987-1.43 4.87-3.537zM8.04 18.16l2.055-1.48.912 2.9L8.04 18.16zm7.84 0l-2.967 1.42.912-2.9 2.055 1.48z" />
-						{:else}
+						</svg>
+					{:else if resolvedProvider === 'gitea' || resolvedProvider === 'forgejo'}
+						<Gitea size={14} />
+					{:else}
+						<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 							<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
-						{/if}
-					</svg>
+						</svg>
+					{/if}
 					{resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
 				</span>
 				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Last activity {formatDate(details.updated_at)}</span>
@@ -713,7 +716,7 @@
 							{/if}
 							{#if runTimeline.length === 0}
 								<div class="flex flex-col items-center justify-center py-8">
-									<Cog class="h-8 w-8 text-[var(--text-muted)] mb-2" />
+									<Cog class="mb-2 h-12 w-12 text-[var(--text-muted)]" />
 									<p class="text-sm text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
 								</div>
 							{:else}
@@ -783,13 +786,13 @@
 							</div>
 							{/if}
 						{:else if activeTab === 'contributors'}
-							{#if contributors.length === 0}
-								<div class="flex flex-col items-center justify-center gap-3 py-6 text-center">
-									<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10">
+								{#if contributors.length === 0}
+										<div class="flex flex-col items-center justify-center py-8 text-center">
+											<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="mb-2 h-12 w-12 text-[var(--text-muted)]">
 										<g id="SVGRepo_bgCarrier" stroke-width="0"></g>
 										<g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
 										<g id="SVGRepo_iconCarrier">
-											<path fill-rule="evenodd" clip-rule="evenodd" d="M16 8C16 12.4183 12.4183 16 8 16C3.58172 16 0 12.4183 0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8ZM7 5.5C7 6.32843 6.32843 7 5.5 7C4.67157 7 4 6.32843 4 5.5C4 4.67157 4.67157 4 5.5 4C6.32843 4 7 4.67157 7 5.5ZM10.5 7C11.3284 7 12 6.32843 12 5.5C12 4.67157 11.3284 4 10.5 4C9.67157 4 9 4.67157 9 5.5C9 6.32843 9.67157 7 10.5 7Z" fill="#000000"></path>
+												<path fill-rule="evenodd" clip-rule="evenodd" d="M16 8C16 12.4183 12.4183 16 8 16C3.58172 16 0 12.4183 0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8ZM7 5.5C7 6.32843 6.32843 7 5.5 7C4.67157 7 4 6.32843 4 5.5C4 4.67157 4.67157 4 5.5 4C6.32843 4 7 4.67157 7 5.5ZM10.5 7C11.3284 7 12 6.32843 12 5.5C12 4.67157 11.3284 4 10.5 4C9.67157 4 9 4.67157 9 5.5C9 6.32843 9.67157 7 10.5 7Z" fill="currentColor"></path>
 										</g>
 									</svg>
 									<p class="text-sm text-[var(--text-muted)]">No contributors found</p>

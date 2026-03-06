@@ -214,6 +214,7 @@
 	};
 
 	const totalPages = $derived(Math.ceil(totalCount / pageSize));
+	const hasActiveSearch = $derived(Boolean(searchQuery.trim() || selectedEcosystem || selectedSource));
 
 	onMount(() => {
 		if (browser) {
@@ -306,7 +307,44 @@
 		{/if}
 
 		{#if dependencies.length === 0 && !loading}
-			<p class="text-sm text-[var(--text-secondary)]">No dependencies found.</p>
+			<div class="flex flex-1 items-center justify-center">
+				<div class="flex flex-col items-center gap-3 text-center">
+					{#if hasActiveSearch}
+						<svg
+							viewBox="0 0 24 24"
+							fill="none"
+							xmlns="http://www.w3.org/2000/svg"
+							class="h-10 w-10 text-[var(--text-secondary)]"
+							aria-hidden="true"
+						>
+							<path
+								d="M11 6C13.7614 6 16 8.23858 16 11M16.6588 16.6549L21 21M19 11C19 15.4183 15.4183 19 11 19C6.58172 19 3 15.4183 3 11C3 6.58172 6.58172 3 11 3C15.4183 3 19 6.58172 19 11Z"
+								stroke="currentColor"
+								stroke-width="2"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							></path>
+						</svg>
+					{:else}
+						<svg
+							viewBox="0 0 24 24"
+							xmlns="http://www.w3.org/2000/svg"
+							class="h-10 w-10 text-[var(--text-secondary)]"
+							aria-hidden="true"
+						>
+							<path
+								d="M20.49,6.63l-8-4.5a1,1,0,0,0-1,0l-8,4.5A1,1,0,0,0,3,7.5v9a1,1,0,0,0,.51.87l8,4.5a1,1,0,0,0,1,0l8-4.5A1,1,0,0,0,21,16.5v-9A1,1,0,0,0,20.49,6.63Z"
+								fill="currentColor"
+							></path>
+							<path
+								d="M16,15a1,1,0,0,1-1-1V10.12L11.55,8.39a1,1,0,0,1,.9-1.78l4,2A1,1,0,0,1,17,9.5V14A1,1,0,0,1,16,15Z"
+								fill="transparent"
+							></path>
+						</svg>
+					{/if}
+					<p class="text-sm text-[var(--text-muted)]">No dependencies found.</p>
+				</div>
+			</div>
 		{:else if dependencies.length > 0}
 			<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<div class="flex-1 overflow-y-auto">
