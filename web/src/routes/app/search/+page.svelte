@@ -300,14 +300,65 @@
 			<div class="rounded-xl border border-[var(--error)]/40 bg-[var(--error)]/10 px-4 py-3 text-sm text-[var(--error)]">{error}</div>
 		{/if}
 
-		<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-			{#if loading}
-				<div class="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">Searching...</div>
-			{:else if !query.trim()}
-				<div class="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--text-muted)]">Enter a query to run advanced search across all indexed repository data.</div>
-			{:else if results.length === 0}
-				<div class="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</div>
-			{:else}
+			<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				{#if loading}
+					<div class="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">Searching...</div>
+				{:else if !query.trim()}
+					<div class="flex h-full items-center justify-center overflow-y-auto p-6 sm:p-8">
+						<div class="mx-auto grid w-fit gap-y-3 sm:grid-cols-2 sm:gap-x-6">
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><FileCode2 class="h-5 w-5 text-[var(--accent)]" /> Manifest files</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">pom.xml</span>, <span class="font-mono">package-lock</span>, <span class="font-mono">spring-boot</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Boxes class="h-5 w-5 text-[var(--accent)]" /> SBOM files</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">cyclonedx</span>, <span class="font-mono">pkg:npm/react</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><ShieldAlert class="h-5 w-5 text-[var(--accent)]" /> Secrets</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">api_key</span>, <span class="font-mono">token</span>, <span class="font-mono">password</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Users class="h-5 w-5 text-[var(--accent)]" /> Contributors</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">alice</span>, <span class="font-mono">@nhn.no</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Braces class="h-5 w-5 text-[var(--accent)]" /> Languages</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">java</span>, <span class="font-mono">go</span>, <span class="font-mono">typescript</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Hash class="h-5 w-5 text-[var(--accent)]" /> Commits</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">a1b2c3d</span>, <span class="font-mono">main</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><FolderGit2 class="h-5 w-5 text-[var(--accent)]" /> Repositories</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">org/repo</span>, <span class="font-mono">spam</span></p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><BookOpen class="h-5 w-5 text-[var(--accent)]" /> README files</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">installation</span>, <span class="font-mono">quickstart</span></p>
+								</div>
+							</div>
+						</div>
+					</div>
+				{:else if results.length === 0}
+					<div class="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</div>
+				{:else}
 				<div class="flex-1 overflow-y-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
