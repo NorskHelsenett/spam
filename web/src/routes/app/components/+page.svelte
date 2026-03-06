@@ -153,14 +153,65 @@
 			if (!res.ok) return;
 			const data = await res.json();
 			const assets: Array<Record<string, string>> = data.assets ?? [];
+			const resolveProviderType = (asset: Record<string, string>) => {
+				const provider = String(asset.provider || '').toLowerCase();
+				if (provider === 'github' || provider === 'gitlab' || provider === 'gitea' || provider === 'forgejo') return provider;
+				const baseUrl = String(asset.provider_base_url || '').toLowerCase();
+				if (baseUrl.includes('github')) return 'github';
+				if (baseUrl.includes('gitlab')) return 'gitlab';
+				if (baseUrl.includes('gitea')) return 'gitea';
+				if (baseUrl.includes('forgejo')) return 'forgejo';
+				return '';
+			};
+			const providerRepoUrl = (asset: Record<string, string>) => {
+				if (asset.asset_type !== 'REPO_COMMIT') return '';
+				const providerType = resolveProviderType(asset);
+				const baseUrl = String(asset.provider_base_url || '')
+					|| (providerType === 'github' ? 'https://github.com'
+						: providerType === 'gitlab' ? 'https://gitlab.com'
+							: '');
+				const path = `${asset.org || ''}/${asset.slug || ''}`.replace(/^\/+|\/+$/g, '');
+				if (!path) return '';
+				if (!baseUrl) return path;
+				return `${baseUrl.replace(/\/$/, '')}/${path}`;
+			};
+			const spamRepoUrl = (asset: Record<string, string>) => {
+				if (asset.asset_type !== 'REPO_COMMIT') return '';
+				const providerType = resolveProviderType(asset);
+				if (providerType && asset.org && asset.slug) {
+					let url = `/app/providers/repo?provider=${providerType}&path=${asset.org}/${asset.slug}`;
+					if (asset.provider_base_url) url += `&base_url=${asset.provider_base_url}`;
+					return url;
+				}
+				if (asset.repo_id) return `/app/providers/repo/${asset.repo_id}`;
+				return '';
+			};
 			const toCsvRow = (fields: unknown[]) =>
 				fields.map((f) => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',');
-			const rows = [['package', 'ecosystem', 'version', 'type', 'repository', 'source']];
+			const rows = [['package', 'ecosystem', 'version', 'type', 'repository', 'source', 'repo_url', 'spam_url']];
 			for (const a of assets) {
 				if (a.asset_type === 'REPO_COMMIT') {
-					rows.push([selectedDependency.name, selectedDependency.ecosystem, a.version || '', 'repo', `${a.org}/${a.slug}`, a.source || '']);
+					rows.push([
+						selectedDependency.name,
+						selectedDependency.ecosystem,
+						a.version || '',
+						'repo',
+						`${a.org}/${a.slug}`,
+						a.source || '',
+						providerRepoUrl(a),
+						spamRepoUrl(a),
+					]);
 				} else if (a.asset_type === 'IMAGE_DIGEST') {
-					rows.push([selectedDependency.name, selectedDependency.ecosystem, a.version || '', 'image', `${a.image_registry}/${a.image_repository}`, '']);
+					rows.push([
+						selectedDependency.name,
+						selectedDependency.ecosystem,
+						a.version || '',
+						'image',
+						`${a.image_registry}/${a.image_repository}`,
+						'',
+						'',
+						'',
+					]);
 				}
 			}
 			const csv = rows.map(toCsvRow).join('\n');

@@ -99,45 +99,56 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 					AND s.version = m.version
 			)
 			SELECT DISTINCT
-				concat_ws('/', provider, org, slug) as repo,
-				version,
-				component_purl,
-				component_name,
-				ecosystem
+				concat_ws('/', merged.provider, merged.org, merged.slug) as repo,
+				merged.version,
+				merged.component_purl,
+				merged.component_name,
+				merged.ecosystem,
+				CASE
+					WHEN COALESCE(pi.base_url, '') <> '' THEN concat_ws('/', trim(trailing '/' from pi.base_url), merged.org, merged.slug)
+					WHEN merged.provider = 'github' THEN concat_ws('/', 'https://github.com', merged.org, merged.slug)
+					WHEN merged.provider = 'gitlab' THEN concat_ws('/', 'https://gitlab.com', merged.org, merged.slug)
+					ELSE concat_ws('/', merged.org, merged.slug)
+				END AS repo_url,
+				('/app/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
+					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
+				) AS spam_url
 			FROM merged
+			LEFT JOIN repos r ON r.id = merged.repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
 			WHERE 1=1
 		`
 
 		args := []interface{}{}
 		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
+			predicate, predicateArgs := buildStructuredDependencyPredicate("merged.component_name", "merged.version", parsedSearch.Groups)
 			if predicate != "" {
 				query += ` AND ` + predicate
 				args = append(args, predicateArgs...)
 			}
 		} else if search != "" {
-			query += ` AND (component_name ILIKE ? OR component_purl ILIKE ?)`
+			query += ` AND (merged.component_name ILIKE ? OR merged.component_purl ILIKE ?)`
 			args = append(args, "%"+search+"%", "%"+search+"%")
 		}
 		if ecosystem != "" {
-			query += ` AND ecosystem = ?`
+			query += ` AND merged.ecosystem = ?`
 			args = append(args, ecosystem)
 		}
 		if repoID != "" {
-			query += ` AND repo_id = ?`
+			query += ` AND merged.repo_id = ?`
 			args = append(args, repoID)
 		}
 
 		switch source {
 		case "sbom":
-			query += ` AND has_sbom = true AND has_manifest = false`
+			query += ` AND merged.has_sbom = true AND merged.has_manifest = false`
 		case "manifest":
-			query += ` AND has_sbom = false AND has_manifest = true`
+			query += ` AND merged.has_sbom = false AND merged.has_manifest = true`
 		case "both":
-			query += ` AND has_sbom = true AND has_manifest = true`
+			query += ` AND merged.has_sbom = true AND merged.has_manifest = true`
 		}
 
-		query += ` ORDER BY repo ASC, component_name ASC, version ASC`
+		query += ` ORDER BY repo ASC, merged.component_name ASC, merged.version ASC`
 
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
@@ -152,24 +163,51 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 
 		cw := csv.NewWriter(w)
-		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem"}); err != nil {
+		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem", "repo_url", "spam_url"}); err != nil {
 			log.Printf("dependency export header write error: %v", err)
 			http.Error(w, "csv write error", http.StatusInternalServerError)
 			return
 		}
 
+		// Build absolute SPAM URL base for exported links.
+		spamBaseURL := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+		if spamBaseURL == "" {
+			scheme := "http"
+			if r.TLS != nil {
+				scheme = "https"
+			}
+			if xfProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfProto != "" {
+				scheme = strings.TrimSpace(strings.Split(xfProto, ",")[0])
+			}
+			host := strings.TrimSpace(r.Host)
+			if xfHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfHost != "" {
+				host = strings.TrimSpace(strings.Split(xfHost, ",")[0])
+			}
+			if host != "" {
+				spamBaseURL = scheme + "://" + host
+			}
+		}
+
 		for rows.Next() {
-			var repo, version, purl, name, eco sql.NullString
-			if err := rows.Scan(&repo, &version, &purl, &name, &eco); err != nil {
+			var repo, version, purl, name, eco, repoURL, spamURL sql.NullString
+			if err := rows.Scan(&repo, &version, &purl, &name, &eco, &repoURL, &spamURL); err != nil {
 				log.Printf("dependency export scan error: %v", err)
 				continue
 			}
+
+			spamURLValue := spamURL.String
+			if spamBaseURL != "" && strings.HasPrefix(spamURLValue, "/") {
+				spamURLValue = spamBaseURL + spamURLValue
+			}
+
 			record := []string{
 				repo.String,
 				version.String,
 				purl.String,
 				name.String,
 				eco.String,
+				repoURL.String,
+				spamURLValue,
 			}
 			if err := cw.Write(record); err != nil {
 				log.Printf("dependency export row write error: %v", err)
