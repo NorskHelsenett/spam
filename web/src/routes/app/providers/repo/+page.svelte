@@ -368,7 +368,7 @@
 	};
 
 	// Scan functionality
-	let activeTab = $state('runs');
+	let activeTab = $state('contributors');
 	let scanning = $state(false);
 	let scanError = $state('');
 	let activeRunId = $state<string | null>(null);
@@ -707,14 +707,14 @@
 			</div>
 			<!-- Activity Tabs -->
 			<div class="pt-4">
-					<TabSelector
-						options={[
-							{ value: 'runs', label: 'Runs' },
-							{ value: 'commits', label: 'Commits' },
-							{ value: 'contributors', label: 'Contributors' }
-						]}
-						bind:value={activeTab}
-					/>
+						<TabSelector
+							options={[
+								{ value: 'runs', label: 'Runs' },
+								{ value: 'contributors', label: 'Contributors' },
+								{ value: 'commits', label: 'Commits' }
+							]}
+							bind:value={activeTab}
+						/>
 
 					<div class="mt-[2em]">
 					{#if activeTab === 'runs'}
