@@ -32,19 +32,26 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	if provider == "" {
 		provider = "manual"
 	}
-	if input.Org == "" || input.Slug == "" {
+	org := strings.TrimSpace(input.Org)
+	slug := strings.TrimSpace(input.Slug)
+	providerInstanceID := strings.TrimSpace(input.ProviderInstanceID)
+
+	if org == "" || slug == "" {
 		return nil, errors.New("org and slug required")
+	}
+	if providerInstanceID == "" {
+		return nil, errors.New("provider instance id required")
 	}
 
 	var repo Repo
 	result := db.WithContext(ctx).
-		Where("provider_instance_id = ? AND org = ? AND slug = ?", input.ProviderInstanceID, input.Org, input.Slug).
+		Where("provider_instance_id = ? AND org = ? AND slug = ?", providerInstanceID, org, slug).
 		Attrs(Repo{
 			ID:                 uuid.NewString(),
 			Provider:           provider,
-			Org:                input.Org,
-			Slug:               input.Slug,
-			ProviderInstanceID: input.ProviderInstanceID,
+			Org:                org,
+			Slug:               slug,
+			ProviderInstanceID: providerInstanceID,
 			CreatedByUserID:    input.CreatedByUserID,
 		}).FirstOrCreate(&repo)
 
@@ -52,7 +59,7 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		// Handle race condition: another request inserted the same row
 		// between our SELECT and INSERT. Retry with a plain lookup.
 		if dbutil.IsDuplicateKeyError(result.Error) {
-			if err := db.WithContext(ctx).Where("provider_instance_id = ? AND org = ? AND slug = ?", input.ProviderInstanceID, input.Org, input.Slug).First(&repo).Error; err != nil {
+			if err := db.WithContext(ctx).Where("provider_instance_id = ? AND org = ? AND slug = ?", providerInstanceID, org, slug).First(&repo).Error; err != nil {
 				return nil, err
 			}
 			return &repo, nil

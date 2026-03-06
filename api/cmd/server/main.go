@@ -90,6 +90,7 @@ func run() error {
 		"migrations/20260203_create_sbom_metadata_view.sql",
 		"migrations/20260302_add_repo_search_trigram.sql",
 		"migrations/20260303_add_repos_provider_instance_id.sql",
+		"migrations/20260306_repos_identity_not_empty.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
