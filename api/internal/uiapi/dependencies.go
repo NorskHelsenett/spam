@@ -1,11 +1,13 @@
 package uiapi
 
 import (
+	"context"
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -104,15 +106,182 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 				merged.component_purl,
 				merged.component_name,
 				merged.ecosystem,
-				CASE
-					WHEN COALESCE(pi.base_url, '') <> '' THEN concat_ws('/', trim(trailing '/' from pi.base_url), merged.org, merged.slug)
-					WHEN merged.provider = 'github' THEN concat_ws('/', 'https://github.com', merged.org, merged.slug)
-					WHEN merged.provider = 'gitlab' THEN concat_ws('/', 'https://gitlab.com', merged.org, merged.slug)
-					ELSE concat_ws('/', merged.org, merged.slug)
-				END AS repo_url,
 				('/app/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
 					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
 				) AS spam_url
+			FROM merged
+			LEFT JOIN repos r ON r.id = merged.repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+			WHERE 1=1
+		`
+
+		args := []interface{}{}
+		if parsedSearch.Structured {
+			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
+			if predicate != "" {
+				query += ` AND ` + predicate
+				args = append(args, predicateArgs...)
+			}
+		} else if search != "" {
+			query += ` AND (component_name ILIKE ? OR component_purl ILIKE ?)`
+			args = append(args, "%"+search+"%", "%"+search+"%")
+		}
+		if ecosystem != "" {
+			query += ` AND ecosystem = ?`
+			args = append(args, ecosystem)
+		}
+		if repoID != "" {
+			query += ` AND repo_id = ?`
+			args = append(args, repoID)
+		}
+
+		switch source {
+		case "sbom":
+			query += ` AND has_sbom = true AND has_manifest = false`
+		case "manifest":
+			query += ` AND has_sbom = false AND has_manifest = true`
+		case "both":
+			query += ` AND has_sbom = true AND has_manifest = true`
+		}
+
+		query += ` ORDER BY repo ASC, component_name ASC, version ASC`
+
+		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
+		if err != nil {
+			log.Printf("dependency export query error: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		filename := "dependencies-forensics-" + time.Now().Format("2006-01-02") + ".csv"
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+
+		cw := csv.NewWriter(w)
+		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem", "spam_url"}); err != nil {
+			log.Printf("dependency export header write error: %v", err)
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+
+		spamBaseURL := requestBaseURL(r)
+
+		for rows.Next() {
+			var repo, version, purl, name, eco, spamURL sql.NullString
+			if err := rows.Scan(&repo, &version, &purl, &name, &eco, &spamURL); err != nil {
+				log.Printf("dependency export scan error: %v", err)
+				continue
+			}
+			spamURLValue := spamURL.String
+			if spamBaseURL != "" && strings.HasPrefix(spamURLValue, "/") {
+				spamURLValue = spamBaseURL + spamURLValue
+			}
+			record := []string{
+				repo.String,
+				version.String,
+				purl.String,
+				name.String,
+				eco.String,
+				spamURLValue,
+			}
+			if err := cw.Write(record); err != nil {
+				log.Printf("dependency export row write error: %v", err)
+				http.Error(w, "csv write error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			log.Printf("dependency export flush error: %v", err)
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+// DependencyExportFullCSVHandler exports expanded dependency rows plus URLs and contributor emails.
+func DependencyExportFullCSVHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		search := r.URL.Query().Get("q")
+		ecosystem := r.URL.Query().Get("ecosystem")
+		repoID := r.URL.Query().Get("repo_id")
+		source := r.URL.Query().Get("source")
+		parsedSearch, err := parseDependencySearchQuery(search)
+		if err != nil {
+			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		query := `
+			WITH sbom_rows AS (
+				SELECT DISTINCT
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+					NULLIF(s.purl, '') as component_purl,
+					COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
+					s.kind as ecosystem
+				FROM sbom_component_view s
+				JOIN repo_commits rc ON rc.id = s.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND s.asset_type = 'REPO_COMMIT'
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+			),
+			manifest_rows AS (
+				SELECT DISTINCT
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					COALESCE(md.version, '') as version,
+					NULL::text as component_purl,
+					md.name as component_name,
+					md.ecosystem as ecosystem
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				JOIN repos r ON r.id = m.repo_id
+				WHERE md.name IS NOT NULL
+			),
+			merged AS (
+				SELECT
+					COALESCE(s.repo_id, m.repo_id) as repo_id,
+					COALESCE(s.provider, m.provider) as provider,
+					COALESCE(s.org, m.org) as org,
+					COALESCE(s.slug, m.slug) as slug,
+					COALESCE(s.version, m.version) as version,
+					COALESCE(s.component_purl, m.component_purl, '') as component_purl,
+					COALESCE(s.component_name, m.component_name) as component_name,
+					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
+					(s.repo_id IS NOT NULL) as has_sbom,
+					(m.repo_id IS NOT NULL) as has_manifest
+				FROM sbom_rows s
+				FULL OUTER JOIN manifest_rows m
+					ON s.repo_id = m.repo_id
+					AND s.component_name = m.component_name
+					AND s.ecosystem = m.ecosystem
+					AND s.version = m.version
+			)
+			SELECT DISTINCT
+				merged.repo_id,
+				concat_ws('/', merged.provider, merged.org, merged.slug) as repo,
+				merged.version,
+				merged.component_purl,
+				merged.component_name,
+				merged.ecosystem,
+				merged.provider,
+				merged.org,
+				merged.slug,
+				COALESCE(pi.base_url, '') as provider_base_url
 			FROM merged
 			LEFT JOIN repos r ON r.id = merged.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
@@ -138,7 +307,6 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 			query += ` AND merged.repo_id = ?`
 			args = append(args, repoID)
 		}
-
 		switch source {
 		case "sbom":
 			query += ` AND merged.has_sbom = true AND merged.has_manifest = false`
@@ -152,77 +320,481 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
-			log.Printf("dependency export query error: %v", err)
+			log.Printf("dependency full export query error: %v", err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
 		}
 		defer rows.Close()
 
-		filename := "dependencies-forensics-" + time.Now().Format("2006-01-02") + ".csv"
+		filename := "dependencies-full-" + time.Now().Format("2006-01-02") + ".csv"
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 
 		cw := csv.NewWriter(w)
-		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem", "repo_url", "spam_url"}); err != nil {
-			log.Printf("dependency export header write error: %v", err)
+		if err := cw.Write([]string{"repo", "version", "component_purl", "component_name", "ecosystem", "repo_url", "spam_url", "contributor_emails"}); err != nil {
 			http.Error(w, "csv write error", http.StatusInternalServerError)
 			return
 		}
 
-		// Build absolute SPAM URL base for exported links.
-		spamBaseURL := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
-		if spamBaseURL == "" {
-			scheme := "http"
-			if r.TLS != nil {
-				scheme = "https"
-			}
-			if xfProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfProto != "" {
-				scheme = strings.TrimSpace(strings.Split(xfProto, ",")[0])
-			}
-			host := strings.TrimSpace(r.Host)
-			if xfHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfHost != "" {
-				host = strings.TrimSpace(strings.Split(xfHost, ",")[0])
-			}
-			if host != "" {
-				spamBaseURL = scheme + "://" + host
-			}
+		type exportRow struct {
+			RepoID          string
+			Repo            string
+			Version         string
+			Purl            string
+			Name            string
+			Eco             string
+			Provider        string
+			Org             string
+			Slug            string
+			ProviderBaseURL string
 		}
-
+		collected := make([]exportRow, 0, 1024)
+		repoIDs := make([]string, 0, 512)
+		seenRepoIDs := map[string]struct{}{}
 		for rows.Next() {
-			var repo, version, purl, name, eco, repoURL, spamURL sql.NullString
-			if err := rows.Scan(&repo, &version, &purl, &name, &eco, &repoURL, &spamURL); err != nil {
-				log.Printf("dependency export scan error: %v", err)
+			var repoID, repo, version, purl, name, eco, provider, org, slug, providerBaseURL sql.NullString
+			if err := rows.Scan(&repoID, &repo, &version, &purl, &name, &eco, &provider, &org, &slug, &providerBaseURL); err != nil {
+				log.Printf("dependency full export scan error: %v", err)
 				continue
 			}
-
-			spamURLValue := spamURL.String
-			if spamBaseURL != "" && strings.HasPrefix(spamURLValue, "/") {
-				spamURLValue = spamBaseURL + spamURLValue
+			row := exportRow{
+				RepoID:          repoID.String,
+				Repo:            repo.String,
+				Version:         version.String,
+				Purl:            purl.String,
+				Name:            name.String,
+				Eco:             eco.String,
+				Provider:        provider.String,
+				Org:             org.String,
+				Slug:            slug.String,
+				ProviderBaseURL: providerBaseURL.String,
 			}
-
-			record := []string{
-				repo.String,
-				version.String,
-				purl.String,
-				name.String,
-				eco.String,
-				repoURL.String,
-				spamURLValue,
+			collected = append(collected, row)
+			if row.RepoID != "" {
+				if _, ok := seenRepoIDs[row.RepoID]; !ok {
+					seenRepoIDs[row.RepoID] = struct{}{}
+					repoIDs = append(repoIDs, row.RepoID)
+				}
 			}
+		}
+		contributorEmailsByRepo := loadContributorEmailsByRepo(db, r.Context(), repoIDs)
+		spamBaseURL := requestBaseURL(r)
+		for _, row := range collected {
+			providerType := inferProviderType(row.Provider, row.ProviderBaseURL)
+			repoURL := buildProviderRepoURL(providerType, row.ProviderBaseURL, row.Org, row.Slug)
+			spamURL := buildSpamRepoURL(spamBaseURL, providerType, row.Org, row.Slug, row.ProviderBaseURL)
+			record := []string{row.Repo, row.Version, row.Purl, row.Name, row.Eco, repoURL, spamURL, contributorEmailsByRepo[row.RepoID]}
 			if err := cw.Write(record); err != nil {
-				log.Printf("dependency export row write error: %v", err)
 				http.Error(w, "csv write error", http.StatusInternalServerError)
 				return
 			}
 		}
-
 		cw.Flush()
 		if err := cw.Error(); err != nil {
-			log.Printf("dependency export flush error: %v", err)
 			http.Error(w, "csv write error", http.StatusInternalServerError)
 			return
 		}
 	}
+}
+
+// DependencyDetailExportCSVHandler exports a single dependency's repo usage as CSV.
+func DependencyDetailExportCSVHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		name := r.URL.Query().Get("name")
+		ecosystem := r.URL.Query().Get("ecosystem")
+		versions := parseVersionFilters(r)
+		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
+		if name == "" || ecosystem == "" {
+			http.Error(w, "name and ecosystem required", http.StatusBadRequest)
+			return
+		}
+		if source != "" && source != "sbom" && source != "manifest" && source != "both" {
+			http.Error(w, "invalid source", http.StatusBadRequest)
+			return
+		}
+		if source == "both" {
+			source = ""
+		}
+
+		assets, err := queryDependencyAssetsForExport(db, r.Context(), name, ecosystem, versions, source)
+		if err != nil {
+			log.Printf("dependency detail export query error: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+
+		repoIDs := make([]string, 0, len(assets))
+		seen := map[string]struct{}{}
+		for _, a := range assets {
+			if a.RepoID == "" {
+				continue
+			}
+			if _, ok := seen[a.RepoID]; ok {
+				continue
+			}
+			seen[a.RepoID] = struct{}{}
+			repoIDs = append(repoIDs, a.RepoID)
+		}
+		contributorEmailsByRepo := loadContributorEmailsByRepo(db, r.Context(), repoIDs)
+
+		filename := strings.ReplaceAll(name, "/", "_") + "-" + ecosystem + "-details.csv"
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		cw := csv.NewWriter(w)
+		if err := cw.Write([]string{"package", "ecosystem", "version", "type", "repository", "source", "repo_url", "spam_url", "contributor_emails"}); err != nil {
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+
+		spamBaseURL := requestBaseURL(r)
+		for _, a := range assets {
+			repository := ""
+			assetType := "repo"
+			if a.AssetType == "IMAGE_DIGEST" {
+				assetType = "image"
+			} else {
+				repository = strings.Trim(strings.TrimSpace(a.Org)+"/"+strings.TrimSpace(a.Slug), "/")
+			}
+			providerType := inferProviderType(a.Provider, a.ProviderBaseURL)
+			repoURL := buildProviderRepoURL(providerType, a.ProviderBaseURL, a.Org, a.Slug)
+			spamURL := buildSpamRepoURL(spamBaseURL, providerType, a.Org, a.Slug, a.ProviderBaseURL)
+			record := []string{
+				name,
+				ecosystem,
+				a.Version,
+				assetType,
+				repository,
+				a.Source,
+				repoURL,
+				spamURL,
+				contributorEmailsByRepo[a.RepoID],
+			}
+			if err := cw.Write(record); err != nil {
+				http.Error(w, "csv write error", http.StatusInternalServerError)
+				return
+			}
+		}
+		cw.Flush()
+		if err := cw.Error(); err != nil {
+			http.Error(w, "csv write error", http.StatusInternalServerError)
+			return
+		}
+	}
+}
+
+func requestBaseURL(r *http.Request) string {
+	base := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+	if base != "" {
+		return base
+	}
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if xfProto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfProto != "" {
+		scheme = strings.TrimSpace(strings.Split(xfProto, ",")[0])
+	}
+	host := strings.TrimSpace(r.Host)
+	if xfHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfHost != "" {
+		host = strings.TrimSpace(strings.Split(xfHost, ",")[0])
+	}
+	if host == "" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
+func parseVersionFilters(r *http.Request) []string {
+	out := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	if single := strings.TrimSpace(r.URL.Query().Get("version")); single != "" {
+		seen[single] = struct{}{}
+		out = append(out, single)
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("versions")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			v := strings.TrimSpace(part)
+			if v == "" {
+				continue
+			}
+			if _, ok := seen[v]; ok {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func inPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	parts := make([]string, n)
+	for i := 0; i < n; i++ {
+		parts[i] = "?"
+	}
+	return strings.Join(parts, ",")
+}
+
+func inferProviderType(provider, providerBaseURL string) string {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	if p == "github" || p == "gitlab" || p == "gitea" || p == "forgejo" {
+		return p
+	}
+	b := strings.ToLower(strings.TrimSpace(providerBaseURL))
+	switch {
+	case strings.Contains(b, "github"):
+		return "github"
+	case strings.Contains(b, "gitlab"):
+		return "gitlab"
+	case strings.Contains(b, "gitea"):
+		return "gitea"
+	case strings.Contains(b, "forgejo"):
+		return "forgejo"
+	default:
+		return p
+	}
+}
+
+func buildProviderRepoURL(providerType, providerBaseURL, org, slug string) string {
+	path := strings.Trim(strings.TrimSpace(org)+"/"+strings.TrimSpace(slug), "/")
+	if path == "" {
+		return ""
+	}
+	base := strings.TrimRight(strings.TrimSpace(providerBaseURL), "/")
+	if base == "" {
+		switch providerType {
+		case "github":
+			base = "https://github.com"
+		case "gitlab":
+			base = "https://gitlab.com"
+		}
+	}
+	if base == "" {
+		return path
+	}
+	return base + "/" + path
+}
+
+func buildSpamRepoURL(baseURL, providerType, org, slug, providerBaseURL string) string {
+	path := strings.Trim(strings.TrimSpace(org)+"/"+strings.TrimSpace(slug), "/")
+	if providerType == "" || path == "" {
+		return ""
+	}
+	u := "/app/providers/repo?provider=" + providerType + "&path=" + path
+	if strings.TrimSpace(providerBaseURL) != "" {
+		u += "&base_url=" + strings.TrimSpace(providerBaseURL)
+	}
+	if baseURL == "" {
+		return u
+	}
+	return baseURL + u
+}
+
+func loadContributorEmailsByRepo(db *gorm.DB, ctx context.Context, repoIDs []string) map[string]string {
+	out := make(map[string]string, len(repoIDs))
+	if len(repoIDs) == 0 {
+		return out
+	}
+	type row struct {
+		RepoID           string
+		ContributorsJSON string
+		CommitsJSON      string
+	}
+	var rows []row
+	if err := db.WithContext(ctx).
+		Table("repo_caches").
+		Select("repo_id, contributors_json, commits_json").
+		Where("repo_id IN ?", repoIDs).
+		Find(&rows).Error; err != nil {
+		return out
+	}
+	type contributor struct {
+		Email string `json:"email"`
+	}
+	type commit struct {
+		AuthorEmail string `json:"author_email"`
+	}
+	for _, r := range rows {
+		set := map[string]struct{}{}
+
+		if strings.TrimSpace(r.ContributorsJSON) != "" {
+			var contributors []contributor
+			if err := json.Unmarshal([]byte(r.ContributorsJSON), &contributors); err == nil {
+				for _, c := range contributors {
+					e := strings.TrimSpace(c.Email)
+					if e == "" {
+						continue
+					}
+					set[e] = struct{}{}
+				}
+			}
+		}
+		if strings.TrimSpace(r.CommitsJSON) != "" {
+			var commits []commit
+			if err := json.Unmarshal([]byte(r.CommitsJSON), &commits); err == nil {
+				for _, c := range commits {
+					e := strings.TrimSpace(c.AuthorEmail)
+					if e == "" {
+						continue
+					}
+					set[e] = struct{}{}
+				}
+			}
+		}
+		emails := make([]string, 0, len(set))
+		for e := range set {
+			emails = append(emails, e)
+		}
+		sort.Strings(emails)
+		out[r.RepoID] = strings.Join(emails, ";")
+	}
+	return out
+}
+
+func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecosystem string, versions []string, source string) ([]DependencyAsset, error) {
+	cteParts := make([]string, 0, 3)
+	args := make([]interface{}, 0, 10)
+	selectParts := make([]string, 0, 2)
+	if source == "" || source == "sbom" {
+		sbomCTE := `
+			sbom_assets AS (
+				SELECT DISTINCT
+					'REPO_COMMIT' as asset_type,
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					r.provider_instance_id,
+					rc.commit_sha,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+					'sbom' as source,
+					NULL as manifest_path,
+					NULL as manifest_type,
+					false as direct,
+					NULL as scope,
+					sb.created_at
+				FROM sbom_component_view s
+				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+				  AND sb.asset_type = 'REPO_COMMIT'
+				  AND sb.asset_ref_id = s.asset_ref_id
+				JOIN repo_commits rc ON rc.id = sb.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND s.kind = ?
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ?
+		`
+		args = append(args, ecosystem, name)
+		if len(versions) > 0 {
+			sbomCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') IN (` + inPlaceholders(len(versions)) + `)`
+			for _, v := range versions {
+				args = append(args, v)
+			}
+		}
+		sbomCTE += `)`
+		cteParts = append(cteParts, sbomCTE)
+		selectParts = append(selectParts, `SELECT * FROM sbom_assets`)
+	}
+	if source == "" || source == "manifest" {
+		manifestCTE := `
+			manifest_assets AS (
+				SELECT
+					'REPO_COMMIT' as asset_type,
+					r.id as repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					r.provider_instance_id,
+					'' as commit_sha,
+					md.version,
+					'manifest' as source,
+					m.path as manifest_path,
+					m.type as manifest_type,
+					md.direct,
+					md.scope,
+					m.created_at
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				JOIN repos r ON r.id = m.repo_id
+				WHERE md.name = ?
+				  AND md.ecosystem = ?
+		`
+		args = append(args, name, ecosystem)
+		if len(versions) > 0 {
+			manifestCTE += ` AND md.version IN (` + inPlaceholders(len(versions)) + `)`
+			for _, v := range versions {
+				args = append(args, v)
+			}
+		}
+		manifestCTE += `)`
+		cteParts = append(cteParts, manifestCTE)
+		selectParts = append(selectParts, `SELECT * FROM manifest_assets`)
+	}
+	assetsQuery := `
+		WITH ` + strings.Join(cteParts, ",") + `,
+		combined_assets AS (
+			` + strings.Join(selectParts, ` UNION ALL `) + `
+		)
+		SELECT
+			ca.asset_type,
+			ca.repo_id,
+			COALESCE(pi.display_name, ca.provider) as provider,
+			ca.provider_instance_id as provider_id,
+			ca.org,
+			ca.slug,
+			ca.commit_sha,
+			ca.version,
+			ca.source,
+			ca.manifest_path,
+			ca.manifest_type,
+			ca.direct,
+			ca.scope,
+			COALESCE(pi.base_url, '') as provider_base_url
+		FROM combined_assets ca
+		LEFT JOIN provider_instances pi ON pi.id = ca.provider_instance_id
+		ORDER BY ca.created_at DESC
+	`
+	rows, err := db.WithContext(ctx).Raw(assetsQuery, args...).Rows()
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	assets := make([]DependencyAsset, 0)
+	for rows.Next() {
+		var a DependencyAsset
+		var commitSHA, manifestPath, manifestType, scope sql.NullString
+		if err := rows.Scan(
+			&a.AssetType, &a.RepoID, &a.Provider, &a.ProviderID, &a.Org, &a.Slug,
+			&commitSHA, &a.Version, &a.Source, &manifestPath, &manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
+		); err != nil {
+			continue
+		}
+		if commitSHA.Valid {
+			v := commitSHA.String
+			a.CommitSHA = &v
+		}
+		if manifestPath.Valid {
+			v := manifestPath.String
+			a.ManifestPath = &v
+		}
+		if manifestType.Valid {
+			v := manifestType.String
+			a.ManifestType = &v
+		}
+		if scope.Valid {
+			v := scope.String
+			a.Scope = &v
+		}
+		assets = append(assets, a)
+	}
+	return assets, nil
 }
 
 // UnifiedDependenciesResponse is the API response
@@ -774,7 +1346,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 		name := r.URL.Query().Get("name")
 		ecosystem := r.URL.Query().Get("ecosystem")
-		version := r.URL.Query().Get("version")
+		versions := parseVersionFilters(r)
 		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 
 		if name == "" || ecosystem == "" {
@@ -833,9 +1405,11 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 					  AND COALESCE(s.package_name, s.normalized_name, s.name) = ?
 			`
 			args = append(args, ecosystem, name)
-			if version != "" {
-				sbomCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?`
-				args = append(args, version)
+			if len(versions) > 0 {
+				sbomCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') IN (` + inPlaceholders(len(versions)) + `)`
+				for _, v := range versions {
+					args = append(args, v)
+				}
 			}
 			sbomCTE += `
 				)
@@ -869,9 +1443,11 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 					  AND md.ecosystem = ?
 			`
 			args = append(args, name, ecosystem)
-			if version != "" {
-				manifestCTE += ` AND md.version = ?`
-				args = append(args, version)
+			if len(versions) > 0 {
+				manifestCTE += ` AND md.version IN (` + inPlaceholders(len(versions)) + `)`
+				for _, v := range versions {
+					args = append(args, v)
+				}
 			}
 			manifestCTE += `
 				)

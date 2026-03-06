@@ -137,9 +137,8 @@
 	let componentAssets: ComponentAsset[] = $state([]);
 	let loading = $state(false);
 	let assetsLoading = $state(false);
-	let selectedVersion = $state('');
+	let selectedVersions = $state<string[]>([]);
 	let repoContributors = $state<Record<string, Contributor[]>>({});
-	let repoContributorsAll = $state<Record<string, Contributor[]>>({});
 	let loadingContributors = $state<Record<string, boolean>>({});
 	let providerInstances: ProviderInstance[] = $state([]);
 	let providerInstancesLoaded = false;
@@ -157,7 +156,7 @@
 		}
 	});
 
-	// Auto-load contributors for visible repos
+	// Auto-load contributors for all repos in the current result set.
 	$effect(() => {
 		for (const repo of uniqueRepos) {
 			if (!repoContributors[repo.key] && !loadingContributors[repo.key]) {
@@ -172,11 +171,6 @@
 			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
 		};
 	});
-
-	const resolveProviderType = (provider: string) => {
-		const instance = findProviderInstance(provider);
-		return instance?.type ?? provider;
-	};
 
 	const findProviderInstance = (provider: string, providerBaseURL?: string) => {
 		return providerInstances.find((p) =>
@@ -199,26 +193,25 @@
 		loading = true;
 		componentDetail = null;
 		componentAssets = [];
-		selectedVersion = '';
+		selectedVersions = [];
 		repoContributors = {};
-		repoContributorsAll = {};
 		try {
 			const params = new URLSearchParams({ name: depName, ecosystem: depEcosystem });
 			const response = await fetch(`/api/dependencies/detail?${params}`, { credentials: 'include' });
 			if (response.ok) {
 				componentDetail = await response.json();
-				loadAssets(depName, depEcosystem, '');
+				loadAssets(depName, depEcosystem, []);
 			}
 		} catch { /* ignore */ } finally {
 			loading = false;
 		}
 	};
 
-	const loadAssets = async (depName: string, depEcosystem: string, version: string) => {
+	const loadAssets = async (depName: string, depEcosystem: string, versions: string[]) => {
 		assetsLoading = true;
 		try {
 			const params = new URLSearchParams({ name: depName, ecosystem: depEcosystem });
-			if (version) params.set('version', version);
+			if (versions.length > 0) params.set('versions', versions.join(','));
 			const primarySource = sources[0];
 			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
 			params.set('page_size', '100');
@@ -295,9 +288,21 @@
 		return [...map.values()];
 	});
 
-	const handleVersionClick = (version: string) => {
-		selectedVersion = selectedVersion === version ? '' : version;
-		loadAssets(name, ecosystem, selectedVersion);
+	const handleVersionClick = (event: MouseEvent, version: string) => {
+		const toggle = event.metaKey || event.ctrlKey;
+		if (toggle) {
+			selectedVersions = selectedVersions.includes(version)
+				? selectedVersions.filter((v) => v !== version)
+				: [...selectedVersions, version];
+		} else {
+			selectedVersions = (selectedVersions.length === 1 && selectedVersions[0] === version) ? [] : [version];
+		}
+		loadAssets(name, ecosystem, selectedVersions);
+	};
+
+	const clearVersionSelection = () => {
+		selectedVersions = [];
+		loadAssets(name, ecosystem, []);
 	};
 
 	const loadContributors = async (repo: UniqueRepo) => {
@@ -325,10 +330,6 @@
 				const contributors = Array.isArray(data.contributors) ? (data.contributors as Contributor[]) : [];
 				const commits = Array.isArray(data.commits) ? (data.commits as CommitInfo[]) : [];
 				const sortedContributors = sortContributorsByLatest(contributors, commits);
-				repoContributorsAll = {
-					...repoContributorsAll,
-					[repo.key]: sortedContributors,
-				};
 				repoContributors = {
 					...repoContributors,
 					[repo.key]: sortedContributors.slice(0, 5),
@@ -336,11 +337,9 @@
 			} else {
 				// Mark as resolved to avoid tight retry loops on persistent non-2xx responses.
 				repoContributors = { ...repoContributors, [repo.key]: [] };
-				repoContributorsAll = { ...repoContributorsAll, [repo.key]: [] };
 			}
 		} catch {
 			repoContributors = { ...repoContributors, [repo.key]: [] };
-			repoContributorsAll = { ...repoContributorsAll, [repo.key]: [] };
 		} finally {
 			loadingContributors = { ...loadingContributors, [repo.key]: false };
 		}
@@ -420,35 +419,6 @@
 		return `/app/providers/repo/${encodeURIComponent(repo.repo_id)}`;
 	};
 
-	const providerRepoUrl = (repo: UniqueRepo): string => {
-		const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
-		const providerType = instance?.type ?? String(repo.provider || '').toLowerCase();
-		const baseUrl = instance?.base_url
-			?? repo.provider_base_url
-			?? (providerType === 'github' ? 'https://github.com'
-				: providerType === 'gitlab' ? 'https://gitlab.com'
-					: '');
-		const path = `${repo.org}/${repo.slug}`;
-		if (!baseUrl) return path;
-		return `${baseUrl.replace(/\/$/, '')}/${path}`;
-	};
-
-	const spamRepoExportUrl = (repo: UniqueRepo): string => {
-		const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
-		const providerType = instance?.type ?? String(repo.provider || '').toLowerCase();
-		const repoPath = `${repo.org}/${repo.slug}`;
-		let path = '';
-		if (providerType && repo.org && repo.slug) {
-			path = `/app/providers/repo?provider=${providerType}&path=${repoPath}`;
-			if (instance?.base_url) path += `&base_url=${instance.base_url}`;
-		} else {
-			path = spamRepoUrl(repo) ?? '';
-		}
-		if (!path) return '';
-		if (browser && window.location?.origin) return `${window.location.origin}${path}`;
-		return path;
-	};
-
 	const handleRepoLinkClick = (event: MouseEvent, url: string) => {
 		event.stopPropagation();
 		if (!browser) return;
@@ -473,33 +443,28 @@
 		return null;
 	});
 
-	// ── Exports ────────────────────────────────────────────────────────────────
-	const downloadFile = (content: string, filename: string) => {
-		const blob = new Blob([content], { type: 'text/csv' });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement('a');
-		a.href = url; a.download = filename;
-		document.body.appendChild(a); a.click();
-		document.body.removeChild(a); URL.revokeObjectURL(url);
-	};
-
-	const toCsvRow = (fields: unknown[]) =>
-		fields.map((f) => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',');
-
-	const exportPackageInfo = () => {
-		const safe = name.replace(/[^a-z0-9\-_.]/gi, '_');
-		const rows = [['package', 'ecosystem', 'version', 'source', 'repo_url', 'spam_url', 'contributor_emails']];
-		for (const repo of uniqueRepos) {
-			const contributorEmails = [...new Set((repoContributorsAll[repo.key] ?? []).map((c) => c.email).filter((e): e is string => Boolean(e && e.trim())))]
-				.join(';');
-			const repoUrl = providerRepoUrl(repo);
-			const spamUrl = spamRepoExportUrl(repo);
-			const versions = repo.versions.length > 0 ? repo.versions : [''];
-			for (const v of versions) {
-				rows.push([name, ecosystem, v, repo.sources.join('+'), repoUrl, spamUrl, contributorEmails]);
-			}
+	const exportPackageInfo = async () => {
+		try {
+			const params = new URLSearchParams({ name, ecosystem });
+			const primarySource = sources[0];
+			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
+			if (selectedVersions.length > 0) params.set('versions', selectedVersions.join(','));
+			const response = await fetch(`/api/dependencies/export/detail.csv?${params}`, { credentials: 'include' });
+			if (!response.ok) return;
+			const blob = await response.blob();
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			const disposition = response.headers.get('content-disposition') ?? '';
+			const match = disposition.match(/filename="([^"]+)"/);
+			link.href = url;
+			link.download = match?.[1] || `${name.replace(/[^a-z0-9\-_.]/gi, '_')}-${ecosystem}-details.csv`;
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(url);
+		} catch {
+			// Ignore export errors
 		}
-		downloadFile(rows.map(toCsvRow).join('\n'), `${safe}-${ecosystem}-info.csv`);
 	};
 </script>
 
@@ -583,12 +548,12 @@
 			<div class="border-b border-[var(--border-color)]/60 px-4 py-3">
 				<div class="flex flex-wrap gap-1.5">
 					<button type="button"
-						class="rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersion === '' ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
-						onclick={() => handleVersionClick('')}>All</button>
+						class="rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersions.length === 0 ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
+						onclick={clearVersionSelection}>All</button>
 					{#each sortedVersions as v}
 						<button type="button"
-							class="rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersion === v.version ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
-							onclick={() => handleVersionClick(v.version)}>
+							class="rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersions.includes(v.version) ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
+							onclick={(e) => handleVersionClick(e, v.version)}>
 							{v.version || '(no version)'}
 						</button>
 					{/each}
@@ -748,7 +713,7 @@
 						<Package class="h-8 w-8 text-[var(--border-color)]" />
 						<p class="text-sm text-[var(--text-secondary)]">No usage found</p>
 						<p class="text-[11px] text-[var(--text-muted)]">
-							{selectedVersion ? `No repos or images use version ${selectedVersion}.` : 'This package has no tracked repositories or images.'}
+							{selectedVersions.length > 0 ? `No repos or images use selected version filters (${selectedVersions.join(', ')}).` : 'This package has no tracked repositories or images.'}
 						</p>
 					</div>
 				{/if}

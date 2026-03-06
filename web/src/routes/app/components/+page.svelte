@@ -104,23 +104,23 @@
 			if (searchQuery) params.set('q', searchQuery);
 			if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
 			if (selectedSource) params.set('source', selectedSource);
+			await downloadCsv(`/api/dependencies/export.csv?${params}`, 'dependencies-forensics.csv');
+		} catch (err) {
+			error = err instanceof Error ? err.message : 'Failed to export dependencies.';
+		} finally {
+			exporting = false;
+		}
+	};
 
-			const response = await fetch(`/api/dependencies/export.csv?${params}`, { credentials: 'include' });
-			if (!response.ok) {
-				throw new Error(response.status === 401 ? 'Please log in.' : 'Failed to export dependencies.');
-			}
-
-			const blob = await response.blob();
-			const url = URL.createObjectURL(blob);
-			const link = document.createElement('a');
-			const disposition = response.headers.get('content-disposition') ?? '';
-			const match = disposition.match(/filename="([^"]+)"/);
-			link.href = url;
-			link.download = match?.[1] || 'dependencies-forensics.csv';
-			document.body.appendChild(link);
-			link.click();
-			document.body.removeChild(link);
-			URL.revokeObjectURL(url);
+	const exportFullCsv = async () => {
+		if (exporting) return;
+		exporting = true;
+		try {
+			const params = new URLSearchParams();
+			if (searchQuery) params.set('q', searchQuery);
+			if (selectedEcosystem) params.set('ecosystem', selectedEcosystem);
+			if (selectedSource) params.set('source', selectedSource);
+			await downloadCsv(`/api/dependencies/export/full.csv?${params}`, 'dependencies-full.csv');
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to export dependencies.';
 		} finally {
@@ -144,87 +144,32 @@
 		try {
 			const params = new URLSearchParams({
 				name: selectedDependency.name,
-				ecosystem: selectedDependency.ecosystem,
-				page_size: '1000'
+				ecosystem: selectedDependency.ecosystem
 			});
 			const primarySource = selectedDependency.sources?.[0];
 			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
-			const res = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });
-			if (!res.ok) return;
-			const data = await res.json();
-			const assets: Array<Record<string, string>> = data.assets ?? [];
-			const resolveProviderType = (asset: Record<string, string>) => {
-				const provider = String(asset.provider || '').toLowerCase();
-				if (provider === 'github' || provider === 'gitlab' || provider === 'gitea' || provider === 'forgejo') return provider;
-				const baseUrl = String(asset.provider_base_url || '').toLowerCase();
-				if (baseUrl.includes('github')) return 'github';
-				if (baseUrl.includes('gitlab')) return 'gitlab';
-				if (baseUrl.includes('gitea')) return 'gitea';
-				if (baseUrl.includes('forgejo')) return 'forgejo';
-				return '';
-			};
-			const providerRepoUrl = (asset: Record<string, string>) => {
-				if (asset.asset_type !== 'REPO_COMMIT') return '';
-				const providerType = resolveProviderType(asset);
-				const baseUrl = String(asset.provider_base_url || '')
-					|| (providerType === 'github' ? 'https://github.com'
-						: providerType === 'gitlab' ? 'https://gitlab.com'
-							: '');
-				const path = `${asset.org || ''}/${asset.slug || ''}`.replace(/^\/+|\/+$/g, '');
-				if (!path) return '';
-				if (!baseUrl) return path;
-				return `${baseUrl.replace(/\/$/, '')}/${path}`;
-			};
-			const spamRepoUrl = (asset: Record<string, string>) => {
-				if (asset.asset_type !== 'REPO_COMMIT') return '';
-				const providerType = resolveProviderType(asset);
-				if (providerType && asset.org && asset.slug) {
-					let url = `/app/providers/repo?provider=${providerType}&path=${asset.org}/${asset.slug}`;
-					if (asset.provider_base_url) url += `&base_url=${asset.provider_base_url}`;
-					return url;
-				}
-				if (asset.repo_id) return `/app/providers/repo/${asset.repo_id}`;
-				return '';
-			};
-			const toCsvRow = (fields: unknown[]) =>
-				fields.map((f) => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',');
-			const rows = [['package', 'ecosystem', 'version', 'type', 'repository', 'source', 'repo_url', 'spam_url']];
-			for (const a of assets) {
-				if (a.asset_type === 'REPO_COMMIT') {
-					rows.push([
-						selectedDependency.name,
-						selectedDependency.ecosystem,
-						a.version || '',
-						'repo',
-						`${a.org}/${a.slug}`,
-						a.source || '',
-						providerRepoUrl(a),
-						spamRepoUrl(a),
-					]);
-				} else if (a.asset_type === 'IMAGE_DIGEST') {
-					rows.push([
-						selectedDependency.name,
-						selectedDependency.ecosystem,
-						a.version || '',
-						'image',
-						`${a.image_registry}/${a.image_repository}`,
-						'',
-						'',
-						'',
-					]);
-				}
-			}
-			const csv = rows.map(toCsvRow).join('\n');
-			const blob = new Blob([csv], { type: 'text/csv' });
-			const url = URL.createObjectURL(blob);
-			const link = document.createElement('a');
-			link.href = url;
-			link.download = `${selectedDependency.name.replace(/[^a-z0-9\-_.]/gi, '_')}-details.csv`;
-			document.body.appendChild(link); link.click();
-			document.body.removeChild(link); URL.revokeObjectURL(url);
+			await downloadCsv(`/api/dependencies/export/detail.csv?${params}`, `${selectedDependency.name.replace(/[^a-z0-9\-_.]/gi, '_')}-details.csv`);
 		} catch { /* ignore */ } finally {
 			exporting = false;
 		}
+	};
+
+	const downloadCsv = async (endpoint: string, fallbackFilename: string) => {
+		const response = await fetch(endpoint, { credentials: 'include' });
+		if (!response.ok) {
+			throw new Error(response.status === 401 ? 'Please log in.' : 'Failed to export dependencies.');
+		}
+		const blob = await response.blob();
+		const url = URL.createObjectURL(blob);
+		const link = document.createElement('a');
+		const disposition = response.headers.get('content-disposition') ?? '';
+		const match = disposition.match(/filename="([^"]+)"/);
+		link.href = url;
+		link.download = match?.[1] || fallbackFilename;
+		document.body.appendChild(link);
+		link.click();
+		document.body.removeChild(link);
+		URL.revokeObjectURL(url);
 	};
 
 	const handleSearch = () => {
@@ -310,7 +255,12 @@
 						<button type="button"
 							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
 							onclick={() => { exportDropdownOpen = false; exportCsv(); }}>
-							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Export CSV
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Standard export (CSV)
+						</button>
+						<button type="button"
+							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+							onclick={() => { exportDropdownOpen = false; exportFullCsv(); }}>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Full export (CSV)
 						</button>
 						<div class="mx-3 my-1 border-t border-[var(--border-color)]/60"></div>
 						<p class="px-3.5 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">Selected package</p>

@@ -113,6 +113,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// Unified dependencies (SBOM + Manifest merged view)
 				api.Get("/dependencies", uiapi.UnifiedDependenciesHandler(db, authService))
 				api.Get("/dependencies/export.csv", uiapi.DependencyExportCSVHandler(db, authService))
+				api.Get("/dependencies/export/full.csv", uiapi.DependencyExportFullCSVHandler(db, authService))
+				api.Get("/dependencies/export/detail.csv", uiapi.DependencyDetailExportCSVHandler(db, authService))
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
 				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
