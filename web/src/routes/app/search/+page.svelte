@@ -3,9 +3,10 @@
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { Search, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab } from 'lucide-svelte';
+	import { Search, SearchX, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab } from 'lucide-svelte';
 	import Select from '$lib/components/Select.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import Loading from '$lib/components/Loading.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme';
@@ -44,6 +45,7 @@
 	let hasMore = $state(false);
 	let results = $state<AdvancedSearchResult[]>([]);
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
+	let searchPending = $state(false);
 
 	let previewOpen = $state(false);
 	let previewLoading = $state(false);
@@ -136,8 +138,10 @@
 			results = [];
 			error = '';
 			hasMore = false;
+			searchPending = false;
 			return;
 		}
+		searchPending = true;
 		loading = true;
 		error = '';
 		try {
@@ -157,11 +161,13 @@
 			results = [];
 		} finally {
 			loading = false;
+			searchPending = false;
 		}
 	};
 
 	const scheduleSearch = () => {
 		if (searchTimeout) clearTimeout(searchTimeout);
+		searchPending = Boolean(query.trim());
 		searchTimeout = setTimeout(() => {
 			loadResults();
 		}, 220);
@@ -300,10 +306,12 @@
 			<div class="rounded-xl border border-[var(--error)]/40 bg-[var(--error)]/10 px-4 py-3 text-sm text-[var(--error)]">{error}</div>
 		{/if}
 
-			<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				{#if loading}
-					<div class="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">Searching...</div>
-				{:else if !query.trim()}
+				<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					{#if loading || searchPending}
+						<div class="flex h-full items-center justify-center">
+							<Loading message="Searching..." variant="spinner" size="md" />
+						</div>
+					{:else if !query.trim()}
 					<div class="flex h-full items-center justify-center overflow-y-auto p-6 sm:p-8">
 						<div class="mx-auto grid w-fit gap-y-3 sm:grid-cols-2 sm:gap-x-6">
 							<div class="flex min-h-[3.6rem] items-center p-1">
@@ -356,8 +364,11 @@
 							</div>
 						</div>
 					</div>
-				{:else if results.length === 0}
-					<div class="flex h-full items-center justify-center px-6 text-center text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</div>
+					{:else if results.length === 0}
+						<div class="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
+							<SearchX class="h-24 w-24 text-[var(--text-muted)] opacity-65" />
+							<p class="text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</p>
+						</div>
 				{:else}
 				<div class="flex-1 overflow-y-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
