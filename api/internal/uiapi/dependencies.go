@@ -736,10 +736,19 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		name := r.URL.Query().Get("name")
 		ecosystem := r.URL.Query().Get("ecosystem")
 		version := r.URL.Query().Get("version")
+		source := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("source")))
 
 		if name == "" || ecosystem == "" {
 			http.Error(w, "name and ecosystem required", http.StatusBadRequest)
 			return
+		}
+		if source != "" && source != "sbom" && source != "manifest" && source != "both" {
+			http.Error(w, "invalid source", http.StatusBadRequest)
+			return
+		}
+		if source == "both" {
+			// For assets, "both" behaves as "all sources".
+			source = ""
 		}
 
 		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
@@ -751,83 +760,133 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			pageSize = 100
 		}
 
-		// Query assets from both SBOM and manifest sources
-		// Simplified approach: find SBOMs containing this dependency, then find bound assets
-		// Single query: window function provides total count alongside paginated rows.
-		assetsQuery := `
-			WITH sbom_assets AS (
-				SELECT DISTINCT
-					'REPO_COMMIT' as asset_type,
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					rc.commit_sha,
-					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
-					'sbom' as source,
-					NULL as manifest_path,
-					NULL as manifest_type,
-					false as direct,
-					NULL as scope,
-					sb.created_at
-				FROM sbom_component_view s
-				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
-				  AND sb.asset_type = 'REPO_COMMIT'
-				  AND sb.asset_ref_id = s.asset_ref_id
-				JOIN repo_commits rc ON rc.id = sb.asset_ref_id
-				JOIN repos r ON r.id = rc.repo_id
-				WHERE s.is_root = false
-				  AND s.purl IS NOT NULL
-				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
-				  AND (? = '' OR COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?)
-			),
-			manifest_assets AS (
-				SELECT
-					'REPO_COMMIT' as asset_type,
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					'' as commit_sha,
-					md.version,
-					'manifest' as source,
-					m.path as manifest_path,
-					m.type as manifest_type,
-					md.direct,
-					md.scope,
-					m.created_at
-				FROM manifest_dependencies md
-				JOIN manifests m ON m.id = md.manifest_id
-				JOIN repos r ON r.id = m.repo_id
-				WHERE md.name = ? AND md.ecosystem = ?
-				  AND (? = '' OR md.version = ?)
-			),
+		cteParts := make([]string, 0, 3)
+		args := make([]interface{}, 0, 10)
+		selectParts := make([]string, 0, 2)
+
+		if source == "" || source == "sbom" {
+			sbomCTE := `
+				sbom_assets AS (
+					SELECT DISTINCT
+						'REPO_COMMIT' as asset_type,
+						r.id as repo_id,
+						r.provider,
+						r.org,
+						r.slug,
+						r.provider_instance_id,
+						rc.commit_sha,
+						COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+						'sbom' as source,
+						NULL as manifest_path,
+						NULL as manifest_type,
+						false as direct,
+						NULL as scope,
+						sb.created_at
+					FROM sbom_component_view s
+					JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+					  AND sb.asset_type = 'REPO_COMMIT'
+					  AND sb.asset_ref_id = s.asset_ref_id
+					JOIN repo_commits rc ON rc.id = sb.asset_ref_id
+					JOIN repos r ON r.id = rc.repo_id
+					WHERE s.is_root = false
+					  AND s.purl IS NOT NULL
+					  AND s.kind = ?
+					  AND COALESCE(s.package_name, s.normalized_name, s.name) = ?
+			`
+			args = append(args, ecosystem, name)
+			if version != "" {
+				sbomCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') = ?`
+				args = append(args, version)
+			}
+			sbomCTE += `
+				)
+			`
+			cteParts = append(cteParts, sbomCTE)
+			selectParts = append(selectParts, `SELECT * FROM sbom_assets`)
+		}
+
+		if source == "" || source == "manifest" {
+			manifestCTE := `
+				manifest_assets AS (
+					SELECT
+						'REPO_COMMIT' as asset_type,
+						r.id as repo_id,
+						r.provider,
+						r.org,
+						r.slug,
+						r.provider_instance_id,
+						'' as commit_sha,
+						md.version,
+						'manifest' as source,
+						m.path as manifest_path,
+						m.type as manifest_type,
+						md.direct,
+						md.scope,
+						m.created_at
+					FROM manifest_dependencies md
+					JOIN manifests m ON m.id = md.manifest_id
+					JOIN repos r ON r.id = m.repo_id
+					WHERE md.name = ?
+					  AND md.ecosystem = ?
+			`
+			args = append(args, name, ecosystem)
+			if version != "" {
+				manifestCTE += ` AND md.version = ?`
+				args = append(args, version)
+			}
+			manifestCTE += `
+				)
+			`
+			cteParts = append(cteParts, manifestCTE)
+			selectParts = append(selectParts, `SELECT * FROM manifest_assets`)
+		}
+
+		countQuery := `
+			WITH ` + strings.Join(cteParts, ",") + `,
 			combined_assets AS (
-				SELECT * FROM sbom_assets
+				` + strings.Join(selectParts, `
 				UNION ALL
-				SELECT * FROM manifest_assets
+				`) + `
+			)
+			SELECT COUNT(*) FROM combined_assets
+		`
+
+		var total int64
+		if err := db.WithContext(r.Context()).Raw(countQuery, args...).Scan(&total).Error; err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		assetsQuery := `
+			WITH ` + strings.Join(cteParts, ",") + `,
+			combined_assets AS (
+				` + strings.Join(selectParts, `
+				UNION ALL
+				`) + `
 			)
 			SELECT
-				ca.asset_type, ca.repo_id,
+				ca.asset_type,
+				ca.repo_id,
 				COALESCE(pi.display_name, ca.provider) as provider,
-				ca.org, ca.slug, ca.commit_sha,
-				ca.version, ca.source, ca.manifest_path, ca.manifest_type, ca.direct, ca.scope,
-				COALESCE(pi.base_url, '') as provider_base_url,
-				COUNT(*) OVER () AS total_count
+				ca.org,
+				ca.slug,
+				ca.commit_sha,
+				ca.version,
+				ca.source,
+				ca.manifest_path,
+				ca.manifest_type,
+				ca.direct,
+				ca.scope,
+				COALESCE(pi.base_url, '') as provider_base_url
 			FROM combined_assets ca
-			LEFT JOIN repos r ON r.id = ca.repo_id
-			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+			LEFT JOIN provider_instances pi ON pi.id = ca.provider_instance_id
 			ORDER BY ca.created_at DESC
 			LIMIT ? OFFSET ?
 		`
 
-		var total int64
-		rows, err := db.WithContext(r.Context()).Raw(
-			assetsQuery,
-			name, ecosystem, version, version,
-			name, ecosystem, version, version,
-			pageSize, (page-1)*pageSize,
-		).Rows()
+		queryArgs := append(make([]interface{}, 0, len(args)+2), args...)
+		queryArgs = append(queryArgs, pageSize, (page-1)*pageSize)
+		rows, err := db.WithContext(r.Context()).Raw(assetsQuery, queryArgs...).Rows()
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -842,7 +901,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			if err := rows.Scan(
 				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
 				&commitSHA, &a.Version, &a.Source, &manifestPath,
-				&manifestType, &a.Direct, &scope, &a.ProviderBaseURL, &total,
+				&manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
 			); err != nil {
 				log.Printf("asset scan error: %v", err)
 				continue

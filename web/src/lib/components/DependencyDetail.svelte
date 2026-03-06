@@ -90,6 +90,8 @@
 		try {
 			const params = new URLSearchParams({ name, ecosystem });
 			if (version) params.set('version', version);
+			const primarySource = sources[0];
+			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
 			params.set('page_size', '100');
 
 			const response = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });

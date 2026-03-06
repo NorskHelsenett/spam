@@ -196,6 +196,8 @@
 		try {
 			const params = new URLSearchParams({ name: depName, ecosystem: depEcosystem });
 			if (version) params.set('version', version);
+			const primarySource = sources[0];
+			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
 			params.set('page_size', '100');
 			const response = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });
 			if (response.ok) {
@@ -289,6 +291,9 @@
 			if (response.ok) {
 				const data = await response.json();
 				repoContributors = { ...repoContributors, [repo.key]: (data.contributors || []).slice(0, 5) };
+			} else {
+				// Mark as resolved to avoid tight retry loops on persistent non-2xx responses.
+				repoContributors = { ...repoContributors, [repo.key]: [] };
 			}
 		} catch {
 			repoContributors = { ...repoContributors, [repo.key]: [] };

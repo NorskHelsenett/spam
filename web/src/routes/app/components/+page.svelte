@@ -147,6 +147,8 @@
 				ecosystem: selectedDependency.ecosystem,
 				page_size: '1000'
 			});
+			const primarySource = selectedDependency.sources?.[0];
+			if (primarySource === 'sbom' || primarySource === 'manifest') params.set('source', primarySource);
 			const res = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });
 			if (!res.ok) return;
 			const data = await res.json();
