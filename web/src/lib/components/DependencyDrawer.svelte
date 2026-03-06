@@ -50,6 +50,13 @@
 		contributions: number;
 	};
 
+	type CommitInfo = {
+		author_login?: string;
+		author_email?: string;
+		author_name?: string;
+		author_date?: string;
+	};
+
 	type ProviderInstance = {
 		id: string;
 		name: string;
@@ -132,6 +139,11 @@
 	let providerInstancesLoaded = false;
 	let exportDropdownOpen = $state(false);
 	let exportBtnEl: HTMLDivElement | undefined = $state();
+	let hoveredContributor: Contributor | null = $state(null);
+	let contributorTipPos = $state({ x: 0, y: 0 });
+	let hideTipTimer: ReturnType<typeof setTimeout> | null = null;
+	let copiedEmail = $state('');
+	let copiedEmailTimer: ReturnType<typeof setTimeout> | null = null;
 
 	$effect(() => {
 		if (name && ecosystem) {
@@ -157,6 +169,13 @@
 		};
 		document.addEventListener('mousedown', handler);
 		return () => document.removeEventListener('mousedown', handler);
+	});
+
+	$effect(() => {
+		return () => {
+			if (hideTipTimer) clearTimeout(hideTipTimer);
+			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
+		};
 	});
 
 	const resolveProviderType = (provider: string) => {
@@ -290,7 +309,12 @@
 			const response = await fetch(url, { credentials: 'include' });
 			if (response.ok) {
 				const data = await response.json();
-				repoContributors = { ...repoContributors, [repo.key]: (data.contributors || []).slice(0, 5) };
+				const contributors = Array.isArray(data.contributors) ? (data.contributors as Contributor[]) : [];
+				const commits = Array.isArray(data.commits) ? (data.commits as CommitInfo[]) : [];
+				repoContributors = {
+					...repoContributors,
+					[repo.key]: sortContributorsByLatest(contributors, commits).slice(0, 5),
+				};
 			} else {
 				// Mark as resolved to avoid tight retry loops on persistent non-2xx responses.
 				repoContributors = { ...repoContributors, [repo.key]: [] };
@@ -299,6 +323,70 @@
 			repoContributors = { ...repoContributors, [repo.key]: [] };
 		} finally {
 			loadingContributors = { ...loadingContributors, [repo.key]: false };
+		}
+	};
+
+	const sortContributorsByLatest = (contributors: Contributor[], commits: CommitInfo[]): Contributor[] => {
+		if (contributors.length === 0 || commits.length === 0) return contributors;
+
+		const norm = (s?: string) => (s || '').trim().toLowerCase();
+		const lastSeen = new Map<string, number>();
+		for (const commit of commits) {
+			const ts = Date.parse(commit.author_date || '');
+			if (!Number.isFinite(ts)) continue;
+			for (const key of [norm(commit.author_login), norm(commit.author_email), norm(commit.author_name)]) {
+				if (!key) continue;
+				const prev = lastSeen.get(key) ?? 0;
+				if (ts > prev) lastSeen.set(key, ts);
+			}
+		}
+
+		return contributors
+			.map((contributor, idx) => {
+				const score = Math.max(
+					lastSeen.get(norm(contributor.login)) ?? 0,
+					lastSeen.get(norm(contributor.email)) ?? 0,
+					lastSeen.get(norm(contributor.name)) ?? 0,
+				);
+				return { contributor, score, idx };
+			})
+			.sort((a, b) => b.score - a.score || a.idx - b.idx)
+			.map((item) => item.contributor);
+	};
+
+	const clearHideTipTimer = () => {
+		if (!hideTipTimer) return;
+		clearTimeout(hideTipTimer);
+		hideTipTimer = null;
+	};
+
+	const showContributorTip = (e: MouseEvent, contributor: Contributor) => {
+		clearHideTipTimer();
+		const target = e.currentTarget as HTMLElement | null;
+		if (!target) return;
+		const rect = target.getBoundingClientRect();
+		contributorTipPos = { x: rect.left + rect.width / 2, y: rect.top - 10 };
+		hoveredContributor = contributor;
+	};
+
+	const scheduleHideContributorTip = () => {
+		clearHideTipTimer();
+		hideTipTimer = setTimeout(() => {
+			hoveredContributor = null;
+		}, 120);
+	};
+
+	const copyEmail = async (contributor: Contributor) => {
+		if (!contributor.email || !browser) return;
+		try {
+			await navigator.clipboard.writeText(contributor.email);
+			copiedEmail = contributor.email;
+			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
+			copiedEmailTimer = setTimeout(() => {
+				copiedEmail = '';
+			}, 1400);
+		} catch {
+			// Ignore clipboard errors
 		}
 	};
 
@@ -576,7 +664,11 @@
 												<div class="mt-2 flex items-center gap-2">
 													<div class="flex -space-x-1.5">
 														{#each contributors as c}
-															<div class="contributor-wrap">
+															<div
+																class="contributor-wrap"
+																onmouseenter={(e) => showContributorTip(e, c)}
+																onmouseleave={scheduleHideContributorTip}
+															>
 																{#if c.avatar_url}
 																	<img src={c.avatar_url} alt={c.login || c.name || ''} class="h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]" />
 																{:else}
@@ -584,23 +676,6 @@
 																		{(c.login || c.name || '?')[0].toUpperCase()}
 																	</div>
 																{/if}
-																<!-- Inclined tooltip -->
-																<div class="contributor-tip">
-																	<div class="tip-card">
-																		{#if c.avatar_url}
-																			<img src={c.avatar_url} alt={c.login || c.name || ''} class="mb-2 h-10 w-10 rounded-full" />
-																		{:else}
-																			<div class="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-[var(--hover-bg)] text-base font-semibold text-[var(--text-secondary)]">
-																				{(c.login || c.name || '?')[0].toUpperCase()}
-																			</div>
-																		{/if}
-																		<p class="text-[12px] font-semibold text-[var(--text-bright)]">{c.login || c.name || '—'}</p>
-																		{#if c.email}
-																			<p class="mt-0.5 text-[10px] text-[var(--text-muted)]">{c.email}</p>
-																		{/if}
-																		<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">{c.contributions} commits</p>
-																	</div>
-																</div>
 															</div>
 														{/each}
 													</div>
@@ -657,37 +732,66 @@
 	{/if}
 </div>
 
+{#if hoveredContributor}
+	<div
+		class="contributor-tip-layer"
+		style={`left:${contributorTipPos.x}px;top:${contributorTipPos.y}px;`}
+		onmouseenter={clearHideTipTimer}
+		onmouseleave={scheduleHideContributorTip}
+	>
+		<button
+			type="button"
+			class="tip-card"
+			onclick={() => copyEmail(hoveredContributor!)}
+			disabled={!hoveredContributor.email}
+			title={hoveredContributor.email ? 'Click to copy email' : 'No email available'}
+		>
+			{#if hoveredContributor.avatar_url}
+				<img src={hoveredContributor.avatar_url} alt={hoveredContributor.login || hoveredContributor.name || ''} class="mb-2 h-12 w-12 rounded-full" />
+			{:else}
+				<div class="mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--hover-bg)] text-base font-semibold text-[var(--text-secondary)]">
+					{(hoveredContributor.login || hoveredContributor.name || '?')[0].toUpperCase()}
+				</div>
+			{/if}
+			<p class="text-[12px] font-semibold text-[var(--text-bright)]">{hoveredContributor.login || hoveredContributor.name || '—'}</p>
+			{#if hoveredContributor.email}
+				<p class="mt-0.5 w-full break-all text-[11px] text-[var(--text-muted)]">{hoveredContributor.email}</p>
+				<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">{copiedEmail === hoveredContributor.email ? 'Copied' : 'Click to copy email'}</p>
+			{:else}
+				<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">No email available</p>
+			{/if}
+		</button>
+	</div>
+{/if}
+
 <style>
 	.contributor-wrap {
 		position: relative;
 		cursor: default;
 	}
 
-	.contributor-tip {
-		position: absolute;
-		bottom: calc(100% + 8px);
-		left: 50%;
-		transform: translateX(-50%);
-		pointer-events: none;
-		z-index: 50;
-		opacity: 0;
-		transition: opacity 0.15s ease, transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
-		transform-origin: bottom center;
-		transform: translateX(-50%) translateY(4px) scale(0.85) rotate(4deg);
-	}
-
-	.contributor-wrap:hover .contributor-tip {
-		opacity: 1;
-		transform: translateX(-50%) translateY(0) scale(1) rotate(-2deg);
+	.contributor-tip-layer {
+		position: fixed;
+		z-index: 1200;
+		transform: translate(-50%, -100%);
+		pointer-events: auto;
 	}
 
 	.tip-card {
-		width: 9rem;
+		width: 14rem;
 		background: var(--bg-soft);
 		border: 1px solid var(--border-color);
 		border-radius: 0.75rem;
 		padding: 0.75rem;
 		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 		text-align: center;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		cursor: pointer;
+	}
+
+	.tip-card:disabled {
+		cursor: default;
 	}
 </style>
