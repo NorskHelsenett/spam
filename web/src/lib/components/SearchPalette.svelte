@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab } from 'lucide-svelte';
+	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type RepoResult = {
@@ -626,6 +626,23 @@
 								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">npm · Maven · PyPI · NuGet · Go</p>
 							</div>
 						</div>
+							<button
+								type="button"
+								onclick={() => {
+									close();
+									goto('/search');
+								}}
+								class="-mx-3 flex w-[calc(100%+1.5rem)] items-center justify-between gap-6 rounded-xl px-3 py-2 text-left transition-colors duration-150 hover:bg-[var(--hover-bg)]"
+							>
+							<div style="display: flex; align-items: center; gap: 1.2em;">
+								<Microscope size={20} style="color: var(--accent); flex-shrink: 0;" />
+								<div class="ml-2">
+									<p style="color: var(--text-primary); font-size: 0.92em; font-weight: 500;">Advanced search</p>
+									<p style="color: var(--text-muted); font-size: 0.78em; margin-top: 0.3em;">Search manifests, SBOMs, secrets, contributors, languages, commits, repos, and README</p>
+								</div>
+							</div>
+							<ArrowRight size={14} style="color: var(--accent); flex-shrink: 0;" />
+						</button>
 					</div>
 				</div>
 			{/if}
