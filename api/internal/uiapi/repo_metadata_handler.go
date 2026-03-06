@@ -74,6 +74,7 @@ func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadata
 		return meta, ""
 	}
 
+	meta.Provider = repo.Provider
 	meta.Org = repo.Org
 	meta.Slug = repo.Slug
 	if repo.ProviderUpdatedAt != nil && !repo.ProviderUpdatedAt.IsZero() {

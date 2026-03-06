@@ -15,6 +15,7 @@ type RepoMetadataResponse struct {
 
 type RepoMetadataRepo struct {
 	ID              string `json:"id"`
+	Provider        string `json:"provider,omitempty"`
 	ProviderID      string `json:"provider_id,omitempty"`
 	ProviderBaseURL string `json:"provider_base_url,omitempty"`
 	Org             string `json:"org"`

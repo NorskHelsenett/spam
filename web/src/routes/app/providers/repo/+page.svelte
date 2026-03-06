@@ -165,6 +165,7 @@
 			const meta = await fetchRepoMetadata(repoDbId);
 			if (meta?.repo?.org && meta.repo.slug) {
 				path = `${meta.repo.org}/${meta.repo.slug}`;
+				provider = meta.repo.provider || provider;
 				providerId = providerId || meta.repo.provider_id || '';
 				baseUrl = baseUrl || meta.repo.provider_base_url || '';
 			}
