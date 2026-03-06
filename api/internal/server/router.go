@@ -87,6 +87,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
+				api.Patch("/admin/users/{userID}/hidden", uiapi.AdminUserHiddenHandler(db, authService))
 				api.Get("/admin/providers", uiapi.AdminProvidersListHandler(authService, providerStore))
 				api.Post("/admin/providers", uiapi.AdminProvidersCreateHandler(authService, providerStore))
 				api.Patch("/admin/providers/{id}", uiapi.AdminProvidersUpdateHandler(authService, providerStore))

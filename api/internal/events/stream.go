@@ -13,6 +13,8 @@ const (
 	StreamEventProviderSyncProgress  = "provider_sync_progress"
 	StreamEventProviderSyncCompleted = "provider_sync_completed"
 	StreamEventProviderSyncFailed    = "provider_sync_failed"
+
+	StreamEventNewUser = "new_user"
 )
 
 type StreamEvent struct {

@@ -10,6 +10,7 @@
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
 	import SearchPalette from '$lib/components/SearchPalette.svelte';
 	import { updateSyncState, initSyncStates } from '$lib/stores/providerSync';
+	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
 	let appEventSource: EventSource | null = null;
 	let metricCardObserver: MutationObserver | null = null;
@@ -116,6 +117,13 @@
 
 		appEventSource.addEventListener('sbom_parsed', (event) => {
 			console.info('sse sbom parsed', parsePayload(event));
+		});
+
+		appEventSource.addEventListener('new_user', (event) => {
+			const payload = parsePayload(event);
+			console.info('sse new_user', payload);
+			newUserCount.update((n) => n + 1);
+			newUserEvent.set(payload);
 		});
 
 		appEventSource.addEventListener('provider_sync_started', (event) => {
@@ -289,6 +297,12 @@ let isAdmin = $state(false);
 	let { children } = $props();
 	const pageStore = page;
 
+	$effect(() => {
+		if ($pageStore.url?.pathname === '/app/users') {
+			newUserCount.set(0);
+		}
+	});
+
 	const isActive = (href: string) => {
 		const path = $pageStore.url?.pathname ?? '/';
 		if (href === '/app') {
@@ -359,6 +373,11 @@ let isAdmin = $state(false);
 						<UsersRound size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">Users</span>
+					{#if $newUserCount > 0}
+						<span class="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-bold text-[var(--bg-primary)]">
+							{$newUserCount > 99 ? '99+' : $newUserCount}
+						</span>
+					{/if}
 				</button>
 			{/if}
 		</nav>

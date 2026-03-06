@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"log"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -58,6 +60,22 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 
 			if err := assignDefaultGroups(tx, user.ID, result.firstUser); err != nil {
 				return err
+			}
+
+			if !result.firstUser {
+				if err := events.NotifyEvent(tx, events.StreamEventNewUser, UserSummary{
+					ID:        user.ID,
+					Subject:   user.Subject,
+					Email:     user.Email,
+					Name:      user.Name,
+					Approved:  false,
+					Hidden:    false,
+					Role:      "pending",
+					Groups:    []string{GroupDefault},
+					CreatedAt: user.CreatedAt,
+				}); err != nil {
+					log.Printf("failed to notify new_user event: %v", err)
+				}
 			}
 
 			result.created = true
