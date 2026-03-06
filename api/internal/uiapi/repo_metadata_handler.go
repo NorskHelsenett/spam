@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/jobs"
@@ -38,7 +39,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
 		runs := loadRepoRuns(r, db, repoMeta.Org, repoMeta.Slug, repoDBID)
 		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
-		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount)
+		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount, runs.Latest)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
 
 		resp := RepoMetadataResponse{
@@ -179,7 +180,7 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID strin
 		if row.LockedAt != nil && row.FinishedAt != nil {
 			summary.DurationMs = row.FinishedAt.Sub(*row.LockedAt).Milliseconds()
 		}
-		summary.Artifacts = loadRunArtifacts(r, db, row.ID, repoDBID)
+		summary.Artifacts = loadRunArtifacts(r, db, row.ID, repoDBID, commitSHA)
 		response.Timeline = append(response.Timeline, summary)
 	}
 
@@ -190,41 +191,43 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID strin
 	return response
 }
 
-func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoDBID string) []string {
-	artifacts := make([]string, 0, 3)
+func loadRunArtifacts(r *http.Request, db *gorm.DB, runID, repoDBID, commitSHA string) []string {
+	runArtifacts := make([]string, 0, 3)
 
 	var secretsCount int64
 	if err := db.WithContext(r.Context()).Table("run_secrets").
 		Where("run_id = ?", runID).
 		Count(&secretsCount).Error; err == nil && secretsCount > 0 {
-		artifacts = append(artifacts, "secrets")
+		runArtifacts = append(runArtifacts, "secrets")
+	}
+
+	var manifestCount int64
+	if err := db.WithContext(r.Context()).Table("manifests").
+		Where("run_id = ?", runID).
+		Count(&manifestCount).Error; err == nil && manifestCount > 0 {
+		runArtifacts = append(runArtifacts, "manifests")
 	}
 
 	if repoDBID == "" {
-		return artifacts
+		return runArtifacts
 	}
 
 	var sbomID string
-	var commitID string
-	if err := db.WithContext(r.Context()).Table("repo_commits").
-		Select("id").
-		Where("repo_id = ?", repoDBID).
-		Order("created_at DESC").
-		Limit(1).
-		Scan(&commitID).Error; err != nil || commitID == "" {
-		return artifacts
+	if commitSHA == "" {
+		return runArtifacts
 	}
 
-	if err := db.WithContext(r.Context()).Table("sbom_bindings").
-		Select("sbom_id").
-		Where("asset_ref_id = ?", commitID).
-		Order("created_at DESC").
+	if err := db.WithContext(r.Context()).Table("sbom_bindings sb").
+		Select("sb.sbom_id").
+		Joins("JOIN repo_commits rc ON rc.id = sb.asset_ref_id").
+		Where("sb.asset_type = ? AND rc.repo_id = ? AND rc.commit_sha = ?", artifacts.AssetTypeRepoCommit, repoDBID, commitSHA).
+		Order("sb.created_at DESC").
 		Limit(1).
 		Scan(&sbomID).Error; err == nil && sbomID != "" {
-		artifacts = append(artifacts, "sbom")
+		runArtifacts = append(runArtifacts, "sbom")
 	}
 
-	return artifacts
+	return runArtifacts
 }
 
 func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSBOM, int64) {
@@ -280,12 +283,12 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSB
 	}, componentCount
 }
 
-func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomComponentCount int64) RepoMetadataDependencies {
+func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomComponentCount int64, latestRun *RepoMetadataRunSummary) RepoMetadataDependencies {
 	deps := RepoMetadataDependencies{
 		FromSBOM: sbomComponentCount,
 	}
 
-	if repoDBID == "" {
+	if repoDBID == "" || latestRun == nil {
 		deps.Total = sbomComponentCount
 		return deps
 	}
@@ -293,7 +296,7 @@ func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomCom
 	var manifestCount int64
 	if err := db.WithContext(r.Context()).Table("manifest_dependencies md").
 		Joins("JOIN manifests m ON m.id = md.manifest_id").
-		Where("m.repo_id = ?", repoDBID).
+		Where("m.repo_id = ? AND m.run_id = ?", repoDBID, latestRun.ID).
 		Count(&manifestCount).Error; err == nil {
 		deps.FromManifest = manifestCount
 	}
