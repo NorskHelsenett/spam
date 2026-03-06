@@ -139,6 +139,7 @@
 	let providerInstancesLoaded = false;
 	let exportDropdownOpen = $state(false);
 	let exportBtnEl: HTMLDivElement | undefined = $state();
+	let drawerShellEl: HTMLDivElement | undefined = $state();
 	let hoveredContributor: Contributor | null = $state(null);
 	let contributorTipPos = $state({ x: 0, y: 0 });
 	let hideTipTimer: ReturnType<typeof setTimeout> | null = null;
@@ -363,9 +364,14 @@
 	const showContributorTip = (e: MouseEvent, contributor: Contributor) => {
 		clearHideTipTimer();
 		const target = e.currentTarget as HTMLElement | null;
-		if (!target) return;
-		const rect = target.getBoundingClientRect();
-		contributorTipPos = { x: rect.left + rect.width / 2, y: rect.top - 10 };
+		if (!target || !drawerShellEl) return;
+		const anchor = target.querySelector<HTMLElement>('.contributor-avatar') ?? target;
+		const rect = anchor.getBoundingClientRect();
+		const shellRect = drawerShellEl.getBoundingClientRect();
+		contributorTipPos = {
+			x: rect.left + rect.width / 2 - shellRect.left,
+			y: rect.top - shellRect.top - 10,
+		};
 		hoveredContributor = contributor;
 	};
 
@@ -452,6 +458,7 @@
 	};
 </script>
 
+<div class="relative h-full" bind:this={drawerShellEl}>
 <div class="flex h-full flex-col overflow-hidden rounded-l-[10px] bg-[var(--bg-soft)]">
 	<!-- Header -->
 	<div class="shrink-0 border-b border-[var(--border-color)] p-5">
@@ -670,9 +677,9 @@
 																onmouseleave={scheduleHideContributorTip}
 															>
 																{#if c.avatar_url}
-																	<img src={c.avatar_url} alt={c.login || c.name || ''} class="h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]" />
+																	<img src={c.avatar_url} alt={c.login || c.name || ''} class="contributor-avatar h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]" />
 																{:else}
-																	<div class="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[8px] font-semibold text-[var(--text-muted)] ring-1 ring-[var(--bg-soft)]">
+																	<div class="contributor-avatar flex h-5 w-5 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[8px] font-semibold text-[var(--text-muted)] ring-1 ring-[var(--bg-soft)]">
 																		{(c.login || c.name || '?')[0].toUpperCase()}
 																	</div>
 																{/if}
@@ -733,36 +740,39 @@
 </div>
 
 {#if hoveredContributor}
-	<div
-		class="contributor-tip-layer"
-		style={`left:${contributorTipPos.x}px;top:${contributorTipPos.y}px;`}
-		onmouseenter={clearHideTipTimer}
-		onmouseleave={scheduleHideContributorTip}
-	>
-		<button
-			type="button"
-			class="tip-card"
-			onclick={() => copyEmail(hoveredContributor!)}
-			disabled={!hoveredContributor.email}
-			title={hoveredContributor.email ? 'Click to copy email' : 'No email available'}
+	{#key `${hoveredContributor.login || hoveredContributor.name || ''}:${hoveredContributor.email || ''}`}
+		<div
+			class="contributor-tip-layer"
+			style={`left:${contributorTipPos.x}px;top:${contributorTipPos.y}px;`}
+			onmouseenter={clearHideTipTimer}
+			onmouseleave={scheduleHideContributorTip}
 		>
-			{#if hoveredContributor.avatar_url}
-				<img src={hoveredContributor.avatar_url} alt={hoveredContributor.login || hoveredContributor.name || ''} class="mb-2 h-12 w-12 rounded-full" />
-			{:else}
-				<div class="mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--hover-bg)] text-base font-semibold text-[var(--text-secondary)]">
-					{(hoveredContributor.login || hoveredContributor.name || '?')[0].toUpperCase()}
-				</div>
-			{/if}
-			<p class="text-[12px] font-semibold text-[var(--text-bright)]">{hoveredContributor.login || hoveredContributor.name || '—'}</p>
-			{#if hoveredContributor.email}
-				<p class="mt-0.5 w-full break-all text-[11px] text-[var(--text-muted)]">{hoveredContributor.email}</p>
-				<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">{copiedEmail === hoveredContributor.email ? 'Copied' : 'Click to copy email'}</p>
-			{:else}
-				<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">No email available</p>
-			{/if}
-		</button>
-	</div>
+			<button
+				type="button"
+				class="tip-card"
+				onclick={() => copyEmail(hoveredContributor!)}
+				disabled={!hoveredContributor.email}
+				title={hoveredContributor.email ? 'Click to copy email' : 'No email available'}
+			>
+				{#if hoveredContributor.avatar_url}
+					<img src={hoveredContributor.avatar_url} alt={hoveredContributor.login || hoveredContributor.name || ''} class="mb-2 h-12 w-12 rounded-full" />
+				{:else}
+					<div class="mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--hover-bg)] text-base font-semibold text-[var(--text-secondary)]">
+						{(hoveredContributor.login || hoveredContributor.name || '?')[0].toUpperCase()}
+					</div>
+				{/if}
+				<p class="text-[12px] font-semibold text-[var(--text-bright)]">{hoveredContributor.login || hoveredContributor.name || '—'}</p>
+				{#if hoveredContributor.email}
+					<p class="mt-0.5 w-full break-all text-[11px] text-[var(--text-muted)]">{hoveredContributor.email}</p>
+					<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">{copiedEmail === hoveredContributor.email ? 'Copied' : 'Click to copy email'}</p>
+				{:else}
+					<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">No email available</p>
+				{/if}
+			</button>
+		</div>
+	{/key}
 {/if}
+</div>
 
 <style>
 	.contributor-wrap {
@@ -771,10 +781,14 @@
 	}
 
 	.contributor-tip-layer {
-		position: fixed;
+		position: absolute;
 		z-index: 1200;
-		transform: translate(-50%, -100%);
+		transform: translate(-50%, calc(-100% + 6px)) scale(0.9) rotate(5deg);
 		pointer-events: auto;
+		opacity: 0;
+		animation: contributor-tip-in 180ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+		transform-origin: bottom center;
+		will-change: transform, opacity;
 	}
 
 	.tip-card {
@@ -793,5 +807,16 @@
 
 	.tip-card:disabled {
 		cursor: default;
+	}
+
+	@keyframes contributor-tip-in {
+		from {
+			opacity: 0;
+			transform: translate(-50%, calc(-100% + 6px)) scale(0.9) rotate(5deg);
+		}
+		to {
+			opacity: 1;
+			transform: translate(-50%, -100%) scale(1) rotate(-2deg);
+		}
 	}
 </style>
