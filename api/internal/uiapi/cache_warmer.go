@@ -241,6 +241,9 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		}
 		contribs = enrichContributors(contribs, commits)
 		commits = enrichCommits(commits, contribs)
+		if details != nil && details.Stats.Contributors == 0 && len(contribs) > 0 {
+			details.Stats.Contributors = len(contribs)
+		}
 
 		// Persist to DB so subsequent syncs and restarts can skip the API.
 		if details != nil {

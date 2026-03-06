@@ -612,7 +612,7 @@
 						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Tag class="h-3 w-3" /> Releases</p>
 					</div>
 					<div>
-						<p class="text-2xl font-bold text-[var(--text-bright)]">{details.stats.contributors}</p>
+						<p class="text-2xl font-bold text-[var(--text-bright)]">{Math.max(details.stats.contributors, contributors.length)}</p>
 						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Users class="h-3 w-3" /> Contributors</p>
 					</div>
 				</div>

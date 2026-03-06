@@ -510,7 +510,9 @@ func (c *GiteaClientImpl) GetRepoDetails(ctx context.Context, owner, repo string
 	stats.Commits = c.getCommitCount(ctx, owner, repo)
 	stats.Branches = c.getBranchCount(ctx, owner, repo)
 	stats.Releases = c.getReleaseCount(ctx, owner, repo)
-	stats.Contributors = c.getContributorCount(ctx, owner, repo)
+	// Contributor count is derived from commit-author inference in GetContributors.
+	// Keep 0 here and let API handlers fill from the fetched contributor list.
+	stats.Contributors = 0
 
 	return &RepoDetails{
 		RepoData: RepoData{

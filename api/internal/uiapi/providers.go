@@ -1057,8 +1057,11 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			repoPath := owner + "/" + repo
 			cacheKey := fmt.Sprintf("contributors:gitea:%s", repoPath)
 			if cached, ok, _ := cache.GetJSON[[]providers.ContributorInfo](r.Context(), c, cacheKey); ok {
-				contributors = cached
-				return
+				// Do not trust empty legacy cache entries from old gitea contributor logic.
+				if len(cached) > 0 {
+					contributors = cached
+					return
+				}
 			}
 			var err error
 			contributors, err = client.GetContributors(r.Context(), repoPath, 30)
@@ -1072,6 +1075,9 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 
 		contributors = enrichContributors(contributors, commits)
 		commits = enrichCommits(commits, contributors)
+		if details != nil && details.Stats.Contributors == 0 && len(contributors) > 0 {
+			details.Stats.Contributors = len(contributors)
+		}
 
 		writeJSON(w, http.StatusOK, RepoDetailsResponse{
 			Details:      details,
