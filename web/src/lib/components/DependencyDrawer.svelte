@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { X, Package, GitBranch, Container, CheckCircle, Microscope, FileCode, Scale, ExternalLink, Github, Gitlab, Download, ChevronDown } from 'lucide-svelte';
+	import { X, Package, GitBranch, Container, CheckCircle, Microscope, FileCode, Scale, ExternalLink, Github, Gitlab, Download } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type ComponentVersion = {
@@ -134,11 +134,10 @@
 	let assetsLoading = $state(false);
 	let selectedVersion = $state('');
 	let repoContributors = $state<Record<string, Contributor[]>>({});
+	let repoContributorsAll = $state<Record<string, Contributor[]>>({});
 	let loadingContributors = $state<Record<string, boolean>>({});
 	let providerInstances: ProviderInstance[] = $state([]);
 	let providerInstancesLoaded = false;
-	let exportDropdownOpen = $state(false);
-	let exportBtnEl: HTMLDivElement | undefined = $state();
 	let drawerShellEl: HTMLDivElement | undefined = $state();
 	let hoveredContributor: Contributor | null = $state(null);
 	let contributorTipPos = $state({ x: 0, y: 0 });
@@ -160,16 +159,6 @@
 				loadContributors(repo);
 			}
 		}
-	});
-
-	// Close export dropdown on outside click
-	$effect(() => {
-		if (!exportDropdownOpen || !browser) return;
-		const handler = (e: MouseEvent) => {
-			if (exportBtnEl && !exportBtnEl.contains(e.target as Node)) exportDropdownOpen = false;
-		};
-		document.addEventListener('mousedown', handler);
-		return () => document.removeEventListener('mousedown', handler);
 	});
 
 	$effect(() => {
@@ -199,6 +188,7 @@
 		componentAssets = [];
 		selectedVersion = '';
 		repoContributors = {};
+		repoContributorsAll = {};
 		try {
 			const params = new URLSearchParams({ name: depName, ecosystem: depEcosystem });
 			const response = await fetch(`/api/dependencies/detail?${params}`, { credentials: 'include' });
@@ -279,10 +269,6 @@
 		return [...map.values()];
 	});
 
-	const hasContributorEmails = $derived(
-		Object.values(repoContributors).some((cs: Contributor[]) => cs.some((c) => c.email))
-	);
-
 	const handleVersionClick = (version: string) => {
 		selectedVersion = selectedVersion === version ? '' : version;
 		loadAssets(name, ecosystem, selectedVersion);
@@ -312,16 +298,23 @@
 				const data = await response.json();
 				const contributors = Array.isArray(data.contributors) ? (data.contributors as Contributor[]) : [];
 				const commits = Array.isArray(data.commits) ? (data.commits as CommitInfo[]) : [];
+				const sortedContributors = sortContributorsByLatest(contributors, commits);
+				repoContributorsAll = {
+					...repoContributorsAll,
+					[repo.key]: sortedContributors,
+				};
 				repoContributors = {
 					...repoContributors,
-					[repo.key]: sortContributorsByLatest(contributors, commits).slice(0, 5),
+					[repo.key]: sortedContributors.slice(0, 5),
 				};
 			} else {
 				// Mark as resolved to avoid tight retry loops on persistent non-2xx responses.
 				repoContributors = { ...repoContributors, [repo.key]: [] };
+				repoContributorsAll = { ...repoContributorsAll, [repo.key]: [] };
 			}
 		} catch {
 			repoContributors = { ...repoContributors, [repo.key]: [] };
+			repoContributorsAll = { ...repoContributorsAll, [repo.key]: [] };
 		} finally {
 			loadingContributors = { ...loadingContributors, [repo.key]: false };
 		}
@@ -433,28 +426,17 @@
 		fields.map((f) => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',');
 
 	const exportPackageInfo = () => {
-		exportDropdownOpen = false;
 		const safe = name.replace(/[^a-z0-9\-_.]/gi, '_');
-		const rows = [['package', 'ecosystem', 'version', 'repo', 'provider', 'source']];
+		const rows = [['package', 'ecosystem', 'version', 'repo', 'provider', 'source', 'contributor_emails']];
 		for (const repo of uniqueRepos) {
+			const contributorEmails = [...new Set((repoContributorsAll[repo.key] ?? []).map((c) => c.email).filter((e): e is string => Boolean(e && e.trim())))]
+				.join(';');
 			const versions = repo.versions.length > 0 ? repo.versions : [''];
 			for (const v of versions) {
-				rows.push([name, ecosystem, v, `${repo.org}/${repo.slug}`, resolveProviderType(repo.provider), repo.sources.join('+')]);
+				rows.push([name, ecosystem, v, `${repo.org}/${repo.slug}`, resolveProviderType(repo.provider), repo.sources.join('+'), contributorEmails]);
 			}
 		}
 		downloadFile(rows.map(toCsvRow).join('\n'), `${safe}-${ecosystem}-info.csv`);
-	};
-
-	const exportContributorEmails = () => {
-		exportDropdownOpen = false;
-		const safe = name.replace(/[^a-z0-9\-_.]/gi, '_');
-		const rows = [['name', 'login', 'email', 'repository', 'contributions']];
-		for (const repo of uniqueRepos) {
-			for (const c of repoContributors[repo.key] ?? []) {
-				rows.push([c.name ?? '', c.login ?? '', c.email ?? '', `${repo.org}/${repo.slug}`, c.contributions]);
-			}
-		}
-		downloadFile(rows.map(toCsvRow).join('\n'), `${safe}-contributors.csv`);
 	};
 </script>
 
@@ -511,40 +493,13 @@
 				{/if}
 			</div>
 
-			<!-- Export split button -->
+			<!-- Export button -->
 			{#if componentDetail}
-				<div class="relative shrink-0" bind:this={exportBtnEl}>
-					<div class="flex overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)]">
-						<button type="button"
-							class="flex items-center gap-1.5 px-3 py-[0.4rem] text-[0.75rem] font-semibold tracking-[0.02em] text-[var(--text-bright)] transition hover:brightness-110"
-							onclick={exportPackageInfo} title="Export package info as CSV">
-							<Download class="h-3 w-3" /> Export
-						</button>
-						<div class="w-px self-stretch bg-[var(--border-color)]"></div>
-						<button type="button"
-							class="flex items-center bg-black/[0.06] px-2 py-[0.4rem] text-[var(--text-bright)] transition hover:bg-black/[0.12]"
-							onclick={() => (exportDropdownOpen = !exportDropdownOpen)} aria-label="More export options">
-							<ChevronDown class="h-3 w-3" />
-						</button>
-					</div>
-					{#if exportDropdownOpen}
-						<div class="absolute right-0 top-full z-30 mt-1 w-52 overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--bg-soft)] py-1 shadow-xl">
-							<button type="button"
-								class="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-								onclick={exportPackageInfo}>
-								<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" />
-								Package info (CSV)
-							</button>
-							<button type="button"
-								class="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12px] transition {hasContributorEmails ? 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg)]' : 'cursor-not-allowed text-[var(--text-muted)] opacity-50'}"
-								onclick={exportContributorEmails} disabled={!hasContributorEmails}
-								title={hasContributorEmails ? '' : 'No contributor emails loaded yet'}>
-								<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" />
-								Contributor emails (CSV)
-							</button>
-						</div>
-					{/if}
-				</div>
+				<button type="button"
+					class="shrink-0 inline-flex items-center gap-1.5 rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)] px-3 py-[0.4rem] text-[0.75rem] font-semibold tracking-[0.02em] text-[var(--text-bright)] transition hover:brightness-110"
+					onclick={exportPackageInfo} title="Export package info as CSV">
+					<Download class="h-3 w-3" /> Export
+				</button>
 			{/if}
 
 			<button type="button"
