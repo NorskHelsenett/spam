@@ -14,6 +14,8 @@
 		asset_type: string;
 		repo_id?: string;
 		provider?: string;
+		provider_id?: string;
+		provider_base_url?: string;
 		org?: string;
 		slug?: string;
 		commit_sha?: string;
@@ -67,7 +69,10 @@
 
 	type UniqueRepo = {
 		key: string;
+		repo_id?: string;
 		provider: string;
+		provider_id?: string;
+		provider_base_url?: string;
 		org: string;
 		slug: string;
 		versions: string[];
@@ -154,7 +159,7 @@
 
 	// Auto-load contributors for visible repos
 	$effect(() => {
-		for (const repo of uniqueRepos.slice(0, 10)) {
+		for (const repo of uniqueRepos) {
 			if (!repoContributors[repo.key] && !loadingContributors[repo.key]) {
 				loadContributors(repo);
 			}
@@ -169,8 +174,16 @@
 	});
 
 	const resolveProviderType = (provider: string) => {
-		const instance = providerInstances.find((p) => p.id === provider || p.type === provider);
+		const instance = findProviderInstance(provider);
 		return instance?.type ?? provider;
+	};
+
+	const findProviderInstance = (provider: string, providerBaseURL?: string) => {
+		return providerInstances.find((p) =>
+			p.id === provider
+			|| p.type === provider
+			|| (providerBaseURL ? p.base_url === providerBaseURL : false),
+		);
 	};
 
 	const loadProviderInstances = async () => {
@@ -231,9 +244,22 @@
 			if (asset.asset_type !== 'REPO_COMMIT') continue;
 			const key = `${asset.provider}:${asset.org}:${asset.slug}`;
 			if (!map.has(key)) {
-				map.set(key, { key, provider: asset.provider ?? '', org: asset.org ?? '', slug: asset.slug ?? '', versions: [], sources: [] });
+				map.set(key, {
+					key,
+					repo_id: asset.repo_id,
+					provider: asset.provider ?? '',
+					provider_id: asset.provider_id,
+					provider_base_url: asset.provider_base_url,
+					org: asset.org ?? '',
+					slug: asset.slug ?? '',
+					versions: [],
+					sources: [],
+				});
 			}
 			const repo = map.get(key)!;
+			if (!repo.repo_id && asset.repo_id) repo.repo_id = asset.repo_id;
+			if (!repo.provider_id && asset.provider_id) repo.provider_id = asset.provider_id;
+			if (!repo.provider_base_url && asset.provider_base_url) repo.provider_base_url = asset.provider_base_url;
 			if (asset.version && !repo.versions.includes(asset.version)) repo.versions.push(asset.version);
 			if (asset.source && !repo.sources.includes(asset.source)) repo.sources.push(asset.source);
 		}
@@ -244,10 +270,10 @@
 	const repoGroups = $derived.by(() => {
 		const map = new Map<string, RepoGroup>();
 		for (const repo of uniqueRepos) {
-			const instance = providerInstances.find((p) => p.id === repo.provider || p.type === repo.provider);
+			const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
 			const groupKey = instance?.id ?? repo.provider;
 			const providerType = instance?.type ?? repo.provider;
-			const baseUrl = instance?.base_url ?? (providerType === 'github' ? 'https://github.com' : providerType === 'gitlab' ? 'https://gitlab.com' : '');
+			const baseUrl = instance?.base_url ?? repo.provider_base_url ?? (providerType === 'github' ? 'https://github.com' : providerType === 'gitlab' ? 'https://gitlab.com' : '');
 			const label = baseUrl.replace(/^https?:\/\//, '');
 			if (!map.has(groupKey)) map.set(groupKey, { key: groupKey, type: providerType, label, repos: [] });
 			map.get(groupKey)!.repos.push(repo);
@@ -279,7 +305,7 @@
 		await loadProviderInstances();
 		try {
 			let url: string;
-			const instance = providerInstances.find((p) => p.id === repo.provider || p.type === repo.provider);
+			const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
 			const providerType = instance?.type ?? repo.provider;
 			if (providerType === 'github') {
 				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
@@ -389,12 +415,47 @@
 		}
 	};
 
-	const repoUrl = (repo: UniqueRepo): string | null => {
-		const instance = providerInstances.find((p) => p.id === repo.provider || p.type === repo.provider);
-		const providerType = instance?.type ?? repo.provider;
-		if (providerType === 'github') return `https://github.com/${repo.org}/${repo.slug}`;
-		if (instance?.base_url) return `${instance.base_url.replace(/\/$/, '')}/${repo.org}/${repo.slug}`;
-		return null;
+	const spamRepoUrl = (repo: UniqueRepo): string | null => {
+		if (!repo.repo_id) return null;
+		return `/app/providers/repo/${encodeURIComponent(repo.repo_id)}`;
+	};
+
+	const providerRepoUrl = (repo: UniqueRepo): string => {
+		const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
+		const providerType = instance?.type ?? String(repo.provider || '').toLowerCase();
+		const baseUrl = instance?.base_url
+			?? repo.provider_base_url
+			?? (providerType === 'github' ? 'https://github.com'
+				: providerType === 'gitlab' ? 'https://gitlab.com'
+					: '');
+		const path = `${repo.org}/${repo.slug}`;
+		if (!baseUrl) return path;
+		return `${baseUrl.replace(/\/$/, '')}/${path}`;
+	};
+
+	const spamRepoExportUrl = (repo: UniqueRepo): string => {
+		const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
+		const providerType = instance?.type ?? String(repo.provider || '').toLowerCase();
+		const repoPath = `${repo.org}/${repo.slug}`;
+		let path = '';
+		if (providerType && repo.org && repo.slug) {
+			path = `/app/providers/repo?provider=${providerType}&path=${repoPath}`;
+			if (instance?.base_url) path += `&base_url=${instance.base_url}`;
+		} else {
+			path = spamRepoUrl(repo) ?? '';
+		}
+		if (!path) return '';
+		if (browser && window.location?.origin) return `${window.location.origin}${path}`;
+		return path;
+	};
+
+	const handleRepoLinkClick = (event: MouseEvent, url: string) => {
+		event.stopPropagation();
+		if (!browser) return;
+		if (event.metaKey || event.ctrlKey) {
+			event.preventDefault();
+			window.open(url, '_blank', 'noopener,noreferrer');
+		}
 	};
 
 	const packageUrl = $derived.by(() => {
@@ -427,13 +488,15 @@
 
 	const exportPackageInfo = () => {
 		const safe = name.replace(/[^a-z0-9\-_.]/gi, '_');
-		const rows = [['package', 'ecosystem', 'version', 'repo', 'provider', 'source', 'contributor_emails']];
+		const rows = [['package', 'ecosystem', 'version', 'source', 'repo_url', 'spam_url', 'contributor_emails']];
 		for (const repo of uniqueRepos) {
 			const contributorEmails = [...new Set((repoContributorsAll[repo.key] ?? []).map((c) => c.email).filter((e): e is string => Boolean(e && e.trim())))]
 				.join(';');
+			const repoUrl = providerRepoUrl(repo);
+			const spamUrl = spamRepoExportUrl(repo);
 			const versions = repo.versions.length > 0 ? repo.versions : [''];
 			for (const v of versions) {
-				rows.push([name, ecosystem, v, `${repo.org}/${repo.slug}`, resolveProviderType(repo.provider), repo.sources.join('+'), contributorEmails]);
+				rows.push([name, ecosystem, v, repo.sources.join('+'), repoUrl, spamUrl, contributorEmails]);
 			}
 		}
 		downloadFile(rows.map(toCsvRow).join('\n'), `${safe}-${ecosystem}-info.csv`);
@@ -581,7 +644,7 @@
 								<!-- Repo rows -->
 								<div class="space-y-0.5">
 									{#each group.repos as repo}
-										{@const url = repoUrl(repo)}
+										{@const url = spamRepoUrl(repo)}
 										{@const contributors = repoContributors[repo.key] ?? []}
 										{@const isLoadingC = loadingContributors[repo.key]}
 										<div class="rounded-lg px-2 py-2 transition hover:bg-[var(--hover-bg-subtle)]">
@@ -591,9 +654,9 @@
 													<span class="text-[var(--text-muted)]">{repo.org}/</span><span class="font-medium text-[var(--text-bright)]">{repo.slug}</span>
 												</span>
 												{#if url}
-													<a href={url} target="_blank" rel="noopener noreferrer"
+													<a href={url}
 														class="shrink-0 rounded p-0.5 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
-														title="Open repository" onclick={(e) => e.stopPropagation()}>
+														title="Open in SPAM" onclick={(e) => handleRepoLinkClick(e, url)}>
 														<ExternalLink class="h-3 w-3" />
 													</a>
 												{/if}

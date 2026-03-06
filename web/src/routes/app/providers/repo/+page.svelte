@@ -154,7 +154,7 @@
 			path: params.get('path') || '',
 			baseUrl: params.get('base_url') || '',
 			providerId: params.get('provider_id') || '',
-			repoDbId: params.get('repo_id') || ''
+			repoDbId: params.get('repo_id') || $page.params.repo_id || ''
 		};
 	};
 

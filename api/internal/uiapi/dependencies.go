@@ -561,6 +561,7 @@ type DependencyAsset struct {
 	AssetType       string  `json:"asset_type"` // "REPO_COMMIT" only for now
 	RepoID          string  `json:"repo_id,omitempty"`
 	Provider        string  `json:"provider,omitempty"`
+	ProviderID      string  `json:"provider_id,omitempty"`
 	ProviderBaseURL string  `json:"provider_base_url,omitempty"`
 	Org             string  `json:"org,omitempty"`
 	Slug            string  `json:"slug,omitempty"`
@@ -868,6 +869,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				ca.asset_type,
 				ca.repo_id,
 				COALESCE(pi.display_name, ca.provider) as provider,
+				ca.provider_instance_id as provider_id,
 				ca.org,
 				ca.slug,
 				ca.commit_sha,
@@ -899,7 +901,7 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			var commitSHA, manifestPath, manifestType, scope sql.NullString
 
 			if err := rows.Scan(
-				&a.AssetType, &a.RepoID, &a.Provider, &a.Org, &a.Slug,
+				&a.AssetType, &a.RepoID, &a.Provider, &a.ProviderID, &a.Org, &a.Slug,
 				&commitSHA, &a.Version, &a.Source, &manifestPath,
 				&manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
 			); err != nil {
