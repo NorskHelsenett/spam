@@ -28,11 +28,12 @@ type readyPayload struct {
 }
 
 type SessionInfo struct {
-	ID      string
-	UserID  string
-	Subject string
-	Name    string
-	Email   string
+	ID       string
+	UserID   string
+	Subject  string
+	Name     string
+	Email    string
+	IsAdmin  bool
 }
 
 // AppStreamHandler streams server-sent events for authenticated app sessions.
@@ -53,7 +54,7 @@ func AppStreamHandler(loadSession func(*http.Request) (SessionInfo, error), shut
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Connection", "keep-alive")
-		w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("X-Accel-Buffering", "no")
 
 		if err := writeSSE(w, "ready", readyPayload{
 			SessionID: session.ID,
@@ -73,7 +74,7 @@ func AppStreamHandler(loadSession func(*http.Request) (SessionInfo, error), shut
 
 		var client *streamClient
 		if session.UserID != "" {
-			client = registerStream(session.UserID)
+			client = registerStream(session.UserID, session.IsAdmin)
 			defer unregisterStream(client)
 		}
 

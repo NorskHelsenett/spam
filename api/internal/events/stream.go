@@ -23,9 +23,10 @@ type StreamEvent struct {
 }
 
 type streamClient struct {
-	id     string
-	userID string
-	ch     chan StreamEvent
+	id      string
+	userID  string
+	isAdmin bool
+	ch      chan StreamEvent
 }
 
 var (
@@ -34,12 +35,13 @@ var (
 	streams   = make(map[string]map[string]*streamClient)
 )
 
-func registerStream(userID string) *streamClient {
+func registerStream(userID string, isAdmin bool) *streamClient {
 	clientID := nextStreamID()
 	client := &streamClient{
-		id:     clientID,
-		userID: userID,
-		ch:     make(chan StreamEvent, 8),
+		id:      clientID,
+		userID:  userID,
+		isAdmin: isAdmin,
+		ch:      make(chan StreamEvent, 8),
 	}
 
 	streamMu.Lock()
@@ -84,6 +86,9 @@ func dispatch(evt StreamEvent) {
 
 	for _, clients := range streams {
 		for _, client := range clients {
+			if evt.Event == StreamEventNewUser && !client.isAdmin {
+				continue
+			}
 			select {
 			case client.ch <- evt:
 			default:

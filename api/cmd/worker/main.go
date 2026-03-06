@@ -179,6 +179,8 @@ func run() error {
 	// WaitGroup to track in-flight jobs for graceful shutdown
 	var wg sync.WaitGroup
 
+	// Only allow one provider poller run at a time to avoid overlapping sync windows.
+	pollSlots := make(chan struct{}, 1)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -204,7 +206,15 @@ func run() error {
 			}
 
 			// Poll providers for new commits (non-blocking — don't delay job claiming)
-			go commitPoller.Poll(ctx)
+			select {
+			case pollSlots <- struct{}{}:
+				go func() {
+					defer func() { <-pollSlots }()
+					commitPoller.Poll(ctx)
+				}()
+			default:
+				// Poll already in progress; skip this tick.
+			}
 
 			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
 			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)

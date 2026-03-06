@@ -375,12 +375,17 @@ func (s *Service) SessionInfo(r *http.Request) (events.SessionInfo, error) {
 	if err != nil {
 		return events.SessionInfo{}, err
 	}
+	isAdmin, err := s.userHasGroup(r.Context(), session.UserID, GroupAdmin)
+	if err != nil {
+		return events.SessionInfo{}, err
+	}
 	return events.SessionInfo{
-		ID:      session.ID,
-		UserID:  session.UserID,
-		Subject: session.Subject,
-		Name:    session.Name,
-		Email:   session.Email,
+		ID:       session.ID,
+		UserID:   session.UserID,
+		Subject:  session.Subject,
+		Name:     session.Name,
+		Email:    session.Email,
+		IsAdmin:  isAdmin,
 	}, nil
 }
 
