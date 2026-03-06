@@ -64,12 +64,11 @@
 		return () => clearTimeout(t);
 	});
 
-	const handleRefresh = () => {
+	const handleRefresh = async () => {
 		if (refreshing) return;
 		refreshing = true;
-		setTimeout(() => {
-			refreshing = false;
-		}, 1000);
+		await new Promise((r) => setTimeout(r, 400)); // simulated fetch
+		setTimeout(() => { refreshing = false; }, 1000);
 	};
 
 	const selectOptions = [
@@ -237,6 +236,7 @@
 					<path d="m12 5 7 7-7 7"></path>
 				</svg>
 			</button>
+			<!-- Canonical refresh button: spins during fetch + 1s after completion for organic feel -->
 			<button type="button" class="btn btn-ghost" onclick={handleRefresh} disabled={refreshing}>
 				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
 					<RotateCw size={14} />

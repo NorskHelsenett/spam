@@ -3,7 +3,8 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import { providerSyncStates, initSyncStates } from '$lib/stores/providerSync';
@@ -45,6 +46,7 @@
 	let formError = $state('');
 	let error = $state('');
 	let loading = $state(true);
+	let refreshing = $state(false);
 	let saving = $state(false);
 	let rotatePat = $state('');
 	let rotateDialogOpen = $state(false);
@@ -256,6 +258,7 @@
 
 	const loadProviders = async () => {
 		loading = true;
+		refreshing = true;
 		error = '';
 		try {
 			const response = await fetch('/api/admin/providers', {
@@ -272,6 +275,7 @@
 			error = 'Failed to load providers.';
 		} finally {
 			loading = false;
+			setTimeout(() => { refreshing = false; }, 1000);
 		}
 	};
 
@@ -563,11 +567,13 @@
 			<div class="flex flex-wrap items-center gap-2">
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				class="btn btn-ghost"
 				onclick={loadProviders}
-				disabled={loading}
+				disabled={refreshing}
 			>
-				<RefreshCw size={16} />
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
 				Refresh
 			</button>
 			</div>

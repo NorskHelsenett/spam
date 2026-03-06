@@ -3,7 +3,7 @@
 	import { browser } from '$app/environment';
 	import { fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download } from 'lucide-svelte';
+	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download, ChevronDown } from 'lucide-svelte';
 	import DependencyDrawer from '$lib/components/DependencyDrawer.svelte';
 	import Select from '$lib/components/Select.svelte';
 
@@ -30,6 +30,8 @@
 	let totalCount = $state(0);
 	let pageSize = $state(50);
 	let exporting = $state(false);
+	let exportDropdownOpen = $state(false);
+	let exportBtnEl: HTMLDivElement | undefined = $state();
 
 	// Sorting
 	let sortColumn = $state<string>('');
@@ -126,6 +128,52 @@
 		}
 	};
 
+	$effect(() => {
+		if (!exportDropdownOpen || !browser) return;
+		const handler = (e: MouseEvent) => {
+			if (exportBtnEl && !exportBtnEl.contains(e.target as Node)) exportDropdownOpen = false;
+		};
+		document.addEventListener('mousedown', handler);
+		return () => document.removeEventListener('mousedown', handler);
+	});
+
+	const exportSelectedPackage = async () => {
+		if (!selectedDependency || exporting) return;
+		exportDropdownOpen = false;
+		exporting = true;
+		try {
+			const params = new URLSearchParams({
+				name: selectedDependency.name,
+				ecosystem: selectedDependency.ecosystem,
+				page_size: '1000'
+			});
+			const res = await fetch(`/api/dependencies/assets?${params}`, { credentials: 'include' });
+			if (!res.ok) return;
+			const data = await res.json();
+			const assets: Array<Record<string, string>> = data.assets ?? [];
+			const toCsvRow = (fields: unknown[]) =>
+				fields.map((f) => `"${String(f ?? '').replace(/"/g, '""')}"`).join(',');
+			const rows = [['package', 'ecosystem', 'version', 'type', 'repository', 'source']];
+			for (const a of assets) {
+				if (a.asset_type === 'REPO_COMMIT') {
+					rows.push([selectedDependency.name, selectedDependency.ecosystem, a.version || '', 'repo', `${a.org}/${a.slug}`, a.source || '']);
+				} else if (a.asset_type === 'IMAGE_DIGEST') {
+					rows.push([selectedDependency.name, selectedDependency.ecosystem, a.version || '', 'image', `${a.image_registry}/${a.image_repository}`, '']);
+				}
+			}
+			const csv = rows.map(toCsvRow).join('\n');
+			const blob = new Blob([csv], { type: 'text/csv' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = `${selectedDependency.name.replace(/[^a-z0-9\-_.]/gi, '_')}-details.csv`;
+			document.body.appendChild(link); link.click();
+			document.body.removeChild(link); URL.revokeObjectURL(url);
+		} catch { /* ignore */ } finally {
+			exporting = false;
+		}
+	};
+
 	const handleSearch = () => {
 		if (searchTimeout) clearTimeout(searchTimeout);
 		searchTimeout = setTimeout(() => {
@@ -186,15 +234,42 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Dependencies</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">Search dependencies from SBOMs and manifest files.</p>
 			</div>
-			<button
-				type="button"
-				class="btn btn-secondary w-full sm:w-auto"
-				onclick={exportCsv}
-				disabled={exporting || loading}
-			>
-				<Download class="h-4 w-4" />
-				{exporting ? 'Exporting...' : 'Export CSV'}
-			</button>
+			<div class="relative w-full sm:w-auto" bind:this={exportBtnEl}>
+				<div class="flex w-full overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)] sm:w-auto">
+					<button type="button"
+						class="flex flex-1 items-center gap-2 px-[1.1rem] py-[0.55rem] text-[0.85rem] font-semibold tracking-[0.02em] text-[var(--text-bright)] transition hover:brightness-110 disabled:opacity-50 sm:flex-none"
+						onclick={exportCsv} disabled={exporting || loading}>
+						<Download class="h-4 w-4" />
+						{exporting ? 'Exporting…' : 'Export CSV'}
+					</button>
+					<div class="w-px self-stretch bg-[var(--border-color)]"></div>
+					<button type="button"
+						class="flex items-center bg-black/[0.06] px-3 py-[0.55rem] text-[var(--text-bright)] transition hover:bg-black/[0.12] disabled:opacity-50"
+						onclick={() => (exportDropdownOpen = !exportDropdownOpen)}
+						disabled={exporting || loading} aria-label="More export options">
+						<ChevronDown class="h-4 w-4" />
+					</button>
+				</div>
+				{#if exportDropdownOpen}
+					<div class="absolute right-0 top-full z-30 mt-1 w-60 overflow-hidden rounded-xl border border-[var(--border-color)] bg-[var(--bg-soft)] py-1 shadow-xl">
+						<p class="px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">All dependencies</p>
+						<button type="button"
+							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+							onclick={() => { exportDropdownOpen = false; exportCsv(); }}>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Export CSV
+						</button>
+						<div class="mx-3 my-1 border-t border-[var(--border-color)]/60"></div>
+						<p class="px-3.5 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">Selected package</p>
+						<button type="button"
+							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] transition {detailOpen && selectedDependency ? 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg)]' : 'cursor-not-allowed text-[var(--text-muted)] opacity-50'}"
+							onclick={exportSelectedPackage} disabled={!detailOpen || !selectedDependency}
+							title={detailOpen && selectedDependency ? `Export ${selectedDependency.name} details` : 'Open a package to export its details'}>
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" />
+							{selectedDependency ? `${selectedDependency.name} (CSV)` : 'Package details (CSV)'}
+						</button>
+					</div>
+				{/if}
+			</div>
 		</header>
 
 		<!-- Search and filters -->

@@ -2,7 +2,9 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Play, CheckCircle, XCircle, Clock, Loader2, RefreshCw } from 'lucide-svelte';
+	import { CheckCircle, XCircle, Clock, Loader2 } from 'lucide-svelte';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
+	import RocketLaunch from '$lib/components/icons/RocketLaunch.svelte';
 
 	type Run = {
 		id: string;
@@ -56,6 +58,7 @@
 
 	let runs: Run[] = $state([]);
 	let loading = $state(true);
+	let refreshing = $state(false);
 	let error = $state('');
 	let totalCount = $state(0);
 	let page = $state(1);
@@ -92,6 +95,7 @@
 		}
 		loadRunsInFlight = true;
 		loading = true;
+		refreshing = true;
 		error = '';
 		try {
 			const response = await fetch(
@@ -112,6 +116,7 @@
 		} finally {
 			loading = false;
 			loadRunsInFlight = false;
+			setTimeout(() => { refreshing = false; }, 1000);
 			if (loadRunsQueued) {
 				loadRunsQueued = false;
 				loadRuns();
@@ -318,8 +323,11 @@
 				type="button"
 				class="btn btn-ghost"
 				onclick={loadRuns}
+				disabled={refreshing}
 			>
-				<RefreshCw size={16} class={loading ? 'animate-spin' : ''} />
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
 				Refresh
 			</button>
 		</header>
@@ -362,7 +370,7 @@
 			</div>
 		{:else if runs.length === 0}
 			<div class="flex flex-col items-center justify-center py-12 text-center">
-				<Play size={48} class="mb-4 text-[var(--text-muted)]" />
+				<RocketLaunch size={48} class="mb-4 text-[var(--text-muted)]" />
 				<p class="text-lg text-[var(--text-secondary)]">No runs yet</p>
 				<p class="mt-1 text-sm text-[var(--text-muted)]">Trigger a scan from a repository page to create a run</p>
 			</div>
