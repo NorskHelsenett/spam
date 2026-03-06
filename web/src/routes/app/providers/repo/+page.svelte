@@ -781,43 +781,51 @@
 									</div>
 								{/each}
 							</div>
-						{/if}
-					{:else if activeTab === 'contributors'}
-						{#if contributors.length === 0}
-							<p class="text-sm text-[var(--text-muted)]">No contributors available.</p>
-						{:else}
-							<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-								{#each contributors as contributor}
-									<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
-										{#if contributor.avatar_url}
-											<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
-										{:else}
-											<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
-												{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
-											</div>
-										{/if}
-										<div class="min-w-0 flex-1">
-											{#if contributor.profile_url}
-												<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-													{contributor.login || contributor.name || contributor.email}
-												</a>
+							{/if}
+						{:else if activeTab === 'contributors'}
+							{#if contributors.length === 0}
+								<div class="flex flex-col items-center justify-center gap-3 py-6 text-center">
+									<svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" class="h-10 w-10">
+										<g id="SVGRepo_bgCarrier" stroke-width="0"></g>
+										<g id="SVGRepo_tracerCarrier" stroke-linecap="round" stroke-linejoin="round"></g>
+										<g id="SVGRepo_iconCarrier">
+											<path fill-rule="evenodd" clip-rule="evenodd" d="M16 8C16 12.4183 12.4183 16 8 16C3.58172 16 0 12.4183 0 8C0 3.58172 3.58172 0 8 0C12.4183 0 16 3.58172 16 8ZM7 5.5C7 6.32843 6.32843 7 5.5 7C4.67157 7 4 6.32843 4 5.5C4 4.67157 4.67157 4 5.5 4C6.32843 4 7 4.67157 7 5.5ZM10.5 7C11.3284 7 12 6.32843 12 5.5C12 4.67157 11.3284 4 10.5 4C9.67157 4 9 4.67157 9 5.5C9 6.32843 9.67157 7 10.5 7Z" fill="#000000"></path>
+										</g>
+									</svg>
+									<p class="text-sm text-[var(--text-muted)]">No contributors found</p>
+								</div>
+							{:else}
+								<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+									{#each contributors as contributor}
+										<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+											{#if contributor.avatar_url}
+												<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
 											{:else}
-												<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
+												<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
+													{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
+												</div>
 											{/if}
-											{#if contributor.email}
-												<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
-											{/if}
-											<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+											<div class="min-w-0 flex-1">
+												{#if contributor.profile_url}
+													<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+														{contributor.login || contributor.name || contributor.email}
+													</a>
+												{:else}
+													<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
+												{/if}
+												{#if contributor.email}
+													<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
+												{/if}
+												<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+											</div>
 										</div>
-									</div>
-								{/each}
-							</div>
+									{/each}
+								</div>
+							{/if}
 						{/if}
-					{/if}
-					</div>
-			</div>
-		</article>
-
+						</div>
+				</div>
+			</article>
 
 		<!-- README -->
 		{#if readme}
