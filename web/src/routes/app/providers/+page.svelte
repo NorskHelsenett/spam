@@ -345,8 +345,14 @@
 				page: String(page),
 				page_size: String(pageSize)
 			});
-			if (ghProviderId) {
-				params.set('provider_id', ghProviderId);
+			// Use explicit provider_id, or resolve from managed providers so the
+			// request hits the cache instead of the live GitHub API.
+			const resolvedProviderId = ghProviderId ??
+				(managedProvidersEnabled
+					? (customProviders.find(p => p.type === 'github' && (!p.ownerPath || p.ownerPath === owner))?.id ?? null)
+					: null);
+			if (resolvedProviderId) {
+				params.set('provider_id', resolvedProviderId);
 			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
