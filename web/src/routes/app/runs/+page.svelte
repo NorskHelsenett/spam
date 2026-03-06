@@ -32,6 +32,18 @@
 		return `/app/runs/${run.id}`;
 	};
 
+	const handleRepoLinkClick = (event: MouseEvent, url: string) => {
+		event.stopPropagation();
+
+		// Keep native browser behavior for new-tab/window gestures.
+		if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+			return;
+		}
+
+		event.preventDefault();
+		goto(url);
+	};
+
 	type RunsResponse = {
 		runs: Run[];
 		total_count: number;
@@ -417,7 +429,7 @@
 									<a
 										href={getRepoUrl(run)}
 										class="hover:text-[var(--accent)] hover:underline"
-										onclick={(e) => e.stopPropagation()}
+										onclick={(event) => handleRepoLinkClick(event, getRepoUrl(run))}
 									>{run.repo_path || run.clone_url}</a>
 								</td>
 								<td class="px-5 py-3">{run.provider || '-'}</td>

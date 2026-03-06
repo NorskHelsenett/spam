@@ -178,7 +178,7 @@
 		resolvedBaseUrl = baseUrl;
 		resolvedProviderId = providerId;
 
-		if (!path) {
+		if (!path && !repoDbId) {
 			error = 'No repository path specified.';
 			loading = false;
 			return;
@@ -203,14 +203,19 @@
 			try {
 			let response: Response;
 
-			if (providerId) {
-				// Try unified endpoint first (resolves base_url/token from DB).
-				// Pass repo_id when available so the backend can skip the org/slug lookup.
-				const uq = new URLSearchParams({ provider_id: providerId, path });
+			if (repoDbId || providerId) {
+				// Try unified endpoint first (resolves provider/path from DB when repo_id is present).
+				const uq = new URLSearchParams();
+				if (providerId) uq.set('provider_id', providerId);
+				if (path) uq.set('path', path);
 				if (repoDbId) uq.set('repo_id', repoDbId);
 				response = await fetch(`/api/providers/details?${uq}`, { credentials: 'include' });
 				// If provider_id is stale (DB reset), fall back to type-specific endpoint
 				if (response.status === 404) {
+					if (!path) {
+						error = 'Repository not found.';
+						return;
+					}
 					response = await fetch(buildTypeUrl(), { credentials: 'include' });
 				}
 			} else {
@@ -232,6 +237,9 @@
 
 			const data: RepoDetailsResponse = await response.json();
 			details = data.details;
+			if (!resolvedPath && data.details?.full_path) {
+				resolvedPath = data.details.full_path;
+			}
 			readme = data.readme;
 			commits = data.commits || [];
 			contributors = data.contributors || [];
