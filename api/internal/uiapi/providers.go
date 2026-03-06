@@ -1165,7 +1165,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				http.Error(w, "path must be owner/repo for GitHub", http.StatusBadRequest)
 				return
 			}
-			client := providers.NewGitHubClient(instance.BaseURL, token)
+			client := providers.NewGitHubClient(githubAPIBaseURL(instance.BaseURL), token)
 			d, err := client.GetRepoDetails(r.Context(), parts[0], parts[1])
 			if err != nil {
 				if errors.Is(err, providers.ErrNotFound) {
@@ -1281,6 +1281,18 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// githubAPIBaseURL returns the GitHub API base URL for use with NewGitHubClient.
+// For public github.com the stored base_url may be "https://github.com" (the web
+// URL), but the client expects "" (which it maps to https://api.github.com) or an
+// explicit GitHub Enterprise API URL.  Passing the web URL directly produces 404s.
+func githubAPIBaseURL(storedBaseURL string) string {
+	u := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(storedBaseURL)), "/")
+	if u == "" || u == "https://github.com" || u == "http://github.com" {
+		return "" // NewGitHubClient defaults to https://api.github.com
+	}
+	return storedBaseURL
 }
 
 // lookupRepoID returns the DB repo UUID for the given provider+path, or "" if not found.

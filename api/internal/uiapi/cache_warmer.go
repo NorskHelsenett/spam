@@ -262,7 +262,7 @@ func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, t
 		if len(parts) != 2 {
 			return
 		}
-		cl := providers.NewGitHubClient(p.BaseURL, token)
+		cl := providers.NewGitHubClient(githubAPIBaseURL(p.BaseURL), token)
 		wg.Add(4)
 		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
 		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, parts[0], parts[1]) }()
