@@ -1092,6 +1092,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
 		repoPath := strings.TrimSpace(r.URL.Query().Get("path"))
+		repoDBID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
 		if providerID == "" || repoPath == "" {
 			http.Error(w, "provider_id and path are required", http.StatusBadRequest)
 			return
@@ -1123,9 +1124,14 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		}
 
 		// DB cache fallback: serve from persisted data if fresh enough.
+		// Use repo_id directly when provided (skips the org/slug lookup).
 		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
 		if db != nil {
-			if repoID := lookupRepoID(r.Context(), db, providerID, repoPath); repoID != "" {
+			repoID := repoDBID
+			if repoID == "" {
+				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
+			}
+			if repoID != "" {
 				if dbCache, dbErr := assets.GetRepoCache(r.Context(), db, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
 					var details providers.RepoDetails
 					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
@@ -1253,7 +1259,11 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		// Persist to DB so subsequent requests and restarts can skip the API.
 		if db != nil && details != nil {
-			if repoID := lookupRepoID(r.Context(), db, providerID, repoPath); repoID != "" {
+			repoID := repoDBID
+			if repoID == "" {
+				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
+			}
+			if repoID != "" {
 				detailsBytes, _ := json.Marshal(details)
 				commitsBytes, _ := json.Marshal(commits)
 				contribBytes, _ := json.Marshal(contributors)

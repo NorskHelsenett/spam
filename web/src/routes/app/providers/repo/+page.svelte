@@ -189,13 +189,13 @@
 		const buildTypeUrl = () => {
 				const q = new URLSearchParams();
 				if (baseUrl) q.set('base_url', baseUrl);
+				if (providerId) q.set('provider_id', providerId);
 				if (provider === 'gitlab') {
 					return `/api/providers/gitlab/${encodeURIComponent(path)}/details?${q}`;
 				} else if (provider === 'gitea' || provider === 'forgejo') {
 					return `/api/providers/gitea/${path}/details?${q}`;
 				} else {
-					const qs = q.toString();
-					return `/api/providers/github/${path}/details${qs ? `?${qs}` : ''}`;
+					return `/api/providers/github/${path}/details?${q}`;
 				}
 			};
 
@@ -203,11 +203,11 @@
 			let response: Response;
 
 			if (providerId) {
-				// Try unified endpoint first (resolves base_url/token from DB)
-				response = await fetch(
-					`/api/providers/details?provider_id=${encodeURIComponent(providerId)}&path=${encodeURIComponent(path)}`,
-					{ credentials: 'include' }
-				);
+				// Try unified endpoint first (resolves base_url/token from DB).
+				// Pass repo_id when available so the backend can skip the org/slug lookup.
+				const uq = new URLSearchParams({ provider_id: providerId, path });
+				if (repoDbId) uq.set('repo_id', repoDbId);
+				response = await fetch(`/api/providers/details?${uq}`, { credentials: 'include' });
 				// If provider_id is stale (DB reset), fall back to type-specific endpoint
 				if (response.status === 404) {
 					response = await fetch(buildTypeUrl(), { credentials: 'include' });
