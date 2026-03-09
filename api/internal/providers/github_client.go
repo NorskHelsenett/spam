@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -229,9 +230,10 @@ func (c *GitHubClientImpl) CountRepos(ctx context.Context, owner string) (int, e
 	if c.token != "" {
 		repoType = "all"
 	}
-	count, err := c.countReposFromURL(ctx, fmt.Sprintf("%s/orgs/%s/repos?type=%s&per_page=1", c.baseURL, owner, repoType))
+	encodedOwner := url.PathEscape(owner)
+	count, err := c.countReposFromURL(ctx, fmt.Sprintf("%s/orgs/%s/repos?type=%s&per_page=1", c.baseURL, encodedOwner, repoType))
 	if err == ErrNotFound {
-		return c.countReposFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?type=%s&per_page=1", c.baseURL, owner, repoType))
+		return c.countReposFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?type=%s&per_page=1", c.baseURL, encodedOwner, repoType))
 	}
 	return count, err
 }

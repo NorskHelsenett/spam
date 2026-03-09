@@ -156,10 +156,9 @@ func CountFreshRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerIns
 func ListReposWithStaleCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string, freshSince time.Time) ([]Repo, error) {
 	var repos []Repo
 	err := db.WithContext(ctx).
-		Where("provider_instance_id = ?", providerInstanceID).
-		Where("id NOT IN (?)",
-			db.Table("repo_caches").Select("repo_id").Where("synced_at > ?", freshSince),
-		).
+		Joins("LEFT JOIN repo_caches ON repo_caches.repo_id = repos.id AND repo_caches.synced_at > ?", freshSince).
+		Where("repos.provider_instance_id = ?", providerInstanceID).
+		Where("repo_caches.repo_id IS NULL").
 		Find(&repos).Error
 	return repos, err
 }

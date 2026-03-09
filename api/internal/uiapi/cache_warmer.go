@@ -72,8 +72,14 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 		}
 	}
 
-	dbCount, _ := assets.CountReposByProvider(ctx, db, p.ID)
-	freshCount, _ := assets.CountFreshRepoCacheByProvider(ctx, db, p.ID, freshSince)
+	dbCount, err := assets.CountReposByProvider(ctx, db, p.ID)
+	if err != nil {
+		log.Printf("cache warmer: %s db count error: %v", p.DisplayName, err)
+	}
+	freshCount, err := assets.CountFreshRepoCacheByProvider(ctx, db, p.ID, freshSince)
+	if err != nil {
+		log.Printf("cache warmer: %s fresh count error: %v", p.DisplayName, err)
+	}
 
 	log.Printf("cache warmer: %s — provider=%d db=%d fresh=%d/%d",
 		p.DisplayName, providerTotal, dbCount, freshCount, dbCount)
