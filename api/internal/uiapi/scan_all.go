@@ -37,7 +37,7 @@ type ScanAllResponse struct {
 
 // ScanAllHandler handles queueing SBOM generation jobs for all repos in a provider/owner/group.
 // POST /api/scan-all
-func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAdmin(w, r, authService) == nil {
 			return
@@ -58,13 +58,21 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		var totalQueued int
 		var errors []string
 
+		// Resolve token from the provider instance if one is configured.
+		token := ""
+		if store != nil && req.ProviderID != "" {
+			if t, err := store.GetActiveToken(ctx, req.ProviderID); err == nil {
+				token = t
+			}
+		}
+
 		switch req.Provider {
 		case "github":
-			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID)
+			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID, token)
 		case "gitlab":
-			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID)
+			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID, token)
 		case "gitea", "forgejo":
-			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID)
+			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID, token)
 		default:
 			http.Error(w, fmt.Sprintf("unsupported provider: %s", req.Provider), http.StatusBadRequest)
 			return
@@ -78,19 +86,18 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 }
 
 // scanAllGitHub fetches all GitHub repos and queues them for scanning.
-func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string) (int, []string) {
+func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string, token string) (int, []string) {
 	if owner == "" {
 		return 0, []string{"owner is required"}
 	}
 
-	client := providers.NewGitHubClient("", "")
+	client := providers.NewGitHubClient("", token)
 	var allRepos []providers.RepoData
 	var errors []string
 
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, owner, providers.ListOptions{
 			Page:     page,
@@ -100,30 +107,26 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID st
 			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
 		allRepos = append(allRepos, repos...)
-
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all repos
 	queued := queueRepos(ctx, db, allRepos, "github", "", providerID, &errors)
 	return queued, errors
 }
 
 // scanAllGitLab fetches all GitLab projects and queues them for scanning.
-func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string) (int, []string) {
-	client := providers.NewGitLabClient(baseURL, "")
+func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string, token string) (int, []string) {
+	client := providers.NewGitLabClient(baseURL, token)
 	var allProjects []providers.RepoData
 	var errors []string
 
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		projects, pageInfo, err := client.ListPublicProjects(ctx, group, providers.ListOptions{
 			Page:             page,
@@ -134,34 +137,30 @@ func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL strin
 			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
 		allProjects = append(allProjects, projects...)
-
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all projects
 	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, providerID, &errors)
 	return queued, errors
 }
 
 // scanAllGitea fetches all Gitea/Forgejo repos and queues them for scanning.
-func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string) (int, []string) {
+func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string, token string) (int, []string) {
 	if baseURL == "" {
 		return 0, []string{"base_url is required for Gitea/Forgejo"}
 	}
 
-	client := providers.NewGiteaClient(baseURL, "")
+	client := providers.NewGiteaClient(baseURL, token)
 	var allRepos []providers.RepoData
 	var errors []string
 
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, owner, providers.ListOptions{
 			Page:     page,
@@ -171,16 +170,13 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string
 			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
 		allRepos = append(allRepos, repos...)
-
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all repos
 	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, providerID, &errors)
 	return queued, errors
 }
@@ -298,6 +294,10 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 		wg.Wait()
 	}
 
-	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), provider)
+	label := providerID
+	if label == "" {
+		label = provider
+	}
+	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), label)
 	return queued
 }
