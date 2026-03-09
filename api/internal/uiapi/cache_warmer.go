@@ -40,9 +40,15 @@ func WarmCache(db *gorm.DB, store *providerconfig.Store, c cache.Store) {
 			return
 		}
 
+		var wg sync.WaitGroup
 		for _, p := range providerList {
-			warmProviderSmart(ctx, db, store, c, p)
+			wg.Add(1)
+			go func(p providerconfig.ProviderInstance) {
+				defer wg.Done()
+				warmProviderSmart(ctx, db, store, c, p)
+			}(p)
 		}
+		wg.Wait()
 
 		log.Printf("cache warmer: done")
 	}()
