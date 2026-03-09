@@ -163,7 +163,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 
 	var queued, skippedSame, skippedPending int
 	for _, repo := range allRepos {
-		if repo.DefaultBranch == "" {
+		if repo.DefaultBranch == "" || repo.IsEmpty {
 			continue
 		}
 		if repo.IsDisabled {

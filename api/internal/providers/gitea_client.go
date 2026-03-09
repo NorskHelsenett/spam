@@ -145,6 +145,7 @@ type giteaRepo struct {
 	Private       bool      `json:"private"`
 	Fork          bool      `json:"fork"`
 	Archived      bool      `json:"archived"`
+	Empty         bool      `json:"empty"`
 	Language      string    `json:"language"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -241,6 +242,7 @@ func (c *GiteaClientImpl) ListPublicRepos(ctx context.Context, owner string, opt
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
+			IsEmpty:       r.Empty,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,
 			PushedAt:      r.UpdatedAt,
@@ -297,6 +299,7 @@ func (c *GiteaClientImpl) listUserRepos(ctx context.Context, username string, op
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
+			IsEmpty:       r.Empty,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,
 			PushedAt:      r.UpdatedAt,

@@ -204,7 +204,7 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 			wg.Add(1)
 			go func(r providers.RepoData) {
 				defer wg.Done()
-				if r.IsDisabled {
+				if r.IsDisabled || r.IsEmpty || r.DefaultBranch == "" {
 					return
 				}
 

@@ -314,6 +314,7 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			IsArchived:    r.Archived,
 			IsDisabled:    r.Disabled,
 			IsFork:        r.Fork,
+			IsEmpty:       r.PushedAt.IsZero(),
 			Topics:        r.Topics,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,

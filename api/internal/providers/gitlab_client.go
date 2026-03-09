@@ -128,6 +128,7 @@ type gitLabProject struct {
 	DefaultBranch     string    `json:"default_branch"`
 	Visibility        string    `json:"visibility"`
 	Archived          bool      `json:"archived"`
+	EmptyRepo         bool      `json:"empty_repo"`
 	ForkedFromProject *struct{} `json:"forked_from_project"` // Non-nil if forked
 	Topics            []string  `json:"topics"`
 	Language          string    `json:"language"`
@@ -248,6 +249,7 @@ func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath str
 			IsPrivate:     p.Visibility != "public",
 			IsArchived:    p.Archived,
 			IsFork:        p.ForkedFromProject != nil,
+			IsEmpty:       p.EmptyRepo,
 			Topics:        p.Topics,
 			CreatedAt:     p.CreatedAt,
 			UpdatedAt:     p.LastActivityAt,
