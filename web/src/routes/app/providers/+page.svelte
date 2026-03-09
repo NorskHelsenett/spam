@@ -699,7 +699,8 @@
 		goto(`/app/providers/repo?${params}`);
 	};
 
-	// Trigger SBOM scan for all repos (including paginated results)
+	// Trigger SBOM scan for all repos (including paginated results).
+	// Streams progress via SSE — the server emits "progress" events per page and a final "done" event.
 	const queueAllRepos = async (
 		provider: string,
 		owner: string,
@@ -731,12 +732,40 @@
 			if (!response.ok) {
 				const text = await response.text();
 				queueProgress.errors = [text || 'Failed to queue repos'];
-			} else {
-				const data = await response.json();
-				queueProgress = {
-					total: data.total_queued,
-					errors: data.errors || []
-				};
+			} else if (response.body) {
+				// Read the SSE stream line by line.
+				const reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = '';
+
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					const parts = buffer.split('\n\n');
+					buffer = parts.pop() ?? '';
+
+					for (const part of parts) {
+						let eventType = '';
+						let dataStr = '';
+						for (const line of part.trim().split('\n')) {
+							if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+							else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+						}
+						if (!dataStr) continue;
+						try {
+							const data = JSON.parse(dataStr);
+							if (eventType === 'progress') {
+								queueProgress = { total: data.queued, errors: [] };
+							} else if (eventType === 'done') {
+								queueProgress = { total: data.total_queued, errors: data.errors || [] };
+							}
+						} catch {
+							// ignore malformed events
+						}
+					}
+				}
 			}
 		} catch (err) {
 			queueProgress.errors = [err instanceof Error ? err.message : 'Failed to queue repos'];
