@@ -3,7 +3,7 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Select from '$lib/components/Select.svelte';
@@ -444,6 +444,92 @@
 		}
 	};
 
+	type OSVScanStatus = {
+		job_id?: string;
+		status?: string;
+		created_at?: string;
+		finished_at?: string;
+		error?: string;
+		result?: {
+			total_purls: number;
+			scanned: number;
+			vulns_found: number;
+			components_with_vulns: number;
+			errors: number;
+		};
+	};
+
+	let osvStatus: OSVScanStatus = $state({});
+	let osvLoading = $state(false);
+	let osvTriggering = $state(false);
+	let osvError = $state('');
+
+	const loadOSVStatus = async () => {
+		try {
+			const response = await fetch('/api/admin/osv/scan/status', { credentials: 'include' });
+			if (response.ok) osvStatus = await response.json();
+		} catch { /* ignore */ }
+	};
+
+	const triggerOSVScan = async () => {
+		osvTriggering = true;
+		osvError = '';
+		try {
+			const response = await fetch('/api/admin/osv/scan', {
+				method: 'POST',
+				credentials: 'include'
+			});
+			if (response.status === 409) {
+				osvError = 'A scan is already queued or running.';
+				return;
+			}
+			if (!response.ok) {
+				osvError = 'Failed to start scan.';
+				return;
+			}
+			osvStatus = await response.json();
+			// Poll until done
+			pollOSVStatus();
+		} catch {
+			osvError = 'Failed to start scan.';
+		} finally {
+			osvTriggering = false;
+		}
+	};
+
+	let osvPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const pollOSVStatus = () => {
+		if (osvPollTimer) clearTimeout(osvPollTimer);
+		osvPollTimer = setTimeout(async () => {
+			await loadOSVStatus();
+			const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
+			if (active) pollOSVStatus();
+		}, 3000);
+	};
+
+	const osvStatusLabel = (status?: string) => {
+		switch (status) {
+			case 'QUEUED': return 'Queued';
+			case 'RUNNING': return 'Running…';
+			case 'RETRY': return 'Retrying';
+			case 'SUCCEEDED': return 'Completed';
+			case 'FAILED': return 'Failed';
+			default: return 'Never run';
+		}
+	};
+
+	const osvStatusClass = (status?: string) => {
+		switch (status) {
+			case 'RUNNING':
+			case 'QUEUED':
+			case 'RETRY': return 'text-amber-400 border-amber-400/40';
+			case 'SUCCEEDED': return 'text-green-400 border-green-400/40';
+			case 'FAILED': return 'text-[var(--error)] border-[var(--error)]/40';
+			default: return 'text-[var(--text-tertiary)] border-[var(--border-color)]';
+		}
+	};
+
 	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
 
 	const refreshSyncStatuses = async () => {
@@ -545,6 +631,10 @@
 	onMount(() => {
 		if (browser) {
 			loadProviders();
+			loadOSVStatus().then(() => {
+				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
+				if (active) pollOSVStatus();
+			});
 			updatePreview();
 
 			// Restore sync states for any in-progress syncs (e.g. after navigating away and back).
@@ -559,6 +649,7 @@
 			return () => {
 				window.removeEventListener('scroll', closeTooltip, true);
 				window.removeEventListener('resize', closeTooltip);
+				if (osvPollTimer) clearTimeout(osvPollTimer);
 			};
 		}
 	});
@@ -871,6 +962,105 @@
 		{/if}
 	</section>
 </div>
+
+<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Vulnerability Scanning</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">
+				Checks all SBOM components against the OSV database. Results are cached per component for 24 h.
+			</p>
+		</div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+			onclick={triggerOSVScan}
+			disabled={osvTriggering || osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY'}
+		>
+			<Play size={14} />
+			{osvTriggering ? 'Starting…' : 'Run OSV Scan'}
+		</button>
+	</header>
+
+	{#if osvError}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
+			{osvError}
+		</div>
+	{/if}
+
+	<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+		<!-- Status -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldAlert size={16} />
+				<span>Status</span>
+			</div>
+			<p class="mt-2 text-sm font-semibold">
+				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {osvStatusClass(osvStatus.status)}">
+					{osvStatusLabel(osvStatus.status)}
+				</span>
+			</p>
+			{#if osvStatus.created_at}
+				<p class="mt-1 flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+					<Clock size={10} /> Started {new Date(osvStatus.created_at).toLocaleString()}
+				</p>
+			{/if}
+			{#if osvStatus.finished_at}
+				<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
+					Finished {new Date(osvStatus.finished_at).toLocaleString()}
+				</p>
+			{/if}
+		</div>
+
+		<!-- Scanned -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Components scanned</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">
+				{osvStatus.result?.scanned ?? '—'}
+				{#if osvStatus.result?.total_purls}
+					<span class="text-sm font-normal text-[var(--text-muted)]">/ {osvStatus.result.total_purls}</span>
+				{/if}
+			</p>
+		</div>
+
+		<!-- Vulnerabilities -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldAlert size={16} />
+				<span>Vulnerabilities found</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold {(osvStatus.result?.vulns_found ?? 0) > 0 ? 'text-red-400' : 'text-[var(--text-bright)]'}">
+				{osvStatus.result?.vulns_found ?? '—'}
+			</p>
+			{#if osvStatus.result?.components_with_vulns != null}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">
+					across {osvStatus.result.components_with_vulns} components
+				</p>
+			{/if}
+		</div>
+
+		<!-- Errors -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<span>Batch errors</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold {(osvStatus.result?.errors ?? 0) > 0 ? 'text-[var(--error)]' : 'text-[var(--text-bright)]'}">
+				{osvStatus.result?.errors ?? '—'}
+			</p>
+			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Failed OSV batches</p>
+		</div>
+	</div>
+
+	{#if osvStatus.error}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{osvStatus.error}</p>
+		</div>
+	{/if}
+</section>
 
 {#if healthTooltip}
 	<div

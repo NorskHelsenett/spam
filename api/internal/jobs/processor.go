@@ -8,6 +8,7 @@ import (
 	"time"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
 
@@ -42,6 +43,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processCreateRun(ctx, db, job, runExecutor)
 	case JobTypeRefreshSBOMViews:
 		return processRefreshSBOMViews(ctx, db)
+	case JobTypeOSVScan:
+		return processOSVScan(ctx, db)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -57,6 +60,14 @@ func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, err
 		return nil, err
 	}
 	return map[string]string{"status": "refreshed"}, nil
+}
+
+func processOSVScan(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	result, err := vulnerabilities.RunBatchScan(ctx, db)
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {

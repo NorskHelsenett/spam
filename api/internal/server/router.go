@@ -98,6 +98,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
+				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
+				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
@@ -118,6 +120,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies/export/detail.csv", uiapi.DependencyDetailExportCSVHandler(db, authService))
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
+				api.Get("/dependencies/vulnerabilities", uiapi.DependencyVulnerabilitiesHandler(db, authService))
+				api.Post("/dependencies/vex", uiapi.DependencyVEXHandler(db, authService))
 				api.Get("/search/advanced", uiapi.AdvancedSearchHandler(db, authService))
 				api.Get("/search/preview", uiapi.AdvancedSearchPreviewHandler(db, authService))
 				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
