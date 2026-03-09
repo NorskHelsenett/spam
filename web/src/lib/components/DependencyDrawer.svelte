@@ -310,16 +310,10 @@
 		await loadProviderInstances();
 		try {
 			let url: string;
-			const instance = findProviderInstance(repo.provider_id ?? repo.provider, repo.provider_base_url);
-			const providerType = instance?.type ?? repo.provider;
-			if (providerType === 'github') {
-				url = `/api/providers/github/${repo.org}/${repo.slug}/details`;
-			} else if (providerType === 'gitlab') {
-				if (!instance) { repoContributors = { ...repoContributors, [repo.key]: [] }; return; }
-				url = `/api/providers/gitlab/${encodeURIComponent(`${repo.org}/${repo.slug}`)}/details?base_url=${encodeURIComponent(instance.base_url)}`;
-			} else if (providerType === 'gitea') {
-				if (!instance) { repoContributors = { ...repoContributors, [repo.key]: [] }; return; }
-				url = `/api/providers/gitea/${repo.org}/${repo.slug}/details?base_url=${encodeURIComponent(instance.base_url)}`;
+			const providerId = repo.provider_id ?? findProviderInstance(repo.provider, repo.provider_base_url)?.id;
+			if (providerId) {
+				const uq = new URLSearchParams({ provider_id: providerId, path: `${repo.org}/${repo.slug}` });
+				url = `/api/providers/details?${uq}`;
 			} else {
 				repoContributors = { ...repoContributors, [repo.key]: [] };
 				return;
