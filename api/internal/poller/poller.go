@@ -198,16 +198,14 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			continue
 		}
 
-		// If this commit was already scanned globally (fork/rename/move), adopt the
-		// existing results for this repo instead of re-running the scanner.
-		if p.hasFinishedJobForCommit(ctx, latestSHA) {
-			p.adoptRunResults(ctx, repoRecord.ID, latestSHA, repo.DefaultBranch)
+		// Skip if this repo already has a finished run for this commit.
+		if p.hasFinishedJobForCommit(ctx, repoRecord.ID, latestSHA) {
 			skippedSame++
 			continue
 		}
 
-		// Check if there's already a pending job for this commit (or repo if SHA unknown).
-		if p.hasPendingJob(ctx, repoRecord.ID, latestSHA) {
+		// Skip if there's already a pending job for this repo.
+		if p.hasPendingJob(ctx, repoRecord.ID) {
 			skippedPending++
 			continue
 		}
@@ -278,11 +276,9 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 	return result, nil
 }
 
-// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for this commit hash
-// globally (across all repos). Commit hashes are content-addressed, so the same hash in a fork,
-// renamed, or moved repo should not be re-scanned.
-func (p *Poller) hasFinishedJobForCommit(ctx context.Context, commitSHA string) bool {
-	if commitSHA == "" {
+// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for this repo+commit.
+func (p *Poller) hasFinishedJobForCommit(ctx context.Context, repoID, commitSHA string) bool {
+	if repoID == "" || commitSHA == "" {
 		return false
 	}
 
@@ -290,25 +286,20 @@ func (p *Poller) hasFinishedJobForCommit(ctx context.Context, commitSHA string) 
 	p.db.WithContext(ctx).Table("jobs").
 		Where("type = ?", jobs.JobTypeCreateRun).
 		Where("finished_at IS NOT NULL").
+		Where("payload->>'repo_id' = ?", repoID).
 		Where("(commit_hash = ? OR payload->>'commit_sha' = ?)", commitSHA, commitSHA).
 		Count(&count)
 	return count > 0
 }
 
-// hasPendingJob checks if there's already a QUEUED or RUNNING job for this commit.
-// When commitSHA is known it checks globally (across all repos); otherwise falls back
-// to a per-repo check using repoID.
-func (p *Poller) hasPendingJob(ctx context.Context, repoID, commitSHA string) bool {
+// hasPendingJob checks if there's already a QUEUED or RUNNING job for this repo.
+func (p *Poller) hasPendingJob(ctx context.Context, repoID string) bool {
 	var count int64
-	q := p.db.WithContext(ctx).Table("jobs").
+	p.db.WithContext(ctx).Table("jobs").
 		Where("type = ?", jobs.JobTypeCreateRun).
-		Where("status IN ?", []string{"QUEUED", "RUNNING"})
-	if commitSHA != "" {
-		q = q.Where("(commit_hash = ? OR payload->>'commit_sha' = ?)", commitSHA, commitSHA)
-	} else {
-		q = q.Where("payload->>'repo_id' = ?", repoID)
-	}
-	q.Count(&count)
+		Where("status IN ?", []string{"QUEUED", "RUNNING"}).
+		Where("payload->>'repo_id' = ?", repoID).
+		Count(&count)
 	return count > 0
 }
 
