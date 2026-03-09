@@ -9,13 +9,17 @@ import (
 // ComponentVulnerability caches an OSV vulnerability result for a versioned PURL.
 // Rows are upserted on each lookup; checked_at is updated to track staleness.
 type ComponentVulnerability struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	PURL      string    `gorm:"not null;index:idx_component_vuln_purl"`
-	VulnID    string    `gorm:"not null"` // CVE-YYYY-NNNNN or GHSA-xxxx
-	Summary   string
-	FixedIn   string
-	Source    string    `gorm:"not null;default:'osv'"`
-	CheckedAt time.Time `gorm:"not null"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
+	PURL       string    `gorm:"not null;index:idx_component_vuln_purl"`
+	VulnID     string    `gorm:"not null"` // CVE-YYYY-NNNNN or GHSA-xxxx
+	Summary    string
+	Severity   string
+	FixedIn    string
+	Source     string `gorm:"not null;default:'osv'"`
+	Details    string
+	References string
+	Aliases    string
+	CheckedAt  time.Time `gorm:"not null"`
 }
 
 func (ComponentVulnerability) TableName() string { return "component_vulnerabilities" }

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -29,13 +30,24 @@ type osvResponse struct {
 }
 
 type osvVuln struct {
-	ID       string     `json:"id"`
-	Summary  string     `json:"summary"`
-	Affected []affected `json:"affected"`
+	ID         string         `json:"id"`
+	Summary    string         `json:"summary"`
+	Details    string         `json:"details"`
+	Aliases    []string       `json:"aliases"`
+	References []osvReference `json:"references"`
+	Affected   []affected     `json:"affected"`
+}
+
+type osvReference struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
 }
 
 type affected struct {
-	Ranges []osvRange `json:"ranges"`
+	Ranges            []osvRange `json:"ranges"`
+	EcosystemSpecific struct {
+		Severity string `json:"severity"`
+	} `json:"ecosystem_specific"`
 }
 
 type osvRange struct {
@@ -49,14 +61,85 @@ type osvEvent struct {
 
 // Result is a simplified vulnerability entry returned to callers.
 type Result struct {
-	VulnID   string `json:"vuln_id"`
-	Summary  string `json:"summary"`
-	FixedIn  string `json:"fixed_in,omitempty"`
-	Source   string `json:"source"`
+	VulnID     string   `json:"vuln_id"`
+	Summary    string   `json:"summary"`
+	Severity   string   `json:"severity,omitempty"`
+	FixedIn    string   `json:"fixed_in,omitempty"`
+	Details    string   `json:"details,omitempty"`
+	References string   `json:"references,omitempty"`
+	Aliases    []string `json:"aliases,omitempty"`
+	Source     string   `json:"source"`
 	// VEX override fields — populated when a ComponentVEX row exists.
 	VEXStatus        string `json:"vex_status,omitempty"`
 	VEXJustification string `json:"vex_justification,omitempty"`
 	VEXDetail        string `json:"vex_detail,omitempty"`
+}
+
+func joinStringList(values []string) string {
+	parts := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, v := range values {
+		val := strings.TrimSpace(v)
+		if val == "" {
+			continue
+		}
+		key := strings.ToLower(val)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		parts = append(parts, val)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func buildReferencesText(refs []osvReference) string {
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		url := strings.TrimSpace(ref.URL)
+		if url == "" {
+			continue
+		}
+		refType := strings.TrimSpace(ref.Type)
+		if refType != "" {
+			out = append(out, refType+": "+url)
+		} else {
+			out = append(out, url)
+		}
+	}
+	return joinStringList(out)
+}
+
+func appendComponentVulnRows(rows *[]ComponentVulnerability, seen map[string]struct{}, purl string, now time.Time, result Result) {
+	add := func(vulnID string) {
+		id := strings.TrimSpace(vulnID)
+		if id == "" {
+			return
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+
+		*rows = append(*rows, ComponentVulnerability{
+			PURL:       purl,
+			VulnID:     id,
+			Summary:    result.Summary,
+			Severity:   result.Severity,
+			FixedIn:    result.FixedIn,
+			Details:    result.Details,
+			References: result.References,
+			Aliases:    joinStringList(result.Aliases),
+			Source:     result.Source,
+			CheckedAt:  now,
+		})
+	}
+
+	add(result.VulnID)
+	for _, alias := range result.Aliases {
+		add(alias)
+	}
 }
 
 // LookupPURL returns cached vulnerability results for a versioned PURL,
@@ -88,16 +171,20 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 		return nil, fmt.Errorf("clear stale cache: %w", err)
 	}
 	if len(fresh) > 0 {
-		rows := make([]ComponentVulnerability, len(fresh))
-		for i, v := range fresh {
-			rows[i] = ComponentVulnerability{
-				PURL:      purl,
-				VulnID:    v.VulnID,
-				Summary:   v.Summary,
-				FixedIn:   v.FixedIn,
-				Source:    "osv",
-				CheckedAt: now,
+		rows := make([]ComponentVulnerability, 0, len(fresh)*2)
+		seen := map[string]struct{}{}
+		for _, v := range fresh {
+			r := Result{
+				VulnID:     v.VulnID,
+				Summary:    v.Summary,
+				Severity:   v.Severity,
+				Details:    v.Details,
+				References: v.References,
+				FixedIn:    v.FixedIn,
+				Aliases:    v.Aliases,
+				Source:     "osv",
 			}
+			appendComponentVulnRows(&rows, seen, purl, now, r)
 		}
 		if err := db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
 			return nil, fmt.Errorf("cache vulns: %w", err)
@@ -166,7 +253,15 @@ func queryOSV(ctx context.Context, purl string) ([]Result, error) {
 
 	results := make([]Result, 0, len(osvResp.Vulns))
 	for _, v := range osvResp.Vulns {
-		r := Result{VulnID: v.ID, Summary: v.Summary, Source: "osv"}
+		r := Result{
+			VulnID:     v.ID,
+			Summary:    v.Summary,
+			Severity:   extractSeverity(v.Affected),
+			Details:    v.Details,
+			Aliases:    v.Aliases,
+			References: buildReferencesText(v.References),
+			Source:     "osv",
+		}
 		r.FixedIn = extractFixedIn(v.Affected)
 		results = append(results, r)
 	}
@@ -186,17 +281,53 @@ func extractFixedIn(affected []affected) string {
 	return ""
 }
 
+func extractSeverity(affectedRows []affected) string {
+	severities := make([]string, 0, len(affectedRows))
+	for _, a := range affectedRows {
+		s := strings.TrimSpace(a.EcosystemSpecific.Severity)
+		if s == "" {
+			continue
+		}
+		severities = append(severities, strings.ToUpper(s))
+	}
+	return joinStringList(severities)
+}
+
 func toResults(rows []ComponentVulnerability) []Result {
 	out := make([]Result, 0, len(rows))
+	seen := map[string]struct{}{}
 	for _, r := range rows {
 		if r.VulnID == "_none" {
 			continue
 		}
+		key := strings.ToLower(strings.TrimSpace(r.VulnID))
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		aliasParts := strings.FieldsFunc(r.Aliases, func(ch rune) bool {
+			return ch == ',' || ch == ';'
+		})
+		aliases := make([]string, 0, len(aliasParts))
+		for _, alias := range aliasParts {
+			alias = strings.TrimSpace(alias)
+			if alias == "" {
+				continue
+			}
+			aliases = append(aliases, alias)
+		}
 		out = append(out, Result{
-			VulnID:  r.VulnID,
-			Summary: r.Summary,
-			FixedIn: r.FixedIn,
-			Source:  r.Source,
+			VulnID:     r.VulnID,
+			Summary:    r.Summary,
+			Severity:   r.Severity,
+			Details:    r.Details,
+			References: r.References,
+			Aliases:    aliases,
+			FixedIn:    r.FixedIn,
+			Source:     r.Source,
 		})
 	}
 	return out

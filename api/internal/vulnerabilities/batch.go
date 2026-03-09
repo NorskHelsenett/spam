@@ -104,16 +104,18 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 				continue
 			}
 			batchComponentsWithVulns++
+			seen := map[string]struct{}{}
 			for _, v := range vulns {
 				batchVulnCount++
-				rows = append(rows, ComponentVulnerability{
-					PURL:      purl,
-					VulnID:    v.ID,
-					Summary:   v.Summary,
-					FixedIn:   extractFixedIn(v.Affected),
-					Source:    "osv",
-					CheckedAt: now,
-				})
+				r := Result{
+					VulnID:   v.ID,
+					Summary:  v.Summary,
+					Severity: extractSeverity(v.Affected),
+					FixedIn:  extractFixedIn(v.Affected),
+					Aliases:  v.Aliases,
+					Source:   "osv",
+				}
+				appendComponentVulnRows(&rows, seen, purl, now, r)
 			}
 		}
 

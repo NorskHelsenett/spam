@@ -1,7 +1,11 @@
 package uiapi
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +37,311 @@ type AdvancedSearchResponse struct {
 	HasMore bool                   `json:"has_more"`
 }
 
+const osvVulnDetailsURL = "https://api.osv.dev/v1/vulns/"
+
+type osvVulnDetail struct {
+	ID       string   `json:"id"`
+	Summary  string   `json:"summary"`
+	Details  string   `json:"details"`
+	Aliases  []string `json:"aliases"`
+	Severity []struct {
+		Type  string `json:"type"`
+		Score string `json:"score"`
+	} `json:"severity"`
+	References []struct {
+		Type string `json:"type"`
+		URL  string `json:"url"`
+	} `json:"references"`
+	Affected []struct {
+		Package struct {
+			PURL string `json:"purl"`
+		} `json:"package"`
+		Ranges []struct {
+			Events []struct {
+				Fixed string `json:"fixed"`
+			} `json:"events"`
+		} `json:"ranges"`
+	} `json:"affected"`
+}
+
+func collectFixedVersions(detail *osvVulnDetail) string {
+	if detail == nil {
+		return ""
+	}
+
+	seen := make(map[string]struct{})
+	versions := make([]string, 0)
+	for _, affected := range detail.Affected {
+		for _, rng := range affected.Ranges {
+			for _, event := range rng.Events {
+				fixed := strings.TrimSpace(event.Fixed)
+				if fixed == "" {
+					continue
+				}
+				if _, ok := seen[fixed]; ok {
+					continue
+				}
+				seen[fixed] = struct{}{}
+				versions = append(versions, fixed)
+			}
+		}
+	}
+	return strings.Join(versions, ", ")
+}
+
+func criticalityFromSeverity(detail *osvVulnDetail) string {
+	if detail == nil {
+		return ""
+	}
+
+	maxRank := 0
+	for _, s := range detail.Severity {
+		score := strings.TrimSpace(s.Score)
+		if score == "" {
+			continue
+		}
+		if rank := severityRank(score); rank > maxRank {
+			maxRank = rank
+		}
+	}
+	if maxRank > 0 {
+		return criticalityFromRank(maxRank)
+	}
+	return ""
+}
+
+func severityRank(value string) int {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium", "moderate":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func criticalityFromRank(rank int) string {
+	switch rank {
+	case 4:
+		return "critical"
+	case 3:
+		return "high"
+	case 2:
+		return "medium"
+	case 1:
+		return "low"
+	default:
+		return ""
+	}
+}
+
+func criticalityFromSeverityString(value string) string {
+	maxRank := 0
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' || r == '/' }) {
+		if rank := severityRank(part); rank > maxRank {
+			maxRank = rank
+		}
+	}
+	return criticalityFromRank(maxRank)
+}
+
+func fetchVulnerabilityDetails(ctx context.Context, vulnID string) (*osvVulnDetail, error) {
+	if strings.TrimSpace(vulnID) == "" {
+		return nil, nil
+	}
+
+	escaped := url.PathEscape(vulnID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, osvVulnDetailsURL+escaped, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OSV details request failed with status %d", resp.StatusCode)
+	}
+
+	var detail osvVulnDetail
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		return nil, err
+	}
+
+	if detail.ID == "" {
+		detail.ID = vulnID
+	}
+	return &detail, nil
+}
+
+func appendVulnMetadata(metadata map[string]string, detail *osvVulnDetail, fallbackSummary string, fixedIn string) {
+	if detail == nil {
+		return
+	}
+
+	if strings.TrimSpace(fixedIn) == "" {
+		fixedIn = collectFixedVersions(detail)
+	}
+
+	metadata["vuln_id_osv"] = detail.ID
+	if strings.TrimSpace(detail.Summary) != "" {
+		metadata["summary"] = detail.Summary
+	} else if strings.TrimSpace(fallbackSummary) != "" {
+		metadata["summary"] = fallbackSummary
+	}
+	if strings.TrimSpace(detail.Details) != "" {
+		metadata["details"] = strings.TrimSpace(detail.Details)
+	}
+	if strings.TrimSpace(fixedIn) != "" {
+		metadata["fixed_in"] = fixedIn
+	}
+	if len(detail.Aliases) > 0 {
+		metadata["aliases"] = strings.Join(detail.Aliases, ", ")
+	}
+	if len(detail.References) > 0 {
+		refs := make([]string, 0, len(detail.References))
+		for _, ref := range detail.References {
+			refType := strings.TrimSpace(ref.Type)
+			refURL := strings.TrimSpace(ref.URL)
+			if refURL == "" {
+				continue
+			}
+			if refType != "" {
+				refs = append(refs, refType+": "+refURL)
+			} else {
+				refs = append(refs, refURL)
+			}
+		}
+		if len(refs) > 0 {
+			metadata["references"] = strings.Join(refs, "\n")
+		}
+	}
+	if len(detail.Severity) > 0 {
+		levels := make([]string, 0, len(detail.Severity))
+		for _, s := range detail.Severity {
+			if strings.TrimSpace(s.Type) == "" || strings.TrimSpace(s.Score) == "" {
+				continue
+			}
+			levels = append(levels, s.Type+": "+s.Score)
+		}
+		if len(levels) > 0 {
+			metadata["severity"] = strings.Join(levels, ", ")
+		}
+	}
+	if criticality := criticalityFromSeverity(detail); criticality != "" {
+		metadata["criticality"] = criticality
+	}
+}
+
+func resolveVulnIDCandidates(ctx context.Context, db *gorm.DB, vulnID string) []string {
+	vulnID = strings.TrimSpace(vulnID)
+	if vulnID == "" {
+		return nil
+	}
+
+	lower := strings.ToLower(vulnID)
+	if !strings.HasPrefix(lower, "cve-") && !strings.HasPrefix(lower, "ghsa-") && !strings.HasPrefix(lower, "go-") {
+		return []string{vulnID}
+	}
+
+	ids := make([]string, 0, 4)
+	seen := map[string]struct{}{}
+	addID := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	addID(vulnID)
+
+	if db != nil {
+		like := "%" + vulnID + "%"
+		type vulnRow struct {
+			VulnID string `gorm:"column:vuln_id"`
+		}
+		dbCandidates := make([]vulnRow, 0, 5)
+		if err := db.WithContext(ctx).Raw(`
+			SELECT DISTINCT vuln_id
+			FROM component_vulnerabilities
+			WHERE vuln_id ILIKE ? OR vuln_id <% ?
+			   OR summary ILIKE ? OR source ILIKE ? OR fixed_in ILIKE ?
+			   OR aliases ILIKE ? OR details ILIKE ? OR references ILIKE ?
+		`, like, vulnID, like, like, like, like, like, like).Scan(&dbCandidates).Error; err == nil {
+			for _, row := range dbCandidates {
+				addID(row.VulnID)
+			}
+		} else {
+			if err := db.WithContext(ctx).Raw(`
+				SELECT DISTINCT vuln_id
+				FROM component_vulnerabilities
+				WHERE vuln_id ILIKE ? OR summary ILIKE ? OR source ILIKE ? OR fixed_in ILIKE ?
+				  OR aliases ILIKE ? OR details ILIKE ? OR references ILIKE ?
+			`, like, like, like, like, like, like, like).Scan(&dbCandidates).Error; err == nil {
+				for _, row := range dbCandidates {
+					addID(row.VulnID)
+				}
+			}
+		}
+		if len(ids) > 1 {
+			return ids
+		}
+	}
+
+	detail, err := fetchVulnerabilityDetails(ctx, vulnID)
+	if err != nil || detail == nil {
+		return ids
+	}
+	addID(detail.ID)
+	for _, alias := range detail.Aliases {
+		addID(alias)
+	}
+	return ids
+}
+
+func buildLikeClause(column string) string {
+	return "(" + column + " ILIKE ?)"
+}
+
+func buildMultiValueLikeClause(column string, values []string, fallback string) (string, []interface{}) {
+	effective := values
+	if len(effective) == 0 {
+		effective = []string{fallback}
+	}
+
+	parts := make([]string, 0, len(effective))
+	args := make([]interface{}, 0, len(effective))
+	for _, value := range effective {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		parts = append(parts, buildLikeClause(column))
+		args = append(args, "%"+value+"%")
+	}
+	if len(parts) == 0 {
+		fallbackLike := "%" + strings.TrimSpace(fallback) + "%"
+		parts = append(parts, buildLikeClause(column))
+		args = append(args, fallbackLike)
+	}
+
+	return "(" + strings.Join(parts, " OR ") + ")", args
+}
+
 type advancedSearchDBRow struct {
 	Type       string
 	SourceRef  string
@@ -58,12 +367,14 @@ var advancedSearchTargets = map[string]struct{}{
 	"commit":      {},
 	"repo":        {},
 	"readme":      {},
+	"vuln":        {},
+	"vex":         {},
 }
 
 func normalizeAdvancedTargets(target string) []string {
 	target = strings.TrimSpace(strings.ToLower(target))
 	if target == "" || target == "all" {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vuln", "vex"}
 	}
 	parts := strings.Split(target, ",")
 	out := make([]string, 0, len(parts))
@@ -83,7 +394,7 @@ func normalizeAdvancedTargets(target string) []string {
 		out = append(out, t)
 	}
 	if len(out) == 0 {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vuln", "vex"}
 	}
 	return out
 }
@@ -224,6 +535,170 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			LIMIT ?
 		`, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
+	case "vex":
+		vexVulnIDCandidates := resolveVulnIDCandidates(r.Context(), db, query)
+		vexVulnIDClause, vexVulnIDArgs := buildMultiValueLikeClause("cv.vuln_id", vexVulnIDCandidates, query)
+		vexStatusClause, vexStatusArgs := buildMultiValueLikeClause("cv.status", vexVulnIDCandidates, query)
+		vexJustificationClause, vexJustificationArgs := buildMultiValueLikeClause("cv.justification", vexVulnIDCandidates, query)
+		vexDetailClause, vexDetailArgs := buildMultiValueLikeClause("cv.detail", vexVulnIDCandidates, query)
+		vexArgs := make([]interface{}, 0, 1+len(vexVulnIDArgs)+len(vexStatusArgs)+len(vexJustificationArgs)+len(vexDetailArgs)+1)
+		vexArgs = append(vexArgs, like)
+		vexArgs = append(vexArgs, vexVulnIDArgs...)
+		vexArgs = append(vexArgs, vexStatusArgs...)
+		vexArgs = append(vexArgs, vexJustificationArgs...)
+		vexArgs = append(vexArgs, vexDetailArgs...)
+		vexArgs = append(vexArgs, perTargetLimit)
+		var hasTable bool
+		if err := db.WithContext(r.Context()).Raw("SELECT to_regclass('public.component_vex') IS NOT NULL").Scan(&hasTable).Error; err != nil {
+			return nil, err
+		}
+		if !hasTable {
+			return []advancedSearchDBRow{}, nil
+		}
+		err := db.WithContext(r.Context()).Raw(fmt.Sprintf(`
+				WITH vuln_repos AS (
+				SELECT DISTINCT
+					s.purl AS p_url,
+					r.id AS repo_id,
+					r.provider,
+					COALESCE(pi.id, '') AS provider_id,
+					COALESCE(pi.base_url, '') AS base_url,
+					COALESCE(pi.owner_path, '') AS owner_path,
+					r.org,
+					r.slug
+				FROM sbom_component_view s
+				JOIN repo_commits rc ON rc.id = s.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+				WHERE s.purl IS NOT NULL
+				  AND s.asset_type = 'REPO_COMMIT'
+				  AND s.is_root = false
+			)
+				SELECT
+					'vex' AS type,
+				cv.p_url AS source_ref,
+				vr.repo_id,
+				vr.provider,
+				vr.provider_id,
+				vr.base_url,
+				vr.owner_path,
+				vr.org,
+				vr.slug,
+				'VEX override' AS title,
+				cv.vuln_id AS value,
+				LEFT(
+					CONCAT_WS(
+						E'\n',
+						COALESCE(cv.p_url, ''),
+						COALESCE(cv.vuln_id, ''),
+						COALESCE(cv.status, ''),
+						COALESCE(cv.justification, ''),
+						COALESCE(cv.detail, '')
+					),
+					60000
+				) AS source_text,
+				CURRENT_TIMESTAMP AS created_at
+				FROM component_vex cv
+				JOIN vuln_repos vr ON vr.p_url = cv.p_url
+				WHERE cv.p_url ILIKE ?
+					OR (%s)
+					OR %s
+					OR %s
+					OR %s
+				ORDER BY cv.vuln_id, cv.p_url, vr.org, vr.slug
+				LIMIT ?
+				`, vexVulnIDClause, vexStatusClause, vexJustificationClause, vexDetailClause), vexArgs...).Scan(&rows).Error
+		return rows, err
+	case "vuln":
+		vulnIDCandidates := resolveVulnIDCandidates(r.Context(), db, query)
+		vulnIDClause, vulnIDArgs := buildMultiValueLikeClause("cv.vuln_id", vulnIDCandidates, query)
+		vulnSeverityClause, vulnSeverityArgs := buildMultiValueLikeClause("cv.severity", vulnIDCandidates, query)
+		vulnSummaryClause, vulnSummaryArgs := buildMultiValueLikeClause("cv.summary", vulnIDCandidates, query)
+		vulnFixedClause, vulnFixedArgs := buildMultiValueLikeClause("cv.fixed_in", vulnIDCandidates, query)
+		vulnSourceClause, vulnSourceArgs := buildMultiValueLikeClause("cv.source", vulnIDCandidates, query)
+		vulnAliasesClause, vulnAliasesArgs := buildMultiValueLikeClause("cv.aliases", vulnIDCandidates, query)
+		vulnDetailsClause, vulnDetailsArgs := buildMultiValueLikeClause("cv.details", vulnIDCandidates, query)
+		vulnReferencesClause, vulnReferencesArgs := buildMultiValueLikeClause("cv.references", vulnIDCandidates, query)
+		vulnArgs := make([]interface{}, 0, 1+len(vulnIDArgs)+len(vulnSeverityArgs)+len(vulnSummaryArgs)+len(vulnFixedArgs)+len(vulnSourceArgs)+len(vulnAliasesArgs)+len(vulnDetailsArgs)+len(vulnReferencesArgs)+1)
+		vulnArgs = append(vulnArgs, like)
+		vulnArgs = append(vulnArgs, vulnIDArgs...)
+		vulnArgs = append(vulnArgs, vulnSeverityArgs...)
+		vulnArgs = append(vulnArgs, vulnSummaryArgs...)
+		vulnArgs = append(vulnArgs, vulnFixedArgs...)
+		vulnArgs = append(vulnArgs, vulnSourceArgs...)
+		vulnArgs = append(vulnArgs, vulnAliasesArgs...)
+		vulnArgs = append(vulnArgs, vulnDetailsArgs...)
+		vulnArgs = append(vulnArgs, vulnReferencesArgs...)
+		vulnArgs = append(vulnArgs, perTargetLimit)
+		var hasTable bool
+		if err := db.WithContext(r.Context()).Raw("SELECT to_regclass('public.component_vulnerabilities') IS NOT NULL").Scan(&hasTable).Error; err != nil {
+			return nil, err
+		}
+		if !hasTable {
+			return []advancedSearchDBRow{}, nil
+		}
+		err := db.WithContext(r.Context()).Raw(fmt.Sprintf(`
+				WITH vuln_repos AS (
+				SELECT DISTINCT
+					s.purl AS p_url,
+					r.id AS repo_id,
+					r.provider,
+					COALESCE(pi.id, '') AS provider_id,
+					COALESCE(pi.base_url, '') AS base_url,
+					COALESCE(pi.owner_path, '') AS owner_path,
+					r.org,
+					r.slug
+				FROM sbom_component_view s
+				JOIN repo_commits rc ON rc.id = s.asset_ref_id
+				JOIN repos r ON r.id = rc.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+				WHERE s.purl IS NOT NULL
+				  AND s.asset_type = 'REPO_COMMIT'
+				  AND s.is_root = false
+			)
+			SELECT
+				'vuln' AS type,
+				cv.p_url AS source_ref,
+				vr.repo_id,
+				vr.provider,
+				vr.provider_id,
+				vr.base_url,
+				vr.owner_path,
+				vr.org,
+				vr.slug,
+				'Vulnerability' AS title,
+				cv.vuln_id AS value,
+					LEFT(
+						CONCAT_WS(
+							E'\n',
+							COALESCE(cv.p_url, ''),
+							COALESCE(cv.vuln_id, ''),
+							COALESCE(cv.severity, ''),
+							COALESCE(cv.summary, ''),
+							COALESCE(cv.fixed_in, ''),
+							COALESCE(cv.source, ''),
+							COALESCE(cv.aliases, ''),
+							COALESCE(cv.details, ''),
+							COALESCE(cv.references, '')
+						),
+						60000
+					) AS source_text,
+					CURRENT_TIMESTAMP AS created_at
+				FROM component_vulnerabilities cv
+				JOIN vuln_repos vr ON vr.p_url = cv.p_url
+					WHERE cv.p_url ILIKE ?
+						OR (%s)
+						OR %s
+						OR %s
+						OR %s
+						OR %s
+						OR %s
+						OR %s
+						OR %s
+					ORDER BY cv.vuln_id, cv.p_url, vr.org, vr.slug
+					LIMIT ?
+					`, vulnIDClause, vulnSeverityClause, vulnSummaryClause, vulnFixedClause, vulnSourceClause, vulnAliasesClause, vulnDetailsClause, vulnReferencesClause), vulnArgs...).Scan(&rows).Error
+		return rows, err
 	case "contributor":
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT
@@ -349,7 +824,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 }
 
 // AdvancedSearchHandler runs cross-domain searches over repo metadata and artifacts.
-// GET /api/search/advanced?q=<query>&target=<all|repo|commit|language|contributor|readme|manifest|sbom|secret>
+// GET /api/search/advanced?q=<query>&target=<all|repo|commit|language|contributor|readme|manifest|sbom|secret|vuln|vex>
 func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
@@ -385,7 +860,7 @@ func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 				return
 			}
 			for _, row := range rows {
-				key := row.Type + "|" + row.RepoID + "|" + row.Title + "|" + row.Value
+				key := row.Type + "|" + row.RepoID + "|" + row.Title + "|" + row.Value + "|" + row.SourceRef
 				if _, ok := seen[key]; ok {
 					continue
 				}
@@ -616,6 +1091,216 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 				resp.Raw = row.ReadmeContent
 				resp.Metadata["source"] = "repo_caches.readme_content"
 			}
+		case "vex":
+			var hasTable bool
+			if err := db.WithContext(r.Context()).Raw("SELECT to_regclass('public.component_vex') IS NOT NULL").Scan(&hasTable).Error; err != nil {
+				http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if !hasTable {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+
+			vulnID := strings.TrimSpace(r.URL.Query().Get("vuln_id"))
+			if vulnID == "" {
+				http.Error(w, "vuln_id is required for vex preview", http.StatusBadRequest)
+				return
+			}
+			var row struct {
+				PURL          string `gorm:"column:p_url"`
+				VulnID        string `gorm:"column:vuln_id"`
+				Status        string `gorm:"column:status"`
+				Justification string `gorm:"column:justification"`
+				Detail        string `gorm:"column:detail"`
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT
+					p_url AS p_url,
+					vuln_id AS vuln_id,
+					COALESCE(status, '') AS status,
+					COALESCE(justification, '') AS justification,
+					COALESCE(detail, '') AS detail
+				FROM component_vex
+				WHERE p_url = ? AND vuln_id = ?
+				LIMIT 1
+			`, sourceRef, vulnID).Scan(&row).Error
+			if err != nil || row.PURL == "" || row.VulnID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			details, _ := fetchVulnerabilityDetails(r.Context(), row.VulnID)
+			if repoID != "" {
+				var repoRow struct {
+					RepoID     string `gorm:"column:repo_id"`
+					Provider   string `gorm:"column:provider"`
+					ProviderID string `gorm:"column:provider_id"`
+					BaseURL    string `gorm:"column:base_url"`
+					OwnerPath  string `gorm:"column:owner_path"`
+					Org        string `gorm:"column:org"`
+					Slug       string `gorm:"column:slug"`
+				}
+				err := db.WithContext(r.Context()).Raw(`
+					SELECT
+						r.id AS repo_id,
+						r.provider,
+						COALESCE(pi.id, '') AS provider_id,
+						COALESCE(pi.base_url, '') AS base_url,
+						COALESCE(pi.owner_path, '') AS owner_path,
+						r.org,
+						r.slug
+					FROM repos r
+					LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+					WHERE r.id = ?
+					LIMIT 1
+				`, repoID).Scan(&repoRow).Error
+				if err != nil {
+					http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+					return
+				}
+				if repoRow.RepoID != "" {
+					resp.RepoID = repoRow.RepoID
+					resp.Provider = repoRow.Provider
+					resp.Org = repoRow.Org
+					resp.Slug = repoRow.Slug
+					resp.Metadata["provider_id"] = repoRow.ProviderID
+					resp.Metadata["base_url"] = repoRow.BaseURL
+					resp.Metadata["owner_path"] = repoRow.OwnerPath
+				}
+			}
+			rawParts := []string{
+				fmt.Sprintf("PURL: %s", row.PURL),
+				fmt.Sprintf("Vuln ID: %s", row.VulnID),
+				"",
+				fmt.Sprintf("Status: %s", row.Status),
+				fmt.Sprintf("Justification: %s", row.Justification),
+				fmt.Sprintf("VEX Detail: %s", row.Detail),
+			}
+			if details != nil && strings.TrimSpace(details.Summary) != "" {
+				rawParts = append(rawParts, "Summary:", strings.TrimSpace(details.Summary))
+			}
+			if details != nil && strings.TrimSpace(details.Details) != "" {
+				rawParts = append(rawParts, "", "OSV Details:", strings.TrimSpace(details.Details))
+			}
+			resp.Raw = strings.Join(rawParts, "\n")
+			resp.Metadata["purl"] = row.PURL
+			resp.Metadata["vuln_id"] = row.VulnID
+			resp.Metadata["status"] = row.Status
+			resp.Metadata["justification"] = row.Justification
+			resp.Metadata["detail"] = row.Detail
+			appendVulnMetadata(resp.Metadata, details, "", "")
+		case "vuln":
+			var hasTable bool
+			if err := db.WithContext(r.Context()).Raw("SELECT to_regclass('public.component_vulnerabilities') IS NOT NULL").Scan(&hasTable).Error; err != nil {
+				http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if !hasTable {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			vulnID := strings.TrimSpace(r.URL.Query().Get("vuln_id"))
+			if vulnID == "" {
+				http.Error(w, "vuln_id is required for vulnerability preview", http.StatusBadRequest)
+				return
+			}
+			var row struct {
+				PURL     string `gorm:"column:p_url"`
+				VulnID   string `gorm:"column:vuln_id"`
+				Summary  string `gorm:"column:summary"`
+				Severity string `gorm:"column:severity"`
+				FixedIn  string `gorm:"column:fixed_in"`
+				Source   string `gorm:"column:source"`
+				Checked  string `gorm:"column:checked"`
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT
+					p_url AS p_url,
+					vuln_id AS vuln_id,
+					COALESCE(summary, '') AS summary,
+					COALESCE(severity, '') AS severity,
+					COALESCE(fixed_in, '') AS fixed_in,
+					COALESCE(source, '') AS source,
+					COALESCE(to_char(checked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), '') AS checked
+				FROM component_vulnerabilities
+				WHERE p_url = ? AND vuln_id = ?
+				LIMIT 1
+			`, sourceRef, vulnID).Scan(&row).Error
+			if err != nil || row.PURL == "" || row.VulnID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			details, _ := fetchVulnerabilityDetails(r.Context(), row.VulnID)
+			if repoID != "" {
+				var repoRow struct {
+					RepoID     string `gorm:"column:repo_id"`
+					Provider   string `gorm:"column:provider"`
+					ProviderID string `gorm:"column:provider_id"`
+					BaseURL    string `gorm:"column:base_url"`
+					OwnerPath  string `gorm:"column:owner_path"`
+					Org        string `gorm:"column:org"`
+					Slug       string `gorm:"column:slug"`
+				}
+				err := db.WithContext(r.Context()).Raw(`
+					SELECT
+						r.id AS repo_id,
+						r.provider,
+						COALESCE(pi.id, '') AS provider_id,
+						COALESCE(pi.base_url, '') AS base_url,
+						COALESCE(pi.owner_path, '') AS owner_path,
+						r.org,
+						r.slug
+					FROM repos r
+					LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+					WHERE r.id = ?
+					LIMIT 1
+				`, repoID).Scan(&repoRow).Error
+				if err != nil {
+					http.Error(w, "preview lookup failed", http.StatusInternalServerError)
+					return
+				}
+				if repoRow.RepoID != "" {
+					resp.RepoID = repoRow.RepoID
+					resp.Provider = repoRow.Provider
+					resp.Org = repoRow.Org
+					resp.Slug = repoRow.Slug
+					resp.Metadata["provider_id"] = repoRow.ProviderID
+					resp.Metadata["base_url"] = repoRow.BaseURL
+					resp.Metadata["owner_path"] = repoRow.OwnerPath
+				}
+			}
+			effectiveFixed := row.FixedIn
+			if strings.TrimSpace(effectiveFixed) == "" && details != nil {
+				effectiveFixed = collectFixedVersions(details)
+			}
+			rawParts := []string{
+				fmt.Sprintf("PURL: %s", row.PURL),
+				fmt.Sprintf("Vuln ID: %s", row.VulnID),
+				fmt.Sprintf("Source: %s", row.Source),
+				fmt.Sprintf("Fixed in: %s", effectiveFixed),
+				fmt.Sprintf("Checked at: %s", row.Checked),
+				"",
+			}
+			if details != nil && strings.TrimSpace(details.Summary) != "" {
+				rawParts = append(rawParts, "Summary:", strings.TrimSpace(details.Summary))
+			} else if row.Summary != "" {
+				rawParts = append(rawParts, "Summary:", row.Summary)
+			}
+			if details != nil && strings.TrimSpace(details.Details) != "" {
+				rawParts = append(rawParts, "Details:", strings.TrimSpace(details.Details))
+			}
+			resp.Raw = strings.Join(rawParts, "\n")
+			resp.Metadata["purl"] = row.PURL
+			resp.Metadata["vuln_id"] = row.VulnID
+			resp.Metadata["source"] = row.Source
+			resp.Metadata["checked_at"] = row.Checked
+			if strings.TrimSpace(row.Severity) != "" {
+				resp.Metadata["severity"] = row.Severity
+				if criticality := criticalityFromSeverityString(row.Severity); criticality != "" {
+					resp.Metadata["criticality"] = criticality
+				}
+			}
+			appendVulnMetadata(resp.Metadata, details, row.Summary, row.FixedIn)
 		case "commit":
 			var row struct {
 				ID        string

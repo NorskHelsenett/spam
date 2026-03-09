@@ -84,14 +84,15 @@ func run() error {
 		return fmt.Errorf("seed provider defaults: %w", err)
 	}
 
-	if err := db.EnsureViews(ctx, gormDB,
-		"migrations/20260211_create_unique_active_create_run_jobs.sql",
-		"migrations/20260223_create_unique_active_refresh_sbom_views_jobs.sql",
-		"migrations/20260310_create_unique_active_osv_scan_job.sql",
-		"migrations/20260206_drop_legacy_component_tables.sql",
-		"migrations/20260204_create_materialized_view_refreshes.sql",
-		"migrations/20260203_create_sbom_component_view.sql",
-		"migrations/20260203_create_sbom_metadata_view.sql",
+		if err := db.EnsureViews(ctx, gormDB,
+			"migrations/20260211_create_unique_active_create_run_jobs.sql",
+			"migrations/20260223_create_unique_active_refresh_sbom_views_jobs.sql",
+			"migrations/20260310_create_unique_active_osv_scan_job.sql",
+			"migrations/20260311_fix_component_vulnerabilities_schema.sql",
+			"migrations/20260206_drop_legacy_component_tables.sql",
+			"migrations/20260204_create_materialized_view_refreshes.sql",
+			"migrations/20260203_create_sbom_component_view.sql",
+			"migrations/20260203_create_sbom_metadata_view.sql",
 		"migrations/20260302_add_repo_search_trigram.sql",
 		"migrations/20260303_add_repos_provider_instance_id.sql",
 		"migrations/20260306_repos_identity_not_empty.sql",

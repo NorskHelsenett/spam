@@ -9,7 +9,7 @@
 	import Loading from '$lib/components/Loading.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
-	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme';
+	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme' | 'vuln' | 'vex';
 
 	type AdvancedSearchResult = {
 		type: AdvancedSearchType;
@@ -66,7 +66,9 @@
 		{ value: 'secret', label: 'Secrets' },
 		{ value: 'contributor', label: 'Contributors' },
 		{ value: 'language', label: 'Languages' },
-		{ value: 'readme', label: 'README files' }
+		{ value: 'readme', label: 'README files' },
+		{ value: 'vuln', label: 'Vulnerabilities' },
+		{ value: 'vex', label: 'VEX overrides' }
 	];
 
 	const iconForType = (type: AdvancedSearchType) => {
@@ -87,6 +89,10 @@
 				return Braces;
 			case 'readme':
 				return BookOpen;
+			case 'vuln':
+				return ShieldAlert;
+			case 'vex':
+				return ShieldAlert;
 			default:
 				return GitBranch;
 		}
@@ -102,6 +108,8 @@
 			case 'contributor': return 'Contributor';
 			case 'language': return 'Language';
 			case 'readme': return 'README';
+			case 'vuln': return 'VULN';
+			case 'vex': return 'VEX';
 		}
 	};
 
@@ -174,6 +182,9 @@
 	};
 
 	const openRepo = (r: AdvancedSearchResult) => {
+		if (!r.repo_id) {
+			return;
+		}
 		const params = new URLSearchParams({ provider: r.provider, path: `${r.org}/${r.slug}` });
 		if (r.repo_id) params.set('repo_id', r.repo_id);
 		if (r.provider_id) params.set('provider_id', r.provider_id);
@@ -195,6 +206,9 @@
 				source_ref: r.source_ref,
 				repo_id: r.repo_id
 			});
+			if ((r.type === 'vex' || r.type === 'vuln') && r.value) {
+				params.set('vuln_id', r.value);
+			}
 			const res = await fetch(`/api/search/preview?${params}`, { credentials: 'include' });
 			if (!res.ok) {
 				previewError = res.status === 404 ? 'Preview not found.' : 'Failed to load preview.';
@@ -210,10 +224,41 @@
 
 	const previewMetadataRows = $derived.by(() => {
 		if (!previewData?.metadata) return [] as Array<[string, string]>;
-		return Object.entries(previewData.metadata)
+		const entries = Object.entries(previewData.metadata)
 			.filter(([, v]) => (v ?? '').toString().trim().length > 0)
 			.sort((a, b) => a[0].localeCompare(b[0]));
+		const detailsIndex = entries.findIndex(([k]) => k === 'details');
+		if (detailsIndex <= 0) return entries;
+		const [details] = entries.splice(detailsIndex, 1);
+		return [details, ...entries];
 	});
+
+	const parseReferenceLinks = (value: string) => {
+		return value
+			.split('\n')
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0)
+			.map((line) => {
+				const idx = line.indexOf(': ');
+				if (idx === -1) {
+					if (!line.startsWith('http://') && !line.startsWith('https://')) return null;
+					return { label: '', url: line };
+				}
+				const label = line.slice(0, idx).trim();
+				const url = line.slice(idx + 2).trim();
+				if (!url.startsWith('http://') && !url.startsWith('https://')) {
+					return null;
+				}
+				return { label, url };
+			})
+			.filter((ref): ref is { label: string; url: string } => !!ref && ref.url.length > 0);
+	};
+
+	const metadataSpanClass = (k: string) => {
+		if (k === 'details') return 'lg:col-span-3';
+		if (k === 'references') return 'lg:col-span-2';
+		return '';
+	};
 
 	const syncPreviewFindings = async () => {
 		await tick();
@@ -285,7 +330,7 @@
 	<section class="panel-surface flex h-[calc(100vh-7rem)] flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2">
 			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Advanced Search</h1>
-			<p class="text-sm text-[var(--text-tertiary)]">Search inside manifests, SBOMs, secrets, contributors, languages, commit IDs, repositories, and README files.</p>
+	<p class="text-sm text-[var(--text-tertiary)]">Search inside manifests, SBOMs, secrets, contributors, languages, commit IDs, repositories, README files, and VEX overrides.</p>
 		</header>
 
 			<div class="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
@@ -295,7 +340,7 @@
 						type="text"
 						bind:value={query}
 						oninput={scheduleSearch}
-						placeholder="Search for java, pom.xml, commit SHA, secrets, contributor email, README text..."
+					placeholder="Search for go, pom.xml, commit SHA, secrets, contributor email, README text, GO-2024-3333..."
 						class="h-11 w-full rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] pl-11 pr-10 text-sm text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
 					/>
 					{#if query.trim()}
@@ -380,6 +425,12 @@
 									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">installation</span>, <span class="font-mono">quickstart</span></p>
 								</div>
 							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><ShieldAlert class="h-5 w-5 text-[var(--accent)]" /> VEX overrides</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">GO-2024-3333</span>, <span class="font-mono">not_affected</span>, <span class="font-mono">GHSA-xxxx</span></p>
+								</div>
+							</div>
 						</div>
 					</div>
 					{:else if results.length === 0}
@@ -458,12 +509,15 @@
 											>
 													<Eye class="h-3.5 w-3.5" /> Preview
 												</button>
-											<button
-												type="button"
-												onclick={() => openRepo(r)}
-												class="inline-flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
-												style="color: var(--accent);"
-											>
+									<button
+										type="button"
+										onclick={() => openRepo(r)}
+										disabled={!r.repo_id}
+										class="inline-flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
+										style="color: var(--accent);"
+										class:opacity-40={ !r.repo_id}
+										class:cursor-not-allowed={ !r.repo_id}
+									>
 												Open repository <ArrowRight class="h-3.5 w-3.5" />
 											</button>
 										</div>
@@ -505,16 +559,19 @@
 						</p>
 					{/if}
 				</div>
-				{#if previewFrom}
-					<button
-						type="button"
-						onclick={() => openRepo(previewFrom)}
-						class="inline-flex shrink-0 items-center gap-1.5 pt-1 text-[11px] font-medium transition-opacity hover:opacity-70"
-						style="color: var(--accent);"
-					>
-						Open repository <ArrowRight class="h-3.5 w-3.5" />
-					</button>
-				{/if}
+					{#if previewFrom}
+						<button
+							type="button"
+							onclick={() => openRepo(previewFrom)}
+							disabled={!previewFrom.repo_id}
+							class="inline-flex shrink-0 items-center gap-1.5 pt-1 text-[11px] font-medium transition-opacity hover:opacity-70"
+							style="color: var(--accent);"
+							class:opacity-40={ !previewFrom.repo_id}
+							class:cursor-not-allowed={ !previewFrom.repo_id}
+						>
+							Open repository <ArrowRight class="h-3.5 w-3.5" />
+						</button>
+					{/if}
 			</div>
 
 			{#if previewFrom}
@@ -533,14 +590,24 @@
 			{:else if previewError}
 				<p class="text-xs text-[var(--error)]">{previewError}</p>
 			{:else if previewData}
-				<div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-					{#each previewMetadataRows as [k, v]}
-						<div class="rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/50 p-2">
-							<p class="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">{k}</p>
-							<p class="mt-1 break-all text-xs text-[var(--text-secondary)]">{v}</p>
+						<div class="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+						{#each previewMetadataRows as [k, v]}
+							<div class={`rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/50 p-2 ${metadataSpanClass(k)}`}>
+								<p class="text-[10px] uppercase tracking-[0.16em] text-[var(--text-muted)]">{k}</p>
+								{#if k === 'references'}
+									<div class="mt-1 space-y-1">
+										{#each parseReferenceLinks(v) as ref}
+											<a href={ref.url} target="_blank" rel="noopener noreferrer" class="block break-all text-xs text-[var(--accent)] underline-offset-2 hover:underline">
+												{ref.label ? `${ref.label}: ${ref.url}` : ref.url}
+											</a>
+										{/each}
+									</div>
+								{:else}
+									<p class="mt-1 break-all text-xs text-[var(--text-secondary)]">{v}</p>
+								{/if}
+							</div>
+						{/each}
 						</div>
-					{/each}
-				</div>
 				<div bind:this={previewRawEl}>
 					<div class="sticky top-2 z-10 mb-3 flex justify-end pe-6">
 						<div class="pointer-events-auto w-full max-w-sm rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] shadow-lg">
