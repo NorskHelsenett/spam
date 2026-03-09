@@ -103,20 +103,6 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 	return store.GetActiveToken(r.Context(), providerID)
 }
 
-// resolveProviderTokenByBaseURL resolves the provider token using provider_id if present,
-// otherwise falls back to looking up the provider by base_url and repoPath.
-// base_url is optional: NormalizeBaseURL will apply defaults for github/gitlab.
-func resolveProviderTokenByBaseURL(r *http.Request, store *providerconfig.Store, providerType, repoPath string) (string, error) {
-	token, err := resolveProviderToken(r, store)
-	if err != nil || token != "" {
-		return token, err
-	}
-	if store == nil {
-		return "", nil
-	}
-	baseURL := r.URL.Query().Get("base_url")
-	return store.GetActiveTokenByBaseURL(r.Context(), providerType, baseURL, repoPath)
-}
 
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
@@ -802,13 +788,15 @@ func GitHubRepoDetailsHandler(authService *auth.Service, store *providerconfig.S
 			return
 		}
 
-		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitHub, owner+"/"+repo)
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(),
+			r.URL.Query().Get("provider_id"), providerconfig.ProviderGitHub,
+			r.URL.Query().Get("base_url"), owner+"/"+repo)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
 		}
 
-		client := providers.NewGitHubClient("", token)
+		client := providers.NewGitHubClient(githubAPIBaseURL(baseURL), token)
 
 		details, err := client.GetRepoDetails(r.Context(), owner, repo)
 		if err != nil {
@@ -1000,15 +988,15 @@ func GiteaRepoDetailsHandler(authService *auth.Service, store *providerconfig.St
 			return
 		}
 
-		baseURL := r.URL.Query().Get("base_url")
-		if baseURL == "" {
-			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
-			return
-		}
-
-		token, err := resolveProviderTokenByBaseURL(r, store, providerconfig.ProviderGitea, owner+"/"+repo)
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(),
+			r.URL.Query().Get("provider_id"), providerconfig.ProviderGitea,
+			r.URL.Query().Get("base_url"), owner+"/"+repo)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
 			return
 		}
 

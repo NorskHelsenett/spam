@@ -161,6 +161,46 @@ type giteaOrg struct {
 	AvatarURL   string `json:"avatar_url"`
 }
 
+// CountRepos returns the total number of repos for the given owner using one API call.
+func (c *GiteaClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
+	var urlStr string
+	if owner != "" {
+		urlStr = fmt.Sprintf("%s/orgs/%s/repos?page=1&limit=1", c.baseURL, url.PathEscape(owner))
+	} else {
+		urlStr = fmt.Sprintf("%s/repos/search?page=1&limit=1", c.baseURL)
+	}
+	count, err := c.countFromURL(ctx, urlStr)
+	if err == ErrNotFound && owner != "" {
+		// Try as user instead
+		count, err = c.countFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?page=1&limit=1", c.baseURL, url.PathEscape(owner)))
+	}
+	return count, err
+}
+
+func (c *GiteaClientImpl) countFromURL(ctx context.Context, urlStr string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := c.checkResponse(resp); err != nil {
+		return 0, err
+	}
+	if total := resp.Header.Get("X-Total-Count"); total != "" {
+		if count, err := strconv.Atoi(total); err == nil {
+			return count, nil
+		}
+	}
+	return 0, nil
+}
+
 // ListPublicRepos lists public repositories for an organization.
 func (c *GiteaClientImpl) ListPublicRepos(ctx context.Context, owner string, opts ListOptions) ([]RepoData, PageInfo, error) {
 	if opts.PageSize <= 0 {

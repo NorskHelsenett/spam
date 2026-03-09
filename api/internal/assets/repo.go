@@ -133,6 +133,37 @@ func GetRepoCache(ctx context.Context, db *gorm.DB, repoID string) (*RepoCache, 
 	return &rc, nil
 }
 
+// CountReposByProvider returns the number of repos for a provider instance.
+func CountReposByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string) (int64, error) {
+	var count int64
+	err := db.WithContext(ctx).Model(&Repo{}).
+		Where("provider_instance_id = ?", providerInstanceID).
+		Count(&count).Error
+	return count, err
+}
+
+// CountFreshRepoCacheByProvider returns the number of cache entries synced after freshSince.
+func CountFreshRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string, freshSince time.Time) (int64, error) {
+	var count int64
+	err := db.WithContext(ctx).Table("repo_caches").
+		Joins("JOIN repos ON repos.id = repo_caches.repo_id").
+		Where("repos.provider_instance_id = ? AND repo_caches.synced_at > ?", providerInstanceID, freshSince).
+		Count(&count).Error
+	return count, err
+}
+
+// ListReposWithStaleCacheByProvider returns repos whose cache is missing or older than freshSince.
+func ListReposWithStaleCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string, freshSince time.Time) ([]Repo, error) {
+	var repos []Repo
+	err := db.WithContext(ctx).
+		Where("provider_instance_id = ?", providerInstanceID).
+		Where("id NOT IN (?)",
+			db.Table("repo_caches").Select("repo_id").Where("synced_at > ?", freshSince),
+		).
+		Find(&repos).Error
+	return repos, err
+}
+
 // ListRepoCacheByProvider returns all cache entries for repos belonging to a provider instance.
 func ListRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string) ([]RepoCache, error) {
 	var caches []RepoCache

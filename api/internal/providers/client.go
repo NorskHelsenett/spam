@@ -33,6 +33,10 @@ type Client interface {
 	// repoPath is "owner/repo". limit caps the result set (0 = provider default).
 	GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error)
 
+	// CountRepos returns the total number of repositories for the given owner
+	// using a single API call. Returns -1 if the count cannot be determined.
+	CountRepos(ctx context.Context, owner string) (int, error)
+
 	// BaseURL returns the base URL of the provider API.
 	BaseURL() string
 

@@ -223,6 +223,50 @@ func (c *GitHubClientImpl) getLanguages(ctx context.Context, fullPath string) []
 	return result
 }
 
+// CountRepos returns the total number of repos for the given owner using one API call.
+func (c *GitHubClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
+	repoType := "public"
+	if c.token != "" {
+		repoType = "all"
+	}
+	count, err := c.countReposFromURL(ctx, fmt.Sprintf("%s/orgs/%s/repos?type=%s&per_page=1", c.baseURL, owner, repoType))
+	if err == ErrNotFound {
+		return c.countReposFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?type=%s&per_page=1", c.baseURL, owner, repoType))
+	}
+	return count, err
+}
+
+func (c *GitHubClientImpl) countReposFromURL(ctx context.Context, url string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := c.checkResponse(resp); err != nil {
+		return 0, err
+	}
+	pi := c.parsePageInfo(resp, 1)
+	if pi.TotalCount > 0 {
+		return pi.TotalCount, nil
+	}
+	// No Link header means all repos fit on one page — count items.
+	body, _ := io.ReadAll(resp.Body)
+	var items []json.RawMessage
+	if json.Unmarshal(body, &items) == nil {
+		return len(items), nil
+	}
+	return 0, nil
+}
+
 // ListPublicRepos lists repositories for a user or organization.
 // If authenticated, private repositories may be included.
 func (c *GitHubClientImpl) ListPublicRepos(ctx context.Context, owner string, opts ListOptions) ([]RepoData, PageInfo, error) {

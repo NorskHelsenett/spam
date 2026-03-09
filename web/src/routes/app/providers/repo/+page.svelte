@@ -171,6 +171,7 @@
 				path = `${meta.repo.org}/${meta.repo.slug}`;
 				providerId = providerId || meta.repo.provider_id || '';
 				baseUrl = baseUrl || meta.repo.provider_base_url || '';
+				provider = provider || meta.repo.provider || 'github';
 			}
 		}
 
@@ -206,20 +207,14 @@
 			let response: Response;
 
 			if (repoDbId || providerId) {
-				// Try unified endpoint first (resolves provider/path from DB when repo_id is present).
+				// Use unified endpoint — backend resolves provider type and credentials from DB.
+				// Never fall back to type-specific endpoints when provider_id is known, as that
+				// would allow the client to influence which provider/credentials are used.
 				const uq = new URLSearchParams();
 				if (providerId) uq.set('provider_id', providerId);
 				if (path) uq.set('path', path);
 				if (repoDbId) uq.set('repo_id', repoDbId);
 				response = await fetch(`/api/providers/details?${uq}`, { credentials: 'include' });
-				// If provider_id is stale (DB reset), fall back to type-specific endpoint
-				if (response.status === 404) {
-					if (!path) {
-						error = 'Repository not found.';
-						return;
-					}
-					response = await fetch(buildTypeUrl(), { credentials: 'include' });
-				}
 			} else {
 				response = await fetch(buildTypeUrl(), { credentials: 'include' });
 			}
