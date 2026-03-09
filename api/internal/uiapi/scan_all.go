@@ -58,21 +58,30 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 		var totalQueued int
 		var errors []string
 
-		// Resolve token from the provider instance if one is configured.
+		// Resolve token and display name from the provider instance if one is configured.
 		token := ""
+		label := req.Provider
 		if store != nil && req.ProviderID != "" {
 			if t, err := store.GetActiveToken(ctx, req.ProviderID); err == nil {
 				token = t
+			}
+			if providers, err := store.ListAdmin(ctx); err == nil {
+				for _, p := range providers {
+					if p.ID == req.ProviderID {
+						label = p.DisplayName
+						break
+					}
+				}
 			}
 		}
 
 		switch req.Provider {
 		case "github":
-			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID, token)
+			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID, token, label)
 		case "gitlab":
-			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID, token)
+			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID, token, label)
 		case "gitea", "forgejo":
-			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID, token)
+			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID, token, label)
 		default:
 			http.Error(w, fmt.Sprintf("unsupported provider: %s", req.Provider), http.StatusBadRequest)
 			return
@@ -86,7 +95,7 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 }
 
 // scanAllGitHub fetches all GitHub repos and queues them for scanning.
-func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string, token string) (int, []string) {
+func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string, token string, label string) (int, []string) {
 	if owner == "" {
 		return 0, []string{"owner is required"}
 	}
@@ -114,12 +123,12 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID st
 		page++
 	}
 
-	queued := queueRepos(ctx, db, allRepos, "github", "", providerID, &errors)
+	queued := queueRepos(ctx, db, allRepos, "github", "", providerID, label, &errors)
 	return queued, errors
 }
 
 // scanAllGitLab fetches all GitLab projects and queues them for scanning.
-func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string, token string) (int, []string) {
+func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string, token string, label string) (int, []string) {
 	client := providers.NewGitLabClient(baseURL, token)
 	var allProjects []providers.RepoData
 	var errors []string
@@ -144,12 +153,12 @@ func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL strin
 		page++
 	}
 
-	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, providerID, &errors)
+	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, providerID, label, &errors)
 	return queued, errors
 }
 
 // scanAllGitea fetches all Gitea/Forgejo repos and queues them for scanning.
-func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string, token string) (int, []string) {
+func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string, token string, label string) (int, []string) {
 	if baseURL == "" {
 		return 0, []string{"base_url is required for Gitea/Forgejo"}
 	}
@@ -177,12 +186,12 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string
 		page++
 	}
 
-	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, providerID, &errors)
+	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, providerID, label, &errors)
 	return queued, errors
 }
 
 // queueRepos creates jobs for all repos in parallel batches.
-func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, errors *[]string) int {
+func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, label string, errors *[]string) int {
 	const batchSize = 10
 	var mu sync.Mutex
 	var queued int
@@ -294,10 +303,6 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 		wg.Wait()
 	}
 
-	label := providerID
-	if label == "" {
-		label = provider
-	}
 	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), label)
 	return queued
 }
