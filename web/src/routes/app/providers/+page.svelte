@@ -4,7 +4,8 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { get } from 'svelte/store';
-	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2, CheckCircle } from 'lucide-svelte';
+	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2 } from 'lucide-svelte';
+	import QueueStatus from '$lib/components/QueueStatus.svelte';
 	import { providersState } from '$lib/stores/providersState';
 	import RepoTable from '$lib/components/RepoTable.svelte';
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
@@ -75,11 +76,10 @@
 	let sortColumn = $state<string>('');
 	let sortDirection = $state<'asc' | 'desc'>('asc');
 
-	// Bulk scan state
-	let queueing = $state(false);
-	let queueingTab = $state('');
-	let queueDone = $state(false);
-	let queueProgress = $state({ total: 0, errors: [] as string[] });
+	// Bulk scan state — keyed by tab ID so multiple providers can queue concurrently
+	type TabQueueState = { done: boolean; total: number; errors: string[] };
+	let queueStates = $state<Record<string, TabQueueState>>({});
+	const isQueueing = (tab: string) => tab in queueStates && !queueStates[tab].done;
 
 	// Table column definitions
 	const githubColumns = [
@@ -711,12 +711,10 @@
 		includeSubgroups: boolean = false,
 		providerId?: string
 	) => {
-		if (queueing && !queueDone) return;
+		const tabId = activeTab;
+		if (isQueueing(tabId)) return;
 
-		queueingTab = activeTab;
-		queueing = true;
-		queueDone = false;
-		queueProgress = { total: 0, errors: [] };
+		queueStates[tabId] = { done: false, total: 0, errors: [] };
 		await tick(); // flush DOM so spinner renders before the fetch starts
 
 		try {
@@ -736,7 +734,7 @@
 
 			if (!response.ok) {
 				const text = await response.text();
-				queueProgress.errors = [text || 'Failed to queue repos'];
+				queueStates[tabId] = { ...queueStates[tabId], errors: [text || 'Failed to queue repos'] };
 			} else if (response.body) {
 				// Read the SSE stream line by line.
 				const reader = response.body.getReader();
@@ -762,9 +760,9 @@
 						try {
 							const data = JSON.parse(dataStr);
 							if (eventType === 'progress') {
-								queueProgress = { total: data.queued, errors: [] };
+								queueStates[tabId] = { ...queueStates[tabId], total: data.queued };
 							} else if (eventType === 'done') {
-								queueProgress = { total: data.total_queued, errors: data.errors || [] };
+								queueStates[tabId] = { ...queueStates[tabId], total: data.total_queued, errors: data.errors || [] };
 							}
 						} catch {
 							// ignore malformed events
@@ -773,17 +771,15 @@
 				}
 			}
 		} catch (err) {
-			queueProgress.errors = [err instanceof Error ? err.message : 'Failed to queue repos'];
+			queueStates[tabId] = { ...queueStates[tabId], errors: [err instanceof Error ? err.message : 'Failed to queue repos'] };
 		}
 
-		queueDone = true;
+		queueStates[tabId] = { ...queueStates[tabId], done: true };
 
 		// Auto-dismiss after 10 seconds if no errors
-		if (queueProgress.errors.length === 0) {
+		if (queueStates[tabId].errors.length === 0) {
 			setTimeout(() => {
-				queueing = false;
-				queueingTab = '';
-				queueDone = false;
+				delete queueStates[tabId];
 			}, 10000);
 		}
 	};
@@ -972,36 +968,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos('github', ghOwner, '', undefined, false)}
-						disabled={(queueing && !queueDone && queueingTab === 'github') || !ghOwner.trim()}
+						disabled={isQueueing('github') || !ghOwner.trim()}
 						title="Queue SBOM generation for all repositories from {ghOwner}"
 					>
-						{queueing && !queueDone && queueingTab === 'github' ? 'Queueing...' : 'Queue All'}
+						{isQueueing('github') ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && queueingTab === 'github'}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center gap-2 text-sm">
-							{#if queueDone}
-								<CheckCircle class="h-4 w-4 shrink-0 text-[var(--success)]" />
-								<span class="text-[var(--text-secondary)]">Added {queueProgress.total} {queueProgress.total === 1 ? 'repository' : 'repositories'} to queue</span>
-							{:else}
-								<div class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-								<span class="text-[var(--text-secondary)]">Adding {queueProgress.total > 0 ? queueProgress.total + ' ' : ''}{queueProgress.total === 1 ? 'repository' : 'repositories'} to queue…</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if 'github' in queueStates}
+					<QueueStatus state={queueStates['github']} singular="repository" plural="repositories" />
 				{/if}
 
 				{#if ghError}
@@ -1050,36 +1025,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
-						disabled={(queueing && !queueDone && queueingTab === 'gitlab') || !glGroup.trim()}
+						disabled={isQueueing('gitlab') || !glGroup.trim()}
 						title="Queue SBOM generation for all projects from {glGroup}"
 					>
-						{queueing && !queueDone && queueingTab === 'gitlab' ? 'Queueing...' : 'Queue All'}
+						{isQueueing('gitlab') ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && queueingTab === 'gitlab'}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center gap-2 text-sm">
-							{#if queueDone}
-								<CheckCircle class="h-4 w-4 shrink-0 text-[var(--success)]" />
-								<span class="text-[var(--text-secondary)]">Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue</span>
-							{:else}
-								<div class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-								<span class="text-[var(--text-secondary)]">Adding {queueProgress.total > 0 ? queueProgress.total + ' ' : ''}{queueProgress.total === 1 ? 'project' : 'projects'} to queue…</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if 'gitlab' in queueStates}
+					<QueueStatus state={queueStates['gitlab']} singular="project" plural="projects" />
 				{/if}
 
 				{#if glGroupPath.length > 0}
@@ -1209,36 +1163,15 @@
 							type="button"
 							class="btn btn-primary"
 							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
-							disabled={(queueing && !queueDone && queueingTab === provider.id) || !provider.ownerPath}
+						disabled={isQueueing(provider.id) || !provider.ownerPath}
 							title="Queue SBOM generation for all projects from {provider.name}"
 						>
-							{queueing && !queueDone && queueingTab === provider.id ? 'Queueing...' : 'Queue All'}
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
 						</button>
 					</div>
 
-					{#if queueing && queueingTab === provider.id}
-						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-							<div class="flex items-center gap-2 text-sm">
-								{#if queueDone}
-									<CheckCircle class="h-4 w-4 shrink-0 text-[var(--success)]" />
-									<span class="text-[var(--text-secondary)]">Added {queueProgress.total} {queueProgress.total === 1 ? 'repo' : 'repos'} to queue</span>
-								{:else}
-									<div class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-									<span class="text-[var(--text-secondary)]">Adding {queueProgress.total > 0 ? queueProgress.total + ' ' : ''}{queueProgress.total === 1 ? 'repo' : 'repos'} to queue…</span>
-								{/if}
-							</div>
-							{#if queueProgress.errors.length > 0}
-								<div class="mt-3 space-y-1">
-									<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-									{#each queueProgress.errors.slice(0, 5) as error}
-										<p class="text-xs text-[var(--error)]">{error}</p>
-									{/each}
-									{#if queueProgress.errors.length > 5}
-										<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-									{/if}
-								</div>
-							{/if}
-						</div>
+					{#if provider.id in queueStates}
+						<QueueStatus state={queueStates[provider.id]} singular="repo" plural="repos" />
 					{/if}
 
 					{#if !provider.ownerPath}
@@ -1289,36 +1222,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
-						disabled={queueing && !queueDone && queueingTab === provider.id}
+						disabled={isQueueing(provider.id)}
 						title="Queue SBOM generation for all projects from {provider.name}"
 					>
-						{queueing && !queueDone && queueingTab === provider.id ? 'Queueing...' : 'Queue All'}
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && queueingTab === provider.id}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center gap-2 text-sm">
-							{#if queueDone}
-								<CheckCircle class="h-4 w-4 shrink-0 text-[var(--success)]" />
-								<span class="text-[var(--text-secondary)]">Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue</span>
-							{:else}
-								<div class="h-4 w-4 shrink-0 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-								<span class="text-[var(--text-secondary)]">Adding {queueProgress.total > 0 ? queueProgress.total + ' ' : ''}{queueProgress.total === 1 ? 'project' : 'projects'} to queue…</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if provider.id in queueStates}
+					<QueueStatus state={queueStates[provider.id]} singular="project" plural="projects" />
 				{/if}
 
 				{#if cpGroupPath.length > 0}
