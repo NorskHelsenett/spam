@@ -54,29 +54,42 @@ func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref 
 		return
 	}
 
-	// Adopt SBOM: find the binding on the original commit and re-bind to the new commit.
+	// Adopt SBOM: prefer finding the binding via the original RepoCommit (preserves source
+	// label). Fall back to reading the SBOM ID from the run's Result field — this survives
+	// even when the original repo and its RepoCommit rows have been deleted, since
+	// SBOMBinding.asset_ref_id is keyed on RepoCommit.ID (UUID), not the commit hash.
+	sbomID := ""
+	sbomSource := "spam-runner"
 	if originalRepoID != "" {
 		var originalCommit assets.RepoCommit
-		err := p.db.WithContext(ctx).
+		if err := p.db.WithContext(ctx).
 			Where("repo_id = ? AND commit_sha = ?", originalRepoID, commitSHA).
-			First(&originalCommit).Error
-		if err == nil {
+			First(&originalCommit).Error; err == nil {
 			var binding artifacts.SBOMBinding
-			err = p.db.WithContext(ctx).
+			if err := p.db.WithContext(ctx).
 				Where("asset_type = ? AND asset_ref_id = ?", artifacts.AssetTypeRepoCommit, originalCommit.ID).
-				First(&binding).Error
-			if err == nil {
-				_, bindErr := artifacts.UpsertBinding(ctx, p.db, artifacts.BindingInput{
-					AssetType:       artifacts.AssetTypeRepoCommit,
-					AssetRefID:      newCommit.ID,
-					SBOMID:          binding.SBOMID,
-					Source:          binding.Source,
-					CreatedByUserID: "system",
-				})
-				if bindErr != nil && bindErr != artifacts.ErrBindingExists {
-					log.Printf("adopt: bind sbom %s to repo %s commit %s: %v", binding.SBOMID, newRepoID, commitSHA, bindErr)
-				}
+				First(&binding).Error; err == nil {
+				sbomID = binding.SBOMID
+				sbomSource = binding.Source
 			}
+		}
+	}
+	if sbomID == "" && len(finishedRun.Result) > 0 {
+		var result runner.RunResultPayload
+		if err := json.Unmarshal(finishedRun.Result, &result); err == nil {
+			sbomID = result.SBOMID
+		}
+	}
+	if sbomID != "" {
+		_, bindErr := artifacts.UpsertBinding(ctx, p.db, artifacts.BindingInput{
+			AssetType:       artifacts.AssetTypeRepoCommit,
+			AssetRefID:      newCommit.ID,
+			SBOMID:          sbomID,
+			Source:          sbomSource,
+			CreatedByUserID: "system",
+		})
+		if bindErr != nil && bindErr != artifacts.ErrBindingExists {
+			log.Printf("adopt: bind sbom %s to repo %s commit %s: %v", sbomID, newRepoID, commitSHA, bindErr)
 		}
 	}
 
