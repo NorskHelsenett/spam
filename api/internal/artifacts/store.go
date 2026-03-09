@@ -21,3 +21,16 @@ func FindBinding(ctx context.Context, db *gorm.DB, bindingID string) (*SBOMBindi
 	}
 	return &binding, nil
 }
+
+// FindBindingByCommitSHA looks up an SBOMBinding directly by commit hash.
+// This is the canonical lookup — hash-keyed, survives repo deletions, works across forks.
+func FindBindingByCommitSHA(ctx context.Context, db *gorm.DB, commitSHA string) (*SBOMBinding, error) {
+	var binding SBOMBinding
+	err := db.WithContext(ctx).
+		Where("asset_type = ? AND commit_sha = ?", AssetTypeRepoCommit, commitSHA).
+		First(&binding).Error
+	if err != nil {
+		return nil, err
+	}
+	return &binding, nil
+}

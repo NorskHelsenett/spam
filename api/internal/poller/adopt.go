@@ -15,7 +15,9 @@ import (
 
 // adoptRunResults links existing scan results (SBOM, secrets, manifests) to a new repo
 // that shares the same commit hash as a previously finished run. This is called when the
-// poller detects a commit that has already been scanned globally (e.g. a fork or renamed repo).
+// poller detects a commit that has already been scanned globally (e.g. a fork, renamed,
+// or re-imported repo). The SBOM lookup is keyed on commit_sha directly — it does not
+// depend on RepoCommit UUIDs and survives repo deletions.
 func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref string) {
 	// Find the finished job for this commit.
 	var finishedRun runner.Run
@@ -38,12 +40,11 @@ func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref 
 		}
 	}
 
-	originalRepoID := payload.RepoID
-	if originalRepoID == newRepoID {
+	if payload.RepoID == newRepoID {
 		return // same repo, nothing to adopt
 	}
 
-	// Create a RepoCommit for the new repo.
+	// Create (or find existing) RepoCommit for the new repo.
 	newCommit, err := assets.UpsertRepoCommit(ctx, p.db, assets.RepoCommitInput{
 		RepoID:    newRepoID,
 		CommitSHA: commitSHA,
@@ -54,42 +55,19 @@ func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref 
 		return
 	}
 
-	// Adopt SBOM: prefer finding the binding via the original RepoCommit (preserves source
-	// label). Fall back to reading the SBOM ID from the run's Result field — this survives
-	// even when the original repo and its RepoCommit rows have been deleted, since
-	// SBOMBinding.asset_ref_id is keyed on RepoCommit.ID (UUID), not the commit hash.
-	sbomID := ""
-	sbomSource := "spam-runner"
-	if originalRepoID != "" {
-		var originalCommit assets.RepoCommit
-		if err := p.db.WithContext(ctx).
-			Where("repo_id = ? AND commit_sha = ?", originalRepoID, commitSHA).
-			First(&originalCommit).Error; err == nil {
-			var binding artifacts.SBOMBinding
-			if err := p.db.WithContext(ctx).
-				Where("asset_type = ? AND asset_ref_id = ?", artifacts.AssetTypeRepoCommit, originalCommit.ID).
-				First(&binding).Error; err == nil {
-				sbomID = binding.SBOMID
-				sbomSource = binding.Source
-			}
-		}
-	}
-	if sbomID == "" && len(finishedRun.Result) > 0 {
-		var result runner.RunResultPayload
-		if err := json.Unmarshal(finishedRun.Result, &result); err == nil {
-			sbomID = result.SBOMID
-		}
-	}
-	if sbomID != "" {
+	// Adopt SBOM: look up by commit hash directly — hash-keyed, independent of any
+	// RepoCommit UUID or repo existence.
+	if binding, err := artifacts.FindBindingByCommitSHA(ctx, p.db, commitSHA); err == nil {
 		_, bindErr := artifacts.UpsertBinding(ctx, p.db, artifacts.BindingInput{
 			AssetType:       artifacts.AssetTypeRepoCommit,
 			AssetRefID:      newCommit.ID,
-			SBOMID:          sbomID,
-			Source:          sbomSource,
+			SBOMID:          binding.SBOMID,
+			CommitSHA:       commitSHA,
+			Source:          binding.Source,
 			CreatedByUserID: "system",
 		})
 		if bindErr != nil && bindErr != artifacts.ErrBindingExists {
-			log.Printf("adopt: bind sbom %s to repo %s commit %s: %v", sbomID, newRepoID, commitSHA, bindErr)
+			log.Printf("adopt: bind sbom %s to repo %s commit %s: %v", binding.SBOMID, newRepoID, commitSHA, bindErr)
 		}
 	}
 
@@ -126,7 +104,6 @@ func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref 
 				continue // already exists
 			}
 			newManifestID := uuid.NewString()
-
 			newManifest := manifests.Manifest{
 				ID:        newManifestID,
 				RunID:     m.RunID,
@@ -142,7 +119,6 @@ func (p *Poller) adoptRunResults(ctx context.Context, newRepoID, commitSHA, ref 
 				continue
 			}
 
-			// Copy dependencies for this manifest.
 			var deps []manifests.ManifestDependency
 			if err := p.db.WithContext(ctx).
 				Where("manifest_id = ?", m.ID).

@@ -25,6 +25,7 @@ type BindingInput struct {
 	AssetRefID      string
 	SBOMID          string
 	Source          string
+	CommitSHA       string
 	CreatedByUserID string
 }
 
@@ -70,6 +71,7 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 		AssetRefID:      input.AssetRefID,
 		SBOMID:          input.SBOMID,
 		Source:          input.Source,
+		CommitSHA:       input.CommitSHA,
 		CreatedByUserID: input.CreatedByUserID,
 	}
 

@@ -155,6 +155,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				bindingInput = &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeRepoCommit,
 					AssetRefID:      commit.ID,
+					CommitSHA:       commitSHA,
 					Source:          sbomSourceUpload,
 					CreatedByUserID: user.ID,
 				}
