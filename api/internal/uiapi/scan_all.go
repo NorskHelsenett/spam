@@ -226,17 +226,20 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 				}
 
 				// Upsert repo
+				fullPath := strings.Trim(r.FullPath, "/")
+				lastSlash := strings.LastIndex(fullPath, "/")
 				org := ""
-				slug := r.FullPath
-				if parts := strings.Split(r.FullPath, "/"); len(parts) > 1 {
-					org = parts[0]
-					slug = parts[len(parts)-1]
+				slug := fullPath
+				if lastSlash >= 0 {
+					org = fullPath[:lastSlash]
+					slug = fullPath[lastSlash+1:]
 				}
 
 				repoRecord, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
 					Provider:           provider,
 					Org:                org,
 					Slug:               slug,
+					ExternalID:         r.ExternalID,
 					ProviderInstanceID: resolvedProviderID,
 				})
 				if err != nil {

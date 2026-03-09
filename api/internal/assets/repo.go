@@ -17,6 +17,7 @@ type RepoInput struct {
 	ProviderInstanceID string
 	Org                string
 	Slug               string
+	ExternalID         string
 	CreatedByUserID    string
 	ProviderUpdatedAt  *time.Time
 }
@@ -43,7 +44,35 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		return nil, errors.New("provider instance id required")
 	}
 
+	externalID := strings.TrimSpace(input.ExternalID)
+
 	var repo Repo
+
+	// When externalID is known, use it as the canonical key so that a previously
+	// truncated org/slug gets corrected rather than a duplicate entry being created.
+	if externalID != "" {
+		err := db.WithContext(ctx).
+			Where("provider_instance_id = ? AND external_id = ?", providerInstanceID, externalID).
+			First(&repo).Error
+		if err == nil {
+			// Found by external ID — update path if it was truncated/stale.
+			updates := map[string]any{}
+			if repo.Org != org || repo.Slug != slug {
+				updates["org"] = org
+				updates["slug"] = slug
+			}
+			if input.ProviderUpdatedAt != nil && !input.ProviderUpdatedAt.IsZero() {
+				updates["provider_updated_at"] = input.ProviderUpdatedAt
+			}
+			if len(updates) > 0 {
+				db.WithContext(ctx).Model(&repo).Updates(updates)
+				repo.Org = org
+				repo.Slug = slug
+			}
+			return &repo, nil
+		}
+	}
+
 	result := db.WithContext(ctx).
 		Where("provider_instance_id = ? AND org = ? AND slug = ?", providerInstanceID, org, slug).
 		Attrs(Repo{
@@ -51,6 +80,7 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 			Provider:           provider,
 			Org:                org,
 			Slug:               slug,
+			ExternalID:         externalID,
 			ProviderInstanceID: providerInstanceID,
 			CreatedByUserID:    input.CreatedByUserID,
 		}).FirstOrCreate(&repo)
@@ -67,8 +97,15 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 		return nil, result.Error
 	}
 
+	updates := map[string]any{}
 	if input.ProviderUpdatedAt != nil && !input.ProviderUpdatedAt.IsZero() {
-		db.WithContext(ctx).Model(&repo).UpdateColumn("provider_updated_at", input.ProviderUpdatedAt)
+		updates["provider_updated_at"] = input.ProviderUpdatedAt
+	}
+	if externalID != "" && repo.ExternalID != externalID {
+		updates["external_id"] = externalID
+	}
+	if len(updates) > 0 {
+		db.WithContext(ctx).Model(&repo).Updates(updates)
 	}
 
 	return &repo, nil
@@ -101,16 +138,22 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 	return &commit, nil
 }
 
+// sanitizeForDB removes null bytes and invalid UTF-8 sequences that PostgreSQL
+// rejects in text columns. 0x00 is valid UTF-8 but Postgres TEXT forbids it.
+func sanitizeForDB(s string) string {
+	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "")
+}
+
 // UpsertRepoCache saves or updates cached provider data for a repo.
 // All string fields are sanitized to valid UTF-8 before storage because
-// provider READMEs and commit messages may contain non-UTF-8 bytes.
+// provider READMEs and commit messages may contain non-UTF-8 bytes or null bytes.
 func UpsertRepoCache(ctx context.Context, db *gorm.DB, repoID, detailsJSON, readmeContent, commitsJSON, contributorsJSON string) error {
 	rc := &RepoCache{
 		RepoID:           repoID,
-		DetailsJSON:      strings.ToValidUTF8(detailsJSON, ""),
-		ReadmeContent:    strings.ToValidUTF8(readmeContent, ""),
-		CommitsJSON:      strings.ToValidUTF8(commitsJSON, ""),
-		ContributorsJSON: strings.ToValidUTF8(contributorsJSON, ""),
+		DetailsJSON:      sanitizeForDB(detailsJSON),
+		ReadmeContent:    sanitizeForDB(readmeContent),
+		CommitsJSON:      sanitizeForDB(commitsJSON),
+		ContributorsJSON: sanitizeForDB(contributorsJSON),
 		SyncedAt:         time.Now(),
 	}
 	return db.WithContext(ctx).

@@ -84,24 +84,36 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 	log.Printf("cache warmer: %s — provider=%d db=%d fresh=%d/%d",
 		p.DisplayName, providerTotal, dbCount, freshCount, dbCount)
 
-	// Case 1: cache is complete and fresh — restore from DB, no more API calls.
-	if providerTotal >= 0 && int64(providerTotal) == dbCount && freshCount == dbCount {
+	// Case 1: all provider repos are cached and fresh (DB may have extra stale rows
+	// from repos deleted/made-private on the provider) — restore from DB only.
+	if providerTotal >= 0 && freshCount >= int64(providerTotal) {
 		if rebuildFromDB(ctx, db, c, p, ttl) {
 			log.Printf("cache warmer: %s fully restored from DB", p.DisplayName)
 			return
 		}
 	}
 
-	// Case 2: DB has all repos but some cache entries are missing/stale.
-	if providerTotal >= 0 && int64(providerTotal) == dbCount && freshCount < dbCount {
+	// Case 2: DB has at least as many repos as provider but some cache is missing/stale.
+	if providerTotal >= 0 && dbCount >= int64(providerTotal) && freshCount < int64(providerTotal) {
 		rebuildFromDB(ctx, db, c, p, ttl) // restore what we can
-		missing := dbCount - freshCount
+		missing := int64(providerTotal) - freshCount
 		log.Printf("cache warmer: %s filling %d stale/missing cache entries", p.DisplayName, missing)
 		warmMissingCache(ctx, db, c, p, token, freshSince)
 		return
 	}
 
-	// Case 3: DB is out of date, count unknown, or first run — full paginated sync.
+	// Case 3a: count call failed (e.g. rate limited) but DB has repos — use DB as
+	// source of truth and fill missing cache entries without pagination.
+	if providerTotal < 0 && dbCount > 0 {
+		rebuildFromDB(ctx, db, c, p, ttl)
+		if freshCount < dbCount {
+			log.Printf("cache warmer: %s count unavailable, filling %d stale/missing from DB", p.DisplayName, dbCount-freshCount)
+			warmMissingCache(ctx, db, c, p, token, freshSince)
+		}
+		return
+	}
+
+	// Case 3b: DB is out of date or first run — full paginated sync.
 	warmProvider(ctx, db, store, c, p, false)
 }
 
@@ -236,6 +248,7 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 			ProviderInstanceID: p.ID,
 			Org:                org,
 			Slug:               slug,
+			ExternalID:         repo.ExternalID,
 			ProviderUpdatedAt:  providerUpdatedAtPtr,
 		})
 		if err != nil {
@@ -283,7 +296,9 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 		var commits []providers.CommitInfo
 		var contribs []providers.ContributorInfo
 
-		fetchRepoFullData(ctx, p, token, path, &details, &readme, &commits, &contribs)
+		if err := fetchRepoFullData(ctx, p, token, path, &details, &readme, &commits, &contribs); err != nil {
+			log.Printf("cache warmer: %s details error for %s: %v", p.DisplayName, path, err)
+		}
 
 		if contribs == nil {
 			contribs = []providers.ContributorInfo{}
@@ -325,23 +340,25 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 
 // fetchRepoFullData fetches details, readme, commits, and contributors for a
 // single repo in parallel (4 concurrent provider API calls).
+// Returns the error from the details fetch so callers can distinguish 429 from 404.
 func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, token, repoPath string,
 	details **providers.RepoDetails, readme *string, commits *[]providers.CommitInfo, contribs *[]providers.ContributorInfo,
-) {
+) error {
 	if repoPath == "" {
-		return
+		return fmt.Errorf("empty repo path")
 	}
 	var wg sync.WaitGroup
+	var detailsErr error
 
 	switch p.Type {
 	case providerconfig.ProviderGitHub:
 		parts := strings.SplitN(repoPath, "/", 2)
 		if len(parts) != 2 {
-			return
+			return fmt.Errorf("invalid path: %s", repoPath)
 		}
 		cl := providers.NewGitHubClient(githubAPIBaseURL(p.BaseURL), token)
 		wg.Add(4)
-		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *details, detailsErr = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
 		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, parts[0], parts[1]) }()
 		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, parts[0], parts[1], 10) }()
 		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
@@ -349,7 +366,7 @@ func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, t
 	case providerconfig.ProviderGitLab:
 		cl := providers.NewGitLabClient(p.BaseURL, token)
 		wg.Add(4)
-		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, repoPath) }()
+		go func() { defer wg.Done(); *details, detailsErr = cl.GetRepoDetails(ctx, repoPath) }()
 		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, repoPath) }()
 		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, repoPath, 10) }()
 		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
@@ -357,17 +374,18 @@ func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, t
 	case providerconfig.ProviderGitea, providerconfig.ProviderForgejo:
 		parts := strings.SplitN(repoPath, "/", 2)
 		if len(parts) != 2 {
-			return
+			return fmt.Errorf("invalid path: %s", repoPath)
 		}
 		cl := providers.NewGiteaClient(p.BaseURL, token)
 		wg.Add(4)
-		go func() { defer wg.Done(); *details, _ = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
+		go func() { defer wg.Done(); *details, detailsErr = cl.GetRepoDetails(ctx, parts[0], parts[1]) }()
 		go func() { defer wg.Done(); *readme, _ = cl.GetReadme(ctx, parts[0], parts[1]) }()
 		go func() { defer wg.Done(); *commits, _ = cl.GetCommitLog(ctx, parts[0], parts[1], 10) }()
 		go func() { defer wg.Done(); *contribs, _ = cl.GetContributors(ctx, repoPath, 30) }()
 	}
 
 	wg.Wait()
+	return detailsErr
 }
 
 // warmMissingCache fetches and persists cache entries only for repos that are
@@ -394,12 +412,12 @@ func warmMissingCache(ctx context.Context, db *gorm.DB, c cache.Store, p provide
 		var commits []providers.CommitInfo
 		var contribs []providers.ContributorInfo
 
-		fetchRepoFullData(ctx, p, token, path, &details, &readme, &commits, &contribs)
-
-		if details == nil {
-			// Likely rate-limited or network error — back off and skip this repo.
-			log.Printf("cache warmer: %s fetch failed for %s, backing off", p.DisplayName, path)
-			time.Sleep(2 * time.Second)
+		if err := fetchRepoFullData(ctx, p, token, path, &details, &readme, &commits, &contribs); err != nil {
+			if err == providers.ErrRateLimited {
+				log.Printf("cache warmer: %s rate limited — stopping fill, will retry next cycle", p.DisplayName)
+				break
+			}
+			log.Printf("cache warmer: %s skip %s: %v", p.DisplayName, path, err)
 			continue
 		}
 

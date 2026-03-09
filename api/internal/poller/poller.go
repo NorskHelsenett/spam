@@ -177,11 +177,13 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		}
 
 		// Upsert repo record
+		fullPath := strings.Trim(repo.FullPath, "/")
+		lastSlash := strings.LastIndex(fullPath, "/")
 		org := ""
-		slug := repo.FullPath
-		if parts := strings.Split(repo.FullPath, "/"); len(parts) > 1 {
-			org = parts[0]
-			slug = parts[len(parts)-1]
+		slug := fullPath
+		if lastSlash >= 0 {
+			org = fullPath[:lastSlash]
+			slug = fullPath[lastSlash+1:]
 		}
 
 		repoRecord, err := assets.UpsertRepo(ctx, p.db, assets.RepoInput{
@@ -189,6 +191,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			ProviderInstanceID: provider.ID,
 			Org:                org,
 			Slug:               slug,
+			ExternalID:         repo.ExternalID,
 		})
 		if err != nil {
 			log.Printf("poller: upsert repo %s: %v", repo.FullPath, err)

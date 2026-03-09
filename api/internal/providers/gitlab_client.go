@@ -148,10 +148,23 @@ type gitLabGroup struct {
 	Visibility  string `json:"visibility"`
 }
 
-// CountRepos returns the total number of projects in the given group using one API call.
+// CountRepos returns the total number of projects using one API call.
+// Mirrors ListPublicProjects: uses /groups/{owner}/projects when owner is set,
+// or /projects for instance-wide listing.
 func (c *GitLabClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
-	encodedOwner := url.PathEscape(owner)
-	urlStr := fmt.Sprintf("%s/groups/%s/projects?per_page=1&include_subgroups=true&with_shared=false", c.baseURL, encodedOwner)
+	visibility := "visibility=public&"
+	if c.token != "" {
+		visibility = ""
+	}
+
+	var urlStr string
+	if owner != "" {
+		encodedOwner := url.PathEscape(owner)
+		urlStr = fmt.Sprintf("%s/groups/%s/projects?%sper_page=1&include_subgroups=true", c.baseURL, encodedOwner, visibility)
+	} else {
+		urlStr = fmt.Sprintf("%s/projects?%sper_page=1", c.baseURL, visibility)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return 0, err
