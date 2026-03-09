@@ -1367,31 +1367,9 @@ func serveFromProviderRepoList(w http.ResponseWriter, r *http.Request, c cache.S
 		return false
 	}
 
-	ttl := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
-
 	allRepos, ok, _ := cache.GetJSON[[]providers.RepoData](r.Context(), c, "provider:repos:"+providerID)
 	if !ok || len(allRepos) == 0 {
-		// In-memory cache cold — try DB (fresh entries only).
-		if db != nil {
-			dbCaches, err := assets.ListRepoCacheByProvider(r.Context(), db, providerID)
-			if err == nil {
-				for _, dc := range dbCaches {
-					if time.Since(dc.SyncedAt) >= ttl {
-						continue
-					}
-					var details providers.RepoDetails
-					if json.Unmarshal([]byte(dc.DetailsJSON), &details) == nil && details.FullPath != "" {
-						allRepos = append(allRepos, details.RepoData)
-					}
-				}
-				if len(allRepos) > 0 {
-					_ = cache.SetJSON(r.Context(), c, "provider:repos:"+providerID, allRepos, ttl)
-				}
-			}
-		}
-		if len(allRepos) == 0 {
-			return false
-		}
+		return false
 	}
 
 	filtered := filterReposByOwner(allRepos, owner)

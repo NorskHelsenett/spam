@@ -21,6 +21,10 @@ const (
 	// maxRepoCacheAge caps how long we skip a full API fetch even if PushedAt
 	// hasn't changed, so dormant repos still get a periodic consistency check.
 	maxRepoCacheAge = 7 * 24 * time.Hour
+	// repoListTTL is the in-memory TTL for the provider repo list. It is kept
+	// long so that the list survives rate-limit periods between sync cycles.
+	// The list is refreshed on every successful sync, not on expiry.
+	repoListTTL = 24 * time.Hour
 )
 
 // WarmCache pre-populates the in-memory cache on startup for all enabled
@@ -173,7 +177,7 @@ func rebuildFromDB(ctx context.Context, db *gorm.DB, c cache.Store, p providerco
 	}
 
 	if len(repoList) > 0 {
-		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, repoList, ttl)
+		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, repoList, repoListTTL)
 	}
 
 	return true
@@ -220,7 +224,7 @@ func warmProvider(ctx context.Context, db *gorm.DB, store *providerconfig.Store,
 
 	// Cache the full repo list for list-page DB-backed fallback.
 	if len(allRepos) > 0 {
-		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, allRepos, ttl)
+		_ = cache.SetJSON(ctx, c, "provider:repos:"+p.ID, allRepos, repoListTTL)
 	}
 
 	log.Printf("cache warmer: syncing %d repos for %s", len(allRepos), p.DisplayName)
