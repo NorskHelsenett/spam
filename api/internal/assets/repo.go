@@ -231,3 +231,17 @@ func FindRepoCommit(ctx context.Context, db *gorm.DB, commitID string) (*RepoCom
 	}
 	return &commit, nil
 }
+
+// FindRepoByCommitSHA looks up a repo via the repo_commits table using the commit hash.
+// Returns the first matching repo if multiple repos share the same commit (e.g. forks).
+func FindRepoByCommitSHA(ctx context.Context, db *gorm.DB, commitSHA string) (*Repo, error) {
+	var repo Repo
+	err := db.WithContext(ctx).
+		Joins("JOIN repo_commits ON repo_commits.repo_id = repos.id").
+		Where("repo_commits.commit_sha = ?", commitSHA).
+		First(&repo).Error
+	if err != nil {
+		return nil, err
+	}
+	return &repo, nil
+}
