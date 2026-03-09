@@ -1,10 +1,11 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { get } from 'svelte/store';
 	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2 } from 'lucide-svelte';
+	import QueueStatus from '$lib/components/QueueStatus.svelte';
 	import { providersState } from '$lib/stores/providersState';
 	import RepoTable from '$lib/components/RepoTable.svelte';
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
@@ -75,9 +76,10 @@
 	let sortColumn = $state<string>('');
 	let sortDirection = $state<'asc' | 'desc'>('asc');
 
-	// Bulk scan state
-	let queueing = $state(false);
-	let queueProgress = $state({ total: 0, errors: [] as string[] });
+	// Bulk scan state — keyed by tab ID so multiple providers can queue concurrently
+	type TabQueueState = { done: boolean; total: number; errors: string[] };
+	let queueStates = $state<Record<string, TabQueueState>>({});
+	const isQueueing = (tab: string) => tab in queueStates && !queueStates[tab].done;
 
 	// Table column definitions
 	const githubColumns = [
@@ -345,8 +347,14 @@
 				page: String(page),
 				page_size: String(pageSize)
 			});
-			if (ghProviderId) {
-				params.set('provider_id', ghProviderId);
+			// Use explicit provider_id, or resolve from managed providers so the
+			// request hits the cache instead of the live GitHub API.
+			const resolvedProviderId = ghProviderId ??
+				(managedProvidersEnabled
+					? (customProviders.find(p => p.type === 'github' && (!p.ownerPath || p.ownerPath === owner))?.id ?? null)
+					: null);
+			if (resolvedProviderId) {
+				params.set('provider_id', resolvedProviderId);
 			}
 			if (sortColumn) {
 				params.set('sort', sortColumn);
@@ -693,7 +701,8 @@
 		goto(`/app/providers/repo?${params}`);
 	};
 
-	// Trigger SBOM scan for all repos (including paginated results)
+	// Trigger SBOM scan for all repos (including paginated results).
+	// Streams progress via SSE — the server emits "progress" events per page and a final "done" event.
 	const queueAllRepos = async (
 		provider: string,
 		owner: string,
@@ -702,10 +711,11 @@
 		includeSubgroups: boolean = false,
 		providerId?: string
 	) => {
-		if (queueing) return;
+		const tabId = activeTab;
+		if (isQueueing(tabId)) return;
 
-		queueing = true;
-		queueProgress = { total: 0, errors: [] };
+		queueStates[tabId] = { done: false, total: 0, errors: [] };
+		await tick(); // flush DOM so spinner renders before the fetch starts
 
 		try {
 			const response = await fetch('/api/scan-all', {
@@ -724,23 +734,53 @@
 
 			if (!response.ok) {
 				const text = await response.text();
-				queueProgress.errors = [text || 'Failed to queue repos'];
-			} else {
-				const data = await response.json();
-				queueProgress = {
-					total: data.total_queued,
-					errors: data.errors || []
-				};
+				queueStates[tabId] = { ...queueStates[tabId], errors: [text || 'Failed to queue repos'] };
+			} else if (response.body) {
+				// Read the SSE stream line by line.
+				const reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = '';
+
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					const parts = buffer.split('\n\n');
+					buffer = parts.pop() ?? '';
+
+					for (const part of parts) {
+						let eventType = '';
+						let dataStr = '';
+						for (const line of part.trim().split('\n')) {
+							if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+							else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+						}
+						if (!dataStr) continue;
+						try {
+							const data = JSON.parse(dataStr);
+							if (eventType === 'progress') {
+								queueStates[tabId] = { ...queueStates[tabId], total: data.queued };
+							} else if (eventType === 'done') {
+								queueStates[tabId] = { ...queueStates[tabId], total: data.total_queued, errors: data.errors || [] };
+							}
+						} catch {
+							// ignore malformed events
+						}
+					}
+				}
 			}
 		} catch (err) {
-			queueProgress.errors = [err instanceof Error ? err.message : 'Failed to queue repos'];
+			queueStates[tabId] = { ...queueStates[tabId], errors: [err instanceof Error ? err.message : 'Failed to queue repos'] };
 		}
 
-		// Auto-dismiss after 5 seconds if no errors
-		if (queueProgress.errors.length === 0) {
+		queueStates[tabId] = { ...queueStates[tabId], done: true };
+
+		// Auto-dismiss after 10 seconds if no errors
+		if (queueStates[tabId].errors.length === 0) {
 			setTimeout(() => {
-				queueing = false;
-			}, 5000);
+				delete queueStates[tabId];
+			}, 10000);
 		}
 	};
 
@@ -928,39 +968,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos('github', ghOwner, '', undefined, false)}
-						disabled={queueing || !ghOwner.trim()}
+						disabled={isQueueing('github') || !ghOwner.trim()}
 						title="Queue SBOM generation for all repositories from {ghOwner}"
 					>
-						{queueing ? 'Queueing...' : 'Queue All'}
+						{isQueueing('github') ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && activeTab === 'github'}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">
-								{#if queueProgress.total > 0}
-									Added {queueProgress.total} {queueProgress.total === 1 ? 'repository' : 'repositories'} to queue
-								{:else}
-									Adding repositories to queue...
-								{/if}
-							</span>
-							{#if queueProgress.total > 0}
-								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if 'github' in queueStates}
+					<QueueStatus state={queueStates['github']} singular="repository" plural="repositories" />
 				{/if}
 
 				{#if ghError}
@@ -1009,39 +1025,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
-						disabled={queueing || !glGroup.trim()}
+						disabled={isQueueing('gitlab') || !glGroup.trim()}
 						title="Queue SBOM generation for all projects from {glGroup}"
 					>
-						{queueing ? 'Queueing...' : 'Queue All'}
+						{isQueueing('gitlab') ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && activeTab === 'gitlab'}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">
-								{#if queueProgress.total > 0}
-									Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue
-								{:else}
-									Adding projects to queue...
-								{/if}
-							</span>
-							{#if queueProgress.total > 0}
-								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if 'gitlab' in queueStates}
+					<QueueStatus state={queueStates['gitlab']} singular="project" plural="projects" />
 				{/if}
 
 				{#if glGroupPath.length > 0}
@@ -1171,39 +1163,15 @@
 							type="button"
 							class="btn btn-primary"
 							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
-							disabled={queueing || !provider.ownerPath}
+						disabled={isQueueing(provider.id) || !provider.ownerPath}
 							title="Queue SBOM generation for all projects from {provider.name}"
 						>
-							{queueing ? 'Queueing...' : 'Queue All'}
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
 						</button>
 					</div>
 
-					{#if queueing && activeTab === provider.id}
-						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-							<div class="flex items-center justify-between text-sm">
-								<span class="text-[var(--text-secondary)]">
-									{#if queueProgress.total > 0}
-										Added {queueProgress.total} {queueProgress.total === 1 ? 'repo' : 'repos'} to queue
-									{:else}
-										Adding repos to queue...
-									{/if}
-								</span>
-								{#if queueProgress.total > 0}
-									<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
-								{/if}
-							</div>
-							{#if queueProgress.errors.length > 0}
-								<div class="mt-3 space-y-1">
-									<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-									{#each queueProgress.errors.slice(0, 5) as error}
-										<p class="text-xs text-[var(--error)]">{error}</p>
-									{/each}
-									{#if queueProgress.errors.length > 5}
-										<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-									{/if}
-								</div>
-							{/if}
-						</div>
+					{#if provider.id in queueStates}
+						<QueueStatus state={queueStates[provider.id]} singular="repo" plural="repos" />
 					{/if}
 
 					{#if !provider.ownerPath}
@@ -1254,39 +1222,15 @@
 						type="button"
 						class="btn btn-primary"
 						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
-						disabled={queueing}
+						disabled={isQueueing(provider.id)}
 						title="Queue SBOM generation for all projects from {provider.name}"
 					>
-						{queueing ? 'Queueing...' : 'Queue All'}
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
 					</button>
 				</div>
 
-				{#if queueing && activeTab === provider.id}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-						<div class="flex items-center justify-between text-sm">
-							<span class="text-[var(--text-secondary)]">
-								{#if queueProgress.total > 0}
-									Added {queueProgress.total} {queueProgress.total === 1 ? 'project' : 'projects'} to queue
-								{:else}
-									Adding projects to queue...
-								{/if}
-							</span>
-							{#if queueProgress.total > 0}
-								<span class="font-medium text-[var(--accent)]">{queueProgress.total}</span>
-							{/if}
-						</div>
-						{#if queueProgress.errors.length > 0}
-							<div class="mt-3 space-y-1">
-								<p class="text-xs font-medium text-[var(--error)]">{queueProgress.errors.length} errors:</p>
-								{#each queueProgress.errors.slice(0, 5) as error}
-									<p class="text-xs text-[var(--error)]">{error}</p>
-								{/each}
-								{#if queueProgress.errors.length > 5}
-									<p class="text-xs text-[var(--text-muted)]">... and {queueProgress.errors.length - 5} more</p>
-								{/if}
-							</div>
-						{/if}
-					</div>
+				{#if provider.id in queueStates}
+					<QueueStatus state={queueStates[provider.id]} singular="project" plural="projects" />
 				{/if}
 
 				{#if cpGroupPath.length > 0}

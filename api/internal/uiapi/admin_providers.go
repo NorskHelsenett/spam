@@ -2,13 +2,13 @@ package uiapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
-	"github.com/NorskHelsenett/spam/internal/poller"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
-	"gorm.io/gorm"
 )
 
 type createProviderRequest struct {
@@ -139,7 +139,9 @@ func AdminProvidersCreateHandler(authService *auth.Service, store *providerconfi
 	}
 }
 
-func AdminProvidersSyncHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+// AdminProvidersSyncHandler starts a background sync and returns 202 immediately.
+// Returns 409 if a sync is already running for that provider.
+func AdminProvidersSyncHandler(authService *auth.Service, store *providerconfig.Store, mgr *SyncManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if adminProviderGuard(w, r, authService, store) == nil {
 			return
@@ -150,14 +152,24 @@ func AdminProvidersSyncHandler(db *gorm.DB, authService *auth.Service, store *pr
 			return
 		}
 
-		syncer := poller.New(db, store)
-		result, err := syncer.SyncProvider(r.Context(), providerID)
-		if err != nil {
-			http.Error(w, "failed to sync provider", http.StatusInternalServerError)
+		started, state := mgr.StartSync(providerID)
+		if !started {
+			writeJSON(w, http.StatusConflict, state)
 			return
 		}
 
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(w, http.StatusAccepted, state)
+	}
+}
+
+// AdminProvidersSyncStatusHandler returns the current sync state for all providers.
+// Used on page load to restore sync state when navigating back to the settings page.
+func AdminProvidersSyncStatusHandler(authService *auth.Service, store *providerconfig.Store, mgr *SyncManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if adminProviderGuard(w, r, authService, store) == nil {
+			return
+		}
+		writeJSON(w, http.StatusOK, mgr.GetAllStatuses())
 	}
 }
 
@@ -220,7 +232,7 @@ func AdminProvidersRotateHandler(authService *auth.Service, store *providerconfi
 	}
 }
 
-func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
+func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfig.Store, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if adminProviderGuard(w, r, authService, store) == nil {
 			return
@@ -231,10 +243,18 @@ func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfi
 			return
 		}
 
-		if err := store.Delete(r.Context(), providerID); err != nil {
+		deletedRepoIDs, err := store.Delete(r.Context(), providerID)
+		if err != nil {
 			http.Error(w, "failed to delete provider", http.StatusInternalServerError)
 			return
 		}
+
+		// Evict per-repo cache entries.
+		for _, repoID := range deletedRepoIDs {
+			_ = c.Delete(r.Context(), fmt.Sprintf("contributors:%s", repoID))
+		}
+		// Evict aggregate caches that include provider data.
+		_ = c.Delete(r.Context(), "app:summary")
 
 		w.WriteHeader(http.StatusNoContent)
 	}

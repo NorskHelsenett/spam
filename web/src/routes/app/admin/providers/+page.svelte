@@ -3,9 +3,11 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, RefreshCw, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown } from 'lucide-svelte';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -44,6 +46,7 @@
 	let formError = $state('');
 	let error = $state('');
 	let loading = $state(true);
+	let refreshing = $state(false);
 	let saving = $state(false);
 	let rotatePat = $state('');
 	let rotateDialogOpen = $state(false);
@@ -53,7 +56,7 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
-	let syncingProviderIds = $state<Set<string>>(new Set());
+	const syncStates = providerSyncStates;
 	let healthTooltip = $state<{
 		entryId: string;
 		message: string;
@@ -78,12 +81,6 @@
 		created_at: string;
 		updated_at?: string;
 		last_rotated_at?: string;
-	};
-
-	type ProviderSyncResponse = {
-		provider_id: string;
-		health_status: string;
-		health_message?: string;
 	};
 
 	const detectTypeFromHost = (host: string): ProviderType | undefined => {
@@ -261,6 +258,7 @@
 
 	const loadProviders = async () => {
 		loading = true;
+		refreshing = true;
 		error = '';
 		try {
 			const response = await fetch('/api/admin/providers', {
@@ -277,6 +275,7 @@
 			error = 'Failed to load providers.';
 		} finally {
 			loading = false;
+			setTimeout(() => { refreshing = false; }, 1000);
 		}
 	};
 
@@ -445,35 +444,38 @@
 		}
 	};
 
+	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
+
+	const refreshSyncStatuses = async () => {
+		try {
+			const response = await fetch('/api/admin/providers/sync/status', { credentials: 'include' });
+			if (!response.ok) return;
+			const data = await response.json();
+			initSyncStates(data);
+		} catch {
+			// Ignore transient sync status refresh errors.
+		}
+	};
+
 	const syncProviderNow = async (entry: ProviderRow) => {
-		if (syncingProviderIds.has(entry.id)) return;
-		syncingProviderIds = new Set(syncingProviderIds).add(entry.id);
+		if (isSyncing(entry.id)) return;
 		formError = '';
 		try {
 			const response = await fetch(`/api/admin/providers/${entry.id}/sync`, {
 				method: 'POST',
 				credentials: 'include'
 			});
-			if (!response.ok) {
-				formError = 'Failed to sync provider.';
+			// 202 = started, 409 = already running — both include current state.
+			if (response.ok || response.status === 409) {
+				const state = await response.json();
+				updateSyncState(state);
 				return;
 			}
-			const synced: ProviderSyncResponse = await response.json();
-			providers = providers.map((provider) => {
-				if (provider.id !== entry.id) return provider;
-				return {
-					...provider,
-					healthStatus: synced.health_status || provider.healthStatus,
-					healthMessage: synced.health_message || '',
-					lastHealthCheck: new Date().toISOString()
-				};
-			});
+			if (!response.ok) {
+				formError = 'Failed to sync provider.';
+			}
 		} catch {
 			formError = 'Failed to sync provider.';
-		} finally {
-			const next = new Set(syncingProviderIds);
-			next.delete(entry.id);
-			syncingProviderIds = next;
 		}
 	};
 
@@ -545,6 +547,9 @@
 			loadProviders();
 			updatePreview();
 
+			// Restore sync states for any in-progress syncs (e.g. after navigating away and back).
+			refreshSyncStatuses();
+
 			const closeTooltip = () => {
 				healthTooltip = null;
 			};
@@ -557,6 +562,7 @@
 			};
 		}
 	});
+
 </script>
 
 <svelte:head>
@@ -575,11 +581,13 @@
 			<div class="flex flex-wrap items-center gap-2">
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				class="btn btn-ghost"
 				onclick={loadProviders}
-				disabled={loading}
+				disabled={refreshing}
 			>
-				<RefreshCw size={16} />
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
 				Refresh
 			</button>
 			</div>
@@ -819,11 +827,11 @@
 										<button
 											type="button"
 											class="sync-now-btn rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											class:syncing={syncingProviderIds.has(entry.id)}
+											class:syncing={isSyncing(entry.id)}
 											onclick={() => syncProviderNow(entry)}
-											disabled={saving || syncingProviderIds.has(entry.id)}
+											disabled={saving || isSyncing(entry.id)}
 										>
-											{#if syncingProviderIds.has(entry.id)}
+											{#if isSyncing(entry.id)}
 												<span class="sync-label syncing-text" data-text="Syncing...">Syncing...</span>
 											{:else}
 												<span class="sync-label">Sync Now</span>

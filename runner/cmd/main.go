@@ -256,7 +256,7 @@ func (r *Runner) runPipeline() int {
 	r.log(fmt.Sprintf("Cloning %s...", r.repoCloneURL))
 	if r.repoCommitSHA != "" {
 		// Pinned-commit mode: clone without --depth=1, then checkout exact SHA
-		cloneArgs := []string{"clone", "--no-tags"}
+		cloneArgs := []string{"clone", "-c", "credential.helper=", "--no-tags"}
 		if r.repoRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
 		}
@@ -274,7 +274,7 @@ func (r *Runner) runPipeline() int {
 		}
 	} else {
 		// Standard shallow clone
-		cloneArgs := []string{"clone", "--depth=1"}
+		cloneArgs := []string{"clone", "-c", "credential.helper=", "--depth=1"}
 		if r.repoRef != "" {
 			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
 		}
@@ -364,8 +364,8 @@ func (r *Runner) runPipeline() int {
 		if _, err := os.Stat(manifestsPath); err == nil {
 			r.log("Uploading dependency manifests...")
 			if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
-				r.log(fmt.Sprintf("Warning: failed to upload manifests: %v", err))
-				// Not fatal - continue
+				r.log(fmt.Sprintf("Failed to upload manifests: %v", err))
+				return 1
 			}
 		}
 	} else {
@@ -547,11 +547,14 @@ func (r *Runner) findCsprojFiles() []string {
 func (r *Runner) findDependencyManifests() []string {
 	var manifests []string
 
-	// Patterns for dependency manifest files
+	// Patterns for dependency manifest files.
+	// We intentionally collect broadly so manifests are available for search and
+	// incremental parser improvements even when dependency extraction is partial.
 	patterns := []string{
 		"*.csproj", "packages.config", "*.fsproj", "*.vbproj", // .NET
 		"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", // Node.js
-		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", "gradle.properties", "settings.gradle", "settings.gradle.kts", "build.sbt", "project/build.properties", "project/plugins.sbt", // Java/Kotlin/Scala
+		"bun.lock", "bun.lockb", // Bun
+		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", "gradle.properties", "settings.gradle", "settings.gradle.kts", "libs.versions.toml", "build.sbt", "project/build.properties", "project/plugins.sbt", // Java/Kotlin/Scala
 		"requirements.txt", "Pipfile", "Pipfile.lock", "poetry.lock", "pyproject.toml", // Python
 		"go.mod", "go.sum", // Go
 		"Cargo.toml", "Cargo.lock", // Rust

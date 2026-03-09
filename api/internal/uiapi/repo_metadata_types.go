@@ -14,16 +14,18 @@ type RepoMetadataResponse struct {
 }
 
 type RepoMetadataRepo struct {
-	ID            string `json:"id"`
-	Provider      string `json:"provider"`
-	Org           string `json:"org"`
-	Slug          string `json:"slug"`
-	URL           string `json:"url,omitempty"`
-	DefaultBranch string `json:"default_branch,omitempty"`
-	IsPrivate     bool   `json:"is_private,omitempty"`
-	IsArchived    bool   `json:"is_archived,omitempty"`
-	Language      string `json:"language,omitempty"`
-	UpdatedAt     string `json:"updated_at,omitempty"`
+	ID              string `json:"id"`
+	Provider        string `json:"provider,omitempty"`
+	ProviderID      string `json:"provider_id,omitempty"`
+	ProviderBaseURL string `json:"provider_base_url,omitempty"`
+	Org             string `json:"org"`
+	Slug           string `json:"slug"`
+	URL            string `json:"url,omitempty"`
+	DefaultBranch  string `json:"default_branch,omitempty"`
+	IsPrivate      bool   `json:"is_private,omitempty"`
+	IsArchived     bool   `json:"is_archived,omitempty"`
+	Language       string `json:"language,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
 }
 
 type RepoMetadataCommit struct {

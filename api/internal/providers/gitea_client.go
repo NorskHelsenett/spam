@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,95 @@ func (c *GiteaClientImpl) ProviderType() string {
 	return "gitea"
 }
 
+// giteaContributor is the Gitea API contributor shape.
+type giteaContributor struct {
+	Login         string `json:"login"`
+	FullName      string `json:"full_name"`
+	Email         string `json:"email"`
+	AvatarURL     string `json:"avatar_url"`
+	HTMLURL       string `json:"html_url"`
+	Contributions int    `json:"contributions"`
+}
+
+// GetContributors returns top contributors for the given owner/repo.
+func (c *GiteaClientImpl) GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	parts := strings.SplitN(repoPath, "/", 2)
+	if len(parts) != 2 {
+		return nil, ErrInvalidResponse
+	}
+	// Infer contributors from commit authors (Gitea has no contributors endpoint on this instance).
+	return c.inferContributorsFromCommits(ctx, parts[0], parts[1], limit)
+}
+
+func (c *GiteaClientImpl) inferContributorsFromCommits(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
+	commits, err := c.GetCommitLog(ctx, owner, repo, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	byKey := make(map[string]*ContributorInfo)
+	for _, cm := range commits {
+		email := strings.TrimSpace(cm.AuthorEmail)
+		name := strings.TrimSpace(cm.AuthorName)
+		login := strings.TrimSpace(cm.AuthorLogin)
+		if email == "" && name == "" && login == "" {
+			continue
+		}
+
+		key := strings.ToLower(login)
+		if key == "" {
+			key = strings.ToLower(email)
+		}
+		if key == "" {
+			key = strings.ToLower(name)
+		}
+
+		entry, ok := byKey[key]
+		if !ok {
+			entry = &ContributorInfo{
+				Login:     login,
+				Name:      name,
+				Email:     email,
+				AvatarURL: cm.AuthorAvatar,
+			}
+			byKey[key] = entry
+		}
+
+		if entry.Login == "" && login != "" {
+			entry.Login = login
+		}
+		if entry.Name == "" && name != "" {
+			entry.Name = name
+		}
+		if entry.Email == "" && email != "" {
+			entry.Email = email
+		}
+		if entry.AvatarURL == "" && cm.AuthorAvatar != "" {
+			entry.AvatarURL = cm.AuthorAvatar
+		}
+		entry.Contributions++
+	}
+
+	out := make([]ContributorInfo, 0, len(byKey))
+	for _, v := range byKey {
+		out = append(out, *v)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Contributions == out[j].Contributions {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Contributions > out[j].Contributions
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
 // giteaRepo represents a repository from the Gitea API.
 type giteaRepo struct {
 	ID            int64     `json:"id"`
@@ -55,6 +145,7 @@ type giteaRepo struct {
 	Private       bool      `json:"private"`
 	Fork          bool      `json:"fork"`
 	Archived      bool      `json:"archived"`
+	Empty         bool      `json:"empty"`
 	Language      string    `json:"language"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`
@@ -68,6 +159,46 @@ type giteaOrg struct {
 	Description string `json:"description"`
 	Website     string `json:"website"`
 	AvatarURL   string `json:"avatar_url"`
+}
+
+// CountRepos returns the total number of repos for the given owner using one API call.
+func (c *GiteaClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
+	var urlStr string
+	if owner != "" {
+		urlStr = fmt.Sprintf("%s/orgs/%s/repos?page=1&limit=1", c.baseURL, url.PathEscape(owner))
+	} else {
+		urlStr = fmt.Sprintf("%s/repos/search?page=1&limit=1", c.baseURL)
+	}
+	count, err := c.countFromURL(ctx, urlStr)
+	if err == ErrNotFound && owner != "" {
+		// Try as user instead
+		count, err = c.countFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?page=1&limit=1", c.baseURL, url.PathEscape(owner)))
+	}
+	return count, err
+}
+
+func (c *GiteaClientImpl) countFromURL(ctx context.Context, urlStr string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "token "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := c.checkResponse(resp); err != nil {
+		return 0, err
+	}
+	if total := resp.Header.Get("X-Total-Count"); total != "" {
+		if count, err := strconv.Atoi(total); err == nil {
+			return count, nil
+		}
+	}
+	return 0, nil
 }
 
 // ListPublicRepos lists public repositories for an organization.
@@ -151,6 +282,7 @@ func (c *GiteaClientImpl) ListPublicRepos(ctx context.Context, owner string, opt
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
+			IsEmpty:       r.Empty,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,
 			PushedAt:      r.UpdatedAt,
@@ -207,6 +339,7 @@ func (c *GiteaClientImpl) listUserRepos(ctx context.Context, username string, op
 			IsPrivate:     r.Private,
 			IsArchived:    r.Archived,
 			IsFork:        r.Fork,
+			IsEmpty:       r.Empty,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,
 			PushedAt:      r.UpdatedAt,
@@ -420,6 +553,9 @@ func (c *GiteaClientImpl) GetRepoDetails(ctx context.Context, owner, repo string
 	stats.Commits = c.getCommitCount(ctx, owner, repo)
 	stats.Branches = c.getBranchCount(ctx, owner, repo)
 	stats.Releases = c.getReleaseCount(ctx, owner, repo)
+	// Contributor count is derived from commit-author inference in GetContributors.
+	// Keep 0 here and let API handlers fill from the fetched contributor list.
+	stats.Contributors = 0
 
 	return &RepoDetails{
 		RepoData: RepoData{
@@ -454,6 +590,11 @@ func (c *GiteaClientImpl) getBranchCount(ctx context.Context, owner, repo string
 
 func (c *GiteaClientImpl) getReleaseCount(ctx context.Context, owner, repo string) int {
 	urlStr := fmt.Sprintf("%s/repos/%s/%s/releases?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
+	return c.getCountFromHeader(ctx, urlStr)
+}
+
+func (c *GiteaClientImpl) getContributorCount(ctx context.Context, owner, repo string) int {
+	urlStr := fmt.Sprintf("%s/repos/%s/%s/contributors?limit=1", c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
 	return c.getCountFromHeader(ctx, urlStr)
 }
 
@@ -569,114 +710,6 @@ func (c *GiteaClientImpl) GetCommitLog(ctx context.Context, owner, repo string, 
 	}
 
 	return commits, nil
-}
-
-// GetContributors fetches contributors for a repository.
-// Falls back to extracting unique authors from recent commits if the contributors endpoint is unavailable.
-func (c *GiteaClientImpl) GetContributors(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
-	if limit <= 0 {
-		limit = 30
-	}
-
-	// Try the activity/contributors endpoint (available in newer Gitea/Forgejo)
-	urlStr := fmt.Sprintf("%s/repos/%s/%s/contributors",
-		c.baseURL, url.PathEscape(owner), url.PathEscape(repo))
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.token != "" {
-		req.Header.Set("Authorization", "token "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err == nil {
-		defer resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			body, err := io.ReadAll(resp.Body)
-			if err == nil {
-				var giteaContribs []struct {
-					Login         string `json:"login"`
-					AvatarURL     string `json:"avatar_url"`
-					HTMLURL       string `json:"html_url"`
-					Contributions int    `json:"contributions"`
-					Name          string `json:"name"`
-					Email         string `json:"email"`
-				}
-				if json.Unmarshal(body, &giteaContribs) == nil && len(giteaContribs) > 0 {
-					result := make([]ContributorInfo, 0, len(giteaContribs))
-					for _, c := range giteaContribs {
-						if len(result) >= limit {
-							break
-						}
-						result = append(result, ContributorInfo{
-							Login:         c.Login,
-							Name:          c.Name,
-							Email:         c.Email,
-							AvatarURL:     c.AvatarURL,
-							ProfileURL:    c.HTMLURL,
-							Contributions: c.Contributions,
-						})
-					}
-					return result, nil
-				}
-			}
-		}
-	}
-
-	// Fallback: extract unique authors from recent commits
-	return c.contributorsFromCommits(ctx, owner, repo, limit)
-}
-
-// contributorsFromCommits builds a contributors list from recent commit authors.
-func (c *GiteaClientImpl) contributorsFromCommits(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
-	commits, err := c.GetCommitLog(ctx, owner, repo, 100)
-	if err != nil {
-		return nil, err
-	}
-
-	type authorKey struct{ name, email string }
-	counts := make(map[authorKey]*ContributorInfo)
-	var order []authorKey
-
-	for _, cm := range commits {
-		email := strings.ToLower(strings.TrimSpace(cm.AuthorEmail))
-		key := authorKey{cm.AuthorName, email}
-		if existing, ok := counts[key]; ok {
-			existing.Contributions++
-		} else {
-			counts[key] = &ContributorInfo{
-				Login:         cm.AuthorLogin,
-				Name:          cm.AuthorName,
-				Email:         email,
-				AvatarURL:     cm.AuthorAvatar,
-				Contributions: 1,
-			}
-			order = append(order, key)
-		}
-	}
-
-	result := make([]ContributorInfo, 0, len(order))
-	for _, key := range order {
-		result = append(result, *counts[key])
-	}
-
-	// Sort by contributions descending
-	for i := 0; i < len(result)-1; i++ {
-		for j := i + 1; j < len(result); j++ {
-			if result[j].Contributions > result[i].Contributions {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
-
-	if len(result) > limit {
-		result = result[:limit]
-	}
-
-	return result, nil
 }
 
 // GetReadme fetches the README content for a repository.

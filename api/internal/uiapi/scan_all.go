@@ -36,8 +36,8 @@ type ScanAllResponse struct {
 }
 
 // ScanAllHandler handles queueing SBOM generation jobs for all repos in a provider/owner/group.
-// POST /api/scan-all
-func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// POST /api/scan-all — streams progress via SSE (event: progress / event: done).
+func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfig.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAdmin(w, r, authService) == nil {
 			return
@@ -54,76 +54,104 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		ctx := r.Context()
-		var totalQueued int
-		var errors []string
+		// Resolve token and display name while still within the request context.
+		token := ""
+		label := req.Provider
+		if store != nil && req.ProviderID != "" {
+			if t, err := store.GetActiveToken(r.Context(), req.ProviderID); err == nil {
+				token = t
+			}
+			if provs, err := store.ListAdmin(r.Context()); err == nil {
+				for _, p := range provs {
+					if p.ID == req.ProviderID {
+						label = p.DisplayName
+						break
+					}
+				}
+			}
+		}
 
-		switch req.Provider {
-		case "github":
-			totalQueued, errors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID)
-		case "gitlab":
-			totalQueued, errors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID)
-		case "gitea", "forgejo":
-			totalQueued, errors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID)
-		default:
-			http.Error(w, fmt.Sprintf("unsupported provider: %s", req.Provider), http.StatusBadRequest)
+		// Set SSE headers — no timeout middleware on this route.
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
 
-		writeJSON(w, http.StatusOK, ScanAllResponse{
-			TotalQueued: totalQueued,
-			Errors:      errors,
-		})
+		// onProgress is called after each page is fetched and queued.
+		// It must only be called from the scan functions' main loop (not goroutines).
+		onProgress := func(totalQueued int) {
+			data, _ := json.Marshal(map[string]int{"queued": totalQueued})
+			fmt.Fprintf(w, "event: progress\ndata: %s\n\n", data)
+			flusher.Flush()
+		}
+
+		ctx := r.Context()
+		var totalQueued int
+		var allErrors []string
+
+		switch req.Provider {
+		case "github":
+			totalQueued, allErrors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID, token, label, onProgress)
+		case "gitlab":
+			totalQueued, allErrors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID, token, label, onProgress)
+		case "gitea", "forgejo":
+			totalQueued, allErrors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID, token, label, onProgress)
+		}
+
+		// Send done event with final totals.
+		doneData, _ := json.Marshal(ScanAllResponse{TotalQueued: totalQueued, Errors: allErrors})
+		fmt.Fprintf(w, "event: done\ndata: %s\n\n", doneData)
+		flusher.Flush()
 	}
 }
 
-// scanAllGitHub fetches all GitHub repos and queues them for scanning.
-func scanAllGitHub(ctx context.Context, db *gorm.DB, owner string, providerID string) (int, []string) {
+// scanAllGitHub fetches all GitHub repos page-by-page and queues them for scanning.
+func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, providerID, token, label string, onProgress func(int)) (int, []string) {
 	if owner == "" {
 		return 0, []string{"owner is required"}
 	}
 
-	client := providers.NewGitHubClient("", "")
-	var allRepos []providers.RepoData
-	var errors []string
-
+	client := providers.NewGitHubClient("", token)
+	var allErrors []string
+	var totalQueued int
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, owner, providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
 		})
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
+			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
-		allRepos = append(allRepos, repos...)
-
+		totalQueued += queueRepos(ctx, db, repos, "github", "", providerID, label, &allErrors)
+		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all repos
-	queued := queueRepos(ctx, db, allRepos, "github", "", providerID, &errors)
-	return queued, errors
+	log.Printf("Queued %d repos for %s scanning", totalQueued, label)
+	return totalQueued, allErrors
 }
 
-// scanAllGitLab fetches all GitLab projects and queues them for scanning.
-func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL string, includeSubgroups bool, providerID string) (int, []string) {
-	client := providers.NewGitLabClient(baseURL, "")
-	var allProjects []providers.RepoData
-	var errors []string
-
+// scanAllGitLab fetches all GitLab projects page-by-page and queues them for scanning.
+func scanAllGitLab(ctx context.Context, db *gorm.DB, group, baseURL string, includeSubgroups bool, providerID, token, label string, onProgress func(int)) (int, []string) {
+	client := providers.NewGitLabClient(baseURL, token)
+	var allErrors []string
+	var totalQueued int
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		projects, pageInfo, err := client.ListPublicProjects(ctx, group, providers.ListOptions{
 			Page:             page,
@@ -131,62 +159,56 @@ func scanAllGitLab(ctx context.Context, db *gorm.DB, group string, baseURL strin
 			IncludeSubgroups: includeSubgroups,
 		})
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
+			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
-		allProjects = append(allProjects, projects...)
-
+		totalQueued += queueRepos(ctx, db, projects, "gitlab", baseURL, providerID, label, &allErrors)
+		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all projects
-	queued := queueRepos(ctx, db, allProjects, "gitlab", baseURL, providerID, &errors)
-	return queued, errors
+	log.Printf("Queued %d projects for %s scanning", totalQueued, label)
+	return totalQueued, allErrors
 }
 
-// scanAllGitea fetches all Gitea/Forgejo repos and queues them for scanning.
-func scanAllGitea(ctx context.Context, db *gorm.DB, owner string, baseURL string, providerID string) (int, []string) {
+// scanAllGitea fetches all Gitea/Forgejo repos page-by-page and queues them for scanning.
+func scanAllGitea(ctx context.Context, db *gorm.DB, owner, baseURL, providerID, token, label string, onProgress func(int)) (int, []string) {
 	if baseURL == "" {
 		return 0, []string{"base_url is required for Gitea/Forgejo"}
 	}
 
-	client := providers.NewGiteaClient(baseURL, "")
-	var allRepos []providers.RepoData
-	var errors []string
-
+	client := providers.NewGiteaClient(baseURL, token)
+	var allErrors []string
+	var totalQueued int
 	page := 1
 	const pageSize = 100
 
-	// Fetch all pages
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, owner, providers.ListOptions{
 			Page:     page,
 			PageSize: pageSize,
 		})
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
+			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-
-		allRepos = append(allRepos, repos...)
-
+		totalQueued += queueRepos(ctx, db, repos, "gitea", baseURL, providerID, label, &allErrors)
+		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
 		}
 		page++
 	}
 
-	// Queue all repos
-	queued := queueRepos(ctx, db, allRepos, "gitea", baseURL, providerID, &errors)
-	return queued, errors
+	log.Printf("Queued %d repos for %s scanning", totalQueued, label)
+	return totalQueued, allErrors
 }
 
 // queueRepos creates jobs for all repos in parallel batches.
-func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, errors *[]string) int {
+func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, label string, errors *[]string) int {
 	const batchSize = 10
 	var mu sync.Mutex
 	var queued int
@@ -204,7 +226,7 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 			wg.Add(1)
 			go func(r providers.RepoData) {
 				defer wg.Done()
-				if r.IsDisabled {
+				if r.IsDisabled || r.IsEmpty || r.DefaultBranch == "" {
 					return
 				}
 
@@ -217,31 +239,36 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 					return
 				}
 
+				// Resolve provider instance ID before upserting the repo
+				resolvedProviderID := providerID
+				if resolvedProviderID == "" {
+					if match, err := providerconfig.FindProviderMatch(ctx, db, provider, baseURL, r.FullPath); err == nil && match != nil {
+						resolvedProviderID = match.ID
+					}
+				}
+
 				// Upsert repo
+				fullPath := strings.Trim(r.FullPath, "/")
+				lastSlash := strings.LastIndex(fullPath, "/")
 				org := ""
-				slug := r.FullPath
-				if parts := strings.Split(r.FullPath, "/"); len(parts) > 1 {
-					org = parts[0]
-					slug = parts[len(parts)-1]
+				slug := fullPath
+				if lastSlash >= 0 {
+					org = fullPath[:lastSlash]
+					slug = fullPath[lastSlash+1:]
 				}
 
 				repoRecord, err := assets.UpsertRepo(ctx, db, assets.RepoInput{
-					Provider: provider,
-					Org:      org,
-					Slug:     slug,
+					Provider:           provider,
+					Org:                org,
+					Slug:               slug,
+					ExternalID:         r.ExternalID,
+					ProviderInstanceID: resolvedProviderID,
 				})
 				if err != nil {
 					mu.Lock()
 					*errors = append(*errors, fmt.Sprintf("%s: %v", r.Name, err))
 					mu.Unlock()
 					return
-				}
-
-				resolvedProviderID := providerID
-				if resolvedProviderID == "" {
-					if match, err := providerconfig.FindProviderMatch(ctx, db, provider, baseURL, r.FullPath); err == nil && match != nil {
-						resolvedProviderID = match.ID
-					}
 				}
 
 				// Create job payload
@@ -293,6 +320,6 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 		wg.Wait()
 	}
 
-	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), provider)
+	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), label)
 	return queued
 }

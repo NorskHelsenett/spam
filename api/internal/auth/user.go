@@ -16,6 +16,7 @@ type User struct {
 	Name             string `gorm:"size:255"`
 	ApprovedAt       *time.Time
 	ApprovedByUserID *string    `gorm:"size:36"`
+	HiddenAt         *time.Time
 	LastLoginAt      *time.Time `gorm:"index"`
 	CreatedAt        time.Time
 	UpdatedAt        time.Time

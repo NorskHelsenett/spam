@@ -15,6 +15,7 @@ type RepoData struct {
 	IsArchived    bool      `json:"is_archived"`
 	IsDisabled    bool      `json:"is_disabled"`
 	IsFork        bool      `json:"is_fork"`
+	IsEmpty       bool      `json:"is_empty"`
 	Topics        []string  `json:"topics"`
 	CreatedAt     time.Time `json:"created_at"`
 	UpdatedAt     time.Time `json:"updated_at"`

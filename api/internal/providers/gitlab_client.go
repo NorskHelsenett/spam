@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,6 +54,69 @@ func (c *GitLabClientImpl) ProviderType() string {
 	return "gitlab"
 }
 
+// gitLabContributor is the GitLab repository contributor API shape.
+type gitLabContributor struct {
+	Name    string `json:"name"`
+	Email   string `json:"email"`
+	Commits int    `json:"commits"`
+}
+
+// GetContributors returns top contributors from the GitLab repository/contributors API.
+// Avatars are derived from email via Gravatar since GitLab's contributors endpoint
+// does not return avatar URLs.
+func (c *GitLabClientImpl) GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	encoded := url.PathEscape(repoPath)
+	apiURL := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=%d&order_by=commits&sort=desc", c.baseURL, encoded, limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, ErrInvalidResponse
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []gitLabContributor
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+
+	out := make([]ContributorInfo, 0, len(raw))
+	for _, r := range raw {
+		hash := fmt.Sprintf("%x", md5sum(strings.ToLower(strings.TrimSpace(r.Email))))
+		out = append(out, ContributorInfo{
+			Name:          r.Name,
+			Email:         r.Email,
+			AvatarURL:     "https://www.gravatar.com/avatar/" + hash + "?d=identicon&s=80",
+			Contributions: r.Commits,
+		})
+	}
+	return out, nil
+}
+
+func md5sum(s string) []byte {
+	h := md5.New()
+	h.Write([]byte(s))
+	return h.Sum(nil)
+}
+
 // gitLabProject represents a project from the GitLab API.
 type gitLabProject struct {
 	ID                int64     `json:"id"`
@@ -64,6 +128,7 @@ type gitLabProject struct {
 	DefaultBranch     string    `json:"default_branch"`
 	Visibility        string    `json:"visibility"`
 	Archived          bool      `json:"archived"`
+	EmptyRepo         bool      `json:"empty_repo"`
 	ForkedFromProject *struct{} `json:"forked_from_project"` // Non-nil if forked
 	Topics            []string  `json:"topics"`
 	Language          string    `json:"language"`
@@ -81,6 +146,42 @@ type gitLabGroup struct {
 	WebURL      string `json:"web_url"`
 	ParentID    *int64 `json:"parent_id"`
 	Visibility  string `json:"visibility"`
+}
+
+// CountRepos returns the total number of projects using one API call.
+// Mirrors ListPublicProjects: uses /groups/{owner}/projects when owner is set,
+// or /projects for instance-wide listing.
+func (c *GitLabClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
+	visibility := "visibility=public&"
+	if c.token != "" {
+		visibility = ""
+	}
+
+	var urlStr string
+	if owner != "" {
+		encodedOwner := url.PathEscape(owner)
+		urlStr = fmt.Sprintf("%s/groups/%s/projects?%sper_page=1&include_subgroups=true", c.baseURL, encodedOwner, visibility)
+	} else {
+		urlStr = fmt.Sprintf("%s/projects?%sper_page=1", c.baseURL, visibility)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return 0, err
+	}
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := c.checkResponse(resp); err != nil {
+		return 0, err
+	}
+	pi := c.parsePageInfo(resp)
+	return pi.TotalCount, nil
 }
 
 // ListPublicRepos implements Client.ListPublicRepos for GitLab.
@@ -184,6 +285,7 @@ func (c *GitLabClientImpl) ListPublicProjects(ctx context.Context, groupPath str
 			IsPrivate:     p.Visibility != "public",
 			IsArchived:    p.Archived,
 			IsFork:        p.ForkedFromProject != nil,
+			IsEmpty:       p.EmptyRepo,
 			Topics:        p.Topics,
 			CreatedAt:     p.CreatedAt,
 			UpdatedAt:     p.LastActivityAt,
@@ -276,6 +378,11 @@ func (c *GitLabClientImpl) ListPublicGroups(ctx context.Context, parentPath stri
 }
 
 func (c *GitLabClientImpl) checkResponse(resp *http.Response) error {
+	// Some self-hosted GitLab proxies return 404 when rate-limited instead of 429.
+	// Check for Retry-After header first before mapping on status code.
+	if resp.Header.Get("Retry-After") != "" {
+		return ErrRateLimited
+	}
 	switch resp.StatusCode {
 	case http.StatusOK:
 		return nil
@@ -661,59 +768,6 @@ func (c *GitLabClientImpl) GetCommitLog(ctx context.Context, projectPath string,
 	}
 
 	return commits, nil
-}
-
-// GetContributors fetches contributors for a project.
-func (c *GitLabClientImpl) GetContributors(ctx context.Context, projectPath string, limit int) ([]ContributorInfo, error) {
-	if limit <= 0 {
-		limit = 30
-	}
-	encodedPath := url.PathEscape(projectPath)
-	urlStr := fmt.Sprintf("%s/projects/%s/repository/contributors?per_page=%d&order_by=commits&sort=desc", c.baseURL, encodedPath, limit)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.token != "" {
-		req.Header.Set("PRIVATE-TOKEN", c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if err := c.checkResponse(resp); err != nil {
-		return nil, err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var glContributors []struct {
-		Name    string `json:"name"`
-		Email   string `json:"email"`
-		Commits int    `json:"commits"`
-	}
-	if err := json.Unmarshal(body, &glContributors); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
-	}
-
-	contributors := make([]ContributorInfo, len(glContributors))
-	for i, c := range glContributors {
-		contributors[i] = ContributorInfo{
-			Name:          c.Name,
-			Email:         c.Email,
-			Contributions: c.Commits,
-		}
-	}
-
-	return contributors, nil
 }
 
 // GetReadme fetches the README content for a project.

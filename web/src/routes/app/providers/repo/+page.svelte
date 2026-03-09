@@ -1,14 +1,18 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2, FileCode, Microscope
+		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
+	import Gitea from '$lib/components/icons/Gitea.svelte';
+	import EmptyCommits from '$lib/components/icons/EmptyCommits.svelte';
+	import EmptyContributors from '$lib/components/icons/EmptyContributors.svelte';
+	import EmptyRuns from '$lib/components/icons/EmptyRuns.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -89,6 +93,13 @@
 	};
 
 	type RepoMetadataResponse = {
+		repo: {
+			id: string;
+			org: string;
+			slug: string;
+			provider_id?: string;
+			provider_base_url?: string;
+		};
 		runs: {
 			total: number;
 			latest?: RepoMetadataRun;
@@ -121,6 +132,11 @@
 	let contributors: ContributorInfo[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	// Resolved params (may differ from URL when page loads via repo_id only)
+	let resolvedPath = $state('');
+	let resolvedProvider = $state('');
+	let resolvedBaseUrl = $state('');
+	let resolvedProviderId = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
 	let totalRuns = $state(0);
 	let securityData: SecurityData = $state({
@@ -134,19 +150,38 @@
 
 	// Get query params
 	const getParams = () => {
-		if (!browser) return { provider: '', path: '', baseUrl: '', providerId: '' };
+		if (!browser) return { provider: 'github', path: '', baseUrl: '', providerId: '', repoDbId: '' };
 		const params = $page.url.searchParams;
 		return {
 			provider: params.get('provider') || 'github',
 			path: params.get('path') || '',
 			baseUrl: params.get('base_url') || '',
-			providerId: params.get('provider_id') || ''
+			providerId: params.get('provider_id') || '',
+			repoDbId: params.get('repo_id') || $page.params.repo_id || ''
 		};
 	};
 
 	const fetchRepoDetails = async () => {
-		const { provider, path, baseUrl, providerId } = getParams();
-		if (!path) {
+		let { provider, path, baseUrl, providerId, repoDbId } = getParams();
+
+		// When only repo_id is provided, resolve path and provider info from metadata
+		if (repoDbId && !path) {
+			const meta = await fetchRepoMetadata(repoDbId);
+			if (meta?.repo?.org && meta.repo.slug) {
+				path = `${meta.repo.org}/${meta.repo.slug}`;
+				providerId = providerId || meta.repo.provider_id || '';
+				baseUrl = baseUrl || meta.repo.provider_base_url || '';
+				provider = provider || meta.repo.provider || 'github';
+			}
+		}
+
+		// Store resolved params for use in triggerScan
+		resolvedPath = path;
+		resolvedProvider = provider;
+		resolvedBaseUrl = baseUrl;
+		resolvedProviderId = providerId;
+
+		if (!path && !repoDbId) {
 			error = 'No repository path specified.';
 			loading = false;
 			return;
@@ -155,31 +190,42 @@
 		loading = true;
 		error = '';
 
-		try {
-			let url: string;
-			const params = new URLSearchParams();
-			if (baseUrl) params.set('base_url', baseUrl);
-			if (providerId) params.set('provider_id', providerId);
+		const buildTypeUrl = () => {
+				const q = new URLSearchParams();
+				if (baseUrl) q.set('base_url', baseUrl);
+				if (providerId) q.set('provider_id', providerId);
+				if (provider === 'gitlab') {
+					return `/api/providers/gitlab/${encodeURIComponent(path)}/details?${q}`;
+				} else if (provider === 'gitea' || provider === 'forgejo') {
+					return `/api/providers/gitea/${path}/details?${q}`;
+				} else {
+					return `/api/providers/github/${path}/details?${q}`;
+				}
+			};
 
-			if (provider === 'github') {
-				// path is owner/repo
-				const query = params.toString();
-				url = `/api/providers/github/${path}/details${query ? `?${query}` : ''}`;
-			} else if (provider === 'gitlab') {
-				// path is full project path (url encoded)
-				url = `/api/providers/gitlab/${encodeURIComponent(path)}/details?${params}`;
+			try {
+			let response: Response;
+
+			if (repoDbId || providerId) {
+				// Use unified endpoint — backend resolves provider type and credentials from DB.
+				// Never fall back to type-specific endpoints when provider_id is known, as that
+				// would allow the client to influence which provider/credentials are used.
+				const uq = new URLSearchParams();
+				if (providerId) uq.set('provider_id', providerId);
+				if (path) uq.set('path', path);
+				if (repoDbId) uq.set('repo_id', repoDbId);
+				response = await fetch(`/api/providers/details?${uq}`, { credentials: 'include' });
 			} else {
-				// gitea/forgejo - path is owner/repo
-				url = `/api/providers/gitea/${path}/details?${params}`;
+				response = await fetch(buildTypeUrl(), { credentials: 'include' });
 			}
-
-			const response = await fetch(url, { credentials: 'include' });
 
 			if (!response.ok) {
 				if (response.status === 404) {
 					error = 'Repository not found. Private instances may require authentication.';
 				} else if (response.status === 401) {
 					error = 'Authentication required. This instance requires a token to access project details.';
+				} else if (response.status === 429) {
+					error = 'rate_limited';
 				} else {
 					error = `Failed to fetch repository details (${response.status}).`;
 				}
@@ -188,6 +234,9 @@
 
 			const data: RepoDetailsResponse = await response.json();
 			details = data.details;
+			if (!resolvedPath && data.details?.full_path) {
+				resolvedPath = data.details.full_path;
+			}
 			readme = data.readme;
 			commits = data.commits || [];
 			contributors = data.contributors || [];
@@ -203,17 +252,13 @@
 
 	// Fetch real security data from API
 	const fetchSecurityData = async (provider: string, repoPath: string, repo: RepoDetails, readmeContent: string) => {
-		// Build repo_id as provider:org:slug
-		const pathParts = repoPath.split('/');
-		const repoID = pathParts.length >= 2 ? `${provider}:${pathParts[0]}:${pathParts[1]}` : '';
-
-		if (!repoID) {
-			// Fall back to mock data if we can't construct repo_id
+		const { repoDbId } = getParams();
+		if (!repoDbId) {
 			generateMockSecurityData(repo, readmeContent);
 			return;
 		}
 
-		const metadata = await fetchRepoMetadata(repoID);
+		const metadata = await fetchRepoMetadata(repoDbId);
 		const sbomComponents = metadata?.dependencies?.from_sbom || 0;
 		const manifestComponents = metadata?.dependencies?.from_manifest || 0;
 		const totalComponents = Math.max(sbomComponents, manifestComponents);
@@ -320,6 +365,7 @@
 	};
 
 	// Scan functionality
+	let activeTab = $state('contributors');
 	let scanning = $state(false);
 	let scanError = $state('');
 	let activeRunId = $state<string | null>(null);
@@ -327,11 +373,11 @@
 
 	// Check for active scans on this repo
 	const checkActiveScans = async () => {
-		const { path } = getParams();
-		if (!path) return;
+		const { repoDbId } = getParams();
+		if (!repoDbId) return;
 
 		try {
-			const response = await fetch(`/api/runs?repo_path=${encodeURIComponent(path)}&page_size=1`, {
+			const response = await fetch(`/api/runs?repo_id=${encodeURIComponent(repoDbId)}&page_size=1`, {
 				credentials: 'include'
 			});
 			if (response.ok) {
@@ -355,7 +401,6 @@
 	const triggerScan = async () => {
 		if (!details) return;
 
-		const { provider, path, baseUrl, providerId } = getParams();
 		scanning = true;
 		scanError = '';
 
@@ -365,10 +410,10 @@
 				credentials: 'include',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					provider,
-					repo_path: path,
-					base_url: baseUrl || undefined,
-					provider_id: providerId || undefined,
+					provider: resolvedProvider,
+					repo_path: resolvedPath,
+					base_url: resolvedBaseUrl || undefined,
+					provider_id: resolvedProviderId || undefined,
 					ref: details.default_branch || undefined,
 					repo_disabled: details.is_disabled || undefined
 				})
@@ -400,15 +445,11 @@
 		}
 	};
 
-	onMount(() => {
-		if (browser) {
-			fetchRepoDetails();
-			checkActiveScans();
-
-			// Periodically check for active scans
-			const interval = setInterval(checkActiveScans, 10000);
-			return () => clearInterval(interval);
-		}
+	$effect(() => {
+		if (!browser) return;
+		// Re-fetch whenever URL params change (handles same-route navigation)
+		const _ = $page.url.href;
+		fetchRepoDetails().then(() => checkActiveScans());
 	});
 </script>
 
@@ -431,19 +472,31 @@
 		<div class="flex items-center justify-center py-20">
 			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
 		</div>
+	{:else if error === 'rate_limited'}
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
+			<Clock class="mx-auto h-12 w-12 text-yellow-500" />
+			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Rate Limited</p>
+			<p class="mt-2 text-sm text-[var(--text-secondary)]">API rate limit reached. Please try again later.</p>
+		</div>
 	{:else if error}
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
 			<AlertCircle class="mx-auto h-12 w-12 text-[var(--error)]" />
 			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
 		</div>
 	{:else if details}
-		<!-- Header -->
-		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+		<!-- Header + Stats -->
+		<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
 			<div class="flex items-start justify-between gap-4">
 				<div class="min-w-0 flex-1">
 					<div class="flex items-center gap-3">
 						<GitBranch class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
 						<h1 class="truncate text-2xl font-semibold text-[var(--text-bright)]">{details.name}</h1>
+						{#if details.is_private}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--text-muted)]/20 px-2 py-0.5 text-xs text-[var(--text-muted)]"><Lock class="h-3 w-3" /> Private</span>
+						{:else}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]"><Globe class="h-3 w-3" /> Public</span>
+						{/if}
+
 						{#if details.is_archived}
 							<span class="rounded-full bg-[var(--text-muted)]/20 px-2 py-0.5 text-xs text-[var(--text-muted)]">Archived</span>
 						{/if}
@@ -495,7 +548,7 @@
 						rel="noopener noreferrer"
 						class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
 					>
-						View on {getParams().provider === 'github' ? 'GitHub' : getParams().provider === 'gitlab' ? 'GitLab' : 'Gitea'}
+						View on {resolvedBaseUrl ? new URL(resolvedBaseUrl).hostname : resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
 						<ExternalLink class="h-4 w-4" />
 					</a>
 				</div>
@@ -508,26 +561,39 @@
 			{/if}
 
 			<!-- Quick stats row -->
-			<div class="flex flex-wrap gap-4 border-t border-[var(--border-color)]/60 pt-4 text-sm text-[var(--text-secondary)]">
+			<div class="flex flex-wrap gap-4 pt-4 text-sm text-[var(--text-secondary)]">
 				<span class="flex items-center gap-1.5"><Star class="h-4 w-4" /> {details.stats.stars.toLocaleString()} stars</span>
 				<span class="flex items-center gap-1.5"><GitFork class="h-4 w-4" /> {details.stats.forks.toLocaleString()} forks</span>
 				<span class="flex items-center gap-1.5"><Eye class="h-4 w-4" /> {details.stats.watchers.toLocaleString()} watching</span>
 				{#if details.languages && details.languages.length > 0}
 					{#each details.languages as lang}
-						<span class="flex items-center gap-1.5"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {lang}</span>
+						<span class="flex items-center gap-1.5" style="display:none"><span class="h-3 w-3 rounded-full bg-[var(--accent)]"></span> {lang}</span>
 					{/each}
 				{/if}
 				{#if details.license}
 					<span class="flex items-center gap-1.5"><Scale class="h-4 w-4" /> {details.license}</span>
 				{/if}
-				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Updated {formatDate(details.updated_at)}</span>
+				<span class="flex items-center gap-1.5">
+					{#if resolvedProvider === 'gitlab'}
+						<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+							<path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.45.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024" />
+						</svg>
+					{:else if resolvedProvider === 'gitea' || resolvedProvider === 'forgejo'}
+						<Gitea size={14} />
+					{:else}
+						<svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+							<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+						</svg>
+					{/if}
+					{resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
+				</span>
+				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Last activity {formatDate(details.updated_at)}</span>
 			</div>
-		</section>
 
-		<!-- Stats Cards Grid -->
-		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<!-- Stats grid -->
+			<div class="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-4">
 			<!-- Repository Stats -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repository</h3>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
@@ -543,14 +609,14 @@
 						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Tag class="h-3 w-3" /> Releases</p>
 					</div>
 					<div>
-						<p class="text-2xl font-bold text-[var(--text-bright)]">{details.stats.contributors}</p>
+						<p class="text-2xl font-bold text-[var(--text-bright)]">{Math.max(details.stats.contributors, contributors.length)}</p>
 						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Users class="h-3 w-3" /> Contributors</p>
 					</div>
 				</div>
 			</div>
 
 			<!-- Vulnerabilities -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
@@ -573,7 +639,7 @@
 			</div>
 
 			<!-- Secrets & Issues -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Secrets & Issues</h3>
 				<div class="space-y-2">
 					<div class="flex items-center justify-between">
@@ -604,7 +670,7 @@
 			</div>
 
 			<!-- Components -->
-			<div class="panel-surface space-y-3 px-5 py-4">
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Dependencies</h3>
 				<div class="flex items-center gap-4">
 					<Package class="h-10 w-10 text-[var(--accent)]" />
@@ -614,8 +680,7 @@
 					</div>
 				</div>
 				<div class="mt-2 space-y-1 text-xs text-[var(--text-muted)]">
-					{#if securityData.componentsFromSBOM > 0 || securityData.componentsFromManifest > 0}
-						<div class="flex items-center justify-between">
+											<div class="flex items-center justify-between">
 							<span class="flex items-center gap-1">
 								<Microscope class="h-3 w-3 text-blue-400" />
 								From SBOM
@@ -629,7 +694,6 @@
 							</span>
 							<span class="font-semibold text-[var(--text-secondary)]">{securityData.componentsFromManifest}</span>
 						</div>
-					{/if}
 					{#if details.size}
 						<div class="pt-1 text-[var(--text-muted)]">
 							Repository size: {formatSize(details.size)}
@@ -637,125 +701,145 @@
 					{/if}
 				</div>
 			</div>
-		</div>
-
-		<!-- Recent Runs -->
-		<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-			<div class="flex items-center justify-between">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Runs</h2>
-				{#if totalRuns > 0}
-					<span class="text-xs text-[var(--text-muted)]">{totalRuns} total</span>
-				{/if}
 			</div>
-			{#if runTimeline.length === 0}
-				<p class="text-sm text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
-			{:else}
-				<div class="space-y-3">
-					{#each runTimeline as run}
-						<div class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
-							<div class="min-w-0 space-y-1">
-								<div class="flex items-center gap-2">
-									<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
-										{run.status}
-									</span>
-									<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
-									{#if run.duration_ms}
-										<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
-									{/if}
+			<!-- Activity Tabs -->
+			<div class="pt-4">
+						<TabSelector
+							options={[
+								{ value: 'runs', label: 'Runs' },
+								{ value: 'contributors', label: 'Contributors' },
+								{ value: 'commits', label: 'Commits' }
+							]}
+							bind:value={activeTab}
+						/>
+
+					<div class="mt-[2em]">
+					{#if activeTab === 'runs'}
+						<div class="space-y-2">
+							{#if totalRuns > 0}
+								<p class="text-xs text-[var(--text-muted)]">{totalRuns} total runs</p>
+							{/if}
+							{#if runTimeline.length === 0}
+								<div class="flex flex-col items-center justify-center py-8 text-center">
+									<EmptyRuns class="mb-3 text-[var(--text-muted)]" />
+									<p class="text-sm font-medium text-[var(--text-secondary)]">No runs yet</p>
+									<p class="mt-1 text-xs text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
 								</div>
-								{#if run.commit_sha}
-									<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
-								{/if}
-							</div>
-							{#if run.artifacts && run.artifacts.length > 0}
-								<div class="flex flex-wrap gap-2 text-xs">
-									{#each run.artifacts as artifact}
-										<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
-											{artifact.toUpperCase()}
-										</span>
+							{:else}
+								<div class="space-y-3">
+									{#each runTimeline as run}
+										<a href="/app/runs/{run.id}" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]">
+											<div class="min-w-0 space-y-1">
+												<div class="flex items-center gap-2">
+													<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
+														{run.status}
+													</span>
+													<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
+													{#if run.duration_ms}
+														<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
+													{/if}
+												</div>
+												{#if run.commit_sha}
+													<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
+												{/if}
+											</div>
+											{#if run.artifacts && run.artifacts.length > 0}
+												<div class="flex flex-wrap gap-2 text-xs">
+													{#each run.artifacts as artifact}
+														<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
+															{artifact.toUpperCase()}
+														</span>
+													{/each}
+												</div>
+											{/if}
+										</a>
 									{/each}
 								</div>
 							{/if}
 						</div>
-					{/each}
-				</div>
-			{/if}
-		</section>
-
-		<!-- Recent Commits -->
-		{#if commits.length > 0}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent Commits</h2>
-				<div class="space-y-2">
-					{#each commits as commit}
-						<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
-							{#if commit.author_avatar}
-								<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
+					{:else if activeTab === 'commits'}
+						{#if commits.length === 0}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<EmptyCommits class="mb-3 text-[var(--text-muted)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No commits available</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no commit history yet.</p>
+							</div>
+						{:else}
+							<div class="space-y-2">
+								{#each commits as commit}
+									<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+										{#if commit.author_avatar}
+											<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
+										{:else}
+											<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-xs font-medium text-[var(--accent)]">
+												{commit.author_name.charAt(0).toUpperCase()}
+											</div>
+										{/if}
+										<div class="min-w-0 flex-1">
+											<div class="flex items-center gap-2">
+												{#if commit.commit_url}
+													<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+														{commit.message}
+													</a>
+												{:else}
+													<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
+												{/if}
+											</div>
+											<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+												<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
+												<span>{commit.author_login || commit.author_name}</span>
+												<span>committed {formatDate(commit.author_date)}</span>
+											</div>
+										</div>
+									</div>
+								{/each}
+							</div>
+							{/if}
+						{:else if activeTab === 'contributors'}
+								{#if contributors.length === 0}
+									<div class="flex flex-col items-center justify-center py-8 text-center">
+										<EmptyContributors class="mb-3 text-[var(--text-muted)]" />
+										<p class="text-sm font-medium text-[var(--text-secondary)]">No contributors found</p>
+										<p class="mt-1 text-xs text-[var(--text-muted)]">Contributors will appear once the repository has commits.</p>
+									</div>
 							{:else}
-								<div class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-xs font-medium text-[var(--accent)]">
-									{commit.author_name.charAt(0).toUpperCase()}
+								<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+									{#each contributors as contributor}
+										<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
+											{#if contributor.avatar_url}
+												<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
+											{:else}
+												<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
+													{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
+												</div>
+											{/if}
+											<div class="min-w-0 flex-1">
+												{#if contributor.profile_url}
+													<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
+														{contributor.login || contributor.name || contributor.email}
+													</a>
+												{:else}
+													<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
+												{/if}
+												{#if contributor.email}
+													<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
+												{/if}
+												<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
+											</div>
+										</div>
+									{/each}
 								</div>
 							{/if}
-							<div class="min-w-0 flex-1">
-								<div class="flex items-center gap-2">
-									{#if commit.commit_url}
-										<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-											{commit.message}
-										</a>
-									{:else}
-										<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
-									{/if}
-								</div>
-								<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
-									<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
-									<span>{commit.author_login || commit.author_name}</span>
-									<span>committed {formatDate(commit.author_date)}</span>
-								</div>
-							</div>
+						{/if}
 						</div>
-					{/each}
 				</div>
-			</section>
-		{/if}
-
-		<!-- Contributors -->
-		{#if contributors.length > 0}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10">
-				<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Contributors</h2>
-				<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-					{#each contributors as contributor}
-						<div class="flex items-center gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
-							{#if contributor.avatar_url}
-								<img src={contributor.avatar_url} alt={contributor.login || contributor.name || ''} class="h-10 w-10 flex-shrink-0 rounded-full" />
-							{:else}
-								<div class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-[var(--accent)]/20 text-sm font-medium text-[var(--accent)]">
-									{(contributor.name || contributor.login || contributor.email || '?').charAt(0).toUpperCase()}
-								</div>
-							{/if}
-							<div class="min-w-0 flex-1">
-								{#if contributor.profile_url}
-									<a href={contributor.profile_url} target="_blank" rel="noopener noreferrer" class="block truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-										{contributor.login || contributor.name || contributor.email}
-									</a>
-								{:else}
-									<p class="truncate text-sm font-medium text-[var(--text-bright)]">{contributor.name || contributor.login || contributor.email}</p>
-								{/if}
-								{#if contributor.email}
-									<p class="truncate text-xs text-[var(--text-secondary)]">{contributor.email}</p>
-								{/if}
-								<p class="text-xs text-[var(--text-muted)]">{contributor.contributions} {contributor.contributions === 1 ? 'commit' : 'commits'}</p>
-							</div>
-						</div>
-					{/each}
-				</div>
-			</section>
-		{/if}
+			</article>
 
 		<!-- README -->
 		{#if readme}
-			<section class="panel-surface overflow-hidden px-6 py-6 sm:px-10">
-				<div class="overflow-x-auto overflow-y-hidden break-words">
-					<Markdown content={readme} class="max-w-none text-[var(--text-secondary)]" />
+			<section class="panel-surface overflow-hidden px-6 py-6 sm:px-10 max-w-[90vw]">
+				<div class="w-full overflow-hidden break-words">
+					<Markdown content={readme} class="max-w-full text-[var(--text-secondary)]" />
 				</div>
 			</section>
 		{/if}

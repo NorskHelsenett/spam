@@ -179,6 +179,8 @@ func run() error {
 	// WaitGroup to track in-flight jobs for graceful shutdown
 	var wg sync.WaitGroup
 
+	// Only allow one provider poller run at a time to avoid overlapping sync windows.
+	pollSlots := make(chan struct{}, 1)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
@@ -203,8 +205,16 @@ func run() error {
 				}
 			}
 
-			// Poll providers for new commits
-			commitPoller.Poll(ctx)
+			// Poll providers for new commits (non-blocking — don't delay job claiming)
+			select {
+			case pollSlots <- struct{}{}:
+				go func() {
+					defer func() { <-pollSlots }()
+					commitPoller.Poll(ctx)
+				}()
+			default:
+				// Poll already in progress; skip this tick.
+			}
 
 			// Check how many CREATE_RUN jobs are currently running (async runs in K8s/Docker)
 			runningRuns, err := jobs.CountRunningByType(ctx, gormDB, jobs.JobTypeCreateRun)
@@ -232,9 +242,10 @@ func run() error {
 				default:
 				}
 
-				// Determine which job types to claim based on running runs and circuit breaker
+				// Determine which job types to claim based on running runs.
+				// Per-provider circuit breaking is handled in processJob itself.
 				var excludeTypes []jobs.JobType
-				if runningRuns >= int64(cfg.Concurrency) || isCircuitOpen() {
+				if runningRuns >= int64(cfg.Concurrency) {
 					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
 				}
 
@@ -295,7 +306,18 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 	if err != nil {
 		next := (*time.Time)(nil)
 		status := jobs.JobStatusFailed
-		if jobs.IsProviderUnavailable(err) {
+		if jobs.IsRetryableWithoutCount(err) {
+			// Transient condition (e.g. advisory lock held by concurrent worker).
+			// Retry shortly without counting the attempt so the job doesn't exhaust retries.
+			retryAt := now.Add(10 * time.Second)
+			next = &retryAt
+			status = jobs.JobStatusRetry
+			log.Printf("job deferred (transient): id=%s type=%s error=%v retry_at=%s", job.ID, job.Type, err, retryAt.Format(time.RFC3339))
+			if err := db.WithContext(ctx).Model(&jobs.Job{}).Where("id = ?", job.ID).
+				Update("attempts", gorm.Expr("GREATEST(attempts - 1, 0)")).Error; err != nil {
+				log.Printf("rollback attempt counter: %v", err)
+			}
+		} else if jobs.IsProviderUnavailable(err) {
 			// Provider is temporarily down. Retry with a longer backoff and
 			// roll back the attempt counter so the outage doesn't exhaust retries.
 			retryAt := now.Add(5 * time.Minute)
@@ -319,6 +341,15 @@ func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
 
 		if _, updateErr := jobs.UpdateJobStatus(ctx, db, job.ID, status, nil, err.Error(), next); updateErr != nil {
 			log.Printf("update job error: %v", updateErr)
+			// If transitioning to RETRY failed (likely a unique constraint conflict
+			// because a newer queued job of the same type already exists), fall back
+			// to FAILED so the row is cleaned up rather than staying stuck in RUNNING
+			// until the stale-job reaper fires.
+			if status == jobs.JobStatusRetry {
+				if _, failErr := jobs.UpdateJobStatus(ctx, db, job.ID, jobs.JobStatusFailed, nil, err.Error(), nil); failErr != nil {
+					log.Printf("fallback-to-failed error: %v", failErr)
+				}
+			}
 		}
 		return
 	}

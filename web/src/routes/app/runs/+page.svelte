@@ -2,20 +2,46 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Play, CheckCircle, XCircle, Clock, Loader2, RefreshCw } from 'lucide-svelte';
+	import { CheckCircle, XCircle, Clock, Loader2 } from 'lucide-svelte';
+	import RotateCw from 'lucide-svelte/icons/rotate-cw';
+	import RocketLaunch from '$lib/components/icons/RocketLaunch.svelte';
 
 	type Run = {
 		id: string;
 		status: string;
 		clone_url: string;
 		provider: string;
+		provider_id?: string;
+		repo_id?: string;
 		repo_path: string;
 		ref?: string;
 		error?: string;
 		created_at: string;
 		started_at?: string;
 		finished_at?: string;
+		retry_at?: string;
 		k8s_job_name?: string;
+	};
+
+	const getRepoUrl = (run: Run): string => {
+		if (run.repo_id) {
+			const params = new URLSearchParams({ repo_id: run.repo_id });
+			if (run.provider_id) params.set('provider_id', run.provider_id);
+			return `/app/providers/repo?${params}`;
+		}
+		return `/app/runs/${run.id}`;
+	};
+
+	const handleRepoLinkClick = (event: MouseEvent, url: string) => {
+		event.stopPropagation();
+
+		// Keep native browser behavior for new-tab/window gestures.
+		if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+			return;
+		}
+
+		event.preventDefault();
+		goto(url);
 	};
 
 	type RunsResponse = {
@@ -31,7 +57,7 @@
 		statuses: string[];
 	};
 
-	type SortField = 'provider' | 'duration' | 'created';
+	type SortField = 'status' | 'provider' | 'duration' | 'created';
 	type SortDirection = 'asc' | 'desc';
 
 	const runFilters: RunFilter[] = [
@@ -44,6 +70,7 @@
 
 	let runs: Run[] = $state([]);
 	let loading = $state(true);
+	let refreshing = $state(false);
 	let error = $state('');
 	let totalCount = $state(0);
 	let page = $state(1);
@@ -52,105 +79,20 @@
 	let searchInput = $state('');
 	let searchTerm = $state('');
 	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
-	let sortField = $state<SortField>('created');
-	let sortDirection = $state<SortDirection>('desc');
+	let sortField = $state<SortField>('status');
+	let sortDirection = $state<SortDirection>('asc');
 
-	const runStreams = new Map<string, EventSource>();
 	let loadRunsInFlight = false;
 	let loadRunsQueued = false;
-	let sseReloadTimer: ReturnType<typeof setTimeout> | null = null;
-	let fallbackPollInterval: ReturnType<typeof setInterval> | null = null;
+	let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
 
-	const closeRunStream = (id: string) => {
-		const stream = runStreams.get(id);
-		if (!stream) return;
-		stream.close();
-		runStreams.delete(id);
-	};
-
-	const closeAllRunStreams = () => {
-		for (const id of runStreams.keys()) {
-			closeRunStream(id);
-		}
-	};
-
-	/** Debounced reload: coalesces multiple SSE-triggered reloads into one call. */
-	const scheduleReload = () => {
-		if (sseReloadTimer) return; // already scheduled
-		sseReloadTimer = setTimeout(() => {
-			sseReloadTimer = null;
-			loadRuns();
-		}, 1000);
-	};
-
-	const handleRunStatusEvent = (runId: string, data: { status?: string; error?: string }) => {
-		if (!data.status) return;
-		const nextStatus = data.status;
-
-		let changed = false;
-		runs = runs.map((run) => {
-			if (run.id !== runId) return run;
-			if (run.status === nextStatus && (!data.error || data.error === run.error)) {
-				return run;
-			}
-			changed = true;
-			return {
-				...run,
-				status: nextStatus,
-				error: data.error ?? run.error
-			};
-		});
-
-		if (!changed) return;
-
-		if (!isActiveRunStatus(nextStatus)) {
-			closeRunStream(runId);
-			// Only re-fetch from the API when a run reaches a terminal state
-			// (counts and filtered rows change). Debounce so multiple completions
-			// within the same second are coalesced into a single request.
-			scheduleReload();
-		}
-	};
-
-	const syncRunStreams = () => {
-		if (!browser) return;
-
-		const activeRunIds = new Set(runs.filter((run) => isActiveRunStatus(run.status)).map((run) => run.id));
-
-		for (const id of runStreams.keys()) {
-			if (!activeRunIds.has(id)) {
-				closeRunStream(id);
-			}
-		}
-
-		for (const run of runs) {
-			if (!isActiveRunStatus(run.status) || runStreams.has(run.id)) {
-				continue;
-			}
-
-			try {
-				const eventSource = new EventSource(`/api/runs/${run.id}/stream`, { withCredentials: true });
-				eventSource.addEventListener('status', (event) => {
-					try {
-						const payload = JSON.parse(event.data) as { status?: string; error?: string };
-						handleRunStatusEvent(run.id, payload);
-					} catch {
-						// Ignore malformed events and keep listening.
-					}
-				});
-				eventSource.onerror = () => {
-					closeRunStream(run.id);
-					// Reconnect: reload the runs list which calls syncRunStreams
-					// and re-opens the stream for still-active runs.
-					scheduleReload();
-				};
-				runStreams.set(run.id, eventSource);
-			} catch {
-				// Ignore SSE connection setup errors; periodic polling remains as fallback.
-			}
-		}
+	/** Restart the polling interval based on whether there are active runs. */
+	const reschedulePoll = () => {
+		if (pollTimer) clearInterval(pollTimer);
+		const hasActive = runs.some((r) => isActiveRunStatus(r.status));
+		pollTimer = setInterval(loadRuns, hasActive ? 5_000 : 30_000);
 	};
 
 	const getStatusQuery = () =>
@@ -165,6 +107,7 @@
 		}
 		loadRunsInFlight = true;
 		loading = true;
+		refreshing = true;
 		error = '';
 		try {
 			const response = await fetch(
@@ -179,12 +122,13 @@
 			const data: RunsResponse = await response.json();
 			runs = data.runs;
 			totalCount = data.total_count;
-			syncRunStreams();
+			reschedulePoll();
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load runs';
 		} finally {
 			loading = false;
 			loadRunsInFlight = false;
+			setTimeout(() => { refreshing = false; }, 1000);
 			if (loadRunsQueued) {
 				loadRunsQueued = false;
 				loadRuns();
@@ -217,17 +161,44 @@
 		}, 300);
 	};
 
+	let activeRunStream: EventSource | null = null;
+
+	const startActiveRunStream = () => {
+		if (!browser || activeRunStream) return;
+		activeRunStream = new EventSource('/api/runs/active/stream', { withCredentials: true });
+		activeRunStream.addEventListener('active_runs', (event) => {
+			try {
+				const active = JSON.parse(event.data) as Array<{ id: string; status: string; error?: string }>;
+				const activeById = new Map(active.map((r) => [r.id, r]));
+				let needsReload = false;
+				runs = runs.map((run) => {
+					const update = activeById.get(run.id);
+					if (!update || update.status === run.status) return run;
+					if (isActiveRunStatus(run.status) && !isActiveRunStatus(update.status)) {
+						needsReload = true;
+					}
+					return { ...run, status: update.status, error: update.error ?? run.error };
+				});
+				if (needsReload && !loadRunsInFlight) {
+					setTimeout(loadRuns, 500);
+				}
+			} catch {
+				// ignore malformed events
+			}
+		});
+	};
+
+	const stopActiveRunStream = () => {
+		if (activeRunStream) {
+			activeRunStream.close();
+			activeRunStream = null;
+		}
+	};
+
 	onMount(() => {
 		if (!browser) return;
 		loadRuns();
-
-		// Fallback poll: reconcile state every 30 s in case all SSE streams
-		// drop silently (e.g. proxy timeout, network hiccup).
-		fallbackPollInterval = setInterval(loadRuns, 30_000);
-
-		return () => {
-			closeAllRunStreams();
-		};
+		startActiveRunStream();
 	});
 
 	onDestroy(() => {
@@ -235,15 +206,11 @@
 			clearTimeout(searchDebounce);
 			searchDebounce = null;
 		}
-		if (sseReloadTimer) {
-			clearTimeout(sseReloadTimer);
-			sseReloadTimer = null;
+		if (pollTimer) {
+			clearInterval(pollTimer);
+			pollTimer = null;
 		}
-		if (fallbackPollInterval) {
-			clearInterval(fallbackPollInterval);
-			fallbackPollInterval = null;
-		}
-		closeAllRunStreams();
+		stopActiveRunStream();
 	});
 
 	const getStatusIcon = (status: string) => {
@@ -312,11 +279,20 @@
 
 	const createdMs = (run: Run) => new Date(run.created_at).getTime();
 
+	const statusPriority = (status: string) => {
+		if (status === 'RUNNING') return 0;
+		if (status === 'QUEUED') return 1;
+		if (status === 'FAILED') return 2;
+		return 3;
+	};
+
 	const sortedRuns = $derived.by(() => {
 		const sorted = [...runs];
 		sorted.sort((a, b) => {
 			let compare = 0;
-			if (sortField === 'provider') {
+			if (sortField === 'status') {
+				compare = statusPriority(a.status) - statusPriority(b.status);
+			} else if (sortField === 'provider') {
 				compare = (a.provider || '').localeCompare(b.provider || '', undefined, { sensitivity: 'base' });
 			} else if (sortField === 'duration') {
 				compare = durationMs(a) - durationMs(b);
@@ -335,6 +311,7 @@
 		}
 		sortField = field;
 		sortDirection = field === 'created' ? 'desc' : 'asc';
+		// status sort: asc = running first (priority 0→3), desc = finished first
 	};
 
 	const sortIndicator = (field: SortField) => {
@@ -358,8 +335,11 @@
 				type="button"
 				class="btn btn-ghost"
 				onclick={loadRuns}
+				disabled={refreshing}
 			>
-				<RefreshCw size={16} class={loading ? 'animate-spin' : ''} />
+				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+					<RotateCw size={14} />
+				</span>
 				Refresh
 			</button>
 		</header>
@@ -402,7 +382,7 @@
 			</div>
 		{:else if runs.length === 0}
 			<div class="flex flex-col items-center justify-center py-12 text-center">
-				<Play size={48} class="mb-4 text-[var(--text-muted)]" />
+				<RocketLaunch size={48} class="mb-4 text-[var(--text-muted)]" />
 				<p class="text-lg text-[var(--text-secondary)]">No runs yet</p>
 				<p class="mt-1 text-sm text-[var(--text-muted)]">Trigger a scan from a repository page to create a run</p>
 			</div>
@@ -411,7 +391,11 @@
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
-								<th class="px-5 py-3 text-left">Status</th>
+								<th class="px-5 py-3 text-left">
+									<button type="button" class="sort-btn" onclick={() => toggleSort('status')}>
+										Status {sortIndicator('status')}
+									</button>
+								</th>
 								<th class="px-5 py-3 text-left">Repository</th>
 								<th class="px-5 py-3 text-left">
 									<button type="button" class="sort-btn" onclick={() => toggleSort('provider')}>
@@ -442,7 +426,11 @@
 									</span>
 								</td>
 								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
-									{run.repo_path || run.clone_url}
+									<a
+										href={getRepoUrl(run)}
+										class="hover:text-[var(--accent)] hover:underline"
+										onclick={(event) => handleRepoLinkClick(event, getRepoUrl(run))}
+									>{run.repo_path || run.clone_url}</a>
 								</td>
 								<td class="px-5 py-3">{run.provider || '-'}</td>
 								<td class="px-5 py-3">{run.ref || 'default'}</td>
@@ -456,7 +444,7 @@
 							{#if run.error}
 								<tr class="bg-[var(--error)]/5">
 									<td colspan="6" class="px-5 py-2 text-xs text-[var(--error)]">
-										Error: {run.error}
+										Error: {run.error}{#if run.retry_at} — retry at {new Date(run.retry_at).toLocaleTimeString()}{/if}
 									</td>
 								</tr>
 							{/if}

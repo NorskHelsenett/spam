@@ -15,6 +15,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"gorm.io/gorm"
 )
 
@@ -154,6 +155,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				bindingInput = &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeRepoCommit,
 					AssetRefID:      commit.ID,
+					CommitSHA:       commitSHA,
 					Source:          sbomSourceUpload,
 					CreatedByUserID: user.ID,
 				}
@@ -279,11 +281,21 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 func resolveRepo(ctx context.Context, tx *gorm.DB, repoID, provider, org, slug, createdBy string) (*assets.Repo, error) {
 	if org != "" && slug != "" {
+		var providerInstanceID string
+		var pi providerconfig.ProviderInstance
+		err := tx.WithContext(ctx).
+			Where("type = ? AND enabled = true AND (owner_path = '' OR ? = owner_path OR ? LIKE owner_path || '/%')", provider, org, org).
+			Order("CASE WHEN owner_path != '' THEN 0 ELSE 1 END, created_at").
+			First(&pi).Error
+		if err == nil {
+			providerInstanceID = pi.ID
+		}
 		return assets.UpsertRepo(ctx, tx, assets.RepoInput{
-			Provider:        provider,
-			Org:             org,
-			Slug:            slug,
-			CreatedByUserID: createdBy,
+			Provider:           provider,
+			Org:                org,
+			Slug:               slug,
+			CreatedByUserID:    createdBy,
+			ProviderInstanceID: providerInstanceID,
 		})
 	}
 
@@ -315,6 +327,93 @@ func detectSBOMFormat(payload []byte) string {
 	}
 
 	return ""
+}
+
+// cycloneDXComponent holds the fields extracted from a CycloneDX component
+// entry, mirroring what the sbom_component_view materialized view computes in SQL.
+type cycloneDXComponent struct {
+	BomRef  string
+	Purl    string
+	Name    string
+	Version string
+	Type    string
+}
+
+// countComponentsFromContent parses raw SBOM bytes and returns the component
+// count without relying on the materialized view. Used as a fallback when the
+// view has not yet been refreshed after a run completes.
+func countComponentsFromContent(format string, content []byte) int {
+	if len(content) == 0 {
+		return 0
+	}
+	switch format {
+	case "cyclonedx-json":
+		var doc struct {
+			Metadata struct {
+				Component struct {
+					BomRef string `json:"bom-ref"`
+				} `json:"component"`
+			} `json:"metadata"`
+			Components []struct {
+				BomRef string `json:"bom-ref"`
+			} `json:"components"`
+		}
+		if err := json.Unmarshal(content, &doc); err != nil {
+			return 0
+		}
+		rootRef := doc.Metadata.Component.BomRef
+		count := 0
+		for _, c := range doc.Components {
+			if rootRef == "" || c.BomRef != rootRef {
+				count++
+			}
+		}
+		return count
+	case "spdx-json":
+		var doc struct {
+			Packages []struct{} `json:"packages"`
+		}
+		if err := json.Unmarshal(content, &doc); err != nil {
+			return 0
+		}
+		// Exclude the root "describes" package by subtracting 1 when present.
+		// A well-formed SPDX document always has at least one root package, so
+		// non-root packages are those beyond the first.
+		n := len(doc.Packages)
+		if n > 1 {
+			return n - 1
+		}
+		return n
+	}
+	return 0
+}
+
+// extractCycloneDXComponents parses a CycloneDX JSON SBOM and returns the
+// list of components declared in the top-level "components" array.
+func extractCycloneDXComponents(payload []byte) ([]cycloneDXComponent, error) {
+	var doc struct {
+		Components []struct {
+			BomRef  string `json:"bom-ref"`
+			Purl    string `json:"purl"`
+			Name    string `json:"name"`
+			Version string `json:"version"`
+			Type    string `json:"type"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return nil, err
+	}
+	out := make([]cycloneDXComponent, 0, len(doc.Components))
+	for _, c := range doc.Components {
+		out = append(out, cycloneDXComponent{
+			BomRef:  c.BomRef,
+			Purl:    c.Purl,
+			Name:    c.Name,
+			Version: c.Version,
+			Type:    c.Type,
+		})
+	}
+	return out, nil
 }
 
 // SBOMDownloadHandler downloads an SBOM by ID.
@@ -371,14 +470,18 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// Count components linked to this SBOM (from materialized view)
+		// Count components from the materialized view; fall back to parsing the
+		// raw content when the view has not yet been refreshed (e.g. immediately
+		// after a run completes and the refresh job is still queued).
 		var componentCount int64
 		if err := db.WithContext(r.Context()).
 			Table("sbom_component_view").
 			Where("sbom_id = ? AND is_root = false", sbomID).
 			Count(&componentCount).Error; err != nil {
 			log.Printf("failed to count sbom components: %v", err)
-			componentCount = 0
+		}
+		if componentCount == 0 {
+			componentCount = int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{

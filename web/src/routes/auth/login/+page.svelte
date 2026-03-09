@@ -43,7 +43,7 @@
 					Sign in with your organization's identity provider to access your monitoring dashboard.
 				</p>
 				
-				<button class="login-button" on:click={handleLogin}>
+				<button class="login-button" onclick={handleLogin}>
 					<Lock size={20} />
 					<span>Sign In with OIDC</span>
 					<ArrowRight size={20} />

@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -24,6 +25,7 @@ type RunResponse struct {
 	CloneURL   string     `json:"clone_url"`
 	Provider   string     `json:"provider"`
 	ProviderID string     `json:"provider_id,omitempty"`
+	RepoID     string     `json:"repo_id,omitempty"`
 	BaseURL    string     `json:"base_url,omitempty"`
 	RepoPath   string     `json:"repo_path"`
 	Ref        string     `json:"ref,omitempty"`
@@ -32,6 +34,7 @@ type RunResponse struct {
 	CreatedAt  time.Time  `json:"created_at"`
 	StartedAt  *time.Time `json:"started_at,omitempty"`
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	RetryAt    *time.Time `json:"retry_at,omitempty"`
 	K8sJobName string     `json:"k8s_job_name,omitempty"`
 	SBOMID     string     `json:"sbom_id,omitempty"`
 	SecretID   string     `json:"secret_id,omitempty"`
@@ -72,6 +75,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		page, pageSize := parsePagination(r)
 		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
+		repoID := r.URL.Query().Get("repo_id")
 
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
@@ -80,7 +84,9 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		} else if len(statuses) > 1 {
 			query = query.Where("status IN ?", statuses)
 		}
-		if repoPath != "" {
+		if repoID != "" {
+			query = query.Where("payload->>'repo_id' = ?", repoID)
+		} else if repoPath != "" {
 			// Search in payload JSON for matching repo path
 			query = query.Where("payload::text LIKE ?", "%"+repoPath+"%")
 		}
@@ -95,12 +101,13 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			CreatedAt  time.Time
 			LockedAt   *time.Time
 			FinishedAt *time.Time
-			K8sJobName string `gorm:"column:k8s_job_name"`
+			RunAt      time.Time `gorm:"column:run_at"`
+			K8sJobName string    `gorm:"column:k8s_job_name"`
 			Result     []byte
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, k8s_job_name, result").
+		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
 			Order("created_at DESC").
 			Offset(offset).
 			Limit(pageSize).
@@ -159,6 +166,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 			status := job.Status
 			errorText := job.Error
+			var retryAt *time.Time
+			if status == string(jobs.JobStatusRetry) && job.RunAt.After(time.Now()) {
+				t := job.RunAt
+				retryAt = &t
+			}
 			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
 				if resultMap, err := parseRunResultMap(job.Result); err == nil {
 					events, podStatus, ok, _ := loadPersistedK8sSnapshotFromResult(resultMap)
@@ -180,6 +192,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				CloneURL:   payload.CloneURL,
 				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
 				ProviderID: payload.ProviderID,
+				RepoID:     payload.RepoID,
 				BaseURL:    providerBaseURLs[payload.ProviderID],
 				RepoPath:   extractRepoPath(payload.CloneURL),
 				Ref:        payload.Ref,
@@ -188,6 +201,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				CreatedAt:  job.CreatedAt,
 				StartedAt:  job.LockedAt,
 				FinishedAt: job.FinishedAt,
+				RetryAt:    retryAt,
 				K8sJobName: job.K8sJobName,
 			})
 		}
@@ -285,13 +299,26 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
-			Provider: req.Provider,
-			Org:      org,
-			Slug:     slug,
+			Provider:           req.Provider,
+			Org:                org,
+			Slug:               slug,
+			ProviderInstanceID: providerID,
 		})
 		if err != nil {
 			log.Printf("failed to upsert repo: %v", err)
 			http.Error(w, "failed to create run", http.StatusInternalServerError)
+			return
+		}
+
+		// Prevent duplicate queuing: reject if there's already a QUEUED or RUNNING job for this repo
+		var pendingCount int64
+		db.WithContext(r.Context()).Table("jobs").
+			Where("type = ?", jobs.JobTypeCreateRun).
+			Where("status IN ?", []string{"QUEUED", "RUNNING"}).
+			Where("payload->>'repo_id' = ?", repo.ID).
+			Count(&pendingCount)
+		if pendingCount > 0 {
+			http.Error(w, "a scan is already queued or running for this repository", http.StatusConflict)
 			return
 		}
 
@@ -413,6 +440,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,
 			ProviderID: payload.ProviderID,
+			RepoID:     payload.RepoID,
 			RepoPath:   extractRepoPath(payload.CloneURL),
 			Ref:        payload.Ref,
 			CommitSHA:  job.CommitHash,
@@ -465,6 +493,71 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, response)
+	}
+}
+
+// ActiveRunStatus is the minimal status payload streamed to clients.
+type ActiveRunStatus struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+// RunsActiveStreamHandler streams the status of all active (QUEUED/RUNNING) runs via SSE.
+// A single connection from the list page replaces per-run SSE streams.
+// GET /api/runs/active/stream
+func RunsActiveStreamHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		w.Header().Set("X-Accel-Buffering", "no")
+
+		send := func() bool {
+			var active []ActiveRunStatus
+			if err := db.WithContext(r.Context()).Table("jobs").
+				Where("type = ? AND status IN ?", jobs.JobTypeCreateRun, []string{
+					string(jobs.JobStatusQueued),
+					string(jobs.JobStatusRunning),
+				}).
+				Select("id, status, error").
+				Order("created_at DESC").
+				Find(&active).Error; err != nil {
+				return r.Context().Err() == nil
+			}
+			data, _ := json.Marshal(active)
+			fmt.Fprintf(w, "event: active_runs\ndata: %s\n\n", data)
+			flusher.Flush()
+			return true
+		}
+
+		if !send() {
+			return
+		}
+
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				if !send() {
+					return
+				}
+			}
+		}
 	}
 }
 

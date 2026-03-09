@@ -163,7 +163,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 
 	var queued, skippedSame, skippedPending int
 	for _, repo := range allRepos {
-		if repo.DefaultBranch == "" {
+		if repo.DefaultBranch == "" || repo.IsEmpty {
 			continue
 		}
 		if repo.IsDisabled {
@@ -177,30 +177,34 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 		}
 
 		// Upsert repo record
+		fullPath := strings.Trim(repo.FullPath, "/")
+		lastSlash := strings.LastIndex(fullPath, "/")
 		org := ""
-		slug := repo.FullPath
-		if parts := strings.Split(repo.FullPath, "/"); len(parts) > 1 {
-			org = parts[0]
-			slug = parts[len(parts)-1]
+		slug := fullPath
+		if lastSlash >= 0 {
+			org = fullPath[:lastSlash]
+			slug = fullPath[lastSlash+1:]
 		}
 
 		repoRecord, err := assets.UpsertRepo(ctx, p.db, assets.RepoInput{
-			Provider: provider.Type,
-			Org:      org,
-			Slug:     slug,
+			Provider:           provider.Type,
+			ProviderInstanceID: provider.ID,
+			Org:                org,
+			Slug:               slug,
+			ExternalID:         repo.ExternalID,
 		})
 		if err != nil {
 			log.Printf("poller: upsert repo %s: %v", repo.FullPath, err)
 			continue
 		}
 
-		// Skip commits that already have a finished run for this repo.
+		// Skip if this repo already has a finished run for this commit.
 		if p.hasFinishedJobForCommit(ctx, repoRecord.ID, latestSHA) {
 			skippedSame++
 			continue
 		}
 
-		// Check if there's already a pending job for this repo
+		// Skip if there's already a pending job for this repo.
 		if p.hasPendingJob(ctx, repoRecord.ID) {
 			skippedPending++
 			continue
@@ -272,7 +276,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 	return result, nil
 }
 
-// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for repo+commit.
+// hasFinishedJobForCommit checks if a CREATE_RUN job has already finished for this repo+commit.
 func (p *Poller) hasFinishedJobForCommit(ctx context.Context, repoID, commitSHA string) bool {
 	if repoID == "" || commitSHA == "" {
 		return false

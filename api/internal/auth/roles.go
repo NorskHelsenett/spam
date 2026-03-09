@@ -15,6 +15,7 @@ type UserSummary struct {
 	Email       string     `json:"email,omitempty"`
 	Name        string     `json:"name,omitempty"`
 	Approved    bool       `json:"approved"`
+	Hidden      bool       `json:"hidden"`
 	Role        string     `json:"role"`
 	Groups      []string   `json:"groups"`
 	LastLoginAt *time.Time `json:"last_login_at,omitempty"`
@@ -106,6 +107,7 @@ func (s *Service) ListUsers(ctx context.Context) ([]UserSummary, error) {
 			Email:       user.Email,
 			Name:        user.Name,
 			Approved:    approved,
+			Hidden:      user.HiddenAt != nil,
 			Role:        role,
 			Groups:      groups,
 			LastLoginAt: user.LastLoginAt,
@@ -337,6 +339,47 @@ func normalizeRole(role string) string {
 	default:
 		return ""
 	}
+}
+
+func (s *Service) SetUserHidden(ctx context.Context, userID string, hidden bool) (*UserSummary, error) {
+	if userID == "" {
+		return nil, errors.New("user id required")
+	}
+
+	var user User
+	if err := s.db.WithContext(ctx).First(&user, "id = ?", userID).Error; err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	updates := map[string]interface{}{"updated_at": now}
+	if hidden {
+		updates["hidden_at"] = now
+	} else {
+		updates["hidden_at"] = nil
+	}
+	if err := s.db.WithContext(ctx).Model(&user).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+
+	groups, err := s.userGroupSlugs(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	approved := user.ApprovedAt != nil
+	return &UserSummary{
+		ID:          user.ID,
+		Subject:     user.Subject,
+		Email:       user.Email,
+		Name:        user.Name,
+		Approved:    approved,
+		Hidden:      hidden,
+		Role:        roleFromGroups(groups, approved),
+		Groups:      groups,
+		LastLoginAt: user.LastLoginAt,
+		CreatedAt:   user.CreatedAt,
+	}, nil
 }
 
 func roleFromGroups(groups []string, approved bool) string {

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/assets"
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -350,8 +353,112 @@ func (s *Store) RotateToken(ctx context.Context, providerID string, pat string, 
 	return s.getAdminByID(ctx, providerID)
 }
 
-func (s *Store) Delete(ctx context.Context, providerID string) error {
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+// Delete removes a provider and all data that belongs exclusively to it:
+// repos, repo commits, SBOMs, manifests, runs, run logs, run secrets, and
+// provider secrets. SBOMs shared with other assets are left intact.
+// Returns the repo IDs that were deleted so callers can evict caches.
+func (s *Store) Delete(ctx context.Context, providerID string) ([]string, error) {
+	var deletedRepoIDs []string
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Collect repo IDs owned by this provider.
+		var repoIDs []string
+		if err := tx.Model(&assets.Repo{}).
+			Where("provider_instance_id = ?", providerID).
+			Pluck("id", &repoIDs).Error; err != nil {
+			return err
+		}
+
+		if len(repoIDs) > 0 {
+			// Delete cached provider data for these repos.
+			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&assets.RepoCache{}).Error; err != nil {
+				return err
+			}
+
+			// Collect commit IDs for those repos.
+			var commitIDs []string
+			if err := tx.Model(&assets.RepoCommit{}).
+				Where("repo_id IN ?", repoIDs).
+				Pluck("id", &commitIDs).Error; err != nil {
+				return err
+			}
+
+			if len(commitIDs) > 0 {
+				// Collect SBOM IDs bound to these commits.
+				var sbomIDs []string
+				if err := tx.Model(&artifacts.SBOMBinding{}).
+					Where("asset_type = ? AND asset_ref_id IN ?", artifacts.AssetTypeRepoCommit, commitIDs).
+					Pluck("sbom_id", &sbomIDs).Error; err != nil {
+					return err
+				}
+
+				// Delete the bindings.
+				if err := tx.Where("asset_type = ? AND asset_ref_id IN ?", artifacts.AssetTypeRepoCommit, commitIDs).
+					Delete(&artifacts.SBOMBinding{}).Error; err != nil {
+					return err
+				}
+
+				// Delete SBOMs that are now fully orphaned (no remaining bindings).
+				if len(sbomIDs) > 0 {
+					subq := tx.Model(&artifacts.SBOMBinding{}).Select("sbom_id").Where("sbom_id IN ?", sbomIDs)
+					if err := tx.Where("id IN ? AND id NOT IN (?)", sbomIDs, subq).
+						Delete(&artifacts.SBOM{}).Error; err != nil {
+						return err
+					}
+				}
+
+				// Delete repo commits.
+				if err := tx.Where("id IN ?", commitIDs).Delete(&assets.RepoCommit{}).Error; err != nil {
+					return err
+				}
+			}
+
+			// Delete manifest dependencies then manifests.
+			var manifestIDs []string
+			if err := tx.Model(&manifests.Manifest{}).
+				Where("repo_id IN ?", repoIDs).
+				Pluck("id", &manifestIDs).Error; err != nil {
+				return err
+			}
+			if len(manifestIDs) > 0 {
+				if err := tx.Where("manifest_id IN ?", manifestIDs).
+					Delete(&manifests.ManifestDependency{}).Error; err != nil {
+					return err
+				}
+			}
+			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&manifests.Manifest{}).Error; err != nil {
+				return err
+			}
+
+			// Delete run_secrets for these repos.
+			if err := tx.Exec("DELETE FROM run_secrets WHERE repo_id IN (?)", repoIDs).Error; err != nil {
+				return err
+			}
+
+			// Find jobs (runs) whose payload references these repos.
+			var runIDs []string
+			if err := tx.Table("jobs").
+				Where("payload->>'repo_id' IN ?", repoIDs).
+				Pluck("id", &runIDs).Error; err != nil {
+				return err
+			}
+			if len(runIDs) > 0 {
+				if err := tx.Exec("DELETE FROM run_logs WHERE run_id IN (?)", runIDs).Error; err != nil {
+					return err
+				}
+				if err := tx.Exec("DELETE FROM jobs WHERE id IN (?)", runIDs).Error; err != nil {
+					return err
+				}
+			}
+
+			// Finally delete the repos themselves.
+			if err := tx.Where("id IN ?", repoIDs).Delete(&assets.Repo{}).Error; err != nil {
+				return err
+			}
+
+			deletedRepoIDs = repoIDs
+		}
+
+		// Delete provider secrets and the provider instance.
 		if err := tx.Where("provider_id = ?", providerID).Delete(&ProviderSecret{}).Error; err != nil {
 			return err
 		}
@@ -360,6 +467,10 @@ func (s *Store) Delete(ctx context.Context, providerID string) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return deletedRepoIDs, nil
 }
 
 // revokeActiveTokensTx revokes all active tokens for a provider, recording who revoked them.
@@ -404,17 +515,30 @@ func (s *Store) rotateTokenTx(ctx context.Context, tx *gorm.DB, providerID strin
 }
 
 // FindProviderMatch finds the best provider instance for a given repo path.
+// When baseURL is empty and no match is found at the default URL, it falls
+// back to searching all enabled providers of that type by owner-path so that
+// self-hosted instances are discovered without an explicit base_url.
 func FindProviderMatch(ctx context.Context, db *gorm.DB, providerType, baseURL, repoPath string) (*ProviderInstance, error) {
-	baseURL = NormalizeBaseURL(providerType, baseURL)
-	if baseURL == "" {
-		return nil, nil
-	}
+	explicitBaseURL := baseURL
+	normalizedURL := NormalizeBaseURL(providerType, baseURL)
 
 	var providers []ProviderInstance
-	if err := db.WithContext(ctx).
-		Where("type = ? AND base_url = ? AND enabled = true", providerType, baseURL).
-		Find(&providers).Error; err != nil {
-		return nil, err
+	if normalizedURL != "" {
+		if err := db.WithContext(ctx).
+			Where("type = ? AND base_url = ? AND enabled = true", providerType, normalizedURL).
+			Find(&providers).Error; err != nil {
+			return nil, err
+		}
+	}
+
+	// No match at the (possibly defaulted) URL and no explicit base_url was
+	// given: search across all instances of this type using owner-path only.
+	if len(providers) == 0 && explicitBaseURL == "" {
+		if err := db.WithContext(ctx).
+			Where("type = ? AND enabled = true", providerType).
+			Find(&providers).Error; err != nil {
+			return nil, err
+		}
 	}
 
 	if len(providers) == 0 {
@@ -477,7 +601,89 @@ func (s *Store) GetActiveToken(ctx context.Context, providerID string) (string, 
 	return GetActiveToken(ctx, s.db, providerID, s.key)
 }
 
+// GetActiveTokenByBaseURL looks up the best matching provider instance for the
+// given providerType, baseURL, and repoPath, then returns its active token.
+func (s *Store) GetActiveTokenByBaseURL(ctx context.Context, providerType, baseURL, repoPath string) (string, error) {
+	if s == nil {
+		return "", nil
+	}
+	p, err := FindProviderMatch(ctx, s.db, providerType, baseURL, repoPath)
+	if err != nil || p == nil {
+		return "", err
+	}
+	return GetActiveToken(ctx, s.db, p.ID, s.key)
+}
+
+// ResolveProviderAccess returns the effective base URL and active token for a
+// provider. It resolves by provider_id first (from providerID), then by
+// base_url+repoPath. When baseURL is empty and a match is found via
+// owner-path, the provider's stored BaseURL is returned as resolvedBaseURL so
+// callers can construct the correct API client even without an explicit base_url.
+func (s *Store) ResolveProviderAccess(ctx context.Context, providerID, providerType, baseURL, repoPath string) (resolvedBaseURL, token string, err error) {
+	if s == nil {
+		return baseURL, "", nil
+	}
+	resolvedBaseURL = baseURL
+
+	if providerID != "" {
+		token, err = s.GetActiveToken(ctx, providerID)
+		if err != nil {
+			return resolvedBaseURL, "", err
+		}
+		if baseURL == "" {
+			var p ProviderInstance
+			if dbErr := s.db.WithContext(ctx).First(&p, "id = ?", providerID).Error; dbErr == nil {
+				resolvedBaseURL = p.BaseURL
+			}
+		}
+		return resolvedBaseURL, token, nil
+	}
+
+	p, err := FindProviderMatch(ctx, s.db, providerType, baseURL, repoPath)
+	if err != nil || p == nil {
+		return resolvedBaseURL, "", err
+	}
+	token, err = GetActiveToken(ctx, s.db, p.ID, s.key)
+	if err != nil {
+		return resolvedBaseURL, "", err
+	}
+	if baseURL == "" {
+		resolvedBaseURL = p.BaseURL
+	}
+	return resolvedBaseURL, token, nil
+}
+
+// GetPollInterval returns the configured poll_interval for a provider as a
+// Duration. Falls back to defaultTTL if the provider is not found or has no
+// poll_interval set.
+func (s *Store) GetPollInterval(ctx context.Context, providerID string, defaultTTL time.Duration) time.Duration {
+	if s == nil || providerID == "" {
+		return defaultTTL
+	}
+	var row struct {
+		PollInterval *int
+	}
+	if err := s.db.WithContext(ctx).
+		Model(&ProviderInstance{}).
+		Select("poll_interval").
+		Where("id = ?", providerID).
+		Scan(&row).Error; err != nil || row.PollInterval == nil || *row.PollInterval <= 0 {
+		return defaultTTL
+	}
+	return time.Duration(*row.PollInterval) * time.Second
+}
+
 // ListEnabledWithPolling returns providers where polling is enabled.
+func (s *Store) ListEnabled(ctx context.Context) ([]ProviderInstance, error) {
+	var providers []ProviderInstance
+	if err := s.db.WithContext(ctx).
+		Where("enabled = true").
+		Find(&providers).Error; err != nil {
+		return nil, err
+	}
+	return providers, nil
+}
+
 func (s *Store) ListEnabledWithPolling(ctx context.Context) ([]ProviderInstance, error) {
 	var providers []ProviderInstance
 	if err := s.db.WithContext(ctx).

@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -94,6 +96,14 @@ func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 			if err := tx.Exec("REFRESH MATERIALIZED VIEW sbom_metadata_view").Error; err != nil {
 				return fmt.Errorf("refresh sbom_metadata_view: %w", err)
 			}
+			refreshedAt := time.Now().UTC()
+			if err := tx.Exec(`
+				INSERT INTO materialized_view_refreshes (name, refreshed_at)
+				VALUES ('sbom_component_view', ?), ('sbom_metadata_view', ?)
+				ON CONFLICT (name) DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+			`, refreshedAt, refreshedAt).Error; err != nil {
+				return fmt.Errorf("record refresh time: %w", err)
+			}
 			return nil
 		}); err != nil {
 			log.Printf("populate views: %v", err)
@@ -107,6 +117,41 @@ func EnsureViewsPopulated(ctx context.Context, db *gorm.DB) error {
 	}
 }
 
+// refreshView refreshes a single materialized view. It checks the view's own
+// ispopulated flag to decide between CONCURRENTLY (non-blocking) and a plain
+// refresh (required when the view has never been populated). If CONCURRENTLY
+// fails with SQLSTATE 55000 (object not in prerequisite state — view not yet
+// populated or no unique index), it falls back to a plain refresh so a race
+// between EnsureViews recreating the view and this function doesn't cause
+// permanent job failures.
+func refreshView(ctx context.Context, db *gorm.DB, view string) error {
+	var populated bool
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(ispopulated, false) FROM pg_matviews WHERE matviewname = ?", view,
+	).Scan(&populated)
+
+	if populated {
+		err := db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY " + view).Error
+		if err == nil {
+			return nil
+		}
+		// SQLSTATE 55000: view not yet populated or no suitable unique index.
+		// Fall through to a plain (blocking) refresh.
+		if !isSQLState(err, "55000") {
+			return err
+		}
+		log.Printf("CONCURRENTLY failed for %s (55000), falling back to plain refresh", view)
+	}
+	return db.WithContext(ctx).Exec("REFRESH MATERIALIZED VIEW " + view).Error
+}
+
+// isSQLState reports whether err contains a PostgreSQL error with the given
+// five-character SQLSTATE code.
+func isSQLState(err error, code string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == code
+}
+
 func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	var populated bool
 	err := db.WithContext(ctx).Raw(
@@ -115,43 +160,59 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	return populated, err
 }
 
+// ErrRefreshLockHeld is returned by RefreshMaterializedViews when another
+// process holds the advisory lock. Callers should treat this as a transient
+// condition and retry rather than silently succeeding.
+var ErrRefreshLockHeld = errors.New("materialized view refresh lock held by another process")
+
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
 // It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one
-// instance performs the refresh — others skip rather than queue up behind it.
-// CONCURRENTLY is used so reads are not blocked during the refresh.
+// instance performs the refresh at a time. If the lock is already held, it returns
+// ErrRefreshLockHeld so the caller can retry after the current refresh completes.
+// CONCURRENTLY is used so reads are not blocked during the refresh, but it must run
+// outside a transaction block, so a session-level advisory lock is used instead.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
-	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var acquired bool
-		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", sbomViewRefreshLockID).Scan(&acquired).Error; err != nil {
-			return fmt.Errorf("acquire refresh lock: %w", err)
-		}
-		if !acquired {
-			log.Printf("skipping materialized view refresh: another replica holds the lock")
-			return nil
-		}
+	// Session-level advisory lock: must acquire and release on the same connection.
+	sqlDB, err := db.WithContext(ctx).DB()
+	if err != nil {
+		return fmt.Errorf("get raw db: %w", err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire db connection: %w", err)
+	}
+	defer conn.Close()
 
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_component_view").Error; err != nil {
-			return fmt.Errorf("refresh sbom_component_view: %w", err)
-		}
-		if err := tx.Exec("REFRESH MATERIALIZED VIEW CONCURRENTLY sbom_metadata_view").Error; err != nil {
-			return fmt.Errorf("refresh sbom_metadata_view: %w", err)
-		}
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", sbomViewRefreshLockID).Scan(&acquired); err != nil {
+		return fmt.Errorf("acquire refresh lock: %w", err)
+	}
+	if !acquired {
+		log.Printf("refresh lock held by another process, will retry")
+		return ErrRefreshLockHeld
+	}
+	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
 
-		refreshedAt := time.Now().UTC()
-		if err := tx.Exec(`
-			INSERT INTO materialized_view_refreshes (name, refreshed_at)
-			VALUES
-				('sbom_component_view', ?),
-				('sbom_metadata_view', ?)
-			ON CONFLICT (name)
-			DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-		`, refreshedAt, refreshedAt).Error; err != nil {
-			return fmt.Errorf("record refresh: %w", err)
+	// Refresh metadata first so that any SBOM visible in sbom_metadata_view is
+	// guaranteed to already have its components in sbom_component_view (which
+	// takes a later snapshot). Reversing this order would cause recent SBOMs
+	// committed between the two snapshot times to show component_count = 0.
+	for _, view := range []string{"sbom_metadata_view", "sbom_component_view"} {
+		if err := refreshView(ctx, db, view); err != nil {
+			return fmt.Errorf("refresh %s: %w", view, err)
 		}
+	}
 
-		return nil
-	}); err != nil {
-		return err
+	refreshedAt := time.Now().UTC()
+	if err := db.WithContext(ctx).Exec(`
+		INSERT INTO materialized_view_refreshes (name, refreshed_at)
+		VALUES
+			('sbom_component_view', ?),
+			('sbom_metadata_view', ?)
+		ON CONFLICT (name)
+		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+	`, refreshedAt, refreshedAt).Error; err != nil {
+		return fmt.Errorf("record refresh: %w", err)
 	}
 
 	return nil

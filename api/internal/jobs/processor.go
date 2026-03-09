@@ -11,6 +11,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// retryableError wraps an error to signal the worker to retry without counting
+// the attempt against the job's max attempts.
+type retryableError struct{ err error }
+
+func (e retryableError) Error() string { return e.err.Error() }
+func (e retryableError) Unwrap() error { return e.err }
+
+// IsRetryableWithoutCount reports whether the error should be retried without
+// incrementing the attempt counter.
+func IsRetryableWithoutCount(err error) bool {
+	var t retryableError
+	return errors.As(err, &t)
+}
+
 // RunExecutor is the interface for executing runs.
 type RunExecutor interface {
 	ExecuteRun(ctx context.Context, runID string, payload interface{}) error
@@ -35,6 +49,11 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 
 func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, error) {
 	if err := dbviews.RefreshMaterializedViews(ctx, db); err != nil {
+		if errors.Is(err, dbviews.ErrRefreshLockHeld) {
+			// Another process holds the refresh lock. Retry without counting
+			// the attempt so this job runs again once the lock is released.
+			return nil, retryableError{err}
+		}
 		return nil, err
 	}
 	return map[string]string{"status": "refreshed"}, nil

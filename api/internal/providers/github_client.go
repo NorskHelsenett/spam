@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +50,64 @@ func (c *GitHubClientImpl) BaseURL() string {
 
 func (c *GitHubClientImpl) ProviderType() string {
 	return "github"
+}
+
+// gitHubContributor is the GitHub API contributor shape.
+type gitHubContributor struct {
+	Login       string `json:"login"`
+	AvatarURL   string `json:"avatar_url"`
+	HTMLURL     string `json:"html_url"`
+	Contributions int  `json:"contributions"`
+}
+
+// GetContributors returns top contributors for owner/repo from the GitHub API.
+func (c *GitHubClientImpl) GetContributors(ctx context.Context, repoPath string, limit int) ([]ContributorInfo, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	apiURL := fmt.Sprintf("%s/repos/%s/contributors?per_page=%d&anon=0", c.baseURL, repoPath, limit)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, ErrInvalidResponse
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw []gitHubContributor
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+
+	out := make([]ContributorInfo, 0, len(raw))
+	for _, c := range raw {
+		out = append(out, ContributorInfo{
+			Login:         c.Login,
+			AvatarURL:     c.AvatarURL,
+			ProfileURL:    c.HTMLURL,
+			Contributions: c.Contributions,
+		})
+	}
+	return out, nil
 }
 
 // gitHubRepo represents a repository from the GitHub API.
@@ -165,6 +224,51 @@ func (c *GitHubClientImpl) getLanguages(ctx context.Context, fullPath string) []
 	return result
 }
 
+// CountRepos returns the total number of repos for the given owner using one API call.
+func (c *GitHubClientImpl) CountRepos(ctx context.Context, owner string) (int, error) {
+	repoType := "public"
+	if c.token != "" {
+		repoType = "all"
+	}
+	encodedOwner := url.PathEscape(owner)
+	count, err := c.countReposFromURL(ctx, fmt.Sprintf("%s/orgs/%s/repos?type=%s&per_page=1", c.baseURL, encodedOwner, repoType))
+	if err == ErrNotFound {
+		return c.countReposFromURL(ctx, fmt.Sprintf("%s/users/%s/repos?type=%s&per_page=1", c.baseURL, encodedOwner, repoType))
+	}
+	return count, err
+}
+
+func (c *GitHubClientImpl) countReposFromURL(ctx context.Context, url string) (int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if err := c.checkResponse(resp); err != nil {
+		return 0, err
+	}
+	pi := c.parsePageInfo(resp, 1)
+	if pi.TotalCount > 0 {
+		return pi.TotalCount, nil
+	}
+	// No Link header means all repos fit on one page — count items.
+	body, _ := io.ReadAll(resp.Body)
+	var items []json.RawMessage
+	if json.Unmarshal(body, &items) == nil {
+		return len(items), nil
+	}
+	return 0, nil
+}
+
 // ListPublicRepos lists repositories for a user or organization.
 // If authenticated, private repositories may be included.
 func (c *GitHubClientImpl) ListPublicRepos(ctx context.Context, owner string, opts ListOptions) ([]RepoData, PageInfo, error) {
@@ -256,6 +360,7 @@ func (c *GitHubClientImpl) fetchRepos(ctx context.Context, url string, pageSize 
 			IsArchived:    r.Archived,
 			IsDisabled:    r.Disabled,
 			IsFork:        r.Fork,
+			IsEmpty:       r.PushedAt.IsZero(),
 			Topics:        r.Topics,
 			CreatedAt:     r.CreatedAt,
 			UpdatedAt:     r.UpdatedAt,
@@ -698,62 +803,6 @@ func (c *GitHubClientImpl) GetCommitLog(ctx context.Context, owner, repo string,
 	}
 
 	return commits, nil
-}
-
-// GetContributors fetches contributors for a repository.
-func (c *GitHubClientImpl) GetContributors(ctx context.Context, owner, repo string, limit int) ([]ContributorInfo, error) {
-	if limit <= 0 {
-		limit = 30
-	}
-	url := fmt.Sprintf("%s/repos/%s/%s/contributors?per_page=%d&anon=false", c.baseURL, owner, repo, limit)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if err := c.checkResponse(resp); err != nil {
-		return nil, err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var ghContributors []struct {
-		Login         string `json:"login"`
-		AvatarURL     string `json:"avatar_url"`
-		HTMLURL       string `json:"html_url"`
-		Contributions int    `json:"contributions"`
-	}
-	if err := json.Unmarshal(body, &ghContributors); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
-	}
-
-	contributors := make([]ContributorInfo, len(ghContributors))
-	for i, c := range ghContributors {
-		contributors[i] = ContributorInfo{
-			Login:         c.Login,
-			AvatarURL:     c.AvatarURL,
-			ProfileURL:    c.HTMLURL,
-			Contributions: c.Contributions,
-		}
-	}
-
-	return contributors, nil
 }
 
 // GetReadme fetches the README content for a repository.

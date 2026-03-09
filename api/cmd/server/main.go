@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/config"
@@ -23,6 +24,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
+	"github.com/NorskHelsenett/spam/internal/uiapi"
 )
 
 func main() {
@@ -57,6 +59,7 @@ func run() error {
 		&auth.Group{},
 		&auth.UserGroup{},
 		&assets.Repo{},
+		&assets.RepoCache{},
 		&assets.RepoCommit{},
 		&assets.ImageDigest{},
 		&artifacts.SBOM{},
@@ -65,6 +68,7 @@ func run() error {
 		&manifests.ManifestDependency{},
 		&jobs.Job{},
 		&runner.Run{},
+		&runner.RunLog{},
 		&runner.RunSecret{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
@@ -84,12 +88,25 @@ func run() error {
 		"migrations/20260204_create_materialized_view_refreshes.sql",
 		"migrations/20260203_create_sbom_component_view.sql",
 		"migrations/20260203_create_sbom_metadata_view.sql",
+		"migrations/20260302_add_repo_search_trigram.sql",
+		"migrations/20260303_add_repos_provider_instance_id.sql",
+		"migrations/20260306_repos_identity_not_empty.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
 
 	if err := db.EnsureViewsPopulated(ctx, gormDB); err != nil {
 		return fmt.Errorf("populate views: %w", err)
+	}
+
+	// Enqueue a refresh so the worker picks up any data accumulated since
+	// the last refresh (e.g. across a server restart). The unique index on
+	// active REFRESH_SBOM_VIEWS jobs means this is a no-op if one is already
+	// queued; the error is intentionally ignored.
+	if _, err := jobs.CreateJob(ctx, gormDB, jobs.CreateJobInput{
+		Type: jobs.JobTypeRefreshSBOMViews,
+	}); err != nil {
+		log.Printf("startup view refresh job (may already be queued): %v", err)
 	}
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
@@ -119,12 +136,15 @@ func run() error {
 		routerOpts = &server.RouterOptions{}
 	}
 
+	routerOpts.Cache = cache.NewMemory()
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
 			log.Printf("WARNING: provider secret key: %s", w)
 		}
 	}
+
+	uiapi.WarmCache(gormDB, routerOpts.ProviderStore, routerOpts.Cache)
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

@@ -169,6 +169,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 						binding = &artifacts.BindingInput{
 							AssetType:       artifacts.AssetTypeRepoCommit,
 							AssetRefID:      commit.ID,
+							CommitSHA:       commitSHA,
 							Source:          "spam-runner",
 							CreatedByUserID: "system",
 						}
