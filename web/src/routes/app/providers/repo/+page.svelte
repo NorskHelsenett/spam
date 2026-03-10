@@ -1117,14 +1117,14 @@
 											{#if s.description}
 												<p class="text-sm text-[var(--text-secondary)]">{s.description}</p>
 											{/if}
-											<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+											<div class="text-xs text-[var(--text-muted)]">
 												{#if s.file}
 													<span class="font-mono">{s.file}{s.start_line ? `:${s.start_line}` : ''}</span>
 												{/if}
-												{#if s.match}
-													<span class="font-mono rounded bg-[var(--card-bg)] px-1.5 py-0.5 opacity-70 break-all">{s.match}</span>
-												{/if}
 											</div>
+											{#if s.match}
+												<div class="font-mono rounded bg-[var(--card-bg)] px-2 py-1.5 text-xs text-[var(--text-muted)] break-all">{s.match}</div>
+											{/if}
 										</div>
 									</div>
 								</article>
