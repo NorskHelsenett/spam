@@ -49,7 +49,7 @@ spec:
                 runAsGroup: 1000
               env:
                 - name: SPAM_API_URL
-                  value: "http://{{ .Release.Name }}-worker:{{ .Values.service.port | default 8081 }}"
+                  value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
                 - name: RUNNER_HMAC_KEY
                   valueFrom:
                     secretKeyRef:
