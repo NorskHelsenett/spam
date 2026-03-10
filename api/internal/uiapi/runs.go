@@ -297,18 +297,37 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
-		// Build clone URL based on provider
-		cloneURL := buildCloneURL(req.Provider, req.RepoPath, req.BaseURL)
-		if cloneURL == "" {
-			http.Error(w, "invalid provider or repo_path", http.StatusBadRequest)
-			return
+		// Resolve provider and its stored base URL from the database.
+		// Never trust req.BaseURL from the client — it could be an attacker-
+		// controlled URL that would receive the provider token (SSRF).
+		providerID := strings.TrimSpace(req.ProviderID)
+		var storedBaseURL string
+		if providerID != "" {
+			var pi struct{ BaseURL string }
+			if err := db.WithContext(r.Context()).
+				Table("provider_instances").
+				Select("base_url").
+				Where("id = ? AND enabled = true", providerID).
+				Scan(&pi).Error; err != nil || pi.BaseURL == "" {
+				http.Error(w, "provider not found or has no base URL", http.StatusBadRequest)
+				return
+			}
+			storedBaseURL = pi.BaseURL
+		} else {
+			match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, "", req.RepoPath)
+			if err != nil || match == nil || match.BaseURL == "" {
+				http.Error(w, "no configured provider found for this repo", http.StatusBadRequest)
+				return
+			}
+			providerID = match.ID
+			storedBaseURL = match.BaseURL
 		}
 
-		providerID := strings.TrimSpace(req.ProviderID)
-		if providerID == "" {
-			if match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, req.BaseURL, req.RepoPath); err == nil && match != nil {
-				providerID = match.ID
-			}
+		// Build clone URL using only the server-side base URL, never the client-supplied one.
+		cloneURL := buildCloneURL(req.Provider, req.RepoPath, storedBaseURL)
+		if cloneURL == "" {
+			http.Error(w, "could not build clone URL", http.StatusBadRequest)
+			return
 		}
 
 		fullPath := strings.Trim(req.RepoPath, "/")
@@ -584,18 +603,13 @@ func RunsActiveStreamHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 // buildCloneURL constructs a clone URL based on provider and repo path.
 func buildCloneURL(provider, repoPath, baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	repoPath = strings.Trim(repoPath, "/")
+	if baseURL == "" || repoPath == "" {
+		return ""
+	}
 	switch provider {
-	case "github":
-		return "https://github.com/" + repoPath + ".git"
-	case "gitlab":
-		if baseURL != "" {
-			return baseURL + "/" + repoPath + ".git"
-		}
-		return "https://gitlab.com/" + repoPath + ".git"
-	case "gitea", "forgejo":
-		if baseURL == "" {
-			return ""
-		}
+	case "github", "gitlab", "gitea", "forgejo":
 		return baseURL + "/" + repoPath + ".git"
 	default:
 		return ""
