@@ -55,9 +55,11 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 			return
 		}
 
-		// Resolve token and display name while still within the request context.
+		// Resolve token, display name, and baseURL from the DB while still within the request context.
+		// baseURL must come from the DB to prevent SSRF — never trust req.BaseURL.
 		token := ""
 		label := req.Provider
+		baseURL := ""
 		if store != nil && req.ProviderID != "" {
 			if t, err := store.GetActiveToken(r.Context(), req.ProviderID); err == nil {
 				token = t
@@ -66,6 +68,7 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 				for _, p := range provs {
 					if p.ID == req.ProviderID {
 						label = p.DisplayName
+						baseURL = p.BaseURL
 						break
 					}
 				}
@@ -98,11 +101,11 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 
 		switch req.Provider {
 		case "github":
-			totalQueued, allErrors = scanAllGitHub(ctx, db, req.Owner, req.ProviderID, token, label, req.OnlyNew, onProgress)
+			totalQueued, allErrors = scanAllGitHub(ctx, db, req.Owner, baseURL, req.ProviderID, token, label, req.OnlyNew, onProgress)
 		case "gitlab":
-			totalQueued, allErrors = scanAllGitLab(ctx, db, req.Group, req.BaseURL, req.IncludeSubgroups, req.ProviderID, token, label, req.OnlyNew, onProgress)
+			totalQueued, allErrors = scanAllGitLab(ctx, db, req.Group, baseURL, req.IncludeSubgroups, req.ProviderID, token, label, req.OnlyNew, onProgress)
 		case "gitea", "forgejo":
-			totalQueued, allErrors = scanAllGitea(ctx, db, req.Owner, req.BaseURL, req.ProviderID, token, label, req.OnlyNew, onProgress)
+			totalQueued, allErrors = scanAllGitea(ctx, db, req.Owner, baseURL, req.ProviderID, token, label, req.OnlyNew, onProgress)
 		}
 
 		// Send done event with final totals.
@@ -113,12 +116,12 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 }
 
 // scanAllGitHub fetches all GitHub repos page-by-page and queues them for scanning.
-func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, providerID, token, label string, onlyNew bool, onProgress func(int)) (int, []string) {
+func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, baseURL, providerID, token, label string, onlyNew bool, onProgress func(int)) (int, []string) {
 	if owner == "" {
 		return 0, []string{"owner is required"}
 	}
 
-	client := providers.NewGitHubClient("", token)
+	client := providers.NewGitHubClient(baseURL, token)
 	var allErrors []string
 	var totalQueued int
 	page := 1
@@ -133,7 +136,7 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, providerID, token, l
 			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-		totalQueued += queueRepos(ctx, db, repos, "github", "", providerID, label, onlyNew, page, &allErrors)
+		totalQueued += queueRepos(ctx, db, repos, "github", baseURL, providerID, label, onlyNew, page, &allErrors)
 		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
