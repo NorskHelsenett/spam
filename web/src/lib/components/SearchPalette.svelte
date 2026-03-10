@@ -313,6 +313,8 @@
 		return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 	};
 
+	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, '\u202f');
+
 	const selectedItem = $derived(flatItems[selectedIndex] ?? null);
 </script>
 
@@ -469,13 +471,12 @@
 									{/if}
 								</div>
 								{#if repoPreview.vulnerabilities?.summary && (repoPreview.vulnerabilities.summary.critical > 0 || repoPreview.vulnerabilities.summary.high > 0 || repoPreview.vulnerabilities.summary.medium > 0 || repoPreview.vulnerabilities.summary.low > 0)}
-									<div class="mb-1">
+									<div class="mb-4 pb-1">
 										<VulnBadges
 											critical={repoPreview.vulnerabilities.summary.critical}
 											high={repoPreview.vulnerabilities.summary.high}
 											medium={repoPreview.vulnerabilities.summary.medium}
 											low={repoPreview.vulnerabilities.summary.low}
-											size="sm"
 										/>
 									</div>
 								{/if}
@@ -484,7 +485,7 @@
 										<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Dependencies</span>
 										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-											{repoPreview.dependencies.total > 0 ? repoPreview.dependencies.total : '—'}
+											{repoPreview.dependencies.total > 0 ? fmt(repoPreview.dependencies.total) : '—'}
 										</span>
 									</div>
 									{#if repoPreview.sbom.latest}
@@ -492,7 +493,7 @@
 											<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
 											<span class="text-[11px]" style="color: var(--text-muted);">SBOM</span>
 											<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-												{repoPreview.sbom.latest.format} · {repoPreview.sbom.latest.component_count} components
+												{repoPreview.sbom.latest.format} · {fmt(repoPreview.sbom.latest.component_count)} components
 											</span>
 										</div>
 									{/if}
@@ -500,7 +501,7 @@
 										<ShieldCheck size={13} style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-muted)'}; flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Secrets</span>
 										<span class="ml-auto text-[11px] font-medium" style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-primary)'};">
-											{repoPreview.secrets.latest_count > 0 ? `${repoPreview.secrets.latest_count} found` : 'None found'}
+											{repoPreview.secrets.latest_count > 0 ? `${fmt(repoPreview.secrets.latest_count)} found` : 'None found'}
 										</span>
 									</div>
 									{#if repoPreview.runs.latest}
@@ -523,7 +524,7 @@
 									<div class="flex items-center gap-2.5">
 										<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Total scans</span>
-										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{repoPreview.runs.total}</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(repoPreview.runs.total)}</span>
 									</div>
 								</div>
 
