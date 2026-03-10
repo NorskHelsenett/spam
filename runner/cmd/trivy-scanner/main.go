@@ -2,7 +2,7 @@
 //
 // Environment variables:
 //
-//	SPAM_API_URL     - base URL of the SPAM API (e.g. http://spam:8080)
+//	SPAM_API_URL     - base URL of the worker API (e.g. http://spam-worker:8081)
 //	RUNNER_HMAC_KEY  - shared secret for request signing
 //	TRIVY_CACHE_DIR  - trivy database cache dir (default: /trivy-cache)
 package main
@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -35,7 +36,7 @@ func run() error {
 	if apiURL == "" {
 		return fmt.Errorf("SPAM_API_URL is required")
 	}
-	hmacKey := os.Getenv("RUNNER_HMAC_KEY")
+	hmacKey := parseHMACKey(os.Getenv("RUNNER_HMAC_KEY"))
 
 	cacheDir := os.Getenv("TRIVY_CACHE_DIR")
 	if cacheDir == "" {
@@ -73,7 +74,7 @@ type nextJobResponse struct {
 	RepoSlug string `json:"repo_slug"`
 }
 
-func fetchNextJob(apiURL, hmacKey string) (*nextJobResponse, bool, error) {
+func fetchNextJob(apiURL string, hmacKey []byte) (*nextJobResponse, bool, error) {
 	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/trivy/next", nil)
 	if err != nil {
 		return nil, false, err
@@ -101,7 +102,7 @@ func fetchNextJob(apiURL, hmacKey string) (*nextJobResponse, bool, error) {
 	return &job, true, nil
 }
 
-func scanSBOM(apiURL, hmacKey, cacheDir string, job *nextJobResponse) error {
+func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobResponse) error {
 	// Create temp directory for this scan.
 	tmpDir, err := os.MkdirTemp("", "trivy-scan-*")
 	if err != nil {
@@ -151,7 +152,7 @@ func scanSBOM(apiURL, hmacKey, cacheDir string, job *nextJobResponse) error {
 	return nil
 }
 
-func downloadSBOM(apiURL, hmacKey, sbomID, destPath string) error {
+func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) error {
 	url := apiURL + "/api/sboms/" + sbomID + "/download"
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
@@ -202,11 +203,23 @@ func trivyScanSBOM(cacheDir, sbomPath, resultPath string) error {
 
 // signRequest adds the X-Scanner-Signature header to r.
 // For GET requests body should be nil; the signature is over an empty body.
-func signRequest(r *http.Request, body []byte, hmacKey string) {
-	if hmacKey == "" {
+func signRequest(r *http.Request, body []byte, hmacKey []byte) {
+	if len(hmacKey) == 0 {
 		return
 	}
-	mac := hmac.New(sha256.New, []byte(hmacKey))
+	mac := hmac.New(sha256.New, hmacKey)
 	mac.Write(body)
 	r.Header.Set("X-Scanner-Signature", hex.EncodeToString(mac.Sum(nil)))
+}
+
+func parseHMACKey(value string) []byte {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	key, err := base64.StdEncoding.DecodeString(value)
+	if err == nil {
+		return key
+	}
+	return []byte(value)
 }

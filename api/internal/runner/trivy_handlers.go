@@ -2,16 +2,42 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
 	"os"
 
+	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
 
 const maxTrivyResultBytes = 50 << 20 // 50 MB guard
+
+func sbomDownloadHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sbomID := r.PathValue("id")
+		if sbomID == "" {
+			http.Error(w, "sbom ID required", http.StatusBadRequest)
+			return
+		}
+
+		sbom, err := artifacts.FindSBOM(r.Context(), db, sbomID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "sbom not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to fetch sbom", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Disposition", "attachment; filename=sbom.json")
+		_, _ = w.Write(sbom.ContentBytes)
+	}
+}
 
 func trivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

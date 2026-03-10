@@ -62,6 +62,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// can talk directly to the worker service.
 	r.Group(func(r chi.Router) {
 		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))
+		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
 		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
 	})
