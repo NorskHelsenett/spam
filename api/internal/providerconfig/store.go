@@ -546,34 +546,40 @@ func FindProviderMatch(ctx context.Context, db *gorm.DB, providerType, baseURL, 
 	}
 
 	repoPath = strings.Trim(repoPath, "/")
+	return matchProvider(providerType, repoPath, providers), nil
+}
+
+// matchProvider selects the best provider from candidates for a given repoPath.
+// It is a pure function so it can be unit-tested without a database.
+func matchProvider(providerType, repoPath string, candidates []ProviderInstance) *ProviderInstance {
 	owner := repoPath
 	if parts := strings.Split(repoPath, "/"); len(parts) > 0 {
 		owner = parts[0]
 	}
 
 	var best *ProviderInstance
-	for i, provider := range providers {
+	for i, provider := range candidates {
 		if providerType == ProviderGitHub {
 			if provider.OwnerPath == owner {
-				best = &providers[i]
+				best = &candidates[i]
 				break
 			}
 			continue
 		}
 		if provider.OwnerPath == "" {
 			if best == nil {
-				best = &providers[i]
+				best = &candidates[i]
 			}
 			continue
 		}
 		ownerPrefix := strings.TrimRight(provider.OwnerPath, "/")
 		if repoPath == ownerPrefix || strings.HasPrefix(repoPath, ownerPrefix+"/") {
 			if best == nil || len(provider.OwnerPath) > len(best.OwnerPath) {
-				best = &providers[i]
+				best = &candidates[i]
 			}
 		}
 	}
-	return best, nil
+	return best
 }
 
 func GetActiveToken(ctx context.Context, db *gorm.DB, providerID string, key []byte) (string, error) {
