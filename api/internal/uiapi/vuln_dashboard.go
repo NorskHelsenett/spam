@@ -1,6 +1,7 @@
 package uiapi
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -119,6 +120,8 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		limit := 500
+		repoID := r.URL.Query().Get("repo_id")
+
 		type vulnRow struct {
 			RepoID           string `json:"repo_id"`
 			RepoSlug         string `json:"repo_slug"`
@@ -131,7 +134,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var rows []vulnRow
-		db.WithContext(r.Context()).Raw(`
+		baseQuery := `
 			SELECT
 				tsr.repo_id,
 				COALESCE(repo.org || '/' || repo.slug, tsr.repo_id) AS repo_slug,
@@ -145,6 +148,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			LEFT JOIN repos repo ON repo.id = tsr.repo_id
 			CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
 			CROSS JOIN LATERAL jsonb_array_elements(result.result->'Vulnerabilities') AS vuln(vuln)
+			%s
 			ORDER BY
 				CASE vuln->>'Severity'
 					WHEN 'CRITICAL' THEN 1
@@ -155,7 +159,18 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				END,
 				vuln->>'VulnerabilityID'
 			LIMIT ?
-		`, limit).Scan(&rows)
+		`
+		if repoID != "" {
+			db.WithContext(r.Context()).Raw(
+				fmt.Sprintf(baseQuery, "WHERE tsr.repo_id = ?"),
+				repoID, limit,
+			).Scan(&rows)
+		} else {
+			db.WithContext(r.Context()).Raw(
+				fmt.Sprintf(baseQuery, ""),
+				limit,
+			).Scan(&rows)
+		}
 
 		if rows == nil {
 			rows = []vulnRow{}

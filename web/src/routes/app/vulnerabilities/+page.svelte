@@ -336,7 +336,7 @@
 			</div>
 
 		{:else if activeTab === 'vulnerabilities'}
-			<div class="border border-[var(--border-color)] bg-[var(--card-bg)] overflow-hidden">
+			<div class="rounded-2xl border border-[var(--border-color)] bg-[var(--card-bg)] overflow-hidden max-w-[90vw]">
 				{#if vulnsLoading}
 					<div class="flex items-center justify-center py-20">
 						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
@@ -348,78 +348,74 @@
 						<p class="mt-1 text-xs text-[var(--text-muted)]">No scan results yet — run a scan to populate this view.</p>
 					</div>
 				{:else}
-					<div class="overflow-x-auto">
-						<table class="w-full text-xs border-collapse">
-							<thead>
-								<tr class="border-b border-[var(--border-color)] text-[var(--text-muted)] uppercase tracking-wider">
-									<th class="px-5 py-3 text-left font-medium">CVE / ID</th>
-									<th class="px-4 py-3 text-left font-medium">Severity</th>
-									<th class="px-4 py-3 text-left font-medium">Title</th>
-									<th class="px-4 py-3 text-left font-medium">Package</th>
-									<th class="px-4 py-3 text-left font-medium">Fix</th>
-									<th class="px-4 py-3 text-left font-medium">Affected Repos</th>
-								</tr>
-							</thead>
-							<tbody>
-								{#each groupedVulns as g, i}
-									<tr class="border-b border-[var(--border-color)]/50 align-top {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}">
-										<!-- CVE ID -->
-										<td class="px-5 py-3 font-mono font-semibold text-[var(--text-bright)] whitespace-nowrap">
+					<table class="w-full text-xs border-collapse">
+						<thead>
+							<tr class="border-b border-[var(--border-color)] text-[var(--text-muted)] uppercase tracking-wider">
+								<th class="px-5 py-3 text-left font-medium w-[22%]">CVE / ID</th>
+								<th class="px-4 py-3 text-left font-medium w-[10%]">Severity</th>
+								<th class="px-4 py-3 text-left font-medium">Package &amp; Fix</th>
+								<th class="px-4 py-3 text-left font-medium w-[28%]">Affected Repos</th>
+							</tr>
+						</thead>
+						<tbody>
+							{#each groupedVulns as g, i}
+								<tr class="border-b border-[var(--border-color)]/50 align-top {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}">
+									<!-- CVE ID + title -->
+									<td class="px-5 py-3">
+										<div class="space-y-1">
 											{#if cveUrl(g.vuln_id)}
 												<a
 													href={cveUrl(g.vuln_id)}
 													target="_blank"
 													rel="noopener noreferrer"
-													class="text-[var(--accent)] hover:underline"
+													class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
 												>{g.vuln_id}</a>
 											{:else}
-												{g.vuln_id}
+												<span class="font-mono font-semibold text-[var(--text-bright)] break-all">{g.vuln_id}</span>
 											{/if}
-										</td>
-										<!-- Severity -->
-										<td class="px-4 py-3 whitespace-nowrap">
-											<span class="inline-flex items-center gap-1 border px-2 py-0.5 font-medium {severityClass(g.severity)} {severityIcon(g.severity).color}">
-												{#if g.severity?.toUpperCase() === 'CRITICAL' || g.severity?.toUpperCase() === 'HIGH'}
-													<ShieldX class="h-3 w-3" />
-												{:else}
-													<ShieldAlert class="h-3 w-3" />
-												{/if}
-												{g.severity}
-											</span>
-										</td>
-										<!-- Title -->
-										<td class="px-4 py-3 text-[var(--text-secondary)] max-w-xs">
-											{g.title || '—'}
-										</td>
-										<!-- Package -->
-										<td class="px-4 py-3 font-mono text-[var(--text-muted)] whitespace-nowrap">
-											{g.pkg_name}{g.installed_version ? `@${g.installed_version}` : ''}
-										</td>
-										<!-- Fix -->
-										<td class="px-4 py-3 whitespace-nowrap">
-											{#if g.fixed_version}
-												<span class="bg-green-500/10 px-1.5 py-0.5 text-green-400 font-mono">{g.fixed_version}</span>
+											{#if g.title}
+												<p class="text-[var(--text-muted)] leading-snug">{g.title}</p>
+											{/if}
+										</div>
+									</td>
+									<!-- Severity pill -->
+									<td class="px-4 py-3 whitespace-nowrap">
+										<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium {severityClass(g.severity)} {severityIcon(g.severity).color}">
+											{#if g.severity?.toUpperCase() === 'CRITICAL' || g.severity?.toUpperCase() === 'HIGH'}
+												<ShieldX class="h-3 w-3" />
 											{:else}
-												<span class="text-[var(--text-muted)]">—</span>
+												<ShieldAlert class="h-3 w-3" />
 											{/if}
-										</td>
-										<!-- Affected repos -->
-										<td class="px-4 py-3">
-											<div class="flex flex-col gap-1">
-												{#each g.repos as repo}
-													<button
-														type="button"
-														class="text-left text-[var(--accent)] hover:underline truncate max-w-[200px]"
-														onclick={() => openRepo(repo.repo_id)}
-													>{repo.repo_slug}</button>
-												{/each}
-											</div>
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					</div>
+											{g.severity}
+										</span>
+									</td>
+									<!-- Package + fix (two lines) -->
+									<td class="px-4 py-3">
+										<div class="space-y-1">
+											<p class="font-mono text-[var(--text-muted)] break-all">{g.pkg_name}{g.installed_version ? `@${g.installed_version}` : ''}</p>
+											{#if g.fixed_version}
+												<p class="font-mono text-green-400"><span class="text-[var(--text-muted)] font-sans">fix:</span> {g.fixed_version}</p>
+											{:else}
+												<p class="text-[var(--text-muted)]/50">no fix available</p>
+											{/if}
+										</div>
+									</td>
+									<!-- Affected repos -->
+									<td class="px-4 py-3">
+										<div class="flex flex-col gap-1">
+											{#each g.repos as repo}
+												<button
+													type="button"
+													class="text-left text-[var(--accent)] hover:underline break-all"
+													onclick={() => openRepo(repo.repo_id)}
+												>{repo.repo_slug}</button>
+											{/each}
+										</div>
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
 				{/if}
 			</div>
 		{/if}

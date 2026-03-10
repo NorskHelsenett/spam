@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe
+		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe, X
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -461,6 +461,51 @@
 		const _ = $page.url.href;
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
+
+	// Vulnerabilities dialog
+	type VulnRow = {
+		repo_id: string;
+		repo_slug: string;
+		vuln_id: string;
+		severity: string;
+		pkg_name: string;
+		installed_version: string;
+		fixed_version: string;
+		title: string;
+	};
+
+	let vulnDialogOpen = $state(false);
+	let vulnDialogData = $state<VulnRow[]>([]);
+	let vulnDialogLoading = $state(false);
+
+	const openVulnDialog = async () => {
+		const { repoDbId } = getParams();
+		vulnDialogOpen = true;
+		if (vulnDialogData.length > 0) return;
+		vulnDialogLoading = true;
+		try {
+			const url = repoDbId
+				? `/api/vuln/list?repo_id=${encodeURIComponent(repoDbId)}`
+				: '/api/vuln/list';
+			const res = await fetch(url, { credentials: 'include' });
+			if (res.ok) vulnDialogData = await res.json();
+		} finally {
+			vulnDialogLoading = false;
+		}
+	};
+
+	const severityClass = (s: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return 'text-red-400 border-red-500/40 bg-red-500/10';
+			case 'HIGH':     return 'text-orange-400 border-orange-500/40 bg-orange-500/10';
+			case 'MEDIUM':   return 'text-yellow-400 border-yellow-500/40 bg-yellow-500/10';
+			case 'LOW':      return 'text-blue-400 border-blue-500/40 bg-blue-500/10';
+			default:         return 'text-[var(--text-muted)] border-[var(--border-color)] bg-transparent';
+		}
+	};
+
+	const cveUrl = (id: string) =>
+		id?.startsWith('CVE-') ? `https://www.cve.org/CVERecord?id=${id}` : null;
 </script>
 
 <svelte:head>
@@ -625,7 +670,11 @@
 			</div>
 
 			<!-- Vulnerabilities -->
-				<div class="space-y-3 metric-card rounded-2xl p-4">
+			<button
+				type="button"
+				class="space-y-3 metric-card rounded-2xl p-4 w-full text-left cursor-pointer transition-colors hover:border-[var(--accent)]/50"
+				onclick={openVulnDialog}
+			>
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
@@ -645,7 +694,7 @@
 						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3" /> Low</p>
 					</div>
 				</div>
-			</div>
+			</button>
 
 			<!-- Secrets & Issues -->
 				<div class="space-y-3 metric-card rounded-2xl p-4">
@@ -854,3 +903,101 @@
 		{/if}
 	{/if}
 </div>
+
+<!-- Vulnerabilities dialog -->
+{#if vulnDialogOpen}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
+		onkeydown={(e) => e.key === 'Escape' && (vulnDialogOpen = false)}
+		onclick={(e) => e.target === e.currentTarget && (vulnDialogOpen = false)}
+	>
+		<div class="w-full max-w-4xl">
+			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
+				<!-- Header -->
+				<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-4">
+					<div class="flex items-center gap-3">
+						<ShieldX class="h-5 w-5 text-[var(--accent)]" />
+						<h2 class="text-base font-semibold text-[var(--text-bright)]">Vulnerabilities</h2>
+						{#if !vulnDialogLoading && vulnDialogData.length > 0}
+							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
+								{vulnDialogData.length}
+							</span>
+						{/if}
+					</div>
+					<button
+						type="button"
+						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
+						onclick={() => (vulnDialogOpen = false)}
+					>
+						<X class="h-4 w-4" />
+					</button>
+				</div>
+
+				<!-- Body -->
+				<div class="max-h-[70vh] overflow-y-auto">
+					{#if vulnDialogLoading}
+						<div class="flex items-center justify-center py-20">
+							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+						</div>
+					{:else if vulnDialogData.length === 0}
+						<div class="flex flex-col items-center justify-center py-16 text-center">
+							<Shield class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
+							<p class="text-sm font-medium text-[var(--text-secondary)]">No vulnerabilities found</p>
+							<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no recorded scan results.</p>
+						</div>
+					{:else}
+						<div class="divide-y divide-[var(--border-color)]/50">
+							{#each vulnDialogData as v}
+								<article class="px-6 py-4 bg-[var(--card-bg)] hover:bg-[var(--hover-bg-subtle)] transition-colors">
+									<div class="flex flex-wrap items-start gap-3">
+										<!-- Severity badge -->
+										<span class="mt-0.5 shrink-0 inline-flex items-center gap-1 border px-2 py-0.5 text-xs font-semibold {severityClass(v.severity)}">
+											{#if v.severity?.toUpperCase() === 'CRITICAL' || v.severity?.toUpperCase() === 'HIGH'}
+												<ShieldX class="h-3 w-3" />
+											{:else}
+												<ShieldAlert class="h-3 w-3" />
+											{/if}
+											{v.severity}
+										</span>
+
+										<div class="min-w-0 flex-1 space-y-1">
+											<!-- CVE ID + title -->
+											<div class="flex flex-wrap items-baseline gap-2">
+												{#if cveUrl(v.vuln_id)}
+													<a
+														href={cveUrl(v.vuln_id)}
+														target="_blank"
+														rel="noopener noreferrer"
+														class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
+													>{v.vuln_id}</a>
+												{:else}
+													<span class="font-mono text-sm font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
+												{/if}
+												{#if v.title}
+													<span class="text-sm text-[var(--text-secondary)]">{v.title}</span>
+												{/if}
+											</div>
+
+											<!-- Package + fix -->
+											<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+												<span class="font-mono">{v.pkg_name}{v.installed_version ? `@${v.installed_version}` : ''}</span>
+												{#if v.fixed_version}
+													<span class="bg-green-500/10 px-1.5 py-0.5 font-mono text-green-400">
+														fix available: {v.fixed_version}
+													</span>
+												{:else}
+													<span class="text-[var(--text-muted)]/60">no fix available</span>
+												{/if}
+											</div>
+										</div>
+									</div>
+								</article>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</section>
+		</div>
+	</div>
+{/if}
