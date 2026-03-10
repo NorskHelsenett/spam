@@ -50,20 +50,21 @@ type advancedSearchDBRow struct {
 }
 
 var advancedSearchTargets = map[string]struct{}{
-	"manifest":    {},
-	"sbom":        {},
-	"secret":      {},
-	"contributor": {},
-	"language":    {},
-	"commit":      {},
-	"repo":        {},
-	"readme":      {},
+	"manifest":      {},
+	"sbom":          {},
+	"secret":        {},
+	"contributor":   {},
+	"language":      {},
+	"commit":        {},
+	"repo":          {},
+	"readme":        {},
+	"vulnerability": {},
 }
 
 func normalizeAdvancedTargets(target string) []string {
 	target = strings.TrimSpace(strings.ToLower(target))
 	if target == "" || target == "all" {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vulnerability"}
 	}
 	parts := strings.Split(target, ",")
 	out := make([]string, 0, len(parts))
@@ -342,6 +343,35 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			ORDER BY rc.synced_at DESC
 			LIMIT ?
 		`, like, perTargetLimit).Scan(&rows).Error
+		return rows, err
+	case "vulnerability":
+		err := db.WithContext(r.Context()).Raw(`
+			SELECT
+				'vulnerability' AS type,
+				tsr.id || '/' || (vuln->>'VulnerabilityID') AS source_ref,
+				r.id AS repo_id,
+				r.provider,
+				COALESCE(pi.id, '') AS provider_id,
+				COALESCE(pi.base_url, '') AS base_url,
+				COALESCE(pi.owner_path, '') AS owner_path,
+				r.org,
+				r.slug,
+				vuln->>'VulnerabilityID' AS title,
+				vuln->>'Severity' AS value,
+				(COALESCE(vuln->>'PkgName', '') || ' ' || COALESCE(vuln->>'InstalledVersion', '') || ' - ' || COALESCE(vuln->>'Title', '')) AS source_text,
+				tsr.scanned_at AS created_at
+			FROM trivy_scan_results tsr
+			JOIN repos r ON r.id = tsr.repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
+			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
+			WHERE
+				vuln->>'VulnerabilityID' ILIKE ?
+				OR vuln->>'PkgName' ILIKE ?
+				OR vuln->>'Title' ILIKE ?
+			ORDER BY tsr.scanned_at DESC
+			LIMIT ?
+		`, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
 	default:
 		return []advancedSearchDBRow{}, nil
@@ -686,6 +716,49 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Raw = strings.TrimSpace(row.Details + "\n\n" + row.Readme + "\n\n" + row.Commits + "\n\n" + row.Contribs)
 			resp.Metadata["repo"] = row.Org + "/" + row.Slug
 			resp.Metadata["provider"] = row.Provider
+		case "vulnerability":
+			// source_ref is "tsr_id/vuln_id" (e.g. "uuid/CVE-2021-44228")
+			parts := strings.SplitN(sourceRef, "/", 2)
+			if len(parts) != 2 {
+				http.Error(w, "invalid source_ref for vulnerability", http.StatusBadRequest)
+				return
+			}
+			tsrID, vulnID := parts[0], parts[1]
+
+			var vulnRow struct {
+				RepoID   string
+				Provider string
+				Org      string
+				Slug     string
+				VulnJSON string
+				Target   string
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT
+					r.id AS repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					vuln::text AS vuln_json,
+					COALESCE(result.result->>'Target', '') AS target
+				FROM trivy_scan_results tsr
+				JOIN repos r ON r.id = tsr.repo_id
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
+				WHERE tsr.id = ? AND vuln->>'VulnerabilityID' = ?
+				LIMIT 1
+			`, tsrID, vulnID).Scan(&vulnRow).Error
+			if err != nil || vulnRow.RepoID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
+			resp.Raw = vulnRow.VulnJSON
+			resp.Metadata["vuln_id"] = vulnID
+			resp.Metadata["scan_id"] = tsrID
+			if vulnRow.Target != "" {
+				resp.Metadata["target"] = vulnRow.Target
+			}
 		}
 
 		if repoID != "" && resp.RepoID != "" && repoID != resp.RepoID {
