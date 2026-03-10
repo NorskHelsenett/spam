@@ -94,6 +94,8 @@ func run() error {
 		"migrations/20260204_create_materialized_view_refreshes.sql",
 		"migrations/20260203_create_sbom_component_view.sql",
 		"migrations/20260203_create_sbom_metadata_view.sql",
+		"migrations/20260310_optimize_sbom_component_view_latest_per_repo.sql",
+		"migrations/20260310_optimize_sbom_metadata_view_latest_per_repo.sql",
 		"migrations/20260302_add_repo_search_trigram.sql",
 		"migrations/20260303_add_repos_provider_instance_id.sql",
 		"migrations/20260306_repos_identity_not_empty.sql",
