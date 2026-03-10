@@ -1069,7 +1069,7 @@
 		<div class="w-full max-w-4xl">
 			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
 				<!-- Header -->
-				<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-4">
+				<div class="flex items-center justify-between px-6 py-4">
 					<div class="flex items-center gap-3">
 						<FileWarning class="h-5 w-5 text-red-400" />
 						<h2 class="text-base font-semibold text-[var(--text-bright)]">Secrets & Issues</h2>
