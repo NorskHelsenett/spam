@@ -146,10 +146,10 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'MEDIUM')     AS medium_count,
 					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'LOW')        AS low_count,
 					COUNT(*) FILTER (WHERE UPPER(deduped.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW') OR deduped.severity IS NULL OR deduped.severity = '') AS unknown_count,
-					NULL::timestamptz                                          AS last_scanned_at
+					MAX(deduped.checked_at)                                    AS last_scanned_at
 				FROM (
 					SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
-						rc.repo_id, cv.severity
+						rc.repo_id, cv.severity, cv.checked_at
 					FROM component_vulnerabilities cv
 					JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
 					JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
