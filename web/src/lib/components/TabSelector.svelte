@@ -48,7 +48,8 @@
 		--tab-index: 0;
 		position: relative;
 		display: grid;
-		grid-template-columns: repeat(var(--tab-count), minmax(min-content, 1fr));
+		grid-template-columns: repeat(var(--tab-count), 1fr);
+		min-width: max-content;
 		gap: 6px;
 		padding: 4px;
 		border: 1px solid var(--border-color);

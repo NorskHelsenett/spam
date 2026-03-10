@@ -346,20 +346,44 @@ func loadRepoVulnerabilities(r *http.Request, db *gorm.DB, repoDBID string) Repo
 		return RepoMetadataVulnerabilities{}
 	}
 
-	var summary RepoMetadataVulnSummary
-	if err := db.WithContext(r.Context()).Raw(`
+	var trivy RepoMetadataVulnSummary
+	db.WithContext(r.Context()).Raw(`
 		SELECT
 			COALESCE(SUM(critical_count), 0) AS critical,
 			COALESCE(SUM(high_count), 0)     AS high,
 			COALESCE(SUM(medium_count), 0)   AS medium,
-			COALESCE(SUM(low_count), 0)      AS low
+			COALESCE(SUM(low_count), 0)      AS low,
+			COALESCE(SUM(unknown_count), 0)  AS unknown
 		FROM trivy_scan_results
 		WHERE repo_id = ?
-	`, repoDBID).Scan(&summary).Error; err != nil {
-		return RepoMetadataVulnerabilities{}
+	`, repoDBID).Scan(&trivy)
+
+	var osv RepoMetadataVulnSummary
+	db.WithContext(r.Context()).Raw(`
+		SELECT
+			COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
+			COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
+			COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
+			COUNT(*) FILTER (WHERE UPPER(severity) = 'LOW')      AS low,
+			COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW') OR severity IS NULL OR severity = '') AS unknown
+		FROM (
+			SELECT DISTINCT ON (cv.vuln_id) cv.severity
+			FROM component_vulnerabilities cv
+			JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
+			JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
+			WHERE rc.repo_id = ? AND cv.vuln_id <> '_none'
+		) osv_deduped
+	`, repoDBID).Scan(&osv)
+
+	summary := RepoMetadataVulnSummary{
+		Critical: trivy.Critical + osv.Critical,
+		High:     trivy.High + osv.High,
+		Medium:   trivy.Medium + osv.Medium,
+		Low:      trivy.Low + osv.Low,
+		Unknown:  trivy.Unknown + osv.Unknown,
 	}
 
-	if summary.Critical == 0 && summary.High == 0 && summary.Medium == 0 && summary.Low == 0 {
+	if summary.Critical == 0 && summary.High == 0 && summary.Medium == 0 && summary.Low == 0 && summary.Unknown == 0 {
 		return RepoMetadataVulnerabilities{}
 	}
 

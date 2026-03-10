@@ -102,8 +102,10 @@
 		);
 	})();
 
-	const cveUrl = (id: string) =>
-		id.startsWith('CVE-') ? `https://www.cve.org/CVERecord?id=${id}` : null;
+	const vulnUrl = (id: string) => {
+		if (id.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
+		return `https://osv.dev/vulnerability/${id}`;
+	};
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
 
@@ -368,16 +370,12 @@
 									<td class="px-5 py-3">
 										<div class="space-y-1">
 											<div class="flex flex-wrap items-center gap-2">
-												{#if cveUrl(g.vuln_id)}
-													<a
-														href={cveUrl(g.vuln_id)}
-														target="_blank"
-														rel="noopener noreferrer"
-														class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
-													>{g.vuln_id}</a>
-												{:else}
-													<span class="font-mono font-semibold text-[var(--text-bright)] break-all">{g.vuln_id}</span>
-												{/if}
+												<a
+													href={vulnUrl(g.vuln_id)}
+													target="_blank"
+													rel="noopener noreferrer"
+													class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
+												>{g.vuln_id}</a>
 												{#each [...g.sources] as src}
 													<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{src}</span>
 												{/each}

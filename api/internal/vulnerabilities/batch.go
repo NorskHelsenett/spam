@@ -111,7 +111,7 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 					VulnID:    v.ID,
 					Summary:   v.Summary,
 					FixedIn:   extractFixedIn(v.Affected),
-					Severity:  extractSeverity(v.Affected),
+					Severity:  extractSeverity(v),
 					Source:    "osv",
 					CheckedAt: now,
 				})
@@ -143,7 +143,55 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 	log.Printf("[osv-scan] finished: scanned=%d vulns_found=%d components_with_vulns=%d errors=%d",
 		result.Scanned, result.VulnsFound, result.ComponentsWithVulns, result.Errors)
 
+	// Enrich vulns that are missing details (batch API returns id+modified only).
+	enrichVulnDetails(ctx, db)
+
 	return result, nil
+}
+
+// enrichVulnDetails fetches full details from /v1/vulns/{id} for any stored
+// vulnerability that has no summary yet (i.e. discovered via batch scan).
+func enrichVulnDetails(ctx context.Context, db *gorm.DB) {
+	var missing []string
+	if err := db.WithContext(ctx).
+		Model(&ComponentVulnerability{}).
+		Where("vuln_id <> '_none' AND (summary IS NULL OR summary = '')").
+		Distinct("vuln_id").
+		Pluck("vuln_id", &missing).Error; err != nil {
+		log.Printf("[osv-enrich] query missing: %v", err)
+		return
+	}
+	if len(missing) == 0 {
+		return
+	}
+	log.Printf("[osv-enrich] fetching details for %d vulns", len(missing))
+
+	enriched := 0
+	for _, id := range missing {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		v, err := FetchVulnDetails(ctx, id)
+		if err != nil {
+			log.Printf("[osv-enrich] fetch %s: %v", id, err)
+			continue
+		}
+		updates := map[string]interface{}{
+			"summary":     v.Summary,
+			"description": v.Details,
+			"severity":    extractSeverity(*v),
+			"fixed_in":    extractFixedIn(v.Affected),
+		}
+		if err := db.WithContext(ctx).
+			Model(&ComponentVulnerability{}).
+			Where("vuln_id = ?", id).
+			Updates(updates).Error; err != nil {
+			log.Printf("[osv-enrich] update %s: %v", id, err)
+			continue
+		}
+		enriched++
+	}
+	log.Printf("[osv-enrich] enriched %d/%d vulns", enriched, len(missing))
 }
 
 func queryOSVBatch(ctx context.Context, purls []string) ([][]osvVuln, error) {

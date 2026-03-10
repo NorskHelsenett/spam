@@ -515,8 +515,10 @@
 		}
 	};
 
-	const cveUrl = (id: string) =>
-		id?.startsWith('CVE-') ? `https://www.cve.org/CVERecord?id=${id}` : null;
+	const vulnUrl = (id: string) => {
+		if (id?.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
+		return `https://osv.dev/vulnerability/${id}`;
+	};
 
 	// Secrets dialog
 	type SecretFinding = {
@@ -944,8 +946,8 @@
 		onkeydown={(e) => e.key === 'Escape' && (vulnDialogOpen = false)}
 		onclick={(e) => e.target === e.currentTarget && (vulnDialogOpen = false)}
 	>
-		<div class="w-full max-w-4xl">
-			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
+		<div class="w-full max-w-5xl">
+			<section class="w-full rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
 				<!-- Header -->
 				<div class="flex items-center justify-between px-6 py-4">
 					<div class="flex items-center gap-3">
@@ -1016,16 +1018,12 @@
 										<div class="min-w-0 flex-1 space-y-1.5">
 										<!-- CVE ID + title -->
 										<div class="flex flex-wrap items-center gap-2">
-											{#if cveUrl(v.vuln_id)}
-												<a
-													href={cveUrl(v.vuln_id)}
-													target="_blank"
-													rel="noopener noreferrer"
-													class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
-												>{v.vuln_id}</a>
-											{:else}
-												<span class="font-mono text-sm font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
-											{/if}
+											<a
+												href={vulnUrl(v.vuln_id)}
+												target="_blank"
+												rel="noopener noreferrer"
+												class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
+											>{v.vuln_id}</a>
 											{#if v.source}
 												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{v.source}</span>
 											{/if}

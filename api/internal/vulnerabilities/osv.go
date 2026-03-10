@@ -30,9 +30,15 @@ type osvResponse struct {
 }
 
 type osvVuln struct {
-	ID       string     `json:"id"`
-	Summary  string     `json:"summary"`
-	Affected []affected `json:"affected"`
+	ID               string              `json:"id"`
+	Summary          string              `json:"summary"`
+	Details          string              `json:"details"`
+	Affected         []affected          `json:"affected"`
+	DatabaseSpecific osvDatabaseSpecific `json:"database_specific"`
+}
+
+type osvDatabaseSpecific struct {
+	Severity string `json:"severity"`
 }
 
 type affected struct {
@@ -55,11 +61,12 @@ type osvEvent struct {
 
 // Result is a simplified vulnerability entry returned to callers.
 type Result struct {
-	VulnID   string `json:"vuln_id"`
-	Summary  string `json:"summary"`
-	Severity string `json:"severity,omitempty"`
-	FixedIn  string `json:"fixed_in,omitempty"`
-	Source   string `json:"source"`
+	VulnID      string `json:"vuln_id"`
+	Summary     string `json:"summary"`
+	Description string `json:"description,omitempty"`
+	Severity    string `json:"severity,omitempty"`
+	FixedIn     string `json:"fixed_in,omitempty"`
+	Source      string `json:"source"`
 	// VEX override fields — populated when a ComponentVEX row exists.
 	VEXStatus        string `json:"vex_status,omitempty"`
 	VEXJustification string `json:"vex_justification,omitempty"`
@@ -98,13 +105,14 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 		rows := make([]ComponentVulnerability, len(fresh))
 		for i, v := range fresh {
 			rows[i] = ComponentVulnerability{
-				PURL:      purl,
-				VulnID:    v.VulnID,
-				Summary:   v.Summary,
-				Severity:  v.Severity,
-				FixedIn:   v.FixedIn,
-				Source:    "osv",
-				CheckedAt: now,
+				PURL:        purl,
+				VulnID:      v.VulnID,
+				Summary:     v.Summary,
+				Description: v.Description,
+				Severity:    v.Severity,
+				FixedIn:     v.FixedIn,
+				Source:      "osv",
+				CheckedAt:   now,
 			}
 		}
 		if err := db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
@@ -174,12 +182,33 @@ func queryOSV(ctx context.Context, purl string) ([]Result, error) {
 
 	results := make([]Result, 0, len(osvResp.Vulns))
 	for _, v := range osvResp.Vulns {
-		r := Result{VulnID: v.ID, Summary: v.Summary, Source: "osv"}
+		r := Result{VulnID: v.ID, Summary: v.Summary, Description: v.Details, Source: "osv"}
 		r.FixedIn = extractFixedIn(v.Affected)
-		r.Severity = extractSeverity(v.Affected)
+		r.Severity = extractSeverity(v)
 		results = append(results, r)
 	}
 	return results, nil
+}
+
+// FetchVulnDetails fetches full vulnerability details from OSV for a single vuln ID.
+func FetchVulnDetails(ctx context.Context, vulnID string) (*osvVuln, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.osv.dev/v1/vulns/"+vulnID, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("osv vulns/%s returned %d", vulnID, resp.StatusCode)
+	}
+	var v osvVuln
+	if err := json.NewDecoder(resp.Body).Decode(&v); err != nil {
+		return nil, err
+	}
+	return &v, nil
 }
 
 func extractFixedIn(affected []affected) string {
@@ -195,14 +224,21 @@ func extractFixedIn(affected []affected) string {
 	return ""
 }
 
-// extractSeverity picks the first non-empty ecosystem_specific.severity across affected entries.
-func extractSeverity(affected []affected) string {
-	for _, a := range affected {
-		if s := a.EcosystemSpecific.Severity; s != "" {
-			return strings.ToUpper(s)
+// extractSeverity picks severity from database_specific first, then ecosystem_specific.
+// MODERATE (used by GHSA) is normalised to MEDIUM.
+func extractSeverity(v osvVuln) string {
+	s := strings.ToUpper(v.DatabaseSpecific.Severity)
+	if s == "" {
+		for _, a := range v.Affected {
+			if s = strings.ToUpper(a.EcosystemSpecific.Severity); s != "" {
+				break
+			}
 		}
 	}
-	return ""
+	if s == "MODERATE" {
+		return "MEDIUM"
+	}
+	return s
 }
 
 func toResults(rows []ComponentVulnerability) []Result {
@@ -212,11 +248,12 @@ func toResults(rows []ComponentVulnerability) []Result {
 			continue
 		}
 		out = append(out, Result{
-			VulnID:   r.VulnID,
-			Summary:  r.Summary,
-			Severity: r.Severity,
-			FixedIn:  r.FixedIn,
-			Source:   r.Source,
+			VulnID:      r.VulnID,
+			Summary:     r.Summary,
+			Description: r.Description,
+			Severity:    r.Severity,
+			FixedIn:     r.FixedIn,
+			Source:      r.Source,
 		})
 	}
 	return out

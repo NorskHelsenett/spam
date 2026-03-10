@@ -18,6 +18,12 @@
 		breaks: true
 	});
 
+	// Open all links in a new tab
+	const renderer = new marked.Renderer();
+	renderer.link = ({ href, title, text }: { href: string; title?: string | null; text: string }) =>
+		`<a href="${href}"${title ? ` title="${title}"` : ''} target="_blank" rel="noopener noreferrer">${text}</a>`;
+	marked.use({ renderer });
+
 	// Configure DOMPurify
 	const sanitize = (dirty: string): string => {
 		return DOMPurify.sanitize(dirty, {
