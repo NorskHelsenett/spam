@@ -15,12 +15,12 @@ WITH latest_bindings AS (
     FROM repo_commits
     ORDER BY repo_id, created_at DESC
   ) latest_rc ON latest_rc.id = sb.asset_ref_id
-  WHERE sb.asset_type = 'repo_commit'
+  WHERE sb.asset_type = 'REPO_COMMIT'
   UNION ALL
   -- For all other asset types (e.g. image_digest): include all
   SELECT sb.*
   FROM sbom_bindings sb
-  WHERE sb.asset_type != 'repo_commit'
+  WHERE sb.asset_type != 'REPO_COMMIT'
 ),
 sbom_json AS (
   SELECT
