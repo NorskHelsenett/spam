@@ -946,13 +946,13 @@
 		<div class="w-full max-w-4xl">
 			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
 				<!-- Header -->
-				<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-4">
+				<div class="flex items-center justify-between px-6 py-4">
 					<div class="flex items-center gap-3">
 						<ShieldX class="h-5 w-5 text-[var(--accent)]" />
 						<h2 class="text-base font-semibold text-[var(--text-bright)]">Vulnerabilities</h2>
 						{#if !vulnDialogLoading && vulnDialogData.length > 0}
 							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
-								{vulnDialogData.length}
+								{vulnDialogFiltered.length}
 							</span>
 						{/if}
 					</div>
@@ -967,15 +967,15 @@
 
 				<!-- Severity tabs -->
 				{#if !vulnDialogLoading && vulnDialogData.length > 0}
-					<div class="border-b border-[var(--border-color)] px-6 py-2">
+					<div class="px-6 pb-2">
 						<TabSelector
 							options={[
-								{ value: 'all', label: `All (${vulnDialogData.length})` },
+								{ value: 'all', label: 'All' },
 								...severityOrder
 									.filter(s => vulnDialogData.some(v => v.severity?.toUpperCase() === s))
 									.map(s => ({
 										value: s,
-										label: `${s.charAt(0) + s.slice(1).toLowerCase()} (${vulnDialogData.filter(v => v.severity?.toUpperCase() === s).length})`
+										label: s.charAt(0) + s.slice(1).toLowerCase()
 									}))
 							]}
 							bind:value={vulnDialogTab}
