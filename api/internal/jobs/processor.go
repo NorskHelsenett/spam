@@ -44,7 +44,7 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 	case JobTypeRefreshSBOMViews:
 		return processRefreshSBOMViews(ctx, db)
 	case JobTypeOSVScan:
-		return processOSVScan(ctx, db)
+		return processOSVScan(ctx, db, job.ID)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -62,8 +62,12 @@ func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, err
 	return map[string]string{"status": "refreshed"}, nil
 }
 
-func processOSVScan(ctx context.Context, db *gorm.DB) (interface{}, error) {
-	result, err := vulnerabilities.RunBatchScan(ctx, db)
+func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	result, err := vulnerabilities.RunBatchScan(ctx, db, func(progress vulnerabilities.BatchScanResult) {
+		if data, jsonErr := json.Marshal(progress); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", data)
+		}
+	})
 	if err != nil {
 		return result, err
 	}

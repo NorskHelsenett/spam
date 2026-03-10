@@ -18,11 +18,14 @@ const batchSize = 1000
 
 // BatchScanResult is stored as the job result JSON.
 type BatchScanResult struct {
-	TotalPURLs          int `json:"total_purls"`
-	Scanned             int `json:"scanned"`
-	VulnsFound          int `json:"vulns_found"`
-	ComponentsWithVulns int `json:"components_with_vulns"`
-	Errors              int `json:"errors"`
+	TotalPURLs          int    `json:"total_purls"`
+	Scanned             int    `json:"scanned"`
+	VulnsFound          int    `json:"vulns_found"`
+	ComponentsWithVulns int    `json:"components_with_vulns"`
+	Errors              int    `json:"errors"`
+	Phase               string `json:"phase,omitempty"` // "scanning", "enriching", or empty when done
+	EnrichTotal         int    `json:"enrich_total,omitempty"`
+	EnrichDone          int    `json:"enrich_done,omitempty"`
 }
 
 type osvBatchRequest struct {
@@ -44,7 +47,8 @@ type osvBatchResponse struct {
 // RunBatchScan fetches all distinct versioned PURLs from the SBOM component
 // view, queries OSV in batches of 1000, and upserts results into
 // component_vulnerabilities. Progress is logged to stdout.
-func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
+// The optional onProgress callback is called after each batch with the current result.
+func RunBatchScan(ctx context.Context, db *gorm.DB, onProgress func(BatchScanResult)) (BatchScanResult, error) {
 	log.Printf("[osv-scan] starting batch vulnerability scan")
 
 	var purls []string
@@ -61,7 +65,14 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 
 	log.Printf("[osv-scan] found %d distinct versioned PURLs", len(purls))
 
-	result := BatchScanResult{TotalPURLs: len(purls)}
+	notify := func(r BatchScanResult) {
+		if onProgress != nil {
+			onProgress(r)
+		}
+	}
+
+	result := BatchScanResult{TotalPURLs: len(purls), Phase: "scanning"}
+	notify(result)
 	now := time.Now().UTC()
 	totalBatches := (len(purls) + batchSize - 1) / batchSize
 
@@ -138,20 +149,31 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 
 		log.Printf("[osv-scan] batch %d/%d: done — %d vulns in %d vulnerable components",
 			batchNum, totalBatches, batchVulnCount, batchComponentsWithVulns)
+		notify(result)
 	}
 
 	log.Printf("[osv-scan] finished: scanned=%d vulns_found=%d components_with_vulns=%d errors=%d",
 		result.Scanned, result.VulnsFound, result.ComponentsWithVulns, result.Errors)
 
 	// Enrich vulns that are missing details (batch API returns id+modified only).
-	enrichVulnDetails(ctx, db)
+	result.Phase = "enriching"
+	notify(result)
+	enrichVulnDetails(ctx, db, func(done, total int) {
+		result.EnrichDone = done
+		result.EnrichTotal = total
+		notify(result)
+	})
+	result.Phase = ""
+	result.EnrichDone = 0
+	result.EnrichTotal = 0
 
 	return result, nil
 }
 
 // enrichVulnDetails fetches full details from /v1/vulns/{id} for any stored
 // vulnerability that has no summary yet (i.e. discovered via batch scan).
-func enrichVulnDetails(ctx context.Context, db *gorm.DB) {
+// The optional onProgress callback receives (done, total) after each fetch.
+func enrichVulnDetails(ctx context.Context, db *gorm.DB, onProgress func(done, total int)) {
 	var missing []string
 	if err := db.WithContext(ctx).
 		Model(&ComponentVulnerability{}).
@@ -165,9 +187,12 @@ func enrichVulnDetails(ctx context.Context, db *gorm.DB) {
 		return
 	}
 	log.Printf("[osv-enrich] fetching details for %d vulns", len(missing))
+	if onProgress != nil {
+		onProgress(0, len(missing))
+	}
 
 	enriched := 0
-	for _, id := range missing {
+	for i, id := range missing {
 		if err := ctx.Err(); err != nil {
 			return
 		}
@@ -176,7 +201,7 @@ func enrichVulnDetails(ctx context.Context, db *gorm.DB) {
 			log.Printf("[osv-enrich] fetch %s: %v", id, err)
 			continue
 		}
-		updates := map[string]interface{}{
+		updates := map[string]any{
 			"summary":     v.Summary,
 			"description": v.Details,
 			"severity":    extractSeverity(*v),
@@ -190,6 +215,9 @@ func enrichVulnDetails(ctx context.Context, db *gorm.DB) {
 			continue
 		}
 		enriched++
+		if onProgress != nil {
+			onProgress(i+1, len(missing))
+		}
 	}
 	log.Printf("[osv-enrich] enriched %d/%d vulns", enriched, len(missing))
 }

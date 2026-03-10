@@ -466,6 +466,9 @@
 			vulns_found: number;
 			components_with_vulns: number;
 			errors: number;
+			phase?: string;
+			enrich_total?: number;
+			enrich_done?: number;
 		};
 	};
 
@@ -1034,6 +1037,22 @@
 					<span class="text-sm font-normal text-[var(--text-muted)]">/ {osvStatus.result.total_purls}</span>
 				{/if}
 			</p>
+			{#if osvStatus.status === 'RUNNING' && osvStatus.result?.total_purls}
+				{@const phase = osvStatus.result.phase}
+				{@const pct = phase === 'enriching'
+					? (osvStatus.result.enrich_total ? Math.round((osvStatus.result.enrich_done ?? 0) / osvStatus.result.enrich_total * 100) : 0)
+					: Math.round((osvStatus.result.scanned / osvStatus.result.total_purls) * 100)}
+				<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--border-color)]">
+					<div class="h-full rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
+				</div>
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">
+					{#if phase === 'enriching'}
+						Enriching details — {osvStatus.result.enrich_done ?? 0}/{osvStatus.result.enrich_total} ({pct}%)
+					{:else}
+						{pct}% scanned
+					{/if}
+				</p>
+			{/if}
 		</div>
 
 		<!-- Vulnerabilities -->
