@@ -472,6 +472,7 @@
 		installed_version: string;
 		fixed_version: string;
 		title: string;
+		description: string;
 	};
 
 	let vulnDialogOpen = $state(false);
@@ -950,18 +951,20 @@
 						<div class="divide-y divide-[var(--border-color)]/50">
 							{#each vulnDialogData as v}
 								<article class="px-6 py-4 bg-[var(--card-bg)] hover:bg-[var(--hover-bg-subtle)] transition-colors">
-									<div class="flex flex-wrap items-start gap-3">
-										<!-- Severity badge -->
-										<span class="mt-0.5 shrink-0 inline-flex items-center gap-1 border px-2 py-0.5 text-xs font-semibold {severityClass(v.severity)}">
-											{#if v.severity?.toUpperCase() === 'CRITICAL' || v.severity?.toUpperCase() === 'HIGH'}
-												<ShieldX class="h-3 w-3" />
-											{:else}
-												<ShieldAlert class="h-3 w-3" />
-											{/if}
-											{v.severity}
-										</span>
+									<div class="flex items-start gap-4">
+										<!-- Severity pill — fixed width so all rows align -->
+										<div class="w-24 shrink-0 pt-0.5">
+											<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(v.severity)}">
+												{#if v.severity?.toUpperCase() === 'CRITICAL' || v.severity?.toUpperCase() === 'HIGH'}
+													<ShieldX class="h-3 w-3" />
+												{:else}
+													<ShieldAlert class="h-3 w-3" />
+												{/if}
+												{v.severity}
+											</span>
+										</div>
 
-										<div class="min-w-0 flex-1 space-y-1">
+										<div class="min-w-0 flex-1 space-y-1.5">
 											<!-- CVE ID + title -->
 											<div class="flex flex-wrap items-baseline gap-2">
 												{#if cveUrl(v.vuln_id)}
@@ -979,15 +982,18 @@
 												{/if}
 											</div>
 
+											<!-- Description -->
+											{#if v.description}
+												<p class="text-xs text-[var(--text-muted)] leading-relaxed">{v.description}</p>
+											{/if}
+
 											<!-- Package + fix -->
 											<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
 												<span class="font-mono">{v.pkg_name}{v.installed_version ? `@${v.installed_version}` : ''}</span>
 												{#if v.fixed_version}
-													<span class="bg-green-500/10 px-1.5 py-0.5 font-mono text-green-400">
-														fix available: {v.fixed_version}
-													</span>
+													<span class="bg-green-500/10 px-1.5 py-0.5 font-mono text-green-400">fix: {v.fixed_version}</span>
 												{:else}
-													<span class="text-[var(--text-muted)]/60">no fix available</span>
+													<span class="opacity-50">no fix available</span>
 												{/if}
 											</div>
 										</div>

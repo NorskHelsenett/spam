@@ -131,6 +131,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			InstalledVersion string `json:"installed_version"`
 			FixedVersion     string `json:"fixed_version"`
 			Title            string `json:"title"`
+			Description      string `json:"description"`
 		}
 
 		var rows []vulnRow
@@ -142,8 +143,9 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				vuln->>'Severity'         AS severity,
 				vuln->>'PkgName'          AS pkg_name,
 				vuln->>'InstalledVersion' AS installed_version,
-				COALESCE(vuln->>'FixedVersion', '') AS fixed_version,
-				COALESCE(vuln->>'Title', '')        AS title
+				COALESCE(vuln->>'FixedVersion', '')    AS fixed_version,
+				COALESCE(vuln->>'Title', '')           AS title,
+				COALESCE(vuln->>'Description', '')     AS description
 			FROM trivy_scan_results tsr
 			LEFT JOIN repos repo ON repo.id = tsr.repo_id
 			CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
