@@ -308,6 +308,7 @@
 					<input
 						type="text"
 						bind:value={query}
+						autofocus
 						oninput={scheduleSearch}
 						placeholder="Search for CVE-2021-44228, log4j, pom.xml, commit SHA, secrets, contributor email..."
 						class="h-11 w-full rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] pl-11 pr-10 text-sm text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
