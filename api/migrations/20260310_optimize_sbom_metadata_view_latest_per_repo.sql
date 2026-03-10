@@ -29,7 +29,7 @@ sbom_docs AS (
     s.ingested_by_user_id,
     convert_from(s.content_bytes, 'utf8')::jsonb AS doc
   FROM sboms s
-  JOIN latest_bindings lb ON lb.sbom_id = s.id
+  WHERE s.id IN (SELECT sbom_id FROM latest_bindings)
 ),
 sbom_json AS (
   SELECT
