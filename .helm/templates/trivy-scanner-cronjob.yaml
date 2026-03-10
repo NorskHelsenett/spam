@@ -11,13 +11,15 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   schedule: {{ .Values.trivyScanner.schedule | quote }}
-  concurrencyPolicy: Forbid
+  concurrencyPolicy: Allow
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       activeDeadlineSeconds: {{ .Values.trivyScanner.activeDeadlineSeconds | default 14400 }}
       ttlSecondsAfterFinished: 3600
+      parallelism: {{ .Values.trivyScanner.parallelism | default 3 }}
+      completions: {{ .Values.trivyScanner.parallelism | default 3 }}
       template:
         metadata:
           labels:

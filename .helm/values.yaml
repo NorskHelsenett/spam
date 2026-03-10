@@ -337,6 +337,7 @@ runner:
 trivyScanner:
   enabled: false
   schedule: "0 1 * * *"        # 1am nightly
+  parallelism: 3               # Number of concurrent scanner pods
   activeDeadlineSeconds: 14400  # 4h max runtime
   resources:
     requests:
