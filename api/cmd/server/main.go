@@ -76,6 +76,8 @@ func run() error {
 		&events.OutboxEvent{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
+		&vulnerabilities.TrivyScanLease{},
+		&vulnerabilities.TrivyScanResult{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
@@ -95,6 +97,7 @@ func run() error {
 		"migrations/20260302_add_repo_search_trigram.sql",
 		"migrations/20260303_add_repos_provider_instance_id.sql",
 		"migrations/20260306_repos_identity_not_empty.sql",
+		"migrations/20260310_create_trivy_scan_tables.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -141,6 +144,7 @@ func run() error {
 	}
 
 	routerOpts.Cache = cache.NewMemory()
+	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {

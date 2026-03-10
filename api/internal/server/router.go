@@ -22,6 +22,7 @@ type RouterOptions struct {
 	RunExecutor   *runner.RunExecutor
 	ProviderStore *providerconfig.Store
 	Cache         cache.Store
+	HMACKey       string
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -29,9 +30,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	r := chi.NewRouter()
 	var providerStore *providerconfig.Store
 	var appCache cache.Store
+	var hmacKey string
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
+		hmacKey = opts.HMACKey
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -163,6 +166,23 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				}
 			}
 		})
+
+		// Machine-to-machine scanner endpoints — HMAC auth, no OIDC session.
+		// Registered inside the timeout group so large result uploads still
+		// benefit from the request infrastructure (logging, recovery, etc.).
+		r.Group(func(r chi.Router) {
+			r.Use(auth.HMACMiddleware(hmacKey))
+			r.Get("/api/trivy/next", uiapi.TrivyScanNextHandler(db))
+			r.Post("/api/trivy/result/{sbom_id}", uiapi.TrivyScanResultHandler(db))
+		})
+
+		if authService != nil {
+			r.Route("/api/vuln", func(v chi.Router) {
+				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
+				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
+				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
+			})
+		}
 
 		if spaHandler != nil && authService != nil {
 			r.Handle("/*", authService.SPAGuard(spaHandler))

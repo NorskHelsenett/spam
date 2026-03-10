@@ -200,7 +200,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
+	import { ChartPie, BellRing, ShieldAlert, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -208,7 +208,7 @@ let isAdmin = $state(false);
 
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
-		{ href: '/app/agents', label: 'SBOMs', icon: Boxes },
+		{ href: '/app/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
 		{ href: '/app/runs', label: 'Runs', icon: Play },

@@ -332,6 +332,20 @@ runner:
   # Local mode for testing (uses Docker instead of K8s jobs)
   localMode: false
 
+# Trivy scanner CronJob configuration
+# Runs nightly and scans all SBOMs in the database for vulnerabilities.
+trivyScanner:
+  enabled: false
+  schedule: "0 1 * * *"        # 1am nightly
+  activeDeadlineSeconds: 14400  # 4h max runtime
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
 # When using external PostgreSQL, set these values
