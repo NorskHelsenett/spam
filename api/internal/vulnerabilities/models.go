@@ -13,6 +13,7 @@ type ComponentVulnerability struct {
 	PURL      string    `gorm:"not null;index:idx_component_vuln_purl"`
 	VulnID    string    `gorm:"not null"` // CVE-YYYY-NNNNN or GHSA-xxxx
 	Summary   string
+	Severity  string    // CRITICAL, HIGH, MEDIUM, LOW, or empty
 	FixedIn   string
 	Source    string    `gorm:"not null;default:'osv'"`
 	CheckedAt time.Time `gorm:"not null"`

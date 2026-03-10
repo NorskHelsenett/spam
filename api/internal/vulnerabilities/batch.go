@@ -111,6 +111,7 @@ func RunBatchScan(ctx context.Context, db *gorm.DB) (BatchScanResult, error) {
 					VulnID:    v.ID,
 					Summary:   v.Summary,
 					FixedIn:   extractFixedIn(v.Affected),
+					Severity:  extractSeverity(v.Affected),
 					Source:    "osv",
 					CheckedAt: now,
 				})

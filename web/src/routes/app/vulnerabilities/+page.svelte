@@ -49,6 +49,7 @@
 		installed_version: string;
 		fixed_version: string;
 		title: string;
+		source: string;
 	};
 
 	type VulnGroup = {
@@ -58,6 +59,7 @@
 		installed_version: string;
 		fixed_version: string;
 		title: string;
+		sources: Set<string>;
 		repos: Array<{ repo_id: string; repo_slug: string }>;
 	};
 
@@ -83,10 +85,12 @@
 					installed_version: v.installed_version,
 					fixed_version: v.fixed_version,
 					title: v.title,
+					sources: new Set<string>(),
 					repos: []
 				});
 			}
 			const g = map.get(v.vuln_id)!;
+			if (v.source) g.sources.add(v.source);
 			if (!g.repos.find((r) => r.repo_id === v.repo_id)) {
 				g.repos.push({ repo_id: v.repo_id, repo_slug: v.repo_slug });
 			}
@@ -363,16 +367,21 @@
 									<!-- CVE ID + title -->
 									<td class="px-5 py-3">
 										<div class="space-y-1">
-											{#if cveUrl(g.vuln_id)}
-												<a
-													href={cveUrl(g.vuln_id)}
-													target="_blank"
-													rel="noopener noreferrer"
-													class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
-												>{g.vuln_id}</a>
-											{:else}
-												<span class="font-mono font-semibold text-[var(--text-bright)] break-all">{g.vuln_id}</span>
-											{/if}
+											<div class="flex flex-wrap items-center gap-2">
+												{#if cveUrl(g.vuln_id)}
+													<a
+														href={cveUrl(g.vuln_id)}
+														target="_blank"
+														rel="noopener noreferrer"
+														class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
+													>{g.vuln_id}</a>
+												{:else}
+													<span class="font-mono font-semibold text-[var(--text-bright)] break-all">{g.vuln_id}</span>
+												{/if}
+												{#each [...g.sources] as src}
+													<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{src}</span>
+												{/each}
+											</div>
 											{#if g.title}
 												<p class="text-[var(--text-muted)] leading-snug">{g.title}</p>
 											{/if}

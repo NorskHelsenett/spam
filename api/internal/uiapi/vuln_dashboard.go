@@ -132,47 +132,74 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			FixedVersion     string `json:"fixed_version"`
 			Title            string `json:"title"`
 			Description      string `json:"description"`
+			Source           string `json:"source"`
 		}
 
 		var rows []vulnRow
-		baseQuery := `
-			SELECT
-				tsr.repo_id,
-				COALESCE(repo.org || '/' || repo.slug, tsr.repo_id) AS repo_slug,
-				vuln->>'VulnerabilityID'  AS vuln_id,
-				vuln->>'Severity'         AS severity,
-				vuln->>'PkgName'          AS pkg_name,
-				vuln->>'InstalledVersion' AS installed_version,
-				COALESCE(vuln->>'FixedVersion', '')    AS fixed_version,
-				COALESCE(vuln->>'Title', '')           AS title,
-				COALESCE(vuln->>'Description', '')     AS description
-			FROM trivy_scan_results tsr
-			LEFT JOIN repos repo ON repo.id = tsr.repo_id
-			CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
-			CROSS JOIN LATERAL jsonb_array_elements(result.result->'Vulnerabilities') AS vuln(vuln)
-			%s
+		args := []interface{}{}
+		trivyFilter := ""
+		osvFilter := "WHERE cv.vuln_id != '_none'"
+		if repoID != "" {
+			trivyFilter = "WHERE tsr.repo_id = ?"
+			osvFilter = "WHERE tsr2.repo_id = ? AND cv.vuln_id != '_none'"
+			args = append(args, repoID, repoID)
+		}
+		args = append(args, limit)
+
+		query := fmt.Sprintf(`
+			SELECT repo_id, repo_slug, vuln_id, severity, pkg_name, installed_version, fixed_version, title, description, source
+			FROM (
+				-- Trivy results
+				SELECT
+					tsr.repo_id::text                                          AS repo_id,
+					COALESCE(repo.org || '/' || repo.slug, tsr.repo_id::text) AS repo_slug,
+					vuln->>'VulnerabilityID'                                   AS vuln_id,
+					COALESCE(vuln->>'Severity', 'UNKNOWN')                     AS severity,
+					vuln->>'PkgName'                                           AS pkg_name,
+					COALESCE(vuln->>'InstalledVersion', '')                    AS installed_version,
+					COALESCE(vuln->>'FixedVersion', '')                        AS fixed_version,
+					COALESCE(vuln->>'Title', '')                               AS title,
+					COALESCE(vuln->>'Description', '')                         AS description,
+					'trivy'                                                    AS source
+				FROM trivy_scan_results tsr
+				LEFT JOIN repos repo ON repo.id = tsr.repo_id
+				CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
+				CROSS JOIN LATERAL jsonb_array_elements(result.result->'Vulnerabilities') AS vuln(vuln)
+				%s
+
+				UNION ALL
+
+				-- OSV results via sbom_component_view → trivy_scan_results for repo linkage
+				SELECT DISTINCT ON (cv.vuln_id, tsr2.repo_id)
+					tsr2.repo_id::text                                         AS repo_id,
+					COALESCE(r2.org || '/' || r2.slug, tsr2.repo_id::text)    AS repo_slug,
+					cv.vuln_id                                                 AS vuln_id,
+					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN')              AS severity,
+					COALESCE(sc.package_name, sc.name, cv.purl)              AS pkg_name,
+					COALESCE(sc.purl_version, '')                             AS installed_version,
+					COALESCE(cv.fixed_in, '')                                 AS fixed_version,
+					cv.summary                                                AS title,
+					''                                                        AS description,
+					'osv'                                                     AS source
+				FROM component_vulnerabilities cv
+				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
+				JOIN trivy_scan_results tsr2 ON tsr2.sbom_id = sc.sbom_id
+				LEFT JOIN repos r2 ON r2.id = tsr2.repo_id
+				%s
+			) combined
 			ORDER BY
-				CASE vuln->>'Severity'
+				CASE severity
 					WHEN 'CRITICAL' THEN 1
 					WHEN 'HIGH'     THEN 2
 					WHEN 'MEDIUM'   THEN 3
 					WHEN 'LOW'      THEN 4
 					ELSE 5
 				END,
-				vuln->>'VulnerabilityID'
+				vuln_id
 			LIMIT ?
-		`
-		if repoID != "" {
-			db.WithContext(r.Context()).Raw(
-				fmt.Sprintf(baseQuery, "WHERE tsr.repo_id = ?"),
-				repoID, limit,
-			).Scan(&rows)
-		} else {
-			db.WithContext(r.Context()).Raw(
-				fmt.Sprintf(baseQuery, ""),
-				limit,
-			).Scan(&rows)
-		}
+		`, trivyFilter, osvFilter)
+
+		db.WithContext(r.Context()).Raw(query, args...).Scan(&rows)
 
 		if rows == nil {
 			rows = []vulnRow{}

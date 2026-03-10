@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -35,7 +36,12 @@ type osvVuln struct {
 }
 
 type affected struct {
-	Ranges []osvRange `json:"ranges"`
+	Ranges            []osvRange        `json:"ranges"`
+	EcosystemSpecific ecosystemSpecific `json:"ecosystem_specific"`
+}
+
+type ecosystemSpecific struct {
+	Severity string `json:"severity"`
 }
 
 type osvRange struct {
@@ -51,6 +57,7 @@ type osvEvent struct {
 type Result struct {
 	VulnID   string `json:"vuln_id"`
 	Summary  string `json:"summary"`
+	Severity string `json:"severity,omitempty"`
 	FixedIn  string `json:"fixed_in,omitempty"`
 	Source   string `json:"source"`
 	// VEX override fields — populated when a ComponentVEX row exists.
@@ -94,6 +101,7 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 				PURL:      purl,
 				VulnID:    v.VulnID,
 				Summary:   v.Summary,
+				Severity:  v.Severity,
 				FixedIn:   v.FixedIn,
 				Source:    "osv",
 				CheckedAt: now,
@@ -168,6 +176,7 @@ func queryOSV(ctx context.Context, purl string) ([]Result, error) {
 	for _, v := range osvResp.Vulns {
 		r := Result{VulnID: v.ID, Summary: v.Summary, Source: "osv"}
 		r.FixedIn = extractFixedIn(v.Affected)
+		r.Severity = extractSeverity(v.Affected)
 		results = append(results, r)
 	}
 	return results, nil
@@ -186,6 +195,16 @@ func extractFixedIn(affected []affected) string {
 	return ""
 }
 
+// extractSeverity picks the first non-empty ecosystem_specific.severity across affected entries.
+func extractSeverity(affected []affected) string {
+	for _, a := range affected {
+		if s := a.EcosystemSpecific.Severity; s != "" {
+			return strings.ToUpper(s)
+		}
+	}
+	return ""
+}
+
 func toResults(rows []ComponentVulnerability) []Result {
 	out := make([]Result, 0, len(rows))
 	for _, r := range rows {
@@ -193,10 +212,11 @@ func toResults(rows []ComponentVulnerability) []Result {
 			continue
 		}
 		out = append(out, Result{
-			VulnID:  r.VulnID,
-			Summary: r.Summary,
-			FixedIn: r.FixedIn,
-			Source:  r.Source,
+			VulnID:   r.VulnID,
+			Summary:  r.Summary,
+			Severity: r.Severity,
+			FixedIn:  r.FixedIn,
+			Source:   r.Source,
 		})
 	}
 	return out

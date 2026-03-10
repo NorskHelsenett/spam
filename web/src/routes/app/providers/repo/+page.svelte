@@ -473,6 +473,7 @@
 		fixed_version: string;
 		title: string;
 		description: string;
+		source: string;
 	};
 
 	let vulnDialogOpen = $state(false);
@@ -1013,22 +1014,25 @@
 										</div>
 
 										<div class="min-w-0 flex-1 space-y-1.5">
-											<!-- CVE ID + title -->
-											<div class="flex flex-wrap items-baseline gap-2">
-												{#if cveUrl(v.vuln_id)}
-													<a
-														href={cveUrl(v.vuln_id)}
-														target="_blank"
-														rel="noopener noreferrer"
-														class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
-													>{v.vuln_id}</a>
-												{:else}
-													<span class="font-mono text-sm font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
-												{/if}
-												{#if v.title}
-													<span class="text-sm text-[var(--text-secondary)]">{v.title}</span>
-												{/if}
-											</div>
+										<!-- CVE ID + title -->
+										<div class="flex flex-wrap items-center gap-2">
+											{#if cveUrl(v.vuln_id)}
+												<a
+													href={cveUrl(v.vuln_id)}
+													target="_blank"
+													rel="noopener noreferrer"
+													class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
+												>{v.vuln_id}</a>
+											{:else}
+												<span class="font-mono text-sm font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
+											{/if}
+											{#if v.source}
+												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{v.source}</span>
+											{/if}
+										</div>
+										{#if v.title}
+											<p class="text-sm text-[var(--text-secondary)]">{v.title}</p>
+										{/if}
 
 											<!-- Description -->
 											{#if v.description}
