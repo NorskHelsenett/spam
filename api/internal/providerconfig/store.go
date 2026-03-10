@@ -566,7 +566,8 @@ func FindProviderMatch(ctx context.Context, db *gorm.DB, providerType, baseURL, 
 			}
 			continue
 		}
-		if strings.HasPrefix(repoPath, provider.OwnerPath) {
+		ownerPrefix := strings.TrimRight(provider.OwnerPath, "/")
+		if repoPath == ownerPrefix || strings.HasPrefix(repoPath, ownerPrefix+"/") {
 			if best == nil || len(provider.OwnerPath) > len(best.OwnerPath) {
 				best = &providers[i]
 			}

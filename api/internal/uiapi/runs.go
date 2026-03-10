@@ -311,11 +311,12 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			}
 		}
 
+		fullPath := strings.Trim(req.RepoPath, "/")
 		org := ""
-		slug := req.RepoPath
-		if parts := strings.Split(req.RepoPath, "/"); len(parts) > 1 {
-			org = parts[0]
-			slug = parts[len(parts)-1]
+		slug := fullPath
+		if lastSlash := strings.LastIndex(fullPath, "/"); lastSlash >= 0 {
+			org = fullPath[:lastSlash]
+			slug = fullPath[lastSlash+1:]
 		}
 
 		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
