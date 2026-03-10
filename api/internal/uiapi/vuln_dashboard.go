@@ -52,35 +52,29 @@ func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			FROM trivy_scan_results
 		`).Scan(&trivy)
 
-		type osvRow struct {
+		type vulnCounts struct {
 			TotalCritical int
 			TotalHigh     int
 			TotalMedium   int
 			TotalLow      int
 			TotalUnknown  int
 		}
-		var osv osvRow
+		var counts vulnCounts
 		db.WithContext(r.Context()).Raw(`
 			SELECT
-				COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS total_critical,
-				COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS total_high,
-				COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS total_medium,
-				COUNT(*) FILTER (WHERE UPPER(severity) = 'LOW')      AS total_low,
-				COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW') OR severity IS NULL OR severity = '') AS total_unknown
-			FROM (
-				SELECT DISTINCT ON (cv.vuln_id, rc.repo_id) cv.severity
-				FROM component_vulnerabilities cv
-				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
-				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
-				WHERE cv.vuln_id <> '_none'
-			) osv_deduped
-		`).Scan(&osv)
+				COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS total_critical,
+				COUNT(*) FILTER (WHERE severity = 'HIGH')     AS total_high,
+				COUNT(*) FILTER (WHERE severity = 'MEDIUM')   AS total_medium,
+				COUNT(*) FILTER (WHERE severity = 'LOW')      AS total_low,
+				COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS total_unknown
+			FROM view_unified_repositories_vulnerabilities
+		`).Scan(&counts)
 
-		summary.TotalCritical = trivy.TotalCritical + osv.TotalCritical
-		summary.TotalHigh = trivy.TotalHigh + osv.TotalHigh
-		summary.TotalMedium = trivy.TotalMedium + osv.TotalMedium
-		summary.TotalLow = trivy.TotalLow + osv.TotalLow
-		summary.TotalUnknown = trivy.TotalUnknown + osv.TotalUnknown
+		summary.TotalCritical = counts.TotalCritical
+		summary.TotalHigh = counts.TotalHigh
+		summary.TotalMedium = counts.TotalMedium
+		summary.TotalLow = counts.TotalLow
+		summary.TotalUnknown = counts.TotalUnknown
 		summary.ScannedSBOMs = trivy.ScannedSBOMs
 		summary.LastScannedAt = trivy.LastScannedAt
 		summary.TotalVulns = summary.TotalCritical + summary.TotalHigh + summary.TotalMedium + summary.TotalLow + summary.TotalUnknown
@@ -113,51 +107,14 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		db.WithContext(r.Context()).Raw(`
 			SELECT
 				repo_id,
-				MAX(repo_slug)           AS repo_slug,
-				SUM(critical_count)      AS critical_count,
-				SUM(high_count)          AS high_count,
-				SUM(medium_count)        AS medium_count,
-				SUM(low_count)           AS low_count,
-				SUM(unknown_count)       AS unknown_count,
-				MAX(last_scanned_at)     AS last_scanned_at
-			FROM (
-				-- Trivy per-repo counts
-				SELECT
-					tsr.repo_id::text                                          AS repo_id,
-					COALESCE(repo.org || '/' || repo.slug, tsr.repo_id::text) AS repo_slug,
-					SUM(tsr.critical_count) AS critical_count,
-					SUM(tsr.high_count)     AS high_count,
-					SUM(tsr.medium_count)   AS medium_count,
-					SUM(tsr.low_count)      AS low_count,
-					SUM(tsr.unknown_count)  AS unknown_count,
-					MAX(tsr.scanned_at)     AS last_scanned_at
-				FROM trivy_scan_results tsr
-				LEFT JOIN repos repo ON repo.id = tsr.repo_id
-				GROUP BY tsr.repo_id, repo.org, repo.slug
-
-				UNION ALL
-
-				-- OSV per-repo counts (deduplicated per vuln_id+repo_id)
-				SELECT
-					deduped.repo_id::text                                      AS repo_id,
-					COALESCE(r2.org || '/' || r2.slug, deduped.repo_id::text) AS repo_slug,
-					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'CRITICAL')   AS critical_count,
-					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'HIGH')       AS high_count,
-					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'MEDIUM')     AS medium_count,
-					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'LOW')        AS low_count,
-					COUNT(*) FILTER (WHERE UPPER(deduped.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW') OR deduped.severity IS NULL OR deduped.severity = '') AS unknown_count,
-					MAX(deduped.checked_at)                                    AS last_scanned_at
-				FROM (
-					SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
-						rc.repo_id, cv.severity, cv.checked_at
-					FROM component_vulnerabilities cv
-					JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
-					JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
-					WHERE cv.vuln_id <> '_none'
-				) deduped
-				LEFT JOIN repos r2 ON r2.id = deduped.repo_id
-				GROUP BY deduped.repo_id, r2.org, r2.slug
-			) combined
+				MAX(repo_slug)                                                    AS repo_slug,
+				COUNT(*) FILTER (WHERE severity = 'CRITICAL')                    AS critical_count,
+				COUNT(*) FILTER (WHERE severity = 'HIGH')                        AS high_count,
+				COUNT(*) FILTER (WHERE severity = 'MEDIUM')                      AS medium_count,
+				COUNT(*) FILTER (WHERE severity = 'LOW')                         AS low_count,
+				COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS unknown_count,
+				MAX(scanned_at)                                                   AS last_scanned_at
+			FROM view_unified_repositories_vulnerabilities
 			GROUP BY repo_id
 			ORDER BY critical_count DESC, high_count DESC, medium_count DESC
 		`).Scan(&rows)
@@ -196,57 +153,18 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var rows []vulnRow
-		args := []interface{}{}
-		trivyFilter := ""
-		osvFilter := "WHERE cv.vuln_id != '_none'"
+		var args []any
+		where := ""
 		if repoID != "" {
-			trivyFilter = "WHERE tsr.repo_id = ?"
-			osvFilter = "WHERE rc.repo_id = ? AND cv.vuln_id != '_none'"
-			args = append(args, repoID, repoID)
+			where = "WHERE repo_id = ?"
+			args = append(args, repoID)
 		}
 		args = append(args, limit)
 
 		query := fmt.Sprintf(`
 			SELECT repo_id, repo_slug, vuln_id, severity, pkg_name, installed_version, fixed_version, title, description, source
-			FROM (
-				-- Trivy results
-				SELECT
-					tsr.repo_id::text                                          AS repo_id,
-					COALESCE(repo.org || '/' || repo.slug, tsr.repo_id::text) AS repo_slug,
-					vuln->>'VulnerabilityID'                                   AS vuln_id,
-					COALESCE(vuln->>'Severity', 'UNKNOWN')                     AS severity,
-					vuln->>'PkgName'                                           AS pkg_name,
-					COALESCE(vuln->>'InstalledVersion', '')                    AS installed_version,
-					COALESCE(vuln->>'FixedVersion', '')                        AS fixed_version,
-					COALESCE(vuln->>'Title', '')                               AS title,
-					COALESCE(vuln->>'Description', '')                         AS description,
-					'trivy'                                                    AS source
-				FROM trivy_scan_results tsr
-				LEFT JOIN repos repo ON repo.id = tsr.repo_id
-				CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
-				CROSS JOIN LATERAL jsonb_array_elements(result.result->'Vulnerabilities') AS vuln(vuln)
-				%s
-
-				UNION ALL
-
-				-- OSV results via sbom_component_view → repo_commits → repos
-				SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
-					rc.repo_id::text                                           AS repo_id,
-					COALESCE(r2.org || '/' || r2.slug, rc.repo_id::text)      AS repo_slug,
-					cv.vuln_id                                                 AS vuln_id,
-					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN')               AS severity,
-					COALESCE(sc.package_name, sc.name, cv.purl)               AS pkg_name,
-					COALESCE(sc.purl_version, '')                              AS installed_version,
-					COALESCE(cv.fixed_in, '')                                  AS fixed_version,
-					cv.summary                                                 AS title,
-					COALESCE(cv.description, '')                               AS description,
-					'osv'                                                      AS source
-				FROM component_vulnerabilities cv
-				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
-				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
-				LEFT JOIN repos r2 ON r2.id = rc.repo_id
-				%s
-			) combined
+			FROM view_unified_repositories_vulnerabilities
+			%s
 			ORDER BY
 				CASE severity
 					WHEN 'CRITICAL' THEN 1
@@ -257,7 +175,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				END,
 				vuln_id
 			LIMIT ?
-		`, trivyFilter, osvFilter)
+		`, where)
 
 		db.WithContext(r.Context()).Raw(query, args...).Scan(&rows)
 

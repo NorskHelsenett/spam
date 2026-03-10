@@ -102,6 +102,7 @@ func run() error {
 		"migrations/20260311_fix_component_vulnerabilities_schema.sql",
 		"migrations/20260310_create_trivy_scan_tables.sql",
 		"migrations/20260310_fix_component_vulnerabilities_purl_column.sql",
+		"migrations/20260311_create_view_unified_repositories_vulnerabilities.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
