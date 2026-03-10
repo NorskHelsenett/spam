@@ -159,10 +159,10 @@
 
 	// Get query params
 	const getParams = () => {
-		if (!browser) return { provider: 'github', path: '', baseUrl: '', providerId: '', repoDbId: '' };
+		if (!browser) return { provider: '', path: '', baseUrl: '', providerId: '', repoDbId: '' };
 		const params = $page.url.searchParams;
 		return {
-			provider: params.get('provider') || 'github',
+			provider: params.get('provider') || '',
 			path: params.get('path') || '',
 			baseUrl: params.get('base_url') || '',
 			providerId: params.get('provider_id') || '',
