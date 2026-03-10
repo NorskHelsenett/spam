@@ -77,6 +77,26 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		repoPath := r.URL.Query().Get("repo_path")
 		repoID := r.URL.Query().Get("repo_id")
 
+		sortBy := r.URL.Query().Get("sort_by")
+		sortDir := r.URL.Query().Get("sort_dir")
+		if sortDir != "asc" && sortDir != "desc" {
+			sortDir = "desc"
+		}
+		var orderClause string
+		switch sortBy {
+		case "status":
+			orderClause = fmt.Sprintf(
+				"CASE status WHEN 'RUNNING' THEN 0 WHEN 'QUEUED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END %s, created_at DESC",
+				strings.ToUpper(sortDir),
+			)
+		case "provider":
+			orderClause = fmt.Sprintf("payload->>'provider' %s, created_at DESC", strings.ToUpper(sortDir))
+		case "duration":
+			orderClause = fmt.Sprintf("(COALESCE(finished_at, NOW()) - COALESCE(locked_at, created_at)) %s", strings.ToUpper(sortDir))
+		default: // "created" or empty
+			orderClause = fmt.Sprintf("created_at %s", strings.ToUpper(sortDir))
+		}
+
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
 		if len(statuses) == 1 {
@@ -108,7 +128,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		offset := (page - 1) * pageSize
 		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
-			Order("created_at DESC").
+			Order(orderClause).
 			Offset(offset).
 			Limit(pageSize).
 			Find(&jobRecords).Error; err != nil {
@@ -854,5 +874,72 @@ func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		writeJSON(w, http.StatusOK, secret)
+	}
+}
+
+// RunsRescheduleFailedHandler resets failed runs to QUEUED for repos that have no newer non-failed run.
+// POST /api/runs/failed/reschedule
+func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		var totalFailed int64
+		db.WithContext(r.Context()).Table("jobs").
+			Where("type = ? AND status = ?", jobs.JobTypeCreateRun, jobs.JobStatusFailed).
+			Count(&totalFailed)
+
+		result := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE type = ? AND status = ?
+			  AND payload->>'repo_id' != ''
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs j2
+			      WHERE j2.type = ?
+			        AND j2.status IN ('QUEUED', 'RUNNING', 'SUCCEEDED')
+			        AND j2.payload->>'repo_id' = jobs.payload->>'repo_id'
+			        AND j2.created_at > jobs.created_at
+			  )`,
+			jobs.JobTypeCreateRun, jobs.JobStatusFailed, jobs.JobTypeCreateRun,
+		)
+		if result.Error != nil {
+			log.Printf("failed to reschedule failed runs: %v", result.Error)
+			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]int64{
+			"rescheduled": result.RowsAffected,
+			"skipped":     totalFailed - result.RowsAffected,
+		})
+	}
+}
+
+// RunsDeleteFailedHandler deletes all failed runs.
+// DELETE /api/runs/failed
+func RunsDeleteFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		result := db.WithContext(r.Context()).Exec(
+			"DELETE FROM jobs WHERE type = ? AND status = ?",
+			jobs.JobTypeCreateRun, jobs.JobStatusFailed,
+		)
+		if result.Error != nil {
+			log.Printf("failed to delete failed runs: %v", result.Error)
+			http.Error(w, "failed to delete failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]int64{
+			"deleted": result.RowsAffected,
+		})
 	}
 }

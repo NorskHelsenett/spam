@@ -4,8 +4,9 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { get } from 'svelte/store';
-	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2 } from 'lucide-svelte';
+	import { Search, Folder, ChevronRight, Plus, X, Globe, Loader2, RotateCcw } from 'lucide-svelte';
 	import QueueStatus from '$lib/components/QueueStatus.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import { providersState } from '$lib/stores/providersState';
 	import RepoTable from '$lib/components/RepoTable.svelte';
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
@@ -703,7 +704,18 @@
 
 	// Trigger SBOM scan for all repos (including paginated results).
 	// Streams progress via SSE — the server emits "progress" events per page and a final "done" event.
-	const queueAllRepos = async (
+	// Queue All dialog state
+	let queueDialogOpen = $state(false);
+	let queueDialogContext = $state<{
+		provider: string;
+		owner: string;
+		group: string;
+		baseUrl?: string;
+		includeSubgroups: boolean;
+		providerId?: string;
+	} | null>(null);
+
+	const openQueueDialog = (
 		provider: string,
 		owner: string,
 		group: string,
@@ -711,6 +723,25 @@
 		includeSubgroups: boolean = false,
 		providerId?: string
 	) => {
+		queueDialogContext = { provider, owner, group, baseUrl, includeSubgroups, providerId };
+		queueDialogOpen = true;
+	};
+
+	const closeQueueDialog = () => {
+		queueDialogOpen = false;
+		queueDialogContext = null;
+	};
+
+	const queueAllRepos = async (
+		provider: string,
+		owner: string,
+		group: string,
+		baseUrl?: string,
+		includeSubgroups: boolean = false,
+		providerId?: string,
+		onlyNew: boolean = false
+	) => {
+		closeQueueDialog();
 		const tabId = activeTab;
 		if (isQueueing(tabId)) return;
 
@@ -728,7 +759,8 @@
 					group: group || undefined,
 					base_url: baseUrl || undefined,
 					include_subgroups: includeSubgroups,
-					provider_id: providerId || undefined
+					provider_id: providerId || undefined,
+					only_new: onlyNew || undefined
 				})
 			});
 
@@ -967,7 +999,7 @@
 					<button
 						type="button"
 						class="btn btn-primary"
-						onclick={() => queueAllRepos('github', ghOwner, '', undefined, false)}
+						onclick={() => openQueueDialog('github', ghOwner, '', undefined, false)}
 						disabled={isQueueing('github') || !ghOwner.trim()}
 						title="Queue SBOM generation for all repositories from {ghOwner}"
 					>
@@ -1024,7 +1056,7 @@
 					<button
 						type="button"
 						class="btn btn-primary"
-						onclick={() => queueAllRepos('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
+						onclick={() => openQueueDialog('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
 						disabled={isQueueing('gitlab') || !glGroup.trim()}
 						title="Queue SBOM generation for all projects from {glGroup}"
 					>
@@ -1162,7 +1194,7 @@
 						<button
 							type="button"
 							class="btn btn-primary"
-							onclick={() => queueAllRepos('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
+							onclick={() => openQueueDialog('github', provider.ownerPath || '', '', undefined, false, managedProvidersEnabled ? provider.id : undefined)}
 						disabled={isQueueing(provider.id) || !provider.ownerPath}
 							title="Queue SBOM generation for all projects from {provider.name}"
 						>
@@ -1221,7 +1253,7 @@
 					<button
 						type="button"
 						class="btn btn-primary"
-						onclick={() => queueAllRepos(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
+						onclick={() => openQueueDialog(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, managedProvidersEnabled ? provider.id : undefined)}
 						disabled={isQueueing(provider.id)}
 						title="Queue SBOM generation for all projects from {provider.name}"
 					>
@@ -1291,3 +1323,21 @@
 		{/if}
 	</section>
 </div>
+
+<!-- Queue All dialog -->
+{#if queueDialogContext}
+	{@const ctx = queueDialogContext}
+	<ConfirmDialog
+		bind:open={queueDialogOpen}
+		title="Queue Scans"
+		description="Choose how to queue scans for all repositories."
+		iconVariant="default"
+		buttons={[
+			{ label: 'Cancel', variant: 'ghost', onclick: closeQueueDialog },
+			{ label: 'Queue Only New', variant: 'ghost', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, true) },
+			{ label: 'Queue All', variant: 'primary', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, false) }
+		]}
+	>
+		{#snippet icon()}<RotateCcw size={26} />{/snippet}
+	</ConfirmDialog>
+{/if}

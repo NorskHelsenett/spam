@@ -146,6 +146,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
+				api.Post("/runs/failed/reschedule", uiapi.RunsRescheduleFailedHandler(db, authService))
+				api.Delete("/runs/failed", uiapi.RunsDeleteFailedHandler(db, authService))
 				// scan-all is registered in the no-timeout SSE group above
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))

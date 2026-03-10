@@ -3,9 +3,10 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2 } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 
@@ -56,6 +57,8 @@
 	let showValidation = $state(false);
 	let showAddProvider = $state(false);
 	let rotateError = $state('');
+	let removeDialogOpen = $state(false);
+	let removingProvider = $state<ProviderRow | null>(null);
 	const syncStates = providerSyncStates;
 	let healthTooltip = $state<{
 		entryId: string;
@@ -423,12 +426,18 @@
 		}
 	};
 
-	const removeProvider = async (entry: ProviderRow) => {
-		if (!confirm(`Remove ${entry.displayName}?`)) return;
+	const openRemoveDialog = (entry: ProviderRow) => {
+		removingProvider = entry;
+		removeDialogOpen = true;
+	};
+
+	const confirmRemoveProvider = async () => {
+		if (!removingProvider) return;
 		saving = true;
 		formError = '';
+		removeDialogOpen = false;
 		try {
-			const response = await fetch(`/api/admin/providers/${entry.id}`, {
+			const response = await fetch(`/api/admin/providers/${removingProvider.id}`, {
 				method: 'DELETE',
 				credentials: 'include'
 			});
@@ -436,11 +445,12 @@
 				formError = 'Failed to delete provider.';
 				return;
 			}
-			providers = providers.filter((provider) => provider.id !== entry.id);
+			providers = providers.filter((provider) => provider.id !== removingProvider!.id);
 		} catch {
 			formError = 'Failed to delete provider.';
 		} finally {
 			saving = false;
+			removingProvider = null;
 		}
 	};
 
@@ -946,8 +956,8 @@
 										</button>
 										<button
 											type="button"
-											class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-											onclick={() => removeProvider(entry)}
+											class="rounded-full border border-[var(--error)]/40 px-3 py-1 text-xs text-[var(--error)] transition hover:bg-[var(--error)]/10 disabled:opacity-50"
+											onclick={() => openRemoveDialog(entry)}
 											disabled={saving}
 										>
 											Remove
@@ -1163,6 +1173,22 @@
 		{/if}
 	</div>
 </Dialog>
+
+<!-- Remove Provider Confirm -->
+{#if removingProvider}
+	<ConfirmDialog
+		bind:open={removeDialogOpen}
+		title="Remove {removingProvider.displayName}?"
+		description="This will remove the provider configuration and its token. Existing scans and SBOMs are not affected."
+		iconVariant="danger"
+		buttons={[
+			{ label: 'Cancel', variant: 'ghost', onclick: () => { removeDialogOpen = false; removingProvider = null; } },
+			{ label: 'Remove', variant: 'danger', onclick: confirmRemoveProvider }
+		]}
+	>
+		{#snippet icon()}<Trash2 size={26} />{/snippet}
+	</ConfirmDialog>
+{/if}
 
 <style>
 	.sync-now-btn {

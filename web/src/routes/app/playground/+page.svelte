@@ -6,6 +6,7 @@
 	import Select from '$lib/components/Select.svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import DependencyDetail from '$lib/components/DependencyDetail.svelte';
 	import HealthStatus from '$lib/components/HealthStatus.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
@@ -17,6 +18,11 @@
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import Download from 'lucide-svelte/icons/download';
 	import ChevronDown from 'lucide-svelte/icons/chevron-down';
+	import Trash2 from 'lucide-svelte/icons/trash-2';
+	import AlertTriangle from 'lucide-svelte/icons/alert-triangle';
+	import CheckCircle from 'lucide-svelte/icons/check-circle';
+	import Info from 'lucide-svelte/icons/info';
+	import Send from 'lucide-svelte/icons/send';
 
 	import {
 		mockDonut,
@@ -39,6 +45,22 @@
 	let tabValue = $state(mockTabs[0].value);
 	let dialogOpen = $state(false);
 	let dependencyOpen = $state(false);
+
+	// ConfirmDialog demos
+	let confirmBasicOpen = $state(false);
+	let confirmDangerOpen = $state(false);
+	let confirmPublishOpen = $state(false);
+	let confirmPublishLoading = $state(false);
+	let confirmLastResult = $state('');
+
+	const simulateAsync = async (label: string, dialogSetter: (v: boolean) => void) => {
+		confirmPublishLoading = true;
+		await new Promise((r) => setTimeout(r, 1200));
+		confirmPublishLoading = false;
+		dialogSetter(false);
+		confirmLastResult = label;
+		setTimeout(() => { confirmLastResult = ''; }, 3000);
+	};
 	let page = $state(1);
 	let loadingPage = $state(false);
 
@@ -138,7 +160,7 @@
 		</header>
 
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			{#each metricCards as card}
+			{#each metricCards as card (card.label)}
 				<div class="metric-card rounded-2xl border border-[var(--border-color)]/60 p-4">
 					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">{card.label}</p>
 					<p class="mt-3 text-2xl font-semibold text-[var(--text-bright)]">{card.value}</p>
@@ -154,7 +176,7 @@
 			<p class="text-sm text-[var(--text-tertiary)]">Tokenized sizing and text styles used across the UI.</p>
 		</header>
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-			{#each mockTextSamples as sample}
+			{#each mockTextSamples as sample (sample.label)}
 				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">{sample.label}</p>
 					<p class={`mt-2 ${sample.className} text-[var(--text-bright)]`}>{sample.sample}</p>
@@ -182,7 +204,7 @@
 			<p class="text-sm text-[var(--text-tertiary)]">Background, text, and semantic colors from the theme.</p>
 		</header>
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-			{#each mockColorSwatches as swatch}
+			{#each mockColorSwatches as swatch (swatch.varName)}
 				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<div class="h-12 rounded-xl" style={`background: var(${swatch.varName});`}></div>
 					<p class="mt-3 text-sm font-medium text-[var(--text-bright)]">{swatch.label}</p>
@@ -191,7 +213,7 @@
 			{/each}
 		</div>
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			{#each mockSemanticSwatches as swatch}
+			{#each mockSemanticSwatches as swatch (swatch.varName)}
 				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<div class="h-12 rounded-xl" style={`background: var(${swatch.varName});`}></div>
 					<p class="mt-3 text-sm font-medium text-[var(--text-bright)]">{swatch.label}</p>
@@ -200,11 +222,11 @@
 			{/each}
 		</div>
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-			{#each mockPaletteGroups as group}
+			{#each mockPaletteGroups as group (group.name)}
 				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">{group.name}</p>
 					<div class="mt-3 grid grid-cols-2 gap-3">
-						{#each group.variants as variant}
+						{#each group.variants as variant (variant.varName)}
 							<div>
 								<div class="h-10 rounded-lg" style={`background: var(${variant.varName});`}></div>
 								<p class="mt-2 text-xs text-[var(--text-tertiary)]">{variant.label}</p>
@@ -317,20 +339,22 @@
 		</header>
 		<div class="grid gap-6 lg:grid-cols-2">
 			<div class="space-y-4">
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Text</label>
+				<label for="input-text" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Text</label>
 				<input
+					id="input-text"
 					type="text"
 					class="input"
 					placeholder="Search..."
 					bind:value={inputValue}
 				/>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Email</label>
-				<input type="email" class="input" bind:value={emailValue} />
+				<label for="input-email" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Email</label>
+				<input id="input-email" type="email" class="input" bind:value={emailValue} />
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Password</label>
+				<label for="input-password" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Password</label>
 				<div class="relative">
 					<input
+						id="input-password"
 						type={showPassword ? 'text' : 'password'}
 						class="input input-with-icon"
 						bind:value={passwordValue}
@@ -349,44 +373,44 @@
 					</button>
 				</div>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Textarea</label>
-				<textarea rows="3" class="input" bind:value={textareaValue}></textarea>
+				<label for="input-textarea" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Textarea</label>
+				<textarea id="input-textarea" rows="3" class="input" bind:value={textareaValue}></textarea>
 			</div>
 			<div class="space-y-4">
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Select</label>
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Select</span>
 				<div class="flex items-center gap-3">
 					<Select options={selectOptions} bind:value={selectValue} />
 					<Select options={selectOptions} bind:value={selectValue} class="w-full" />
 				</div>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Radio</label>
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Radio</span>
 				<div class="flex flex-wrap gap-4">
 					<Radio name="phase" value="alpha" bind:group={radioValue} label="Alpha" />
 					<Radio name="phase" value="beta" bind:group={radioValue} label="Beta" />
 				</div>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Checkbox</label>
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Checkbox</span>
 				<Checkbox bind:checked={checkboxValue} label="Enable notifications" />
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Toggle</label>
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Toggle</span>
 				<Toggle bind:checked={toggleValue} label="Feature flag" />
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Button Group</label>
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Button Group</span>
 				<ButtonGroup options={scrapeIntervalOptions} bind:value={buttonGroupValue} />
 				<p class="text-xs text-[var(--text-tertiary)]">Scrape interval: {buttonGroupValue === '0' ? 'Off' : scrapeIntervalOptions.find(o => o.value === buttonGroupValue)?.label}</p>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Range</label>
-				<input type="range" min="0" max="100" bind:value={rangeValue} />
+				<label for="input-range" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Range</label>
+				<input id="input-range" type="range" min="0" max="100" bind:value={rangeValue} />
 				<p class="text-xs text-[var(--text-tertiary)]">Value: {rangeValue}</p>
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">File</label>
-				<input type="file" class="input" bind:files={fileList} />
+				<label for="input-file" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">File</label>
+				<input id="input-file" type="file" class="input" bind:files={fileList} />
 				{#if fileList && fileList.length > 0}
 					<p class="text-xs text-[var(--text-tertiary)]">{fileList.length} file(s) selected</p>
 				{/if}
 
-				<label class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Validation</label>
-				<input type="text" class="input input-error" value="Invalid value" />
+				<label for="input-validation" class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Validation</label>
+				<input id="input-validation" type="text" class="input input-error" value="Invalid value" />
 			</div>
 		</div>
 	</section>
@@ -452,6 +476,68 @@
 				<HealthStatus />
 			</div>
 		</div>
+
+		<!-- ConfirmDialog demos -->
+		<div class="space-y-3">
+			<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Confirm Dialog</p>
+			<div class="flex flex-wrap gap-3">
+				<button type="button" class="btn btn-secondary" onclick={() => (confirmBasicOpen = true)}>
+					Basic (2 buttons)
+				</button>
+				<button type="button" class="btn btn-secondary" onclick={() => (confirmDangerOpen = true)}>
+					Danger (2 buttons)
+				</button>
+				<button type="button" class="btn btn-secondary" onclick={() => (confirmPublishOpen = true)}>
+					Publish (3 buttons)
+				</button>
+			</div>
+			{#if confirmLastResult}
+				<p class="text-xs text-[var(--success)]">→ {confirmLastResult}</p>
+			{/if}
+		</div>
+
+		<!-- Basic confirm -->
+		<ConfirmDialog
+			bind:open={confirmBasicOpen}
+			title="Save changes?"
+			description="Your unsaved edits will be applied to the repository configuration."
+			iconVariant="default"
+			buttons={[
+				{ label: 'Cancel', variant: 'ghost', onclick: () => { confirmBasicOpen = false; } },
+				{ label: 'Save', variant: 'primary', onclick: () => { confirmBasicOpen = false; confirmLastResult = 'Saved'; setTimeout(() => { confirmLastResult = ''; }, 3000); } }
+			]}
+		>
+			{#snippet icon()}<CheckCircle size={26} />{/snippet}
+		</ConfirmDialog>
+
+		<!-- Danger confirm -->
+		<ConfirmDialog
+			bind:open={confirmDangerOpen}
+			title="Delete repository?"
+			description="This action cannot be undone. All associated runs, SBOMs, and secrets will be permanently removed."
+			iconVariant="danger"
+			buttons={[
+				{ label: 'Cancel', variant: 'ghost', onclick: () => { confirmDangerOpen = false; } },
+				{ label: 'Delete', variant: 'danger', onclick: () => { confirmDangerOpen = false; confirmLastResult = 'Deleted'; setTimeout(() => { confirmLastResult = ''; }, 3000); } }
+			]}
+		>
+			{#snippet icon()}<Trash2 size={26} />{/snippet}
+		</ConfirmDialog>
+
+		<!-- 3-button publish confirm with simulated async -->
+		<ConfirmDialog
+			bind:open={confirmPublishOpen}
+			title="Publish report?"
+			description="Choose how you'd like to proceed. Drafts can be edited at any time before publishing."
+			iconVariant="info"
+			buttons={[
+				{ label: 'Cancel', variant: 'ghost', onclick: () => { confirmPublishOpen = false; }, disabled: confirmPublishLoading },
+				{ label: 'Save Draft', variant: 'ghost', onclick: () => simulateAsync('Saved as draft', (v) => { confirmPublishOpen = v; }), loading: false, disabled: confirmPublishLoading },
+				{ label: 'Publish', variant: 'primary', onclick: () => simulateAsync('Published!', (v) => { confirmPublishOpen = v; }), loading: confirmPublishLoading }
+			]}
+		>
+			{#snippet icon()}<Send size={26} />{/snippet}
+		</ConfirmDialog>
 
 		<div class="grid gap-6 lg:grid-cols-2">
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
@@ -567,10 +653,10 @@ console.log(apiUrl);</code>
 					</tbody>
 				</table>
 				<div class="space-y-2">
-					<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Progress</label>
-					<progress class="w-full" value="68" max="100"></progress>
-					<label class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Meter</label>
-					<meter class="w-full" min="0" max="100" low="30" high="80" optimum="90" value="72"></meter>
+					<label for="input-progress" class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Progress</label>
+					<progress id="input-progress" class="w-full" value="68" max="100"></progress>
+					<label for="input-meter" class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Meter</label>
+					<meter id="input-meter" class="w-full" min="0" max="100" low="30" high="80" optimum="90" value="72"></meter>
 				</div>
 					<figure class="rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 p-4">
 						<div class="placeholder-block h-28 w-full rounded-lg"></div>
