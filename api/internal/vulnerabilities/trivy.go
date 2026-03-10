@@ -78,18 +78,14 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 		var r row
 		res := tx.Raw(`
 			SELECT
-				s.id         AS sbom_id,
-				COALESCE(rc.repo_id, id_repo.repo_id, '')  AS repo_id,
+				s.id                                       AS sbom_id,
+				COALESCE(rc.repo_id, '')                   AS repo_id,
 				s.format,
 				COALESCE(repo.org || '/' || repo.slug, '') AS repo_slug
 			FROM sboms s
-			LEFT JOIN sbom_bindings sb ON sb.sbom_id = s.id
-			LEFT JOIN repo_commits   rc ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
-			LEFT JOIN image_digests  id_img ON id_img.id = sb.asset_ref_id AND sb.asset_type = 'IMAGE_DIGEST'
-			LEFT JOIN (
-				SELECT repo_id FROM image_digests LIMIT 0
-			) id_repo ON false
-			LEFT JOIN repos repo ON repo.id = rc.repo_id
+			LEFT JOIN sbom_bindings sb  ON sb.sbom_id = s.id
+			LEFT JOIN repo_commits  rc  ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
+			LEFT JOIN repos         repo ON repo.id = rc.repo_id
 			LEFT JOIN trivy_scan_results tsr ON tsr.sbom_id = s.id
 			LEFT JOIN trivy_scan_leases  tsl ON tsl.sbom_id = s.id AND tsl.expires_at > now()
 			WHERE tsr.id IS NULL

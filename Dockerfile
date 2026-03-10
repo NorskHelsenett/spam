@@ -11,7 +11,7 @@ RUN npm ci --include=dev
 # Copy rest of frontend source
 COPY web/ .
 # Build static site (outputs to web/build via adapter-static config)
-RUN npm run build
+RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # 2. Go build stage
 FROM golang:1.25-alpine AS gobuilder
