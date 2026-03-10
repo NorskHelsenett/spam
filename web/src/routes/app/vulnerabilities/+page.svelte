@@ -5,6 +5,8 @@
 	import { ArrowLeft, ShieldX, ShieldAlert, Shield, Clock } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
+	import VulnBadges from '$lib/components/VulnBadges.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -36,11 +38,25 @@
 		last_scanned_at: string | null;
 	};
 
+	type VulnRow = {
+		repo_id: string;
+		repo_slug: string;
+		vuln_id: string;
+		severity: string;
+		pkg_name: string;
+		installed_version: string;
+		fixed_version: string;
+		title: string;
+	};
+
 	let summary: Summary | null = null;
 	let repos: RepoRow[] = [];
 	let trend: TrendPoint[] = [];
+	let vulns: VulnRow[] = [];
 	let loading = true;
+	let vulnsLoading = false;
 	let error = '';
+	let activeTab = 'repositories';
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
 
@@ -55,14 +71,48 @@
 		});
 	};
 
-	const openRepo = (repo: RepoRow) => {
-		if (!repo.repo_id) return;
-		goto(`/app/providers/repo?repo_id=${encodeURIComponent(repo.repo_id)}`);
+	const openRepo = (repoId: string) => {
+		if (!repoId) return;
+		goto(`/app/providers/repo?repo_id=${encodeURIComponent(repoId)}`);
 	};
 
 	const goBack = () => {
 		if (browser) history.back();
 	};
+
+	const severityClass = (s: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return 'border-red-500/30 bg-red-500/5';
+			case 'HIGH':     return 'border-orange-500/30 bg-orange-500/5';
+			case 'MEDIUM':   return 'border-yellow-500/30 bg-yellow-500/5';
+			case 'LOW':      return 'border-[var(--border-color)]/50 bg-transparent';
+			default:         return 'border-[var(--border-color)]/40 bg-transparent';
+		}
+	};
+
+	const severityIcon = (s: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return { color: 'text-red-400' };
+			case 'HIGH':     return { color: 'text-orange-400' };
+			case 'MEDIUM':   return { color: 'text-yellow-400' };
+			default:         return { color: 'text-[var(--text-muted)]' };
+		}
+	};
+
+	const loadVulns = async () => {
+		if (vulns.length > 0) return;
+		vulnsLoading = true;
+		try {
+			const res = await fetch('/api/vuln/list', { credentials: 'include' });
+			if (res.ok) vulns = await res.json();
+		} catch {
+			// ignore
+		} finally {
+			vulnsLoading = false;
+		}
+	};
+
+	$: if (activeTab === 'vulnerabilities') loadVulns();
 
 	onMount(async () => {
 		try {
@@ -175,22 +225,32 @@
 					<LineChart title="30-day trend" data={trend} />
 				</div>
 			</div>
+
+			<!-- Tab selector -->
+			<div class="pt-2">
+				<TabSelector
+					options={[
+						{ value: 'repositories', label: 'Repositories' },
+						{ value: 'vulnerabilities', label: 'Vulnerabilities' }
+					]}
+					bind:value={activeTab}
+				/>
+			</div>
 		</article>
 
-		<!-- Repository list -->
-		<div class="space-y-2">
-			<h2 class="px-1 text-sm font-medium text-[var(--text-secondary)]">By Repository</h2>
-			{#if repos.length === 0}
-				<article class="panel-surface flex items-center justify-center py-12 text-xs text-[var(--text-tertiary)]">
-					No scan results yet
-				</article>
-			{:else}
-				<div class="space-y-2">
+		<!-- Tab content -->
+		{#if activeTab === 'repositories'}
+			<div class="space-y-2">
+				{#if repos.length === 0}
+					<article class="panel-surface flex items-center justify-center py-12 text-xs text-[var(--text-tertiary)]">
+						No scan results yet
+					</article>
+				{:else}
 					{#each repos as repo}
 						<button
 							type="button"
 							class="panel-surface w-full cursor-pointer px-6 py-4 sm:px-10 text-left transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]"
-							onclick={() => openRepo(repo)}
+							onclick={() => openRepo(repo.repo_id)}
 						>
 							<div class="flex flex-wrap items-center justify-between gap-3">
 								<div class="min-w-0 space-y-1">
@@ -200,36 +260,72 @@
 										{fmtDate(repo.last_scanned_at)}
 									</div>
 								</div>
-								<div class="flex items-center gap-4 text-sm">
-									{#if repo.critical_count > 0}
-										<span class="flex items-center gap-1 font-semibold text-red-500">
-											<ShieldX class="h-4 w-4" />{fmt(repo.critical_count)}
-										</span>
-									{/if}
-									{#if repo.high_count > 0}
-										<span class="flex items-center gap-1 font-semibold text-orange-500">
-											<ShieldAlert class="h-4 w-4" />{fmt(repo.high_count)}
-										</span>
-									{/if}
-									{#if repo.medium_count > 0}
-										<span class="flex items-center gap-1 font-semibold text-yellow-500">
-											<Shield class="h-4 w-4" />{fmt(repo.medium_count)}
-										</span>
-									{/if}
-									{#if repo.low_count > 0}
-										<span class="flex items-center gap-1 text-[var(--text-secondary)]">
-											<Shield class="h-4 w-4" />{fmt(repo.low_count)}
-										</span>
-									{/if}
-									{#if repo.critical_count === 0 && repo.high_count === 0 && repo.medium_count === 0 && repo.low_count === 0}
-										<span class="text-xs text-[var(--text-muted)]">No vulnerabilities</span>
-									{/if}
-								</div>
+								{#if repo.critical_count === 0 && repo.high_count === 0 && repo.medium_count === 0 && repo.low_count === 0}
+									<span class="text-xs text-[var(--text-muted)]">No vulnerabilities</span>
+								{:else}
+									<VulnBadges critical={repo.critical_count} high={repo.high_count} medium={repo.medium_count} low={repo.low_count} />
+								{/if}
 							</div>
 						</button>
 					{/each}
-				</div>
-			{/if}
-		</div>
+				{/if}
+			</div>
+
+		{:else if activeTab === 'vulnerabilities'}
+			<div class="space-y-2">
+				{#if vulnsLoading}
+					<div class="flex items-center justify-center py-20">
+						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+					</div>
+				{:else if vulns.length === 0}
+					<article class="panel-surface flex items-center justify-center py-12 text-xs text-[var(--text-tertiary)]">
+						No vulnerabilities found
+					</article>
+				{:else}
+					{#each vulns as v}
+						<article class="panel-surface px-6 py-4 sm:px-10">
+							<div class="flex flex-wrap items-start gap-4">
+								<!-- Severity icon + CVE ID -->
+								<div class="flex items-start gap-3 min-w-0 flex-1">
+									<div class="mt-0.5 shrink-0">
+										{#if v.severity?.toUpperCase() === 'CRITICAL' || v.severity?.toUpperCase() === 'HIGH'}
+											<ShieldX class="h-4 w-4 {severityIcon(v.severity).color}" />
+										{:else}
+											<ShieldAlert class="h-4 w-4 {severityIcon(v.severity).color}" />
+										{/if}
+									</div>
+									<div class="min-w-0 flex-1 space-y-1">
+										<div class="flex flex-wrap items-center gap-2">
+											<span class="font-mono text-sm font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
+											<span class="rounded-full px-2 py-0.5 text-xs font-medium border {severityClass(v.severity)} {severityIcon(v.severity).color}">
+												{v.severity}
+											</span>
+											{#if v.fixed_version}
+												<span class="rounded bg-green-500/10 px-1.5 py-0.5 text-xs text-green-400">
+													fix: {v.fixed_version}
+												</span>
+											{/if}
+										</div>
+										{#if v.title}
+											<p class="text-sm text-[var(--text-secondary)]">{v.title}</p>
+										{/if}
+										<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+											<span class="font-mono">{v.pkg_name}{v.installed_version ? `@${v.installed_version}` : ''}</span>
+											<button
+												type="button"
+												class="text-[var(--accent)] hover:underline"
+												onclick={() => openRepo(v.repo_id)}
+											>
+												{v.repo_slug}
+											</button>
+										</div>
+									</div>
+								</div>
+							</div>
+						</article>
+					{/each}
+				{/if}
+			</div>
+		{/if}
 	{/if}
 </div>

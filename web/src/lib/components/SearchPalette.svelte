@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
+	import VulnBadges from '$lib/components/VulnBadges.svelte';
 
 	type RepoResult = {
 		id: string;
@@ -46,6 +47,7 @@
 		sbom: { latest?: { component_count: number; format: string } };
 		dependencies: { total: number };
 		secrets: { latest_count: number };
+		vulnerabilities?: { summary?: { critical: number; high: number; medium: number; low: number } };
 	};
 
 	let open = $state(false);
@@ -466,6 +468,17 @@
 										</p>
 									{/if}
 								</div>
+								{#if repoPreview.vulnerabilities?.summary && (repoPreview.vulnerabilities.summary.critical > 0 || repoPreview.vulnerabilities.summary.high > 0 || repoPreview.vulnerabilities.summary.medium > 0 || repoPreview.vulnerabilities.summary.low > 0)}
+									<div class="mb-1">
+										<VulnBadges
+											critical={repoPreview.vulnerabilities.summary.critical}
+											high={repoPreview.vulnerabilities.summary.high}
+											medium={repoPreview.vulnerabilities.summary.medium}
+											low={repoPreview.vulnerabilities.summary.low}
+											size="sm"
+										/>
+									</div>
+								{/if}
 								<div class="space-y-2.5">
 									<div class="flex items-center gap-2.5">
 										<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />

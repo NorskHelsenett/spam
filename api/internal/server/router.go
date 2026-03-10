@@ -170,6 +170,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
 				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
+			v.Get("/list", uiapi.VulnListHandler(db, authService))
 			})
 		}
 
