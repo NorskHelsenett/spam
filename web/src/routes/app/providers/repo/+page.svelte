@@ -946,7 +946,7 @@
 		onkeydown={(e) => e.key === 'Escape' && (vulnDialogOpen = false)}
 		onclick={(e) => e.target === e.currentTarget && (vulnDialogOpen = false)}
 	>
-		<div class="w-full max-w-5xl">
+		<div class="w-full max-w-[60rem]">
 			<section class="w-full rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
 				<!-- Header -->
 				<div class="flex items-center justify-between px-6 py-4">
