@@ -81,7 +81,7 @@
 	};
 
 	const btnClass = (variant: ButtonVariant = 'ghost') =>
-		`flex-1 rounded-full py-3 text-base font-medium transition ${btnStyles[variant]}`;
+		`flex-1 rounded-full py-3 text-base font-medium transition whitespace-nowrap ${btnStyles[variant]}`;
 </script>
 
 {#if open}
