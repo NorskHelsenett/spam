@@ -56,6 +56,7 @@
 	let previewRawEl: HTMLDivElement | undefined = $state();
 	let previewFindingCount = $state(0);
 	let activeFindingIndex = $state(0);
+	let searchInputEl: HTMLInputElement | undefined = $state();
 
 	const targetOptions = [
 		{ value: 'all', label: 'All targets' },
@@ -288,6 +289,7 @@
 			query = q;
 			loadResults();
 		}
+		searchInputEl?.focus();
 	});
 </script>
 
