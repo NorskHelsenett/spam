@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -55,6 +56,14 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Get("/ws", s.handleWebSocket)
 		r.Post("/token", s.handleTokenExchange)
 		r.Post("/results", s.handleResults)
+	})
+
+	// Trivy scanner endpoints are served by the worker listener so scanner jobs
+	// can talk directly to the worker service.
+	r.Group(func(r chi.Router) {
+		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))
+		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
+		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)

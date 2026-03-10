@@ -30,11 +30,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	r := chi.NewRouter()
 	var providerStore *providerconfig.Store
 	var appCache cache.Store
-	var hmacKey string
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
-		hmacKey = opts.HMACKey
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -165,15 +163,6 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 					api.Post("/runs/{id}/cancel", uiapi.RunCancelHandler(db, authService, opts.RunExecutor))
 				}
 			}
-		})
-
-		// Machine-to-machine scanner endpoints — HMAC auth, no OIDC session.
-		// Registered inside the timeout group so large result uploads still
-		// benefit from the request infrastructure (logging, recovery, etc.).
-		r.Group(func(r chi.Router) {
-			r.Use(auth.HMACMiddleware(hmacKey))
-			r.Get("/api/trivy/next", uiapi.TrivyScanNextHandler(db))
-			r.Post("/api/trivy/result/{sbom_id}", uiapi.TrivyScanResultHandler(db))
 		})
 
 		if authService != nil {
