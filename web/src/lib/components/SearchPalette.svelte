@@ -648,9 +648,9 @@
 								}}
 								class="-mx-3 flex w-[calc(100%+1.5rem)] items-center justify-between gap-6 rounded-xl px-3 py-2 text-left transition-colors duration-150 hover:bg-[var(--hover-bg)]"
 							>
-							<div style="display: flex; align-items: center; gap: 1.2em;">
-								<Microscope size={20} style="color: var(--accent); flex-shrink: 0;" />
-								<div class="ml-2">
+							<div style="display: flex; align-items: center; gap: 1.5em;">
+								<Microscope size={20} style="color: var(--accent); flex-shrink: 0; margin-left: 0.5em;" />
+								<div class="ml-[0.2em]">
 									<p style="color: var(--text-primary); font-size: 0.92em; font-weight: 500;">Advanced search</p>
 									<p style="color: var(--text-muted); font-size: 0.78em; margin-top: 0.3em;">Search manifests, SBOMs, secrets, contributors, languages, commits, repos, and README</p>
 								</div>

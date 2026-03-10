@@ -358,7 +358,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				r.slug,
 				vuln->>'VulnerabilityID' AS title,
 				vuln->>'Severity' AS value,
-				(COALESCE(vuln->>'PkgName', '') || ' ' || COALESCE(vuln->>'InstalledVersion', '') || ' - ' || COALESCE(vuln->>'Title', '')) AS source_text,
+				(COALESCE(vuln->>'PkgName', '') || ' ' || COALESCE(vuln->>'InstalledVersion', '') || ' - ' || COALESCE(vuln->>'Title', '') || ' ' || COALESCE(vuln->>'Description', '')) AS source_text,
 				tsr.scanned_at AS created_at
 			FROM trivy_scan_results tsr
 			JOIN repos r ON r.id = tsr.repo_id
@@ -369,9 +369,10 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				vuln->>'VulnerabilityID' ILIKE ?
 				OR vuln->>'PkgName' ILIKE ?
 				OR vuln->>'Title' ILIKE ?
+				OR vuln->>'Description' ILIKE ?
 			ORDER BY tsr.scanned_at DESC
 			LIMIT ?
-		`, like, like, like, perTargetLimit).Scan(&rows).Error
+		`, like, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
 	default:
 		return []advancedSearchDBRow{}, nil
