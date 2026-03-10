@@ -198,19 +198,75 @@ func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) ([]byt
 // countSBOMComponents returns the number of components in a CycloneDX or SPDX SBOM.
 func countSBOMComponents(data []byte) int {
 	var cdx struct {
-		Components []json.RawMessage `json:"components"`
+		Metadata struct {
+			Component struct {
+				BomRef string `json:"bom-ref"`
+				Purl   string `json:"purl"`
+			} `json:"component"`
+		} `json:"metadata"`
+		Components []struct {
+			BomRef string `json:"bom-ref"`
+			Purl   string `json:"purl"`
+		} `json:"components"`
+		Dependencies []struct {
+			Ref       string   `json:"ref"`
+			DependsOn []string `json:"dependsOn"`
+		} `json:"dependencies"`
 	}
 	if err := json.Unmarshal(data, &cdx); err == nil && cdx.Components != nil {
-		return len(cdx.Components)
+		rootRef := firstNonEmpty(cdx.Metadata.Component.BomRef, cdx.Metadata.Component.Purl)
+		if rootRef == "" && isImplicitCycloneDXRoot(cdx.Components, cdx.Dependencies) {
+			rootRef = firstNonEmpty(cdx.Components[0].BomRef, cdx.Components[0].Purl)
+		}
+		count := 0
+		for _, component := range cdx.Components {
+			componentRef := firstNonEmpty(component.BomRef, component.Purl)
+			if rootRef == "" || componentRef != rootRef {
+				count++
+			}
+		}
+		return count
 	}
 	// SPDX fallback: count packages (excluding DESCRIBES relationship root)
 	var spdx struct {
 		Packages []json.RawMessage `json:"packages"`
 	}
 	if err := json.Unmarshal(data, &spdx); err == nil {
-		return len(spdx.Packages)
+		if len(spdx.Packages) > 0 {
+			return len(spdx.Packages) - 1
+		}
+		return 0
 	}
 	return 0
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isImplicitCycloneDXRoot(
+	components []struct {
+		BomRef string `json:"bom-ref"`
+		Purl   string `json:"purl"`
+	},
+	dependencies []struct {
+		Ref       string   `json:"ref"`
+		DependsOn []string `json:"dependsOn"`
+	},
+) bool {
+	if len(components) != 1 || len(dependencies) != 1 {
+		return false
+	}
+	componentRef := firstNonEmpty(components[0].BomRef, components[0].Purl)
+	if componentRef == "" || dependencies[0].Ref != componentRef {
+		return false
+	}
+	return len(dependencies[0].DependsOn) == 0
 }
 
 type manifestFile struct {
