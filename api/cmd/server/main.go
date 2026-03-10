@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
-	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
@@ -97,6 +97,7 @@ func run() error {
 		"migrations/20260302_add_repo_search_trigram.sql",
 		"migrations/20260303_add_repos_provider_instance_id.sql",
 		"migrations/20260306_repos_identity_not_empty.sql",
+		"migrations/20260311_fix_component_vulnerabilities_schema.sql",
 		"migrations/20260310_create_trivy_scan_tables.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
