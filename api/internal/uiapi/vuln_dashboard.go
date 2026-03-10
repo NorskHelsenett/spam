@@ -141,7 +141,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		osvFilter := "WHERE cv.vuln_id != '_none'"
 		if repoID != "" {
 			trivyFilter = "WHERE tsr.repo_id = ?"
-			osvFilter = "WHERE tsr2.repo_id = ? AND cv.vuln_id != '_none'"
+			osvFilter = "WHERE rc.repo_id = ? AND cv.vuln_id != '_none'"
 			args = append(args, repoID, repoID)
 		}
 		args = append(args, limit)
@@ -169,22 +169,22 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 				UNION ALL
 
-				-- OSV results via sbom_component_view → trivy_scan_results for repo linkage
-				SELECT DISTINCT ON (cv.vuln_id, tsr2.repo_id)
-					tsr2.repo_id::text                                         AS repo_id,
-					COALESCE(r2.org || '/' || r2.slug, tsr2.repo_id::text)    AS repo_slug,
+				-- OSV results via sbom_component_view → repo_commits → repos
+				SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
+					rc.repo_id::text                                           AS repo_id,
+					COALESCE(r2.org || '/' || r2.slug, rc.repo_id::text)      AS repo_slug,
 					cv.vuln_id                                                 AS vuln_id,
-					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN')              AS severity,
-					COALESCE(sc.package_name, sc.name, cv.purl)              AS pkg_name,
-					COALESCE(sc.purl_version, '')                             AS installed_version,
-					COALESCE(cv.fixed_in, '')                                 AS fixed_version,
-					cv.summary                                                AS title,
-					''                                                        AS description,
-					'osv'                                                     AS source
+					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN')               AS severity,
+					COALESCE(sc.package_name, sc.name, cv.purl)               AS pkg_name,
+					COALESCE(sc.purl_version, '')                              AS installed_version,
+					COALESCE(cv.fixed_in, '')                                  AS fixed_version,
+					cv.summary                                                 AS title,
+					''                                                         AS description,
+					'osv'                                                      AS source
 				FROM component_vulnerabilities cv
 				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
-				JOIN trivy_scan_results tsr2 ON tsr2.sbom_id = sc.sbom_id
-				LEFT JOIN repos r2 ON r2.id = tsr2.repo_id
+				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
+				LEFT JOIN repos r2 ON r2.id = rc.repo_id
 				%s
 			) combined
 			ORDER BY
