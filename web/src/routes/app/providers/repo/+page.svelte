@@ -458,15 +458,29 @@
 </svelte:head>
 
 <div class="space-y-6">
-	<!-- Back button -->
-	<button
-		type="button"
-		class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-		onclick={goBack}
-	>
-		<ArrowLeft class="h-4 w-4" />
-		Back to providers
-	</button>
+	<!-- Back button + view on provider link -->
+	<div class="flex items-center justify-between">
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
+			onclick={goBack}
+		>
+			<ArrowLeft class="h-4 w-4" />
+			Back to providers
+		</button>
+		{#if details}
+			<a
+				href={details.html_url}
+				target="_blank"
+				rel="noopener noreferrer"
+				class="flex mr-[2em] pr-2 items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
+				style="color: var(--accent);"
+			>
+				View on {resolvedBaseUrl ? new URL(resolvedBaseUrl).hostname : resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
+				<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="m12 5 7 7-7 7"></path></svg>
+			</a>
+		{/if}
+	</div>
 
 	{#if loading}
 		<div class="flex items-center justify-center py-20">
@@ -529,28 +543,13 @@
 					{:else}
 						<button
 							type="button"
-							class="flex items-center gap-2 rounded-xl border border-[var(--success)] bg-[var(--success)]/10 px-4 py-2 text-sm font-medium text-[var(--success)] transition hover:bg-[var(--success)]/20 disabled:opacity-50"
+							class="btn btn-primary disabled:opacity-50"
 							onclick={triggerScan}
 							disabled={scanning}
 						>
-							{#if scanning}
-								<Loader2 class="h-4 w-4 animate-spin" />
-								Starting...
-							{:else}
-								<Play class="h-4 w-4" />
-								Scan Repository
-							{/if}
+							{scanning ? 'Starting...' : 'Scan Repository'}
 						</button>
 					{/if}
-					<a
-						href={details.html_url}
-						target="_blank"
-						rel="noopener noreferrer"
-						class="flex items-center gap-2 rounded-xl border border-[var(--accent)] bg-[var(--accent)]/10 px-4 py-2 text-sm font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-					>
-						View on {resolvedBaseUrl ? new URL(resolvedBaseUrl).hostname : resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
-						<ExternalLink class="h-4 w-4" />
-					</a>
 				</div>
 			</div>
 
