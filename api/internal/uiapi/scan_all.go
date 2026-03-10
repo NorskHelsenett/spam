@@ -133,7 +133,7 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, providerID, token, l
 			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-		totalQueued += queueRepos(ctx, db, repos, "github", "", providerID, label, onlyNew, &allErrors)
+		totalQueued += queueRepos(ctx, db, repos, "github", "", providerID, label, onlyNew, page, &allErrors)
 		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
@@ -163,7 +163,7 @@ func scanAllGitLab(ctx context.Context, db *gorm.DB, group, baseURL string, incl
 			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-		totalQueued += queueRepos(ctx, db, projects, "gitlab", baseURL, providerID, label, onlyNew, &allErrors)
+		totalQueued += queueRepos(ctx, db, projects, "gitlab", baseURL, providerID, label, onlyNew, page, &allErrors)
 		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
@@ -196,7 +196,7 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner, baseURL, providerID, 
 			allErrors = append(allErrors, fmt.Sprintf("Failed to fetch page %d: %v", page, err))
 			break
 		}
-		totalQueued += queueRepos(ctx, db, repos, "gitea", baseURL, providerID, label, onlyNew, &allErrors)
+		totalQueued += queueRepos(ctx, db, repos, "gitea", baseURL, providerID, label, onlyNew, page, &allErrors)
 		onProgress(totalQueued)
 		if !pageInfo.HasNextPage {
 			break
@@ -209,7 +209,7 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner, baseURL, providerID, 
 }
 
 // queueRepos creates jobs for all repos in parallel batches.
-func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, label string, onlyNew bool, errors *[]string) int {
+func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, label string, onlyNew bool, page int, errors *[]string) int {
 	const batchSize = 10
 	var mu sync.Mutex
 	var queued int
@@ -333,6 +333,6 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 		wg.Wait()
 	}
 
-	log.Printf("Queued %d/%d repos for %s scanning", queued, len(repos), label)
+	log.Printf("Queued %d/%d repos for %s scanning (page %d)", queued, len(repos), label, page)
 	return queued
 }
