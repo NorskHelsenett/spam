@@ -2,11 +2,13 @@
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, ShieldX, ShieldAlert, Shield, Clock } from 'lucide-svelte';
+	import { ArrowLeft, ShieldX, ShieldAlert, Shield } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import VulnBadges from '$lib/components/VulnBadges.svelte';
+	import EmptyRepos from '$lib/components/icons/EmptyRepos.svelte';
+	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -240,47 +242,70 @@
 
 		<!-- Tab content -->
 		{#if activeTab === 'repositories'}
-			<div class="space-y-2">
+			<div class="rounded-2xl border border-[var(--border-color)] bg-[var(--card-bg)] overflow-hidden">
 				{#if repos.length === 0}
-					<article class="panel-surface flex items-center justify-center py-12 text-xs text-[var(--text-tertiary)]">
-						No scan results yet
-					</article>
+					<div class="flex flex-col items-center justify-center py-16 text-center">
+						<EmptyRepos class="mb-3 text-[var(--text-muted)]" />
+						<p class="text-sm font-medium text-[var(--text-secondary)]">No repositories scanned</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">Run a scan to see vulnerability results per repository.</p>
+					</div>
 				{:else}
-					{#each repos as repo}
-						<button
-							type="button"
-							class="panel-surface w-full cursor-pointer px-6 py-4 sm:px-10 text-left transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]"
-							onclick={() => openRepo(repo.repo_id)}
-						>
-							<div class="flex flex-wrap items-center justify-between gap-3">
-								<div class="min-w-0 space-y-1">
-									<p class="truncate font-medium text-[var(--accent)]">{repo.repo_slug || repo.repo_id}</p>
-									<div class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-										<Clock class="h-3 w-3" />
-										{fmtDate(repo.last_scanned_at)}
-									</div>
-								</div>
-								{#if repo.critical_count === 0 && repo.high_count === 0 && repo.medium_count === 0 && repo.low_count === 0}
-									<span class="text-xs text-[var(--text-muted)]">No vulnerabilities</span>
-								{:else}
-									<VulnBadges critical={repo.critical_count} high={repo.high_count} medium={repo.medium_count} low={repo.low_count} />
-								{/if}
-							</div>
-						</button>
-					{/each}
+					<div class="overflow-x-auto">
+						<table class="w-full text-xs">
+							<thead>
+								<tr class="border-b border-[var(--border-color)] text-[var(--text-muted)] uppercase tracking-wider">
+									<th class="px-5 py-3 text-left font-medium">Repository</th>
+									<th class="px-4 py-3 text-right font-medium" style="color:var(--red)">Critical</th>
+									<th class="px-4 py-3 text-right font-medium" style="color:var(--orange)">High</th>
+									<th class="px-4 py-3 text-right font-medium" style="color:var(--yellow)">Medium</th>
+									<th class="px-4 py-3 text-right font-medium" style="color:var(--blue)">Low</th>
+									<th class="px-4 py-3 text-right font-medium text-[var(--text-muted)]">Last Scanned</th>
+								</tr>
+							</thead>
+							<tbody>
+								{#each repos as repo, i}
+									<tr
+										class="cursor-pointer border-b border-[var(--border-color)]/50 transition-colors hover:bg-[var(--hover-bg-subtle)] {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}"
+										onclick={() => openRepo(repo.repo_id)}
+									>
+										<td class="px-5 py-3 font-medium text-[var(--accent)] max-w-xs truncate">
+											{repo.repo_slug || repo.repo_id}
+										</td>
+										<td class="px-4 py-3 text-right tabular-nums" style="color:var(--red)">
+											{#if repo.critical_count > 0}{fmt(repo.critical_count)}{:else}<span class="text-[var(--text-muted)]">—</span>{/if}
+										</td>
+										<td class="px-4 py-3 text-right tabular-nums" style="color:var(--orange)">
+											{#if repo.high_count > 0}{fmt(repo.high_count)}{:else}<span class="text-[var(--text-muted)]">—</span>{/if}
+										</td>
+										<td class="px-4 py-3 text-right tabular-nums" style="color:var(--yellow)">
+											{#if repo.medium_count > 0}{fmt(repo.medium_count)}{:else}<span class="text-[var(--text-muted)]">—</span>{/if}
+										</td>
+										<td class="px-4 py-3 text-right tabular-nums" style="color:var(--blue)">
+											{#if repo.low_count > 0}{fmt(repo.low_count)}{:else}<span class="text-[var(--text-muted)]">—</span>{/if}
+										</td>
+										<td class="px-4 py-3 text-right text-[var(--text-tertiary)]">
+											{fmtDate(repo.last_scanned_at)}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
 				{/if}
 			</div>
 
 		{:else if activeTab === 'vulnerabilities'}
-			<div class="space-y-2">
+			<div class="rounded-2xl border border-[var(--border-color)] bg-[var(--card-bg)] overflow-hidden">
 				{#if vulnsLoading}
 					<div class="flex items-center justify-center py-20">
 						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
 					</div>
 				{:else if vulns.length === 0}
-					<article class="panel-surface flex items-center justify-center py-12 text-xs text-[var(--text-tertiary)]">
-						No vulnerabilities found
-					</article>
+					<div class="flex flex-col items-center justify-center py-16 text-center">
+						<EmptyVulns class="mb-3 text-[var(--text-muted)]" />
+						<p class="text-sm font-medium text-[var(--text-secondary)]">No vulnerabilities found</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">No scan results yet — run a scan to populate this view.</p>
+					</div>
 				{:else}
 					{#each vulns as v}
 						<article class="panel-surface px-6 py-4 sm:px-10">
