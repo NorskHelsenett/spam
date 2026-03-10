@@ -112,17 +112,53 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		var rows []repoRow
 		db.WithContext(r.Context()).Raw(`
 			SELECT
-				tsr.repo_id,
-				COALESCE(repo.org || '/' || repo.slug, tsr.repo_id) AS repo_slug,
-				SUM(tsr.critical_count) AS critical_count,
-				SUM(tsr.high_count)     AS high_count,
-				SUM(tsr.medium_count)   AS medium_count,
-				SUM(tsr.low_count)      AS low_count,
-				SUM(tsr.unknown_count)  AS unknown_count,
-				MAX(tsr.scanned_at)     AS last_scanned_at
-			FROM trivy_scan_results tsr
-			LEFT JOIN repos repo ON repo.id = tsr.repo_id
-			GROUP BY tsr.repo_id, repo.org, repo.slug
+				repo_id,
+				MAX(repo_slug)           AS repo_slug,
+				SUM(critical_count)      AS critical_count,
+				SUM(high_count)          AS high_count,
+				SUM(medium_count)        AS medium_count,
+				SUM(low_count)           AS low_count,
+				SUM(unknown_count)       AS unknown_count,
+				MAX(last_scanned_at)     AS last_scanned_at
+			FROM (
+				-- Trivy per-repo counts
+				SELECT
+					tsr.repo_id::text                                          AS repo_id,
+					COALESCE(repo.org || '/' || repo.slug, tsr.repo_id::text) AS repo_slug,
+					SUM(tsr.critical_count) AS critical_count,
+					SUM(tsr.high_count)     AS high_count,
+					SUM(tsr.medium_count)   AS medium_count,
+					SUM(tsr.low_count)      AS low_count,
+					SUM(tsr.unknown_count)  AS unknown_count,
+					MAX(tsr.scanned_at)     AS last_scanned_at
+				FROM trivy_scan_results tsr
+				LEFT JOIN repos repo ON repo.id = tsr.repo_id
+				GROUP BY tsr.repo_id, repo.org, repo.slug
+
+				UNION ALL
+
+				-- OSV per-repo counts (deduplicated per vuln_id+repo_id)
+				SELECT
+					deduped.repo_id::text                                      AS repo_id,
+					COALESCE(r2.org || '/' || r2.slug, deduped.repo_id::text) AS repo_slug,
+					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'CRITICAL')   AS critical_count,
+					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'HIGH')       AS high_count,
+					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'MEDIUM')     AS medium_count,
+					COUNT(*) FILTER (WHERE UPPER(deduped.severity) = 'LOW')        AS low_count,
+					COUNT(*) FILTER (WHERE UPPER(deduped.severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW') OR deduped.severity IS NULL OR deduped.severity = '') AS unknown_count,
+					NULL::timestamptz                                          AS last_scanned_at
+				FROM (
+					SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
+						rc.repo_id, cv.severity
+					FROM component_vulnerabilities cv
+					JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
+					JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
+					WHERE cv.vuln_id <> '_none'
+				) deduped
+				LEFT JOIN repos r2 ON r2.id = deduped.repo_id
+				GROUP BY deduped.repo_id, r2.org, r2.slug
+			) combined
+			GROUP BY repo_id
 			ORDER BY critical_count DESC, high_count DESC, medium_count DESC
 		`).Scan(&rows)
 
