@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
@@ -62,6 +63,43 @@ func trivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 			"format":    job.Format,
 			"repo_slug": job.RepoSlug,
 		})
+	}
+}
+
+// trivyManifestsHandler returns the latest manifest files for a repo so the
+// scanner can fall back to filesystem scanning when the SBOM is a leaf.
+func trivyManifestsHandler(db *gorm.DB) http.HandlerFunc {
+	type manifestFile struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		repoID := r.PathValue("repo_id")
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		// Latest version of each distinct path for this repo.
+		var rows []manifests.Manifest
+		if err := db.WithContext(r.Context()).
+			Raw(`SELECT DISTINCT ON (path) path, content
+			     FROM manifests
+			     WHERE repo_id = ?
+			     ORDER BY path, created_at DESC`, repoID).
+			Scan(&rows).Error; err != nil {
+			log.Printf("trivy/manifests: query repo %s: %v", repoID, err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		out := make([]manifestFile, 0, len(rows))
+		for _, m := range rows {
+			out = append(out, manifestFile{Path: m.Path, Content: m.Content})
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
 	}
 }
 

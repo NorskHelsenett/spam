@@ -112,14 +112,28 @@ func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobRespon
 
 	// Download the SBOM content.
 	sbomPath := filepath.Join(tmpDir, "sbom.json")
-	if err := downloadSBOM(apiURL, hmacKey, job.SBOMID, sbomPath); err != nil {
+	sbomBytes, err := downloadSBOM(apiURL, hmacKey, job.SBOMID, sbomPath)
+	if err != nil {
 		return fmt.Errorf("download sbom: %w", err)
 	}
 
-	// Run trivy.
+	// Run trivy — fall back to filesystem scan when the SBOM is a leaf (0 or 1 components).
 	resultPath := filepath.Join(tmpDir, "result.json")
-	if err := trivyScanSBOM(cacheDir, sbomPath, resultPath); err != nil {
-		return fmt.Errorf("trivy scan: %w", err)
+	if countSBOMComponents(sbomBytes) <= 1 && job.RepoID != "" {
+		log.Printf("sbom_id=%s has ≤1 components, fetching manifests for fs scan", job.SBOMID)
+		manifestDir := filepath.Join(tmpDir, "manifests")
+		if err := fetchAndWriteManifests(apiURL, hmacKey, job.RepoID, manifestDir); err != nil {
+			log.Printf("WARNING: could not fetch manifests, falling back to sbom scan: %v", err)
+			if err := trivyScanSBOM(cacheDir, sbomPath, resultPath); err != nil {
+				return fmt.Errorf("trivy scan: %w", err)
+			}
+		} else if err := trivyScanFS(cacheDir, manifestDir, resultPath); err != nil {
+			return fmt.Errorf("trivy fs scan: %w", err)
+		}
+	} else {
+		if err := trivyScanSBOM(cacheDir, sbomPath, resultPath); err != nil {
+			return fmt.Errorf("trivy scan: %w", err)
+		}
 	}
 
 	// Upload result.
@@ -152,8 +166,62 @@ func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobRespon
 	return nil
 }
 
-func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) error {
+func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) ([]byte, error) {
 	url := apiURL + "/api/sboms/" + sbomID + "/download"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	signRequest(req, nil, hmacKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// countSBOMComponents returns the number of components in a CycloneDX or SPDX SBOM.
+func countSBOMComponents(data []byte) int {
+	var cdx struct {
+		Components []json.RawMessage `json:"components"`
+	}
+	if err := json.Unmarshal(data, &cdx); err == nil && cdx.Components != nil {
+		return len(cdx.Components)
+	}
+	// SPDX fallback: count packages (excluding DESCRIBES relationship root)
+	var spdx struct {
+		Packages []json.RawMessage `json:"packages"`
+	}
+	if err := json.Unmarshal(data, &spdx); err == nil {
+		return len(spdx.Packages)
+	}
+	return 0
+}
+
+type manifestFile struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+// fetchAndWriteManifests downloads the repo's manifest files from the API and
+// writes them into dir so Trivy can scan them with `trivy fs`.
+func fetchAndWriteManifests(apiURL string, hmacKey []byte, repoID, dir string) error {
+	url := apiURL + "/api/trivy/manifests/" + repoID
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -171,14 +239,25 @@ func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) error 
 		return fmt.Errorf("status %d: %s", resp.StatusCode, body)
 	}
 
-	f, err := os.Create(destPath)
-	if err != nil {
-		return err
+	var files []manifestFile
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		return fmt.Errorf("decode manifests: %w", err)
 	}
-	defer f.Close()
+	if len(files) == 0 {
+		return fmt.Errorf("no manifest files available for repo %s", repoID)
+	}
 
-	_, err = io.Copy(f, resp.Body)
-	return err
+	for _, f := range files {
+		dest := filepath.Join(dir, f.Path)
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(dest, []byte(f.Content), 0644); err != nil {
+			return err
+		}
+	}
+	log.Printf("wrote %d manifest file(s) to %s", len(files), dir)
+	return nil
 }
 
 func trivyDownloadDB(cacheDir string) error {
@@ -191,6 +270,19 @@ func trivyDownloadDB(cacheDir string) error {
 func trivyScanSBOM(cacheDir, sbomPath, resultPath string) error {
 	cmd := exec.Command(
 		"trivy", "sbom", sbomPath,
+		"--skip-db-update",
+		"--cache-dir", cacheDir,
+		"--format", "json",
+		"--output", resultPath,
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func trivyScanFS(cacheDir, dir, resultPath string) error {
+	cmd := exec.Command(
+		"trivy", "fs", dir,
 		"--skip-db-update",
 		"--cache-dir", cacheDir,
 		"--format", "json",

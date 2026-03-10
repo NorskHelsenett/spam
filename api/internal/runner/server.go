@@ -65,6 +65,7 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
 		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
+		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
