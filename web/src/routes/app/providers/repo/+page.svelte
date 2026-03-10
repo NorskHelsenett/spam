@@ -478,6 +478,13 @@
 	let vulnDialogOpen = $state(false);
 	let vulnDialogData = $state<VulnRow[]>([]);
 	let vulnDialogLoading = $state(false);
+	let vulnDialogTab = $state('all');
+
+	const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+
+	$: vulnDialogFiltered = vulnDialogTab === 'all'
+		? vulnDialogData
+		: vulnDialogData.filter(v => v.severity?.toUpperCase() === vulnDialogTab);
 
 	const openVulnDialog = async () => {
 		const { repoDbId } = getParams();
@@ -935,6 +942,24 @@
 					</button>
 				</div>
 
+				<!-- Severity tabs -->
+				{#if !vulnDialogLoading && vulnDialogData.length > 0}
+					<div class="border-b border-[var(--border-color)] px-6 py-2">
+						<TabSelector
+							options={[
+								{ value: 'all', label: `All (${vulnDialogData.length})` },
+								...severityOrder
+									.filter(s => vulnDialogData.some(v => v.severity?.toUpperCase() === s))
+									.map(s => ({
+										value: s,
+										label: `${s.charAt(0) + s.slice(1).toLowerCase()} (${vulnDialogData.filter(v => v.severity?.toUpperCase() === s).length})`
+									}))
+							]}
+							bind:value={vulnDialogTab}
+						/>
+					</div>
+				{/if}
+
 				<!-- Body -->
 				<div class="max-h-[70vh] overflow-y-auto">
 					{#if vulnDialogLoading}
@@ -949,7 +974,7 @@
 						</div>
 					{:else}
 						<div class="space-y-1 p-2">
-							{#each vulnDialogData as v}
+							{#each vulnDialogFiltered as v}
 								<article class="rounded-xl px-5 py-4 hover:bg-[var(--hover-bg-subtle)] transition-colors">
 									<div class="flex items-start gap-4">
 										<!-- Severity pill — fixed width so all rows align -->
