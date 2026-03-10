@@ -222,7 +222,7 @@
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)]">Vulnerabilities</h1>
 				</div>
 				<p class="mt-1 text-sm text-[var(--text-muted)]">
-					Trivy scan results across all SBOMs
+					Scan results across all SBOMs
 					{#if summary?.last_scanned_at}
 						· last scan {fmtDate(summary.last_scanned_at)}
 					{/if}
