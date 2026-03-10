@@ -516,6 +516,35 @@
 
 	const cveUrl = (id: string) =>
 		id?.startsWith('CVE-') ? `https://www.cve.org/CVERecord?id=${id}` : null;
+
+	// Secrets dialog
+	type SecretFinding = {
+		rule_id: string;
+		description: string;
+		file: string;
+		start_line: number;
+		match: string;
+	};
+
+	let secretsDialogOpen = $state(false);
+	let secretsDialogData = $state<SecretFinding[]>([]);
+	let secretsDialogLoading = $state(false);
+
+	const openSecretsDialog = async () => {
+		const { repoDbId } = getParams();
+		secretsDialogOpen = true;
+		if (secretsDialogData.length > 0) return;
+		secretsDialogLoading = true;
+		try {
+			const url = repoDbId
+				? `/api/repos/secrets/list?repo_id=${encodeURIComponent(repoDbId)}`
+				: '/api/repos/secrets/list';
+			const res = await fetch(url, { credentials: 'include' });
+			if (res.ok) secretsDialogData = await res.json();
+		} finally {
+			secretsDialogLoading = false;
+		}
+	};
 </script>
 
 <svelte:head>
@@ -707,7 +736,11 @@
 			</button>
 
 			<!-- Secrets & Issues -->
-				<div class="space-y-3 metric-card rounded-2xl p-4">
+			<button
+				type="button"
+				class="space-y-3 metric-card rounded-2xl p-4 w-full text-left cursor-pointer transition-colors hover:border-[var(--accent)]/50 flex flex-col"
+				onclick={openSecretsDialog}
+			>
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Secrets & Issues</h3>
 				<div class="space-y-2">
 					<div class="flex items-center justify-between">
@@ -718,24 +751,12 @@
 					</div>
 					<div class="flex items-center justify-between">
 						<span class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-							<AlertCircle class="h-4 w-4 {securityData.issues.noOwner ? 'text-orange-500' : 'text-green-500'}" /> CODEOWNERS
-						</span>
-						<span class="text-sm {securityData.issues.noOwner ? 'text-orange-500' : 'text-green-500'}">{securityData.issues.noOwner ? 'Missing' : 'Present'}</span>
-					</div>
-					<div class="flex items-center justify-between">
-						<span class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 							<Scale class="h-4 w-4 {securityData.issues.noLicense ? 'text-orange-500' : 'text-green-500'}" /> License
 						</span>
 						<span class="text-sm {securityData.issues.noLicense ? 'text-orange-500' : 'text-green-500'}">{securityData.issues.noLicense ? 'Missing' : 'Present'}</span>
 					</div>
-					<div class="flex items-center justify-between">
-						<span class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-							<Package class="h-4 w-4 text-yellow-500" /> Outdated deps
-						</span>
-						<span class="font-semibold text-[var(--text-bright)]">{securityData.issues.outdatedDeps}</span>
-					</div>
 				</div>
-			</div>
+			</button>
 
 			<!-- Components -->
 				<div class="space-y-3 metric-card rounded-2xl p-4">
@@ -1023,6 +1044,85 @@
 													<span class="bg-green-500/10 px-1.5 py-0.5 font-mono text-green-400">fix: {v.fixed_version}</span>
 												{:else}
 													<span class="opacity-50">no fix available</span>
+												{/if}
+											</div>
+										</div>
+									</div>
+								</article>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</section>
+		</div>
+	</div>
+{/if}
+
+<!-- Secrets & Issues dialog -->
+{#if secretsDialogOpen}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
+		onkeydown={(e) => e.key === 'Escape' && (secretsDialogOpen = false)}
+		onclick={(e) => e.target === e.currentTarget && (secretsDialogOpen = false)}
+	>
+		<div class="w-full max-w-4xl">
+			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
+				<!-- Header -->
+				<div class="flex items-center justify-between border-b border-[var(--border-color)] px-6 py-4">
+					<div class="flex items-center gap-3">
+						<FileWarning class="h-5 w-5 text-red-400" />
+						<h2 class="text-base font-semibold text-[var(--text-bright)]">Secrets & Issues</h2>
+						{#if !secretsDialogLoading && secretsDialogData.length > 0}
+							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
+								{secretsDialogData.length}
+							</span>
+						{/if}
+					</div>
+					<button
+						type="button"
+						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
+						onclick={() => (secretsDialogOpen = false)}
+					>
+						<X class="h-4 w-4" />
+					</button>
+				</div>
+
+				<!-- Body -->
+				<div class="max-h-[65vh] overflow-y-auto">
+					{#if secretsDialogLoading}
+						<div class="flex items-center justify-center py-20">
+							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+						</div>
+					{:else if secretsDialogData.length === 0}
+						<div class="flex flex-col items-center justify-center py-16 text-center">
+							<Shield class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
+							<p class="text-sm font-medium text-[var(--text-secondary)]">No secrets found</p>
+							<p class="mt-1 text-xs text-[var(--text-muted)]">No Gitleaks findings for this repository.</p>
+						</div>
+					{:else}
+						<div class="space-y-1 p-2">
+							{#each secretsDialogData as s}
+								<article class="rounded-xl px-5 py-4 hover:bg-[var(--hover-bg-subtle)] transition-colors">
+									<div class="flex items-start gap-4">
+										<!-- Rule pill -->
+										<div class="shrink-0 pt-0.5">
+											<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
+												<FileWarning class="h-3 w-3" />
+												{s.rule_id || 'unknown'}
+											</span>
+										</div>
+
+										<div class="min-w-0 flex-1 space-y-1.5">
+											{#if s.description}
+												<p class="text-sm text-[var(--text-secondary)]">{s.description}</p>
+											{/if}
+											<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+												{#if s.file}
+													<span class="font-mono">{s.file}{s.start_line ? `:${s.start_line}` : ''}</span>
+												{/if}
+												{#if s.match}
+													<span class="font-mono rounded bg-[var(--card-bg)] px-1.5 py-0.5 opacity-70 break-all">{s.match}</span>
 												{/if}
 											</div>
 										</div>

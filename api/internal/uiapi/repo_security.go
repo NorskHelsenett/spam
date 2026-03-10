@@ -1,6 +1,7 @@
 package uiapi
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -112,5 +113,87 @@ func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.Hand
 			SBOMDependencyCount: sbomDeps,
 			SecretsFindingCount: secretsCount,
 		})
+	}
+}
+
+// SecretFinding is a single Gitleaks finding extracted from stored JSON.
+type SecretFinding struct {
+	RuleID      string `json:"rule_id"`
+	Description string `json:"description"`
+	File        string `json:"file"`
+	StartLine   int    `json:"start_line"`
+	Match       string `json:"match"`
+}
+
+// RepoSecretsListHandler returns individual secret findings for a repo's latest scan.
+// GET /api/repos/secrets/list?repo_id=<uuid>
+func RepoSecretsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		repoID := r.URL.Query().Get("repo_id")
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		// Cast JSONB to text so GORM can scan it into a plain string reliably.
+		// Try by repo_id first; fall back to the latest run tied to this repo via jobs table.
+		var rawFindings string
+		res := db.WithContext(r.Context()).Table("run_secrets").
+			Select("findings::text").
+			Where("repo_id = ?", repoID).
+			Order("created_at DESC").
+			Limit(1).
+			Scan(&rawFindings)
+		if res.Error != nil || res.RowsAffected == 0 || rawFindings == "" {
+			// Fallback: find the latest run_id for this repo and query by that
+			var runID string
+			db.WithContext(r.Context()).Table("jobs").
+				Select("id").
+				Where("repo_id = ?", repoID).
+				Order("created_at DESC").
+				Limit(1).
+				Scan(&runID)
+			if runID != "" {
+				db.WithContext(r.Context()).Table("run_secrets").
+					Select("findings::text").
+					Where("run_id = ?", runID).
+					Order("created_at DESC").
+					Limit(1).
+					Scan(&rawFindings)
+			}
+		}
+		if rawFindings == "" {
+			writeJSON(w, http.StatusOK, []SecretFinding{})
+			return
+		}
+
+		// Gitleaks output: array of objects with RuleID, Description, File, StartLine, Match
+		var raw []struct {
+			RuleID      string `json:"RuleID"`
+			Description string `json:"Description"`
+			File        string `json:"File"`
+			StartLine   int    `json:"StartLine"`
+			Match       string `json:"Match"`
+		}
+		if err := json.Unmarshal([]byte(rawFindings), &raw); err != nil {
+			writeJSON(w, http.StatusOK, []SecretFinding{})
+			return
+		}
+
+		out := make([]SecretFinding, 0, len(raw))
+		for _, f := range raw {
+			out = append(out, SecretFinding{
+				RuleID:      f.RuleID,
+				Description: f.Description,
+				File:        f.File,
+				StartLine:   f.StartLine,
+				Match:       f.Match,
+			})
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
 }
