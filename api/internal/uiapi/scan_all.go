@@ -212,7 +212,7 @@ func scanAllGitea(ctx context.Context, db *gorm.DB, owner, baseURL, providerID, 
 func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, provider string, baseURL string, providerID string, label string, onlyNew bool, page int, errors *[]string) int {
 	const batchSize = 10
 	var mu sync.Mutex
-	var queued int
+	var queued, skipped int
 
 	for i := 0; i < len(repos); i += batchSize {
 		end := i + batchSize
@@ -228,6 +228,9 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 			go func(r providers.RepoData) {
 				defer wg.Done()
 				if r.IsDisabled || r.IsEmpty || r.DefaultBranch == "" {
+					mu.Lock()
+					skipped++
+					mu.Unlock()
 					return
 				}
 
@@ -333,6 +336,6 @@ func queueRepos(ctx context.Context, db *gorm.DB, repos []providers.RepoData, pr
 		wg.Wait()
 	}
 
-	log.Printf("Queued %d/%d repos for %s scanning (page %d)", queued, len(repos), label, page)
+	log.Printf("Queued %d/%d repos for %s scanning (page %d, skipped %d disabled/empty/no-branch, %d errors)", queued, len(repos), label, page, skipped, len(*errors))
 	return queued
 }
