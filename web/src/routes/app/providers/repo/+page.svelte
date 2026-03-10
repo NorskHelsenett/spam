@@ -482,9 +482,11 @@
 
 	const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
 
-	$: vulnDialogFiltered = vulnDialogTab === 'all'
-		? vulnDialogData
-		: vulnDialogData.filter(v => v.severity?.toUpperCase() === vulnDialogTab);
+	const vulnDialogFiltered = $derived(
+		vulnDialogTab === 'all'
+			? vulnDialogData
+			: vulnDialogData.filter(v => v.severity?.toUpperCase() === vulnDialogTab)
+	);
 
 	const openVulnDialog = async () => {
 		const { repoDbId } = getParams();
@@ -1009,7 +1011,9 @@
 
 											<!-- Description -->
 											{#if v.description}
-												<p class="text-xs text-[var(--text-muted)] leading-relaxed">{v.description}</p>
+												<div class="text-xs text-[var(--text-muted)] leading-relaxed">
+													<Markdown content={v.description} />
+												</div>
 											{/if}
 
 											<!-- Package + fix -->
