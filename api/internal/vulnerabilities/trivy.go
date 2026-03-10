@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // TrivyScanLease holds an in-progress scan claim for a single SBOM.
@@ -119,7 +120,7 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 			LeasedBy:  leasedBy,
 			ExpiresAt: now.Add(leaseDuration),
 		}
-		if err := tx.Create(&lease).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{UpdateAll: true}).Create(&lease).Error; err != nil {
 			return fmt.Errorf("create lease: %w", err)
 		}
 
