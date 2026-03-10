@@ -246,8 +246,8 @@
 				{#if repos.length === 0}
 					<div class="flex flex-col items-center justify-center py-16 text-center">
 						<EmptyRepos class="mb-3 text-[var(--text-muted)]" />
-						<p class="text-sm font-medium text-[var(--text-secondary)]">No repositories scanned</p>
-						<p class="mt-1 text-xs text-[var(--text-muted)]">Run a scan to see vulnerability results per repository.</p>
+						<p class="text-sm font-medium text-[var(--text-secondary)]">No security scans executed</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">No scan results yet — run a scan on a repository to see results here.</p>
 					</div>
 				{:else}
 					<div class="overflow-x-auto">
@@ -263,7 +263,7 @@
 								</tr>
 							</thead>
 							<tbody>
-								{#each repos as repo, i}
+								{#each repos.filter(r => r.repo_slug !== r.repo_id && r.repo_slug) as repo, i}
 									<tr
 										class="cursor-pointer border-b border-[var(--border-color)]/50 transition-colors hover:bg-[var(--hover-bg-subtle)] {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}"
 										onclick={() => openRepo(repo.repo_id)}
@@ -307,7 +307,7 @@
 						<p class="mt-1 text-xs text-[var(--text-muted)]">No scan results yet — run a scan to populate this view.</p>
 					</div>
 				{:else}
-					{#each vulns as v}
+					{#each vulns.filter(v => v.repo_slug !== v.repo_id && v.repo_slug) as v}
 						<article class="panel-surface px-6 py-4 sm:px-10">
 							<div class="flex flex-wrap items-start gap-4">
 								<!-- Severity icon + CVE ID -->
