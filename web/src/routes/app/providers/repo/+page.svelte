@@ -948,9 +948,9 @@
 							<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no recorded scan results.</p>
 						</div>
 					{:else}
-						<div class="divide-y divide-[var(--border-color)]/50">
+						<div class="space-y-1 p-2">
 							{#each vulnDialogData as v}
-								<article class="px-6 py-4 bg-[var(--card-bg)] hover:bg-[var(--hover-bg-subtle)] transition-colors">
+								<article class="rounded-xl px-5 py-4 hover:bg-[var(--hover-bg-subtle)] transition-colors">
 									<div class="flex items-start gap-4">
 										<!-- Severity pill — fixed width so all rows align -->
 										<div class="w-24 shrink-0 pt-0.5">
