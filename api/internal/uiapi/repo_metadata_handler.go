@@ -37,7 +37,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 
 		repoMeta, repoDBID := loadRepoMetadata(r, db, repoID)
 		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
-		runs := loadRepoRuns(r, db, repoMeta.Org, repoMeta.Slug, repoDBID)
+		runs := loadRepoRuns(r, db, repoDBID)
 		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount, runs.Latest)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
@@ -120,16 +120,21 @@ func loadRepoLatestCommit(r *http.Request, db *gorm.DB, repoDBID string) *RepoMe
 	}
 }
 
-func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID string) RepoMetadataRuns {
+func loadRepoRuns(r *http.Request, db *gorm.DB, repoDBID string) RepoMetadataRuns {
 	response := RepoMetadataRuns{
 		Total:    0,
 		Timeline: []RepoMetadataRunSummary{},
 	}
-
-	query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", "CREATE_RUN")
-	if org != "" && slug != "" {
-		query = query.Where("payload::text LIKE ?", "%"+org+"/"+slug+"%")
+	if repoDBID == "" {
+		return response
 	}
+
+	query := db.WithContext(r.Context()).
+		Table("jobs").
+		Joins(`JOIN repo_commits rc
+			ON rc.repo_id = ?
+			AND rc.commit_sha = COALESCE(NULLIF(jobs.commit_hash, ''), NULLIF(jobs.payload->>'commit_sha', ''))`, repoDBID).
+		Where("jobs.type = ?", "CREATE_RUN")
 
 	query.Where("finished_at IS NOT NULL").Count(&response.Total)
 
@@ -143,8 +148,8 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID strin
 		FinishedAt *time.Time
 		Result     []byte
 	}
-	if err := query.Select("id, status, payload, commit_hash, created_at, locked_at, finished_at, result").
-		Order("created_at DESC").
+	if err := query.Select("jobs.id, jobs.status, jobs.payload, jobs.commit_hash, jobs.created_at, jobs.locked_at, jobs.finished_at, jobs.result").
+		Order("jobs.created_at DESC").
 		Limit(10).
 		Find(&rows).Error; err != nil {
 		return response
