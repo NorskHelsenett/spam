@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
@@ -57,6 +58,11 @@
 			hour: '2-digit',
 			minute: '2-digit'
 		});
+	};
+
+	const openRepo = (repo: RepoRow) => {
+		if (!repo.repo_id) return;
+		goto(`/app/providers/repo?repo_id=${encodeURIComponent(repo.repo_id)}`);
 	};
 
 	onMount(async () => {
@@ -164,9 +170,10 @@
 						<tbody>
 							{#each repos as repo, i}
 								<tr
-									class="border-b border-[var(--border-color)]/50 transition-colors hover:bg-[var(--hover-bg-subtle)] {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}"
+									class="cursor-pointer border-b border-[var(--border-color)]/50 transition-colors hover:bg-[var(--hover-bg-subtle)] {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}"
+									onclick={() => openRepo(repo)}
 								>
-									<td class="px-5 py-3 font-medium text-[var(--text-bright)] max-w-xs truncate">
+									<td class="px-5 py-3 font-medium text-[var(--accent)] max-w-xs truncate">
 										{repo.repo_slug || repo.repo_id}
 									</td>
 									<td class="px-4 py-3 text-right tabular-nums" style="color:var(--red)">

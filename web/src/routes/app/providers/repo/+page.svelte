@@ -124,6 +124,14 @@
 			latest_run_id?: string;
 			last_scanned_at?: string;
 		};
+		vulnerabilities?: {
+			summary?: {
+				critical: number;
+				high: number;
+				medium: number;
+				low: number;
+			};
+		};
 	};
 
 	let details: RepoDetails | null = $state(null);
@@ -262,13 +270,14 @@
 		const sbomComponents = metadata?.dependencies?.from_sbom || 0;
 		const manifestComponents = metadata?.dependencies?.from_manifest || 0;
 		const totalComponents = Math.max(sbomComponents, manifestComponents);
+		const vulnSummary = metadata?.vulnerabilities?.summary;
 
 		securityData = {
 			vulnerabilities: {
-				critical: 0, // TODO: implement vulnerability scanning
-				high: 0,
-				medium: 0,
-				low: 0
+				critical: vulnSummary?.critical || 0,
+				high: vulnSummary?.high || 0,
+				medium: vulnSummary?.medium || 0,
+				low: vulnSummary?.low || 0
 			},
 			secrets: metadata?.secrets?.latest_count || 0,
 			issues: {

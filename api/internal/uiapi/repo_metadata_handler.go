@@ -41,6 +41,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount, runs.Latest)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
+		vulnerabilities := loadRepoVulnerabilities(r, db, repoDBID)
 
 		resp := RepoMetadataResponse{
 			Repo:            repoMeta,
@@ -50,7 +51,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 			Dependencies:    deps,
 			Secrets:         secrets,
 			Hygiene:         RepoMetadataHygiene{},
-			Vulnerabilities: RepoMetadataVulnerabilities{},
+			Vulnerabilities: vulnerabilities,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoMetadataCacheTTL)
 		writeJSON(w, http.StatusOK, resp)
@@ -332,5 +333,32 @@ func loadRepoSecrets(r *http.Request, db *gorm.DB, latestRun *RepoMetadataRunSum
 		LatestRunID:   latestRun.ID,
 		LatestCount:   secret.Count,
 		LastScannedAt: secret.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func loadRepoVulnerabilities(r *http.Request, db *gorm.DB, repoDBID string) RepoMetadataVulnerabilities {
+	if repoDBID == "" {
+		return RepoMetadataVulnerabilities{}
+	}
+
+	var summary RepoMetadataVulnSummary
+	if err := db.WithContext(r.Context()).Raw(`
+		SELECT
+			COALESCE(SUM(critical_count), 0) AS critical,
+			COALESCE(SUM(high_count), 0)     AS high,
+			COALESCE(SUM(medium_count), 0)   AS medium,
+			COALESCE(SUM(low_count), 0)      AS low
+		FROM trivy_scan_results
+		WHERE repo_id = ?
+	`, repoDBID).Scan(&summary).Error; err != nil {
+		return RepoMetadataVulnerabilities{}
+	}
+
+	if summary.Critical == 0 && summary.High == 0 && summary.Medium == 0 && summary.Low == 0 {
+		return RepoMetadataVulnerabilities{}
+	}
+
+	return RepoMetadataVulnerabilities{
+		Summary: &summary,
 	}
 }
