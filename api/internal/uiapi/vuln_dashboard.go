@@ -119,7 +119,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		limit := 500
+		limit := 5000
 		repoID := r.URL.Query().Get("repo_id")
 
 		type vulnRow struct {
