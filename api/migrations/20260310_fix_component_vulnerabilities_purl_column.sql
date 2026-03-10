@@ -10,6 +10,8 @@ BEGIN
       AND column_name = 'p_url'
   ) THEN
     UPDATE component_vulnerabilities SET purl = p_url WHERE (purl IS NULL OR purl = '') AND p_url IS NOT NULL AND p_url <> '';
+    -- Drop NOT NULL on p_url so new code (which writes to purl) does not fail.
+    ALTER TABLE component_vulnerabilities ALTER COLUMN p_url DROP NOT NULL;
   END IF;
 
   -- Move the index from p_url to purl if it still points at p_url.
