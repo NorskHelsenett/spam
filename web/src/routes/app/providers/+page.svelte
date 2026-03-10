@@ -1334,7 +1334,7 @@
 		iconVariant="default"
 		buttons={[
 			{ label: 'Cancel', variant: 'ghost', onclick: closeQueueDialog },
-			{ label: 'Queue Only New', variant: 'ghost', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, true) },
+			{ label: 'Only New', variant: 'ghost', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, true) },
 			{ label: 'Queue All', variant: 'primary', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, false) }
 		]}
 	>

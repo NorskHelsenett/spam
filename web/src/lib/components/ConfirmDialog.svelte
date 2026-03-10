@@ -81,7 +81,7 @@
 	};
 
 	const btnClass = (variant: ButtonVariant = 'ghost') =>
-		`flex-1 rounded-full py-3 text-base font-medium transition whitespace-nowrap ${btnStyles[variant]}`;
+		`flex-1 min-w-fit rounded-full py-3 text-base font-medium transition whitespace-nowrap ${btnStyles[variant]}`;
 </script>
 
 {#if open}
@@ -93,7 +93,7 @@
 	>
 		<!-- Card -->
 		<div
-			class="w-full max-w-sm space-y-6 rounded-3xl bg-[var(--main-content-bg)] p-8 shadow-[0_8px_40px_rgba(0,0,0,0.28)]"
+			class="w-full max-w-md space-y-6 rounded-3xl bg-[var(--main-content-bg)] p-8 shadow-[0_8px_40px_rgba(0,0,0,0.28)]"
 			onclick={(e) => e.stopPropagation()}
 			role="dialog"
 			aria-modal="true"
@@ -118,7 +118,7 @@
 
 			<!-- Pill buttons -->
 			{#if buttons.length > 0}
-				<div class="flex gap-3">
+				<div class="flex flex-wrap gap-3">
 					{#each buttons as btn}
 						<button
 							type="button"
