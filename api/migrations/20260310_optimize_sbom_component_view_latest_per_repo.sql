@@ -1,6 +1,7 @@
 -- Optimize sbom_component_view to only materialize the latest SBOM per repo.
 -- The view now only processes the latest bound SBOM per repo_commit
 -- (keyed by repo_id) plus all non-repo-commit assets.
+-- The depends_on column has been removed as it is not currently used.
 
 DROP MATERIALIZED VIEW IF EXISTS sbom_component_view;
 
@@ -89,35 +90,6 @@ root_component AS (
     TRUE AS is_root
   FROM sbom_json sj
   WHERE sj.doc->'metadata'->'component' IS NOT NULL
-),
-deps AS (
-  SELECT
-    sj.sbom_id,
-    sj.asset_type,
-    sj.asset_ref_id,
-    d->>'ref' AS component_ref,
-    array_agg(dep) FILTER (WHERE dep IS NOT NULL) AS depends_on
-  FROM sbom_json sj
-  LEFT JOIN LATERAL jsonb_array_elements(COALESCE(sj.doc->'dependencies', '[]'::jsonb)) AS d ON TRUE
-  LEFT JOIN LATERAL jsonb_array_elements_text(COALESCE(d->'dependsOn', '[]'::jsonb)) AS dep ON TRUE
-  GROUP BY sj.sbom_id, sj.asset_type, sj.asset_ref_id, d->>'ref'
-),
-implicit_root_component AS (
-  SELECT
-    comp.sbom_id,
-    comp.asset_type,
-    comp.asset_ref_id,
-    MIN(comp.component_ref) AS component_ref
-  FROM components comp
-  LEFT JOIN deps dep
-    ON dep.sbom_id = comp.sbom_id
-    AND dep.asset_type IS NOT DISTINCT FROM comp.asset_type
-    AND dep.asset_ref_id IS NOT DISTINCT FROM comp.asset_ref_id
-  GROUP BY comp.sbom_id, comp.asset_type, comp.asset_ref_id
-  HAVING COUNT(*) = 1
-     AND COUNT(dep.component_ref) = 1
-     AND MIN(dep.component_ref) = MIN(comp.component_ref)
-     AND COALESCE(MAX(cardinality(dep.depends_on)), 0) = 0
 )
 SELECT
   c.sbom_id,
@@ -128,8 +100,7 @@ SELECT
   c.version,
   c.type,
   c.licenses,
-  (c.is_root OR ir.component_ref IS NOT NULL) AS is_root,
-  COALESCE(d.depends_on, ARRAY[]::text[]) AS depends_on,
+  c.is_root,
   NULLIF(substring(c.purl from '^pkg:([^/]+)'), '') AS kind,
   NULLIF(
     replace(
@@ -235,16 +206,6 @@ FROM (
   -- appears in both metadata.component and the top-level components array.
   ORDER BY sbom_id, asset_type, asset_ref_id, component_ref, is_root DESC
 ) c
-LEFT JOIN deps d
-  ON d.sbom_id = c.sbom_id
-  AND d.asset_type IS NOT DISTINCT FROM c.asset_type
-  AND d.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
-  AND d.component_ref = c.component_ref
-LEFT JOIN implicit_root_component ir
-  ON ir.sbom_id = c.sbom_id
-  AND ir.asset_type IS NOT DISTINCT FROM c.asset_type
-  AND ir.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
-  AND ir.component_ref = c.component_ref
 WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
