@@ -325,7 +325,7 @@
 		role="presentation"
 	>
 		<div
-			class="fixed left-1/2 top-[16%] z-50 w-[95vw] max-w-2xl -translate-x-1/2 overflow-hidden rounded-2xl shadow-2xl"
+			class="fixed left-1/2 top-[16%] z-50 w-[95vw] max-w-4xl -translate-x-1/2 overflow-hidden rounded-2xl shadow-2xl"
 			style="background: var(--bg-soft); border: 1px solid var(--bg2);"
 			role="dialog"
 			aria-modal="true"
@@ -362,7 +362,7 @@
 				<div class="flex">
 
 					<!-- Left: results list -->
-					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
+					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-72 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped] as [, group]}
