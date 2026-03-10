@@ -101,6 +101,7 @@ func run() error {
 		"migrations/20260306_repos_identity_not_empty.sql",
 		"migrations/20260311_fix_component_vulnerabilities_schema.sql",
 		"migrations/20260310_create_trivy_scan_tables.sql",
+		"migrations/20260310_fix_component_vulnerabilities_purl_column.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

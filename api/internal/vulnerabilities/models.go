@@ -10,7 +10,7 @@ import (
 // Rows are upserted on each lookup; checked_at is updated to track staleness.
 type ComponentVulnerability struct {
 	ID        uuid.UUID `gorm:"type:uuid;primaryKey;default:gen_random_uuid()"`
-	PURL      string    `gorm:"not null;index:idx_component_vuln_purl"`
+	PURL      string    `gorm:"column:purl;not null;index:idx_component_vuln_purl"`
 	VulnID    string    `gorm:"not null"` // CVE-YYYY-NNNNN or GHSA-xxxx
 	Summary   string
 	Severity  string    // CRITICAL, HIGH, MEDIUM, LOW, or empty
