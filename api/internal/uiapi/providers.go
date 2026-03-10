@@ -1096,11 +1096,10 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				ProviderInstanceID string
 				Org                string
 				Slug               string
-				ExternalID         string
 			}
 			if err := db.WithContext(r.Context()).
 				Table("repos").
-				Select("provider_instance_id, org, slug, external_id").
+				Select("provider_instance_id, org, slug").
 				Where("id = ?", repoDBID).
 				First(&repoRow).Error; err != nil {
 				http.Error(w, "repo not found", http.StatusNotFound)
@@ -1110,10 +1109,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			if repoRow.ProviderInstanceID != "" {
 				providerID = repoRow.ProviderInstanceID
 			}
-			if repoRow.ExternalID != "" {
-				// Prefer numeric external ID so the path never goes stale (GitLab, Gitea).
-				repoPath = repoRow.ExternalID
-			} else if repoRow.Org != "" && repoRow.Slug != "" {
+			if repoRow.Org != "" && repoRow.Slug != "" {
 				repoPath = repoRow.Org + "/" + repoRow.Slug
 			}
 		}

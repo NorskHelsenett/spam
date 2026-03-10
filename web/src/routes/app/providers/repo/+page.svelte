@@ -97,6 +97,7 @@
 			id: string;
 			org: string;
 			slug: string;
+			provider?: string;
 			provider_id?: string;
 			provider_base_url?: string;
 		};
