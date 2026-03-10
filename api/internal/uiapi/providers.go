@@ -369,21 +369,16 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 		page, pageSize := parsePagination(r)
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
-		baseURL := r.URL.Query().Get("base_url")
+		rawBaseURL := r.URL.Query().Get("base_url")
+		giteaProviderID := r.URL.Query().Get("provider_id")
 
-		if baseURL == "" {
-			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
-			return
-		}
-
-		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", baseURL, owner, page, pageSize)
+		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", rawBaseURL, owner, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GiteaReposResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
 		// Serve from provider-level repo list cache (populated by sync/warm).
-		giteaProviderID := r.URL.Query().Get("provider_id")
 		if served := serveFromProviderRepoList(w, r, c, store, db, giteaProviderID, owner, page, pageSize, sortColumn, sortOrder,
 			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
 				return GiteaReposResponse{Repos: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
@@ -391,9 +386,14 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		// base_url from the client is a lookup hint only; the actual URL comes from the DB.
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), giteaProviderID, providerconfig.ProviderGitea, rawBaseURL, owner)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "no configured Gitea provider found for this base_url", http.StatusBadRequest)
 			return
 		}
 
@@ -443,22 +443,23 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store, c 
 		}
 
 		page, pageSize := parsePagination(r)
-		baseURL := r.URL.Query().Get("base_url")
+		rawBaseURL := r.URL.Query().Get("base_url")
+		giteaProviderID := r.URL.Query().Get("provider_id")
 
-		if baseURL == "" {
-			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
-			return
-		}
-
-		cacheKey := fmt.Sprintf("gitea:orgs:%s:p%d:ps%d", baseURL, page, pageSize)
+		cacheKey := fmt.Sprintf("gitea:orgs:%s:p%d:ps%d", rawBaseURL, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GiteaOrgsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		// base_url from the client is a lookup hint only; the actual URL comes from the DB.
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), giteaProviderID, providerconfig.ProviderGitea, rawBaseURL, "")
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "no configured Gitea provider found for this base_url", http.StatusBadRequest)
 			return
 		}
 
