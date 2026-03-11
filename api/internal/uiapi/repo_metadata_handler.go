@@ -260,22 +260,28 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSB
 	}
 
 	var sbom struct {
-		ID        string
-		Format    string
-		CreatedAt time.Time
+		ID           string
+		Format       string
+		CreatedAt    time.Time
+		ContentBytes []byte
 	}
 	if err := db.WithContext(r.Context()).Table("sboms").
-		Select("id, format, created_at").
+		Select("id, format, created_at, content_bytes").
 		Where("id = ?", sbomID).
 		First(&sbom).Error; err != nil {
 		return RepoMetadataSBOM{}, 0
 	}
 
-	var componentCount int64
-	if err := db.WithContext(r.Context()).Table("sbom_component_view").
-		Where("sbom_id = ? AND is_root = false", sbomID).
-		Count(&componentCount).Error; err != nil {
-		componentCount = 0
+	// countComponentsFromContent correctly handles explicit metadata.component,
+	// implicit root detection (single-component SBOMs), and SPDX root packages.
+	// Fall back to the materialized view only for unrecognised formats.
+	componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
+	if componentCount == 0 {
+		if err := db.WithContext(r.Context()).Table("sbom_component_view").
+			Where("sbom_id = ? AND is_root = false", sbomID).
+			Count(&componentCount).Error; err != nil {
+			componentCount = 0
+		}
 	}
 
 	return RepoMetadataSBOM{

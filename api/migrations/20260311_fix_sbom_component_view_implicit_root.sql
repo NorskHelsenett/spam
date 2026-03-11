@@ -1,8 +1,13 @@
--- Fix sbom_component_view to correctly detect implicit root components
--- (components listed in the top-level "components" array that act as the sole
--- root dependency with no dependsOn, but have no metadata.component entry).
--- Also switch components CTE from LEFT JOIN LATERAL to JOIN LATERAL to prevent
--- phantom NULL rows for SBOMs with empty or absent "components" arrays.
+-- Fix sbom_component_view:
+-- 1. Switch components CTE from LEFT JOIN LATERAL to JOIN LATERAL to prevent
+--    phantom NULL rows for SBOMs with empty or absent "components" arrays.
+-- 2. Recreate view_unified_repositories_vulnerabilities (dropped by CASCADE)
+--    with a DISTINCT ON (repo_id) filter on trivy_scan_results so only the
+--    latest scan per repo is used, preventing duplicate vuln counts on re-runs.
+--
+-- Note: implicit root component detection (single-component SBOMs with no
+-- metadata.component) is handled in Go via countComponentsFromContent rather
+-- than in SQL to avoid expensive deps/grouping CTEs during view refresh.
 
 DROP MATERIALIZED VIEW IF EXISTS sbom_component_view CASCADE;
 
@@ -92,41 +97,6 @@ root_component AS (
     TRUE AS is_root
   FROM sbom_json sj
   WHERE sj.doc->'metadata'->'component' IS NOT NULL
-),
-deps AS (
-  -- Minimal dependency CTE used only for implicit_root_component detection.
-  -- Counts dependsOn entries per ref so we can identify self-contained roots.
-  SELECT
-    sj.sbom_id,
-    sj.asset_type,
-    sj.asset_ref_id,
-    d->>'ref' AS component_ref,
-    COUNT(dep) AS depends_on_count
-  FROM sbom_json sj
-  JOIN LATERAL jsonb_array_elements(COALESCE(sj.doc->'dependencies', '[]'::jsonb)) AS d ON TRUE
-  LEFT JOIN LATERAL jsonb_array_elements_text(COALESCE(d->'dependsOn', '[]'::jsonb)) AS dep ON TRUE
-  GROUP BY sj.sbom_id, sj.asset_type, sj.asset_ref_id, d->>'ref'
-),
-implicit_root_component AS (
-  -- Detects SBOMs that have no metadata.component but contain exactly one
-  -- component listed as the sole top-level dependency with no dependsOn.
-  -- This pattern is used by tools like Syft when the scanned subject is not
-  -- explicitly declared in metadata.component.
-  SELECT
-    comp.sbom_id,
-    comp.asset_type,
-    comp.asset_ref_id,
-    MIN(comp.component_ref) AS component_ref
-  FROM components comp
-  LEFT JOIN deps dep
-    ON dep.sbom_id = comp.sbom_id
-    AND dep.asset_type IS NOT DISTINCT FROM comp.asset_type
-    AND dep.asset_ref_id IS NOT DISTINCT FROM comp.asset_ref_id
-  GROUP BY comp.sbom_id, comp.asset_type, comp.asset_ref_id
-  HAVING COUNT(*) = 1
-     AND COUNT(dep.component_ref) = 1
-     AND MIN(dep.component_ref) = MIN(comp.component_ref)
-     AND COALESCE(MAX(dep.depends_on_count), 0) = 0
 )
 SELECT
   c.sbom_id,
@@ -137,7 +107,7 @@ SELECT
   c.version,
   c.type,
   c.licenses,
-  (c.is_root OR ir.component_ref IS NOT NULL) AS is_root,
+  c.is_root,
   NULLIF(substring(c.purl from '^pkg:([^/]+)'), '') AS kind,
   NULLIF(
     replace(
@@ -243,11 +213,6 @@ FROM (
   -- appears in both metadata.component and the top-level components array.
   ORDER BY sbom_id, asset_type, asset_ref_id, component_ref, is_root DESC
 ) c
-LEFT JOIN implicit_root_component ir
-  ON ir.sbom_id = c.sbom_id
-  AND ir.asset_type IS NOT DISTINCT FROM c.asset_type
-  AND ir.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
-  AND ir.component_ref = c.component_ref
 WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv
@@ -277,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_sbom_component_mv_pkg_trgm
 
 -- Recreate the vulnerabilities view dropped by CASCADE above.
 -- Its own migration file won't rerun (hash unchanged), so we must restore it here.
+-- This version also fixes the Trivy branch to use only the latest scan per repo.
 DROP VIEW IF EXISTS view_unified_repositories_vulnerabilities;
 
 CREATE VIEW view_unified_repositories_vulnerabilities AS
