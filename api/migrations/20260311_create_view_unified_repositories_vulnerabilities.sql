@@ -4,7 +4,7 @@
 DROP VIEW IF EXISTS view_unified_repositories_vulnerabilities;
 
 CREATE VIEW view_unified_repositories_vulnerabilities AS
--- Trivy: one row per (vuln, package, repo)
+-- Trivy: one row per (vuln, package, repo), latest scan only
 SELECT
     tsr.repo_id::text                                          AS repo_id,
     COALESCE(repo.org || '/' || repo.slug, tsr.repo_id::text) AS repo_slug,
@@ -17,7 +17,11 @@ SELECT
     COALESCE(vuln->>'Description', '')                         AS description,
     'trivy'                                                    AS source,
     tsr.scanned_at
-FROM trivy_scan_results tsr
+FROM (
+    SELECT DISTINCT ON (repo_id) *
+    FROM trivy_scan_results
+    ORDER BY repo_id, scanned_at DESC
+) tsr
 LEFT JOIN repos repo ON repo.id = tsr.repo_id
 CROSS JOIN LATERAL jsonb_array_elements(tsr.raw_json->'Results') AS result(result)
 CROSS JOIN LATERAL jsonb_array_elements(result.result->'Vulnerabilities') AS vuln(vuln)
