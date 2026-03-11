@@ -60,7 +60,6 @@ func run() error {
 		&auth.Group{},
 		&auth.UserGroup{},
 		&assets.Repo{},
-		&assets.RepoCache{},
 		&assets.RepoCommit{},
 		&assets.ImageDigest{},
 		&artifacts.SBOM{},
@@ -151,7 +150,10 @@ func run() error {
 		routerOpts = &server.RouterOptions{}
 	}
 
-	routerOpts.Cache = cache.NewMemory()
+	if err := cache.EnsureTable(ctx, gormDB); err != nil {
+		return fmt.Errorf("ensure kv_store table: %w", err)
+	}
+	routerOpts.Cache = cache.NewPostgresStore(gormDB)
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {

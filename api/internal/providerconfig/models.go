@@ -18,6 +18,7 @@ type ProviderInstance struct {
 	DisplayName     string     `gorm:"size:512;not null" json:"display_name"`
 	Enabled         bool       `gorm:"not null;default:true" json:"enabled"`
 	PollInterval    *int       `gorm:"column:poll_interval;default:3600" json:"poll_interval,omitempty"`
+	LastPolledAt    *time.Time `gorm:"column:last_polled_at" json:"last_polled_at,omitempty"`
 	HealthStatus    string     `gorm:"size:16;not null;default:UNKNOWN" json:"health_status"`
 	HealthMessage   string     `gorm:"size:1024" json:"health_message,omitempty"`
 	LastHealthCheck *time.Time `json:"last_health_check,omitempty"`

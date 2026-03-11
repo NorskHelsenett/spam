@@ -2,16 +2,25 @@ package assets
 
 import "time"
 
-// RepoCache stores provider-fetched metadata for a repository, enabling the
-// HTTP layer to serve responses without re-hitting provider APIs on every
-// request. Entries are keyed by repo UUID and refreshed on each sync cycle.
-type RepoCache struct {
-	RepoID           string    `gorm:"primaryKey;size:36"`
-	DetailsJSON      string    `gorm:"type:text"`
-	ReadmeContent    string    `gorm:"type:text"`
-	CommitsJSON      string    `gorm:"type:text"`
-	ContributorsJSON string    `gorm:"type:text"`
-	SyncedAt         time.Time `gorm:"not null;autoUpdateTime:false"`
+// MaxRepoCacheAge is the maximum lifetime for a repo cache entry in kv_store.
+// Entries older than this are considered stale even if the repo is unchanged.
+const MaxRepoCacheAge = 7 * 24 * time.Hour
+
+// RepoCacheData holds provider-fetched metadata for a repository stored in
+// the kv_store table under the key "repo:cache:{repoID}".
+type RepoCacheData struct {
+	DetailsJSON      string    `json:"details_json"`
+	ReadmeContent    string    `json:"readme_content"`
+	CommitsJSON      string    `json:"commits_json"`
+	ContributorsJSON string    `json:"contributors_json"`
+	SyncedAt         time.Time `json:"synced_at"`
+}
+
+// RepoCacheEntry pairs a repo ID with its cached data, used when listing
+// caches for an entire provider.
+type RepoCacheEntry struct {
+	RepoID string
+	RepoCacheData
 }
 
 // Repo identifies a source code repository.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/assets"
@@ -22,8 +21,6 @@ import (
 type Poller struct {
 	db    *gorm.DB
 	store *providerconfig.Store
-	mu    sync.Mutex
-	last  map[string]time.Time // providerID -> last poll time
 }
 
 type SyncResult struct {
@@ -42,7 +39,6 @@ func New(db *gorm.DB, store *providerconfig.Store) *Poller {
 	return &Poller{
 		db:    db,
 		store: store,
-		last:  make(map[string]time.Time),
 	}
 }
 
@@ -62,11 +58,7 @@ func (p *Poller) Poll(ctx context.Context) {
 
 		interval := time.Duration(*provider.PollInterval) * time.Second
 
-		p.mu.Lock()
-		lastPoll := p.last[provider.ID]
-		p.mu.Unlock()
-
-		if time.Since(lastPoll) < interval {
+		if provider.LastPolledAt != nil && time.Since(*provider.LastPolledAt) < interval {
 			continue
 		}
 
@@ -74,9 +66,12 @@ func (p *Poller) Poll(ctx context.Context) {
 			log.Printf("poller: sync provider %s: %v", provider.DisplayName, err)
 		}
 
-		p.mu.Lock()
-		p.last[provider.ID] = time.Now()
-		p.mu.Unlock()
+		now := time.Now().UTC()
+		if err := p.db.WithContext(ctx).Model(&providerconfig.ProviderInstance{}).
+			Where("id = ?", provider.ID).
+			Update("last_polled_at", now).Error; err != nil {
+			log.Printf("poller: update last_polled_at for %s: %v", provider.DisplayName, err)
+		}
 	}
 }
 

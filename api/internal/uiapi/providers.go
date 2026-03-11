@@ -1153,7 +1153,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
 			}
 			if repoID != "" {
-				if dbCache, dbErr := assets.GetRepoCache(r.Context(), db, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
+				if dbCache, dbErr := assets.GetRepoCache(r.Context(), c, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
 					var details providers.RepoDetails
 					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
 						var commits []providers.CommitInfo
@@ -1291,7 +1291,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				detailsBytes, _ := json.Marshal(details)
 				commitsBytes, _ := json.Marshal(commits)
 				contribBytes, _ := json.Marshal(contributors)
-				_ = assets.UpsertRepoCache(r.Context(), db, repoID,
+				_ = assets.UpsertRepoCache(r.Context(), c, repoID,
 					string(detailsBytes), readme, string(commitsBytes), string(contribBytes))
 			}
 		}

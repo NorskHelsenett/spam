@@ -6,11 +6,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
+
+// RepoCacheKey returns the kv_store key for a repo's provider cache entry.
+func RepoCacheKey(repoID string) string { return "repo:cache:" + repoID }
 
 type RepoInput struct {
 	Provider           string
@@ -144,36 +147,30 @@ func sanitizeForDB(s string) string {
 	return strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), "")
 }
 
-// UpsertRepoCache saves or updates cached provider data for a repo.
-// All string fields are sanitized to valid UTF-8 before storage because
-// provider READMEs and commit messages may contain non-UTF-8 bytes or null bytes.
-func UpsertRepoCache(ctx context.Context, db *gorm.DB, repoID, detailsJSON, readmeContent, commitsJSON, contributorsJSON string) error {
-	rc := &RepoCache{
-		RepoID:           repoID,
+// UpsertRepoCache saves or updates cached provider data for a repo in kv_store.
+// All string fields are sanitized to remove null bytes and invalid UTF-8.
+func UpsertRepoCache(ctx context.Context, c cache.Store, repoID, detailsJSON, readmeContent, commitsJSON, contributorsJSON string) error {
+	data := RepoCacheData{
 		DetailsJSON:      sanitizeForDB(detailsJSON),
 		ReadmeContent:    sanitizeForDB(readmeContent),
 		CommitsJSON:      sanitizeForDB(commitsJSON),
 		ContributorsJSON: sanitizeForDB(contributorsJSON),
 		SyncedAt:         time.Now(),
 	}
-	return db.WithContext(ctx).
-		Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "repo_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"details_json", "readme_content", "commits_json", "contributors_json", "synced_at",
-			}),
-		}).
-		Create(rc).Error
+	return cache.SetJSON(ctx, c, RepoCacheKey(repoID), data, MaxRepoCacheAge)
 }
 
-// GetRepoCache retrieves the cached provider data for a repo.
-// Returns gorm.ErrRecordNotFound if no entry exists.
-func GetRepoCache(ctx context.Context, db *gorm.DB, repoID string) (*RepoCache, error) {
-	var rc RepoCache
-	if err := db.WithContext(ctx).First(&rc, "repo_id = ?", repoID).Error; err != nil {
+// GetRepoCache retrieves the cached provider data for a repo from kv_store.
+// Returns (nil, gorm.ErrRecordNotFound) when no entry exists.
+func GetRepoCache(ctx context.Context, c cache.Store, repoID string) (*RepoCacheData, error) {
+	data, ok, err := cache.GetJSON[RepoCacheData](ctx, c, RepoCacheKey(repoID))
+	if err != nil {
 		return nil, err
 	}
-	return &rc, nil
+	if !ok {
+		return nil, gorm.ErrRecordNotFound
+	}
+	return &data, nil
 }
 
 // CountReposByProvider returns the number of repos for a provider instance.
@@ -185,35 +182,65 @@ func CountReposByProvider(ctx context.Context, db *gorm.DB, providerInstanceID s
 	return count, err
 }
 
-// CountFreshRepoCacheByProvider returns the number of cache entries synced after freshSince.
-func CountFreshRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string, freshSince time.Time) (int64, error) {
+// CountFreshRepoCacheByProvider returns the number of repos with a cache entry
+// whose SyncedAt is after freshSince, using kv_store for cache lookups.
+// Note: performs one kv_store lookup per repo (N+1); acceptable since this
+// runs on background warm paths, not hot request paths.
+func CountFreshRepoCacheByProvider(ctx context.Context, db *gorm.DB, c cache.Store, providerInstanceID string, freshSince time.Time) (int64, error) {
+	var repoIDs []string
+	if err := db.WithContext(ctx).Model(&Repo{}).
+		Where("provider_instance_id = ?", providerInstanceID).
+		Pluck("id", &repoIDs).Error; err != nil {
+		return 0, err
+	}
 	var count int64
-	err := db.WithContext(ctx).Table("repo_caches").
-		Joins("JOIN repos ON repos.id = repo_caches.repo_id").
-		Where("repos.provider_instance_id = ? AND repo_caches.synced_at > ?", providerInstanceID, freshSince).
-		Count(&count).Error
-	return count, err
+	for _, id := range repoIDs {
+		entry, ok, _ := cache.GetJSON[RepoCacheData](ctx, c, RepoCacheKey(id))
+		if ok && entry.SyncedAt.After(freshSince) {
+			count++
+		}
+	}
+	return count, nil
 }
 
-// ListReposWithStaleCacheByProvider returns repos whose cache is missing or older than freshSince.
-func ListReposWithStaleCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string, freshSince time.Time) ([]Repo, error) {
+// ListReposWithStaleCacheByProvider returns repos whose cache is missing or
+// whose SyncedAt is not after freshSince, using kv_store for cache lookups.
+// Note: performs one kv_store lookup per repo (N+1); acceptable since this
+// runs on background warm paths, not hot request paths.
+func ListReposWithStaleCacheByProvider(ctx context.Context, db *gorm.DB, c cache.Store, providerInstanceID string, freshSince time.Time) ([]Repo, error) {
 	var repos []Repo
-	err := db.WithContext(ctx).
-		Joins("LEFT JOIN repo_caches ON repo_caches.repo_id = repos.id AND repo_caches.synced_at > ?", freshSince).
-		Where("repos.provider_instance_id = ?", providerInstanceID).
-		Where("repo_caches.repo_id IS NULL").
-		Find(&repos).Error
-	return repos, err
+	if err := db.WithContext(ctx).
+		Where("provider_instance_id = ?", providerInstanceID).
+		Find(&repos).Error; err != nil {
+		return nil, err
+	}
+	var stale []Repo
+	for _, repo := range repos {
+		entry, ok, _ := cache.GetJSON[RepoCacheData](ctx, c, RepoCacheKey(repo.ID))
+		if !ok || !entry.SyncedAt.After(freshSince) {
+			stale = append(stale, repo)
+		}
+	}
+	return stale, nil
 }
 
-// ListRepoCacheByProvider returns all cache entries for repos belonging to a provider instance.
-func ListRepoCacheByProvider(ctx context.Context, db *gorm.DB, providerInstanceID string) ([]RepoCache, error) {
-	var caches []RepoCache
-	err := db.WithContext(ctx).
-		Joins("JOIN repos ON repos.id = repo_caches.repo_id").
-		Where("repos.provider_instance_id = ?", providerInstanceID).
-		Find(&caches).Error
-	return caches, err
+// ListRepoCacheByProvider returns all kv_store cache entries for repos
+// belonging to a provider instance.
+func ListRepoCacheByProvider(ctx context.Context, db *gorm.DB, c cache.Store, providerInstanceID string) ([]RepoCacheEntry, error) {
+	var repos []Repo
+	if err := db.WithContext(ctx).
+		Where("provider_instance_id = ?", providerInstanceID).
+		Find(&repos).Error; err != nil {
+		return nil, err
+	}
+	var entries []RepoCacheEntry
+	for _, repo := range repos {
+		data, ok, _ := cache.GetJSON[RepoCacheData](ctx, c, RepoCacheKey(repo.ID))
+		if ok {
+			entries = append(entries, RepoCacheEntry{RepoID: repo.ID, RepoCacheData: data})
+		}
+	}
+	return entries, nil
 }
 
 func FindRepo(ctx context.Context, db *gorm.DB, repoID string) (*Repo, error) {

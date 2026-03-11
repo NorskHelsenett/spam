@@ -369,8 +369,12 @@ func (s *Store) Delete(ctx context.Context, providerID string) ([]string, error)
 		}
 
 		if len(repoIDs) > 0 {
-			// Delete cached provider data for these repos.
-			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&assets.RepoCache{}).Error; err != nil {
+			// Delete cached provider data from kv_store for these repos.
+			keys := make([]string, len(repoIDs))
+			for i, id := range repoIDs {
+				keys[i] = assets.RepoCacheKey(id)
+			}
+			if err := tx.Exec("DELETE FROM kv_store WHERE key IN ?", keys).Error; err != nil {
 				return err
 			}
 
