@@ -209,7 +209,7 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		LEFT JOIN (
 			SELECT sbom_id, COUNT(*) AS component_count
 			FROM sbom_component_view
-			WHERE type = 'library'
+			WHERE is_root = false
 			GROUP BY sbom_id
 		) lib ON lib.sbom_id = m.sbom_id
 		ORDER BY m.created_at DESC
