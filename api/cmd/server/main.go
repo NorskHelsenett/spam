@@ -108,7 +108,9 @@ func run() error {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
 
-	if err := db.EnsureViewsPopulated(ctx, gormDB); err != nil {
+	populateCtx, populateCancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer populateCancel()
+	if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
 		return fmt.Errorf("populate views: %w", err)
 	}
 
