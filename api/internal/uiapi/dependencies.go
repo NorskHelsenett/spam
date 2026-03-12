@@ -1191,6 +1191,19 @@ type dependencyAssetsResponse struct {
 	PageSize int               `json:"page_size"`
 }
 
+type RepoDependencyItem struct {
+	Name      string   `json:"name"`
+	Ecosystem string   `json:"ecosystem"`
+	Version   string   `json:"version"`
+	Sources   []string `json:"sources"`
+	Direct    bool     `json:"direct"`
+}
+
+type repoDependenciesResponse struct {
+	Dependencies []RepoDependencyItem `json:"dependencies"`
+	Total        int                  `json:"total"`
+}
+
 // DependencyDetailHandler returns detailed information about a dependency by name and ecosystem
 func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1549,6 +1562,109 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			Total:    total,
 			Page:     page,
 			PageSize: pageSize,
+		})
+	}
+}
+
+// RepoDependenciesListHandler returns merged dependency rows for a single repository.
+func RepoDependenciesListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		repoID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		query := `
+			WITH sbom_rows AS (
+				SELECT DISTINCT
+					COALESCE(s.package_name, s.normalized_name, s.name) AS name,
+					s.kind AS ecosystem,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') AS version
+				FROM sbom_component_view s
+				JOIN repo_commits rc ON rc.id = s.asset_ref_id
+				WHERE s.asset_type = 'REPO_COMMIT'
+				  AND s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND rc.repo_id = ?
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+			),
+			manifest_rows AS (
+				SELECT
+					md.name,
+					md.ecosystem,
+					COALESCE(md.version, '') AS version,
+					BOOL_OR(md.direct) AS direct
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				WHERE m.repo_id = ?
+				  AND md.name IS NOT NULL
+				GROUP BY md.name, md.ecosystem, COALESCE(md.version, '')
+			),
+			merged AS (
+				SELECT
+					COALESCE(s.name, m.name) AS name,
+					COALESCE(s.ecosystem, m.ecosystem) AS ecosystem,
+					COALESCE(s.version, m.version) AS version,
+					(s.name IS NOT NULL) AS has_sbom,
+					(m.name IS NOT NULL) AS has_manifest,
+					COALESCE(m.direct, false) AS direct
+				FROM sbom_rows s
+				FULL OUTER JOIN manifest_rows m
+					ON s.name = m.name
+					AND s.ecosystem = m.ecosystem
+					AND s.version = m.version
+			)
+			SELECT
+				name,
+				ecosystem,
+				version,
+				has_sbom,
+				has_manifest,
+				direct
+			FROM merged
+			ORDER BY
+				direct DESC,
+				LOWER(name) ASC,
+				LOWER(version) ASC
+		`
+
+		rows, err := db.WithContext(r.Context()).Raw(query, repoID, repoID).Rows()
+		if err != nil {
+			log.Printf("repo dependencies query error: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		dependencies := make([]RepoDependencyItem, 0)
+		for rows.Next() {
+			var item RepoDependencyItem
+			var hasSBOM, hasManifest bool
+			if err := rows.Scan(&item.Name, &item.Ecosystem, &item.Version, &hasSBOM, &hasManifest, &item.Direct); err != nil {
+				log.Printf("repo dependencies scan error: %v", err)
+				continue
+			}
+			switch {
+			case hasSBOM && hasManifest:
+				item.Sources = []string{"manifest", "sbom"}
+			case hasManifest:
+				item.Sources = []string{"manifest"}
+			case hasSBOM:
+				item.Sources = []string{"sbom"}
+			default:
+				item.Sources = []string{}
+			}
+			dependencies = append(dependencies, item)
+		}
+
+		writeJSON(w, http.StatusOK, repoDependenciesResponse{
+			Dependencies: dependencies,
+			Total:        len(dependencies),
 		})
 	}
 }

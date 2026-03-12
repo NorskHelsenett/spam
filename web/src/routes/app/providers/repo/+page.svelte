@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Play, Loader2, FileCode, Microscope, Lock, Globe, X
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, CheckCircle
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -535,9 +535,21 @@
 		match: string;
 	};
 
+	type RepoDependency = {
+		name: string;
+		ecosystem: string;
+		version: string;
+		sources: string[];
+		direct: boolean;
+	};
+
 	let secretsDialogOpen = $state(false);
 	let secretsDialogData = $state<SecretFinding[]>([]);
 	let secretsDialogLoading = $state(false);
+	let dependenciesDialogOpen = $state(false);
+	let dependenciesDialogLoading = $state(false);
+	let dependenciesDialogData = $state<RepoDependency[]>([]);
+	let dependenciesDialogTab = $state('all');
 
 	const openSecretsDialog = async () => {
 		const repoDbId = resolvedRepoDbId;
@@ -553,6 +565,53 @@
 		} finally {
 			secretsDialogLoading = false;
 		}
+	};
+
+	const dependenciesDialogFiltered = $derived.by(() => {
+		if (dependenciesDialogTab === 'direct') return dependenciesDialogData.filter((dep) => dep.direct);
+		if (dependenciesDialogTab === 'transitive') return dependenciesDialogData.filter((dep) => !dep.direct);
+		return dependenciesDialogData;
+	});
+
+	const openDependenciesDialog = async () => {
+		const repoDbId = resolvedRepoDbId;
+		if (!repoDbId) return;
+
+		dependenciesDialogOpen = true;
+		if (dependenciesDialogData.length > 0) return;
+
+		dependenciesDialogLoading = true;
+		try {
+			const res = await fetch(`/api/repos/dependencies/list?repo_id=${encodeURIComponent(repoDbId)}`, {
+				credentials: 'include'
+			});
+			if (res.ok) {
+				const data = await res.json();
+				dependenciesDialogData = data.dependencies || [];
+			}
+		} finally {
+			dependenciesDialogLoading = false;
+		}
+	};
+
+	const sourceBadgeInfo = (source: string) => {
+		if (source === 'manifest') {
+			return {
+				icon: FileCode,
+				label: 'Manifest',
+				className: 'bg-purple-500/10 text-purple-400',
+				title: 'From manifest file'
+			};
+		}
+		if (source === 'sbom') {
+			return {
+				icon: Microscope,
+				label: 'SBOM',
+				className: 'bg-blue-500/10 text-blue-400',
+				title: 'From SBOM scanner'
+			};
+		}
+		return null;
 	};
 </script>
 
@@ -768,7 +827,11 @@
 			</button>
 
 			<!-- Components -->
-				<div class="space-y-3 metric-card rounded-2xl p-4">
+			<button
+				type="button"
+				class="space-y-3 metric-card rounded-2xl p-4 w-full text-left cursor-pointer transition-colors hover:border-[var(--accent)]/50"
+				onclick={openDependenciesDialog}
+			>
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Dependencies</h3>
 				<div class="flex items-center gap-4">
 					<Package class="h-10 w-10 text-[var(--accent)]" />
@@ -798,7 +861,7 @@
 						</div>
 					{/if}
 				</div>
-			</div>
+			</button>
 			</div>
 			<!-- Activity Tabs -->
 			<div class="pt-4">
@@ -943,6 +1006,108 @@
 		{/if}
 	{/if}
 </div>
+
+{#if dependenciesDialogOpen}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
+	<div
+		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
+		onkeydown={(e) => e.key === 'Escape' && (dependenciesDialogOpen = false)}
+		onclick={(e) => e.target === e.currentTarget && (dependenciesDialogOpen = false)}
+	>
+		<div class="w-full max-w-4xl">
+			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
+				<div class="flex items-center justify-between px-6 py-4">
+					<div class="flex items-center gap-3">
+						<Package class="h-5 w-5 text-[var(--accent)]" />
+						<h2 class="text-base font-semibold text-[var(--text-bright)]">Dependencies</h2>
+						{#if !dependenciesDialogLoading}
+							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
+								{dependenciesDialogFiltered.length}
+							</span>
+						{/if}
+					</div>
+					<button
+						type="button"
+						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
+						onclick={() => (dependenciesDialogOpen = false)}
+					>
+						<X class="h-4 w-4" />
+					</button>
+				</div>
+
+				<div class="px-6">
+					<p class="text-sm text-[var(--text-muted)] pb-[1em]">Direct and transitive dependencies detected for this repository.</p>
+					{#if !dependenciesDialogLoading && dependenciesDialogData.length > 0}
+						<div class="mt-4">
+							<TabSelector
+								options={[
+									{ value: 'all', label: 'All' },
+									{ value: 'direct', label: 'Direct' },
+									{ value: 'transitive', label: 'Transitive' }
+								]}
+								bind:value={dependenciesDialogTab}
+							/>
+						</div>
+					{/if}
+				</div>
+
+				<div class="max-h-[65vh] overflow-y-auto p-4">
+					{#if dependenciesDialogLoading}
+						<div class="flex items-center justify-center py-20">
+							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+						</div>
+					{:else if dependenciesDialogData.length === 0}
+						<div class="flex flex-col items-center justify-center py-16 text-center">
+							<Package class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
+							<p class="text-sm font-medium text-[var(--text-secondary)]">No dependencies found</p>
+							<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no dependency data from manifests or SBOM scans yet.</p>
+						</div>
+					{:else if dependenciesDialogFiltered.length === 0}
+						<div class="flex flex-col items-center justify-center py-16 text-center">
+							<CheckCircle class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
+							<p class="text-sm font-medium text-[var(--text-secondary)]">No matches in this filter</p>
+						</div>
+					{:else}
+						<div class="space-y-2">
+							{#each dependenciesDialogFiltered as dep}
+								<article class="rounded-xl px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+									<div class="flex flex-wrap items-start justify-between gap-3">
+										<div class="min-w-0 flex-1">
+											<div class="flex flex-wrap items-center gap-2">
+												<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{dep.name}</p>
+												<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">
+													{dep.ecosystem}
+												</span>
+												{#if dep.direct}
+													<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-400">Direct</span>
+												{:else}
+													<span class="rounded-full bg-[var(--hover-bg)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">Transitive</span>
+												{/if}
+											</div>
+											<p class="mt-1 font-mono text-xs text-[var(--text-secondary)]">{dep.version || '(no version)'}</p>
+										</div>
+										<div class="flex flex-wrap items-center justify-end gap-2">
+											{#each dep.sources as source}
+												{@const badge = sourceBadgeInfo(source)}
+												{#if badge}
+													{@const Icon = badge.icon}
+													<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] {badge.className}" title={badge.title}>
+														<Icon class="h-3 w-3" />
+														{badge.label}
+													</span>
+												{/if}
+											{/each}
+										</div>
+									</div>
+								</article>
+							{/each}
+						</div>
+					{/if}
+				</div>
+			</section>
+		</div>
+	</div>
+{/if}
 
 <!-- Vulnerabilities dialog -->
 {#if vulnDialogOpen}

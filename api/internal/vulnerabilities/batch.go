@@ -188,6 +188,14 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 		return nil, 0, 0, err
 	}
 
+	type manifestPURLStats struct {
+		added              int
+		deduped            int
+		skippedNonExact    int
+		skippedUnsupported int
+		skippedEmpty       int
+	}
+
 	seen := make(map[string]struct{}, len(sbomPURLs))
 	for _, purl := range sbomPURLs {
 		purl = strings.TrimSpace(purl)
@@ -197,18 +205,34 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 		seen[purl] = struct{}{}
 	}
 
-	manifestPURLs := 0
+	stats := manifestPURLStats{}
 	for _, dep := range manifestDeps {
 		purl := manifests.BuildDependencyPURL(dep)
 		if purl == "" {
+			version := strings.TrimSpace(dep.Version)
+			constraint := strings.TrimSpace(dep.Constraint)
+			switch {
+			case version == "" || version == "*":
+				stats.skippedEmpty++
+			case dep.Ecosystem == "gradle-plugin" || dep.Ecosystem == "sbt-plugin" || dep.Ecosystem == "":
+				stats.skippedUnsupported++
+			case constraint != "" && constraint != version && constraint != "="+version && constraint != "=="+version:
+				stats.skippedNonExact++
+			default:
+				stats.skippedUnsupported++
+			}
 			continue
 		}
 		if _, ok := seen[purl]; ok {
+			stats.deduped++
 			continue
 		}
 		seen[purl] = struct{}{}
-		manifestPURLs++
+		stats.added++
 	}
+
+	log.Printf("[osv-scan] manifest purl conversion: total_dependencies=%d added=%d deduped=%d skipped_non_exact=%d skipped_unsupported=%d skipped_empty=%d",
+		len(manifestDeps), stats.added, stats.deduped, stats.skippedNonExact, stats.skippedUnsupported, stats.skippedEmpty)
 
 	purls := make([]string, 0, len(seen))
 	for purl := range seen {
@@ -216,7 +240,7 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 	}
 	sort.Strings(purls)
 
-	return purls, len(sbomPURLs), manifestPURLs, nil
+	return purls, len(sbomPURLs), stats.added, nil
 }
 
 // enrichVulnDetails fetches full details from /v1/vulns/{id} for any stored
