@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +38,7 @@ func run() error {
 		return fmt.Errorf("SPAM_API_URL is required")
 	}
 	hmacKey := parseHMACKey(os.Getenv("RUNNER_HMAC_KEY"))
+	runStartedAt := time.Now().UTC()
 
 	cacheDir := os.Getenv("TRIVY_CACHE_DIR")
 	if cacheDir == "" {
@@ -50,7 +52,7 @@ func run() error {
 
 	log.Printf("starting scan loop …")
 	for {
-		job, ok, err := fetchNextJob(apiURL, hmacKey)
+		job, ok, err := fetchNextJob(apiURL, hmacKey, runStartedAt)
 		if err != nil {
 			return fmt.Errorf("fetch next job: %w", err)
 		}
@@ -74,8 +76,10 @@ type nextJobResponse struct {
 	RepoSlug string `json:"repo_slug"`
 }
 
-func fetchNextJob(apiURL string, hmacKey []byte) (*nextJobResponse, bool, error) {
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/trivy/next", nil)
+func fetchNextJob(apiURL string, hmacKey []byte, runStartedAt time.Time) (*nextJobResponse, bool, error) {
+	params := url.Values{}
+	params.Set("run_started_at", runStartedAt.Format(time.RFC3339))
+	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/trivy/next?"+params.Encode(), nil)
 	if err != nil {
 		return nil, false, err
 	}

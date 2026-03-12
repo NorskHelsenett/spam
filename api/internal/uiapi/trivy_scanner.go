@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
@@ -20,8 +21,17 @@ const maxTrivyResultBytes = 50 << 20 // 50 MB guard
 func TrivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leasedBy, _ := os.Hostname()
+		runStartedAt := time.Now().UTC()
+		if raw := r.URL.Query().Get("run_started_at"); raw != "" {
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				http.Error(w, "invalid run_started_at", http.StatusBadRequest)
+				return
+			}
+			runStartedAt = parsed.UTC()
+		}
 
-		job, ok, err := vulnerabilities.GetNextSBOMToScan(r.Context(), db, leasedBy)
+		job, ok, err := vulnerabilities.GetNextSBOMToScan(r.Context(), db, leasedBy, runStartedAt)
 		if err != nil {
 			log.Printf("trivy/next: get next sbom: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)

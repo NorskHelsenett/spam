@@ -62,15 +62,14 @@ type TrivyReport struct {
 }
 
 const leaseDuration = 30 * time.Minute
-const rescanInterval = 24 * time.Hour
 
 // GetNextSBOMToScan leases the next due SBOM and returns its metadata.
 // Returns (nil, false, nil) when the queue is empty.
-func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOMScanJob, bool, error) {
+func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runStartedAt time.Time) (*SBOMScanJob, bool, error) {
 	var job SBOMScanJob
 
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Find the oldest latest-per-repo SBOM whose last Trivy scan is stale.
+		// Find the oldest latest-per-repo SBOM that has not been scanned in this run.
 		type row struct {
 			SBOMID   string
 			RepoID   string
@@ -97,7 +96,7 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 			WHERE tsl.sbom_id IS NULL
 			  AND (
 			    tsr.last_scanned_at IS NULL
-			    OR tsr.last_scanned_at <= now() - ?::INTERVAL
+			    OR tsr.last_scanned_at < ?
 			  )
 			  AND (
 			    sb.asset_type != 'REPO_COMMIT'
@@ -112,7 +111,7 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 			ORDER BY COALESCE(tsr.last_scanned_at, TIMESTAMPTZ 'epoch') ASC, s.created_at ASC
 			LIMIT 1
 			FOR UPDATE OF s SKIP LOCKED
-		`, fmt.Sprintf("%d seconds", int(rescanInterval.Seconds()))).Scan(&r)
+			`, runStartedAt).Scan(&r)
 		if res.Error != nil {
 			return res.Error
 		}
