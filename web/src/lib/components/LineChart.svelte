@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { browser } from '$app/environment';
+
 	type TrendKey = 'critical' | 'high' | 'medium' | 'low';
 
 	type TrendPoint = {
@@ -34,6 +36,11 @@
 	$: if (container) {
 		W = Math.max(480, container.clientWidth);
 	}
+
+	const handleResize = () => {
+		if (!browser) return;
+		W = Math.max(480, container?.clientWidth ?? 480);
+	};
 
 	$: maxVal = data.length === 0 ? 1 : Math.max(
 		1,
@@ -85,7 +92,6 @@
 			No scan data yet
 		</div>
 	{:else}
-		<svelte:window on:resize={() => (W = Math.max(480, container?.clientWidth ?? 480))} />
 		<div class="relative" bind:this={container}>
 			<svg
 				viewBox="0 0 {W} {H}"
@@ -205,3 +211,5 @@
 		</div>
 	{/if}
 </div>
+
+<svelte:window on:resize={handleResize} />
