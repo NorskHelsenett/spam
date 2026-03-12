@@ -259,7 +259,7 @@
 			</div>
 
 			<!-- Charts -->
-			<div class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+			<div class="grid grid-cols-1 gap-6 lg:grid-cols-3">
 				<div class="metric-card rounded-2xl p-5">
 					{#if summary}
 						<DonutChart
@@ -275,7 +275,7 @@
 						/>
 					{/if}
 				</div>
-				<div class="metric-card rounded-2xl p-5">
+				<div class="metric-card rounded-2xl p-5 lg:col-span-2">
 					<LineChart title="30-day trend" data={trend} />
 				</div>
 			</div>
