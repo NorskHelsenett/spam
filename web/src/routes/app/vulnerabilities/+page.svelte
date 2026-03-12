@@ -230,7 +230,7 @@
 			</div>
 
 			<!-- Metric cards grid -->
-			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Total</h3>
 					<p class="text-3xl font-bold text-[var(--text-bright)]">{fmt(summary?.total_vulns ?? 0)}</p>
@@ -247,9 +247,14 @@
 					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-orange-500" /> High severity</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
-					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Medium + Low</h3>
-					<p class="text-3xl font-bold text-yellow-500">{fmt((summary?.total_medium ?? 0) + (summary?.total_low ?? 0))}</p>
-					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3 text-yellow-500" /> Lower severity</p>
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Medium</h3>
+					<p class="text-3xl font-bold text-yellow-500">{fmt(summary?.total_medium ?? 0)}</p>
+					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3 text-yellow-500" /> Needs scheduled remediation</p>
+				</div>
+				<div class="metric-card space-y-1 rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Low + Unknown</h3>
+					<p class="text-3xl font-bold text-[var(--text-secondary)]">{fmt((summary?.total_low ?? 0) + (summary?.total_unknown ?? 0))}</p>
+					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3 text-[var(--text-secondary)]" /> Lower priority or unclassified</p>
 				</div>
 			</div>
 
