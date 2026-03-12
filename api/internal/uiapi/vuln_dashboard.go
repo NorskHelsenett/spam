@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -211,16 +212,17 @@ func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT
 				TO_CHAR(DATE(scanned_at), 'YYYY-MM-DD') AS date,
-				COALESCE(SUM(critical_count), 0)        AS critical,
-				COALESCE(SUM(high_count), 0)            AS high,
-				COALESCE(SUM(medium_count), 0)          AS medium,
-				COALESCE(SUM(low_count), 0)             AS low,
-				COALESCE(SUM(unknown_count), 0)         AS unknown
+				COALESCE(SUM(critical_count), 0)::int   AS critical,
+				COALESCE(SUM(high_count), 0)::int       AS high,
+				COALESCE(SUM(medium_count), 0)::int     AS medium,
+				COALESCE(SUM(low_count), 0)::int        AS low,
+				COALESCE(SUM(unknown_count), 0)::int    AS unknown
 			FROM trivy_scan_results
-			WHERE scanned_at >= now() - (? || ' days')::INTERVAL
+			WHERE scanned_at >= now() - (? * INTERVAL '1 day')
 			GROUP BY DATE(scanned_at)
 			ORDER BY DATE(scanned_at) ASC
 		`, days).Scan(&rows).Error; err != nil {
+			log.Printf("vuln/trend: days=%d query failed: %v", days, err)
 			http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
 			return
 		}
