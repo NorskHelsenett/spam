@@ -589,6 +589,7 @@
 		}
 		return Array.from(groups.entries()).map(([groupPath, dependencies]) => ({
 			groupPath,
+			ecosystems: Array.from(new Set(dependencies.map((dep) => dep.ecosystem))).sort((a, b) => a.localeCompare(b)),
 			dependencies: [...dependencies].sort((a, b) => {
 				if (a.direct !== b.direct) return a.direct ? -1 : 1;
 				if (a.name !== b.name) return a.name.localeCompare(b.name);
@@ -1130,7 +1131,14 @@
 								<section class="overflow-hidden border-0 shadow-none p-0" style="border: none; box-shadow: none; padding: 0;">
 									<div class="flex items-center justify-between gap-4 px-4 py-3">
 										<div class="min-w-0 flex-1">
-											<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
+											<div class="flex flex-wrap items-center gap-2">
+												<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
+												{#each group.ecosystems as ecosystem}
+													<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[8px] text-[var(--text-muted)] uppercase tracking-wide">
+														{ecosystem}
+													</span>
+												{/each}
+											</div>
 											<p class="mt-1 text-xs text-[var(--text-muted)]">{group.dependencies.length} dependency entries</p>
 										</div>
 										<button
@@ -1200,9 +1208,6 @@
 																{:else}
 																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}</span>
 																{/if}
-																<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[8px] text-[var(--text-muted)] uppercase tracking-wide">
-																	{dep.ecosystem}
-																</span>
 																{#if dep.origin_path && dep.origin_path !== group.groupPath}
 																	<span class="rounded-md bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[8px] text-[var(--text-muted)]">
 																		{dep.origin_path}
