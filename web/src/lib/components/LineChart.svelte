@@ -83,8 +83,7 @@
 		<div class="relative">
 			<svg
 				viewBox="0 0 {W} {H}"
-				class="w-full"
-				style="height: {H}px"
+				style="display: block; width: 100%; height: {H}px;"
 				on:mousemove={handleMouseMove}
 				on:mouseleave={() => (hoveredIndex = null)}
 				role="img"
