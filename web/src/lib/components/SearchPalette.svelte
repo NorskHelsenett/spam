@@ -313,7 +313,7 @@
 		return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 	};
 
-	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, '\u202f');
+	const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-US').replace(/,/g, '\u202f');
 
 	const selectedItem = $derived(flatItems[selectedIndex] ?? null);
 </script>
