@@ -1685,7 +1685,7 @@ func RepoDependenciesListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 				continue
 			}
 
-			rawOriginPath := strings.TrimSpace(originPath.String)
+			rawOriginPath := cleanDependencyPath(originPath.String)
 			groupPath := normalizeDependencyGroupPath(rawOriginPath)
 			key := repoDependencyKey{
 				groupPath: groupPath,
@@ -1743,7 +1743,7 @@ func RepoDependenciesListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 }
 
 func normalizeDependencyGroupPath(path string) string {
-	path = filepath.ToSlash(strings.TrimSpace(path))
+	path = cleanDependencyPath(path)
 	if path == "" {
 		return "Scanner detected"
 	}
@@ -1785,6 +1785,16 @@ func normalizeDependencyGroupPath(path string) string {
 	default:
 		return path
 	}
+}
+
+func cleanDependencyPath(path string) string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimLeft(path, "/")
+	if path == "." {
+		return ""
+	}
+	return path
 }
 
 func containsString(values []string, target string) bool {

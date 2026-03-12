@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, CheckCircle
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, CheckCircle, ChevronRight, ChevronDown
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -552,6 +552,7 @@
 	let dependenciesDialogLoading = $state(false);
 	let dependenciesDialogData = $state<RepoDependency[]>([]);
 	let dependenciesDialogTab = $state('all');
+	let collapsedDependencyGroups = $state<Record<string, boolean>>({});
 
 	const openSecretsDialog = async () => {
 		const repoDbId = resolvedRepoDbId;
@@ -588,7 +589,11 @@
 		}
 		return Array.from(groups.entries()).map(([groupPath, dependencies]) => ({
 			groupPath,
-			dependencies
+			dependencies: [...dependencies].sort((a, b) => {
+				if (a.direct !== b.direct) return a.direct ? -1 : 1;
+				if (a.name !== b.name) return a.name.localeCompare(b.name);
+				return a.version.localeCompare(b.version);
+			})
 		}));
 	});
 
@@ -607,10 +612,18 @@
 			if (res.ok) {
 				const data = await res.json();
 				dependenciesDialogData = data.dependencies || [];
+				collapsedDependencyGroups = {};
 			}
 		} finally {
 			dependenciesDialogLoading = false;
 		}
+	};
+
+	const toggleDependencyGroup = (groupPath: string) => {
+		collapsedDependencyGroups = {
+			...collapsedDependencyGroups,
+			[groupPath]: !collapsedDependencyGroups[groupPath]
+		};
 	};
 
 	const sourceBadgeInfo = (source: string) => {
@@ -632,6 +645,10 @@
 		}
 		return null;
 	};
+
+	const formatDependencyTitle = (dep: RepoDependency) => dep.version
+		? `${dep.name}@${dep.version}`
+		: dep.name;
 </script>
 
 <svelte:head>
@@ -1033,7 +1050,7 @@
 		onkeydown={(e) => e.key === 'Escape' && (dependenciesDialogOpen = false)}
 		onclick={(e) => e.target === e.currentTarget && (dependenciesDialogOpen = false)}
 	>
-		<div class="w-full max-w-4xl">
+		<div class="w-full max-w-5xl">
 			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
 				<div class="flex items-center justify-between px-6 py-4">
 					<div class="flex items-center gap-3">
@@ -1089,48 +1106,79 @@
 					{:else}
 						<div class="space-y-4">
 							{#each dependencyGroups as group}
-								<section class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/30">
-									<div class="border-b border-[var(--border-color)]/60 px-4 py-3">
-										<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
-										<p class="mt-1 text-xs text-[var(--text-muted)]">{group.dependencies.length} dependency entries</p>
+								<section class="overflow-hidden border-0 shadow-none p-0" style="border: none; box-shadow: none; padding: 0;">
+									<div class="flex items-center justify-between gap-4 px-4 py-3">
+										<div class="min-w-0 flex-1">
+											<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
+											<p class="mt-1 text-xs text-[var(--text-muted)]">{group.dependencies.length} dependency entries</p>
+										</div>
+										<button
+											type="button"
+											class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
+											onclick={() => toggleDependencyGroup(group.groupPath)}
+											aria-label={collapsedDependencyGroups[group.groupPath] ? `Expand ${group.groupPath}` : `Collapse ${group.groupPath}`}
+											title={collapsedDependencyGroups[group.groupPath] ? 'Expand' : 'Collapse'}
+										>
+											{#if collapsedDependencyGroups[group.groupPath]}
+												<ChevronRight class="h-4 w-4" />
+											{:else}
+												<ChevronDown class="h-4 w-4" />
+											{/if}
+										</button>
 									</div>
-									<div class="divide-y divide-[var(--border-color)]/40">
-										{#each group.dependencies as dep}
-											<article class="px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
-												<div class="flex flex-wrap items-start justify-between gap-3">
-													<div class="min-w-0 flex-1">
-														<div class="flex flex-wrap items-center gap-2">
-															<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{dep.name}</p>
-															<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">
-																{dep.ecosystem}
-															</span>
+									{#if !collapsedDependencyGroups[group.groupPath]}
+										<div class="space-y-1 border-t border-[var(--border-color)]/60 p-1">
+											{#each group.dependencies as dep}
+												<article class="rounded-lg px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+													<div class="flex items-start gap-4">
+														<div class="w-20 shrink-0 pt-0.5">
 															{#if dep.direct}
-																<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-400">Direct</span>
+																<span class="inline-flex items-center rounded-full border border-green-500/40 bg-green-500/10 px-2 py-0.5 text-xs font-semibold text-green-400">
+																	direct
+																</span>
 															{:else}
-																<span class="rounded-full bg-[var(--hover-bg)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">Transitive</span>
-															{/if}
-														</div>
-														<p class="mt-1 font-mono text-xs text-[var(--text-secondary)]">{dep.version || '(no version)'}</p>
-														{#if dep.origin_path && dep.origin_path !== group.groupPath}
-															<p class="mt-1 text-xs text-[var(--text-muted)]">Detected from {dep.origin_path}</p>
-														{/if}
-													</div>
-													<div class="flex flex-wrap items-center justify-end gap-2">
-														{#each dep.sources as source}
-															{@const badge = sourceBadgeInfo(source)}
-															{#if badge}
-																{@const Icon = badge.icon}
-																<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] {badge.className}" title={badge.title}>
-																	<Icon class="h-3 w-3" />
-																	{badge.label}
+																<span class="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--hover-bg)] px-2 py-0.5 text-xs font-semibold text-[var(--text-muted)]">
+																	transitive
 																</span>
 															{/if}
-														{/each}
+														</div>
+														<div class="min-w-0 flex-1 space-y-1.5">
+															<div class="flex flex-wrap items-center gap-2">
+																<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{formatDependencyTitle(dep)}</p>
+																<div class="ml-auto flex flex-wrap items-center gap-2">
+																	{#each dep.sources as source}
+																		{@const badge = sourceBadgeInfo(source)}
+																		{#if badge}
+																			{@const Icon = badge.icon}
+																			<span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium {badge.className}" title={badge.title}>
+																				<Icon class="h-3 w-3" />
+																				{badge.label.toLowerCase()}
+																			</span>
+																		{/if}
+																	{/each}
+																</div>
+															</div>
+															<p class="text-sm text-[var(--text-secondary)]">
+																{dep.name}
+																<span class="text-[var(--text-muted)]"> in {dep.ecosystem}</span>
+															</p>
+															<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
+																{#if dep.version}
+																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}@{dep.version}</span>
+																{:else}
+																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}</span>
+																{/if}
+																<span class="uppercase tracking-wide text-[var(--text-tertiary)]">{dep.ecosystem}</span>
+																{#if dep.origin_path && dep.origin_path !== group.groupPath}
+																	<span class="font-mono">{dep.origin_path}</span>
+																{/if}
+															</div>
+														</div>
 													</div>
-												</div>
-											</article>
-										{/each}
-									</div>
+												</article>
+											{/each}
+										</div>
+									{/if}
 								</section>
 							{/each}
 						</div>
