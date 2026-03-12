@@ -12,11 +12,12 @@
 	export let data: TrendPoint[] = [];
 	export let title = 'Trend';
 
-	const W = 480;
+	let container: HTMLDivElement;
+	let W = 480;
 	const H = 180;
 	const PAD = { top: 16, right: 16, bottom: 36, left: 44 };
 
-	const chartW = W - PAD.left - PAD.right;
+	$: chartW = W - PAD.left - PAD.right;
 	const chartH = H - PAD.top - PAD.bottom;
 
 	const series: { key: TrendKey; label: string; color: string }[] = [
@@ -29,6 +30,10 @@
 	let hoveredIndex: number | null = null;
 	let tooltipX = 0;
 	let tooltipY = 0;
+
+	$: if (container) {
+		W = Math.max(480, container.clientWidth);
+	}
 
 	$: maxVal = data.length === 0 ? 1 : Math.max(
 		1,
@@ -80,11 +85,11 @@
 			No scan data yet
 		</div>
 	{:else}
-		<div class="relative">
+		<svelte:window on:resize={() => (W = Math.max(480, container?.clientWidth ?? 480))} />
+		<div class="relative" bind:this={container}>
 			<svg
 				viewBox="0 0 {W} {H}"
 				width="100%"
-				preserveAspectRatio="none"
 				style="display: block; height: {H}px;"
 				on:mousemove={handleMouseMove}
 				on:mouseleave={() => (hoveredIndex = null)}
