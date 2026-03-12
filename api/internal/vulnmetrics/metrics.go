@@ -145,7 +145,7 @@ func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, e
 func Clear(ctx context.Context, db *gorm.DB) error {
 	store := cache.NewPostgresStore(db)
 	for _, key := range []string{summaryCacheKey, reposCacheKey, listCacheKey} {
-		if err := store.Delete(ctx, key); err != nil {
+		if err := cache.Delete(ctx, store, key); err != nil {
 			return err
 		}
 	}

@@ -18,8 +18,10 @@ import (
 	"time"
 )
 
-// Store is the caching interface. Both Memory and a future Redis implementation
-// satisfy it.
+// Store is the low-level cache backend interface.
+// Application code should prefer the helper functions in this package
+// (`GetJSON`, `SetJSON`, `Delete`) so request-scoped cache policy is applied
+// consistently.
 type Store interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
@@ -54,6 +56,13 @@ func SetJSON[T any](ctx context.Context, s Store, key string, value T, ttl time.
 		return err
 	}
 	return s.Set(ctx, key, raw, ttl)
+}
+
+// Delete removes a cache entry. Callers should prefer this helper over
+// invoking the store directly so cache access remains centralized in this
+// package.
+func Delete(ctx context.Context, s Store, key string) error {
+	return s.Delete(ctx, key)
 }
 
 // Memory is an in-process TTL cache backed by sync.RWMutex + map.

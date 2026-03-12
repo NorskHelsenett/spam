@@ -251,10 +251,10 @@ func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfi
 
 		// Evict per-repo cache entries.
 		for _, repoID := range deletedRepoIDs {
-			_ = c.Delete(r.Context(), fmt.Sprintf("contributors:%s", repoID))
+			_ = cache.Delete(r.Context(), c, fmt.Sprintf("contributors:%s", repoID))
 		}
 		// Evict aggregate caches that include provider data.
-		_ = c.Delete(r.Context(), appSummaryCacheKey)
+		_ = cache.Delete(r.Context(), c, appSummaryCacheKey)
 
 		w.WriteHeader(http.StatusNoContent)
 	}
