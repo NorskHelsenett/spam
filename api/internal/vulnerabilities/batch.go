@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/manifests"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -51,19 +54,12 @@ type osvBatchResponse struct {
 func RunBatchScan(ctx context.Context, db *gorm.DB, onProgress func(BatchScanResult)) (BatchScanResult, error) {
 	log.Printf("[osv-scan] starting batch vulnerability scan")
 
-	var purls []string
-	if err := db.WithContext(ctx).Raw(`
-		SELECT DISTINCT purl
-		FROM sbom_component_view
-		WHERE purl IS NOT NULL
-		  AND purl_version IS NOT NULL
-		  AND purl_version != ''
-		  AND is_root = false
-	`).Scan(&purls).Error; err != nil {
+	purls, sbomCount, manifestCount, err := collectBatchPURLs(ctx, db)
+	if err != nil {
 		return BatchScanResult{}, fmt.Errorf("fetch purls: %w", err)
 	}
 
-	log.Printf("[osv-scan] found %d distinct versioned PURLs", len(purls))
+	log.Printf("[osv-scan] found %d distinct versioned PURLs (%d from SBOMs, %d from manifests)", len(purls), sbomCount, manifestCount)
 
 	notify := func(r BatchScanResult) {
 		if onProgress != nil {
@@ -168,6 +164,59 @@ func RunBatchScan(ctx context.Context, db *gorm.DB, onProgress func(BatchScanRes
 	result.EnrichTotal = 0
 
 	return result, nil
+}
+
+func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, error) {
+	var sbomPURLs []string
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT purl
+		FROM sbom_component_view
+		WHERE purl IS NOT NULL
+		  AND purl_version IS NOT NULL
+		  AND purl_version != ''
+		  AND is_root = false
+	`).Scan(&sbomPURLs).Error; err != nil {
+		return nil, 0, 0, err
+	}
+
+	var manifestDeps []manifests.ManifestDependency
+	if err := db.WithContext(ctx).
+		Model(&manifests.ManifestDependency{}).
+		Select("name", "version", "constraint", "ecosystem").
+		Where("version IS NOT NULL AND version <> ''").
+		Find(&manifestDeps).Error; err != nil {
+		return nil, 0, 0, err
+	}
+
+	seen := make(map[string]struct{}, len(sbomPURLs))
+	for _, purl := range sbomPURLs {
+		purl = strings.TrimSpace(purl)
+		if purl == "" {
+			continue
+		}
+		seen[purl] = struct{}{}
+	}
+
+	manifestPURLs := 0
+	for _, dep := range manifestDeps {
+		purl := manifests.BuildDependencyPURL(dep)
+		if purl == "" {
+			continue
+		}
+		if _, ok := seen[purl]; ok {
+			continue
+		}
+		seen[purl] = struct{}{}
+		manifestPURLs++
+	}
+
+	purls := make([]string, 0, len(seen))
+	for purl := range seen {
+		purls = append(purls, purl)
+	}
+	sort.Strings(purls)
+
+	return purls, len(sbomPURLs), manifestPURLs, nil
 }
 
 // enrichVulnDetails fetches full details from /v1/vulns/{id} for any stored
