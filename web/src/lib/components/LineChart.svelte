@@ -47,38 +47,43 @@
 		...data.flatMap((d) => [d.critical, d.high, d.medium, d.low])
 	);
 
-	$: xPos = (i: number) =>
-		data.length <= 1 ? PAD.left + chartW / 2 : PAD.left + (i / (data.length - 1)) * chartW;
+	const getX = (i: number, len: number, cw: number) =>
+		len <= 1 ? PAD.left + cw / 2 : PAD.left + (i / (len - 1)) * cw;
 
-	$: yPos = (v: number) => PAD.top + chartH - (v / maxVal) * chartH;
+	const getY = (v: number, max: number) => PAD.top + chartH - (v / max) * chartH;
 
-	$: makePath = (key: TrendKey) => {
-		if (data.length === 0) return '';
-		const pts = data.map((d, i) => ({ x: xPos(i), y: yPos(d[key]) }));
-		if (pts.length === 1) return `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-		// Monotone cubic spline (Fritsch–Carlson)
-		const n = pts.length;
-		const dx: number[] = [];
-		const dy: number[] = [];
-		const m: number[] = [];
-		for (let i = 0; i < n - 1; i++) {
-			dx.push(pts[i + 1].x - pts[i].x);
-			dy.push(pts[i + 1].y - pts[i].y);
-			m.push(dy[i] / dx[i]);
+	$: xPositions = data.map((_, i) => getX(i, data.length, chartW));
+
+	$: paths = (() => {
+		const result: Record<string, string> = {};
+		for (const s of series) {
+			if (data.length === 0) { result[s.key] = ''; continue; }
+			const pts = data.map((d, i) => ({ x: xPositions[i], y: getY(d[s.key], maxVal) }));
+			if (pts.length === 1) { result[s.key] = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`; continue; }
+			const n = pts.length;
+			const dx: number[] = [];
+			const dy: number[] = [];
+			const m: number[] = [];
+			for (let i = 0; i < n - 1; i++) {
+				dx.push(pts[i + 1].x - pts[i].x);
+				dy.push(pts[i + 1].y - pts[i].y);
+				m.push(dy[i] / dx[i]);
+			}
+			const tangents: number[] = [m[0]];
+			for (let i = 1; i < n - 1; i++) {
+				if (m[i - 1] * m[i] <= 0) tangents.push(0);
+				else tangents.push(2 / (1 / m[i - 1] + 1 / m[i]));
+			}
+			tangents.push(m[n - 2]);
+			let d2 = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+			for (let i = 0; i < n - 1; i++) {
+				const seg = dx[i] / 3;
+				d2 += ` C${(pts[i].x + seg).toFixed(1)},${(pts[i].y + tangents[i] * seg).toFixed(1)} ${(pts[i + 1].x - seg).toFixed(1)},${(pts[i + 1].y - tangents[i + 1] * seg).toFixed(1)} ${pts[i + 1].x.toFixed(1)},${pts[i + 1].y.toFixed(1)}`;
+			}
+			result[s.key] = d2;
 		}
-		const tangents: number[] = [m[0]];
-		for (let i = 1; i < n - 1; i++) {
-			if (m[i - 1] * m[i] <= 0) tangents.push(0);
-			else tangents.push(2 / (1 / m[i - 1] + 1 / m[i]));
-		}
-		tangents.push(m[n - 2]);
-		let d2 = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
-		for (let i = 0; i < n - 1; i++) {
-			const seg = dx[i] / 3;
-			d2 += ` C${(pts[i].x + seg).toFixed(1)},${(pts[i].y + tangents[i] * seg).toFixed(1)} ${(pts[i + 1].x - seg).toFixed(1)},${(pts[i + 1].y - tangents[i + 1] * seg).toFixed(1)} ${pts[i + 1].x.toFixed(1)},${pts[i + 1].y.toFixed(1)}`;
-		}
-		return d2;
-	};
+		return result;
+	})();
 
 	const formatShortDate = (date: string) => {
 		const [year, month, day] = date.split('-').map(Number);
@@ -86,12 +91,11 @@
 		return `${day}.${month}`;
 	};
 
-	const xLabels = (step: number) =>
-		data
-			.filter((_, i) => i % step === 0 || i === data.length - 1)
-			.map((d) => ({ label: formatShortDate(d.date), index: data.indexOf(d) }));
-
 	$: labelStep = data.length <= 7 ? 1 : data.length <= 14 ? 2 : 7;
+
+	$: xLabelList = data
+		.filter((_, i) => i % labelStep === 0 || i === data.length - 1)
+		.map((d) => ({ label: formatShortDate(d.date), index: data.indexOf(d) }));
 
 	const handleMouseMove = (e: MouseEvent) => {
 		const svg = e.currentTarget as SVGElement;
@@ -124,7 +128,7 @@
 				aria-label="Vulnerability trend chart"
 			>
 				<!-- Y-axis gridlines -->
-				{#each [0, 0.25, 0.5, 0.75, 1] as frac}
+				{#each [0, 0.25, 0.5, 0.75, 1] as frac (frac)}
 					{@const y = PAD.top + chartH * (1 - frac)}
 					<line
 						x1={PAD.left}
@@ -145,9 +149,9 @@
 				{/each}
 
 				<!-- Series lines -->
-				{#each series as s}
+				{#each series as s (s.key)}
 					<path
-						d={makePath(s.key)}
+						d={paths[s.key]}
 						fill="none"
 						stroke={s.color}
 						stroke-width="1.8"
@@ -157,10 +161,10 @@
 				{/each}
 
 				{#if data.length === 1}
-					{#each series as s}
+					{#each series as s (s.key)}
 						<circle
-							cx={xPos(0)}
-							cy={yPos(data[0][s.key])}
+							cx={xPositions[0]}
+							cy={getY(data[0][s.key], maxVal)}
 							r="4"
 							fill={s.color}
 						/>
@@ -170,28 +174,28 @@
 				<!-- Hover crosshair -->
 				{#if hoveredIndex !== null}
 					<line
-						x1={xPos(hoveredIndex)}
+						x1={xPositions[hoveredIndex]}
 						y1={PAD.top}
-						x2={xPos(hoveredIndex)}
+						x2={xPositions[hoveredIndex]}
 						y2={PAD.top + chartH}
 						stroke="var(--text-tertiary)"
 						stroke-width="1"
 						stroke-dasharray="3 3"
 					/>
-					{#each series as s}
+					{#each series as s (s.key)}
 						<circle
-							cx={xPos(hoveredIndex)}
-							cy={yPos(data[hoveredIndex][s.key])}
-							r="3"
-							fill={s.color}
+								cx={xPositions[hoveredIndex]}
+								cy={getY(data[hoveredIndex][s.key], maxVal)}
+								r="3"
+								fill={s.color}
 						/>
 					{/each}
 				{/if}
 
 				<!-- X axis labels -->
-				{#each xLabels(labelStep) as lbl}
+				{#each xLabelList as lbl (lbl.index)}
 					<text
-						x={xPos(lbl.index)}
+						x={xPositions[lbl.index]}
 						y={H - 6}
 						text-anchor="middle"
 						font-size="9"
@@ -207,7 +211,7 @@
 					class="pointer-events-none absolute z-20 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl space-y-1"
 					style="left: {tooltipX + 12}px; top: {Math.max(0, tooltipY - 80)}px;"
 				>
-					{#each series as s}
+					{#each series as s (s.key)}
 						<div class="flex items-center gap-2 justify-between">
 							<span class="flex items-center gap-1.5">
 								<span class="h-1.5 w-1.5 rounded-full" style="background:{s.color}"></span>
@@ -222,7 +226,7 @@
 
 		<!-- Legend -->
 		<div class="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-			{#each series as s}
+			{#each series as s (s.key)}
 				<span class="flex items-center gap-1.5 text-[10px] text-[var(--text-tertiary)]">
 					<span class="h-2 w-6 rounded-full" style="background:{s.color}; opacity:0.85"></span>
 					{s.label}
