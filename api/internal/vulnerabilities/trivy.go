@@ -25,9 +25,9 @@ func (TrivyScanLease) TableName() string { return "trivy_scan_leases" }
 // TrivyScanResult stores the processed output of a single Trivy SBOM scan.
 type TrivyScanResult struct {
 	ID            string          `gorm:"primaryKey;size:36"`
-	SBOMID        string          `gorm:"column:sbom_id;uniqueIndex:ux_trivy_scan_results_sbom_id;size:36;not null"`
+	SBOMID        string          `gorm:"column:sbom_id;index:idx_trivy_scan_results_sbom_scanned_at,priority:1;size:36;not null"`
 	RepoID        string          `gorm:"column:repo_id;index:idx_trivy_scan_results_repo_id;size:36;not null"`
-	ScannedAt     time.Time       `gorm:"column:scanned_at;index:idx_trivy_scan_results_scanned_at"`
+	ScannedAt     time.Time       `gorm:"column:scanned_at;index:idx_trivy_scan_results_scanned_at;index:idx_trivy_scan_results_sbom_scanned_at,priority:2,sort:desc"`
 	SchemaVersion int             `gorm:"column:schema_version"`
 	ArtifactName  string          `gorm:"column:artifact_name;size:512"`
 	CriticalCount int             `gorm:"column:critical_count"`
@@ -62,14 +62,15 @@ type TrivyReport struct {
 }
 
 const leaseDuration = 30 * time.Minute
+const rescanInterval = 24 * time.Hour
 
-// GetNextSBOMToScan leases the next un-scanned SBOM and returns its metadata.
+// GetNextSBOMToScan leases the next due SBOM and returns its metadata.
 // Returns (nil, false, nil) when the queue is empty.
 func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOMScanJob, bool, error) {
 	var job SBOMScanJob
 
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Find the oldest SBOM that has no result and no active lease.
+		// Find the oldest latest-per-repo SBOM whose last Trivy scan is stale.
 		type row struct {
 			SBOMID   string
 			RepoID   string
@@ -87,10 +88,17 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 			INNER JOIN sbom_bindings sb  ON sb.sbom_id = s.id
 			LEFT JOIN repo_commits  rc  ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
 			LEFT JOIN repos         repo ON repo.id = rc.repo_id
-			LEFT JOIN trivy_scan_results tsr ON tsr.sbom_id = s.id
+			LEFT JOIN (
+				SELECT sbom_id, MAX(scanned_at) AS last_scanned_at
+				FROM trivy_scan_results
+				GROUP BY sbom_id
+			) tsr ON tsr.sbom_id = s.id
 			LEFT JOIN trivy_scan_leases  tsl ON tsl.sbom_id = s.id AND tsl.expires_at > now()
-			WHERE tsr.id IS NULL
-			  AND tsl.sbom_id IS NULL
+			WHERE tsl.sbom_id IS NULL
+			  AND (
+			    tsr.last_scanned_at IS NULL
+			    OR tsr.last_scanned_at <= now() - ?::INTERVAL
+			  )
 			  AND (
 			    sb.asset_type != 'REPO_COMMIT'
 			    OR NOT EXISTS (
@@ -101,10 +109,10 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string) (*SBOM
 			        AND rc2.created_at > rc.created_at
 			    )
 			  )
-			ORDER BY s.created_at ASC
+			ORDER BY COALESCE(tsr.last_scanned_at, TIMESTAMPTZ 'epoch') ASC, s.created_at ASC
 			LIMIT 1
 			FOR UPDATE OF s SKIP LOCKED
-		`).Scan(&r)
+		`, fmt.Sprintf("%d seconds", int(rescanInterval.Seconds()))).Scan(&r)
 		if res.Error != nil {
 			return res.Error
 		}
@@ -161,8 +169,8 @@ func StoreScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, re
 	}
 
 	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Save(&result).Error; err != nil {
-			return fmt.Errorf("save result: %w", err)
+		if err := tx.Create(&result).Error; err != nil {
+			return fmt.Errorf("create result: %w", err)
 		}
 		if err := tx.Delete(&TrivyScanLease{}, "sbom_id = ?", sbomID).Error; err != nil {
 			return fmt.Errorf("delete lease: %w", err)
