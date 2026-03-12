@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const repoMetadataCacheTTL = 30 * time.Second
+const repoMetadataCacheTTL = 15 * time.Minute
 
 // RepoMetadataHandler returns a unified metadata response for a repo.
 // GET /api/repos/metadata?repo_id=<uuid>

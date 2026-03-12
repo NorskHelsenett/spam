@@ -107,6 +107,7 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 // GET /api/providers/github/{owner}/repos
 // defaultListCacheTTL is used when no provider_id is present or poll_interval is unset.
 const defaultListCacheTTL = 10 * time.Minute
+const defaultRepoDetailsCacheTTL = 15 * time.Minute
 
 // resolvePollTTL returns the provider's configured poll_interval as a cache TTL,
 // falling back to defaultListCacheTTL if the provider_id param is absent or unset.
@@ -1147,7 +1148,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		if cached, ok, _ := cache.GetJSON[RepoDetailsResponse](r.Context(), c, cacheKey); ok {
 			if cached.RepoID == "" && repoID != "" {
 				cached.RepoID = repoID
-				_ = cache.SetJSON(r.Context(), c, cacheKey, cached, store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL))
+				_ = cache.SetJSON(r.Context(), c, cacheKey, cached, store.GetPollInterval(r.Context(), providerID, defaultRepoDetailsCacheTTL))
 			}
 			writeJSON(w, http.StatusOK, cached)
 			return
@@ -1155,7 +1156,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		// DB cache fallback: serve from persisted data if fresh enough.
 		// Use repo_id directly when provided (skips the org/slug lookup).
-		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
+		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultRepoDetailsCacheTTL)
 		if db != nil {
 			if repoID != "" {
 				if dbCache, dbErr := assets.GetRepoCache(r.Context(), c, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
