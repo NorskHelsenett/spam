@@ -208,42 +208,22 @@ func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var rows []trendRow
-		db.WithContext(r.Context()).Raw(`
-			WITH unified AS (
-				SELECT
-					DATE(scanned_at) AS date,
-					COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical,
-					COUNT(*) FILTER (WHERE severity = 'HIGH')     AS high,
-					COUNT(*) FILTER (WHERE severity = 'MEDIUM')   AS medium,
-					COUNT(*) FILTER (WHERE severity = 'LOW')      AS low,
-					COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS unknown
-				FROM view_unified_repositories_vulnerabilities
-				WHERE scanned_at >= now() - (? || ' days')::INTERVAL
-				GROUP BY DATE(scanned_at)
-			),
-			trivy_history AS (
-				SELECT
-					DATE(scanned_at)    AS date,
-					SUM(critical_count) AS critical,
-					SUM(high_count)     AS high,
-					SUM(medium_count)   AS medium,
-					SUM(low_count)      AS low,
-					SUM(unknown_count)  AS unknown
-				FROM trivy_scan_results
-				WHERE scanned_at >= now() - (? || ' days')::INTERVAL
-				GROUP BY DATE(scanned_at)
-			)
+		if err := db.WithContext(r.Context()).Raw(`
 			SELECT
-				TO_CHAR(COALESCE(th.date, u.date), 'YYYY-MM-DD') AS date,
-				COALESCE(th.critical, u.critical, 0)             AS critical,
-				COALESCE(th.high, u.high, 0)                     AS high,
-				COALESCE(th.medium, u.medium, 0)                 AS medium,
-				COALESCE(th.low, u.low, 0)                       AS low,
-				COALESCE(th.unknown, u.unknown, 0)               AS unknown
-			FROM trivy_history th
-			FULL OUTER JOIN unified u ON u.date = th.date
-			ORDER BY COALESCE(th.date, u.date) ASC
-		`, days, days, days).Scan(&rows)
+				TO_CHAR(DATE(scanned_at), 'YYYY-MM-DD') AS date,
+				COALESCE(SUM(critical_count), 0)        AS critical,
+				COALESCE(SUM(high_count), 0)            AS high,
+				COALESCE(SUM(medium_count), 0)          AS medium,
+				COALESCE(SUM(low_count), 0)             AS low,
+				COALESCE(SUM(unknown_count), 0)         AS unknown
+			FROM trivy_scan_results
+			WHERE scanned_at >= now() - (? || ' days')::INTERVAL
+			GROUP BY DATE(scanned_at)
+			ORDER BY DATE(scanned_at) ASC
+		`, days).Scan(&rows).Error; err != nil {
+			http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
+			return
+		}
 
 		if rows == nil {
 			rows = []trendRow{}
