@@ -1056,8 +1056,8 @@
 
 		<!-- README -->
 		{#if readme}
-			<section class="panel-surface overflow-hidden px-6 py-6 sm:px-10 max-w-[90vw]">
-				<div class="w-full overflow-hidden break-words">
+			<section class="panel-surface min-w-0 overflow-hidden px-6 py-6 sm:px-10">
+				<div class="min-w-0 overflow-x-auto break-words">
 					<Markdown content={readme} class="max-w-full text-[var(--text-secondary)]" />
 				</div>
 			</section>
