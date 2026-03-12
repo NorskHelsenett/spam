@@ -107,6 +107,8 @@ func main() {
 	}
 }
 
+const syncJobStaleTimeout = 45 * time.Second
+
 func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -173,6 +175,13 @@ func run() error {
 
 	log.Printf("worker started: %s (concurrency=%d, stale_timeout=%s)", workerID, cfg.Concurrency, cfg.StaleTimeout)
 
+	startupNow := time.Now()
+	if n, err := jobs.RequeueStaleJobs(ctx, gormDB, startupNow.Add(-syncJobStaleTimeout), startupNow.Add(-cfg.StaleTimeout), startupNow); err != nil {
+		log.Printf("startup stale-job requeue error: %v", err)
+	} else if n > 0 {
+		log.Printf("requeued %d stale running jobs on startup", n)
+	}
+
 	// Semaphore to limit concurrent job processing
 	sem := make(chan struct{}, cfg.Concurrency)
 
@@ -194,7 +203,7 @@ func run() error {
 
 		case <-ticker.C:
 			now := time.Now()
-			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-cfg.StaleTimeout), now)
+			_, _ = jobs.RequeueStaleJobs(ctx, gormDB, now.Add(-syncJobStaleTimeout), now.Add(-cfg.StaleTimeout), now)
 
 			// Reconcile RUNNING jobs against K8s state
 			if reconciler, ok := runExecutor.(jobs.RunReconciler); ok {
@@ -272,7 +281,7 @@ func run() error {
 					defer wg.Done()
 					defer func() { <-sem }() // Release slot when done
 
-					processJob(ctx, gormDB, job)
+					processJob(ctx, gormDB, job, workerID)
 				}(job)
 			}
 		nextTick:
@@ -280,8 +289,14 @@ func run() error {
 	}
 }
 
-func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job) {
+func processJob(ctx context.Context, db *gorm.DB, job *jobs.Job, workerID string) {
 	log.Printf("processing job: id=%s type=%s attempt=%d/%d", job.ID, job.Type, job.Attempts, job.MaxAttempts)
+
+	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
+	if jobs.ShouldHeartbeat(job.Type) {
+		go jobs.HeartbeatJob(heartbeatCtx, db, job.ID, workerID, jobs.JobHeartbeatInterval)
+	}
+	defer cancelHeartbeat()
 
 	// Per-provider circuit breaker: if this specific provider is tripped, defer
 	// the job immediately rather than attempting it and failing again.
