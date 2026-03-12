@@ -54,9 +54,30 @@
 
 	$: makePath = (key: TrendKey) => {
 		if (data.length === 0) return '';
-		return data
-			.map((d, i) => `${i === 0 ? 'M' : 'L'}${xPos(i).toFixed(1)},${yPos(d[key]).toFixed(1)}`)
-			.join(' ');
+		const pts = data.map((d, i) => ({ x: xPos(i), y: yPos(d[key]) }));
+		if (pts.length === 1) return `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+		// Monotone cubic spline (Fritsch–Carlson)
+		const n = pts.length;
+		const dx: number[] = [];
+		const dy: number[] = [];
+		const m: number[] = [];
+		for (let i = 0; i < n - 1; i++) {
+			dx.push(pts[i + 1].x - pts[i].x);
+			dy.push(pts[i + 1].y - pts[i].y);
+			m.push(dy[i] / dx[i]);
+		}
+		const tangents: number[] = [m[0]];
+		for (let i = 1; i < n - 1; i++) {
+			if (m[i - 1] * m[i] <= 0) tangents.push(0);
+			else tangents.push(2 / (1 / m[i - 1] + 1 / m[i]));
+		}
+		tangents.push(m[n - 2]);
+		let d2 = `M${pts[0].x.toFixed(1)},${pts[0].y.toFixed(1)}`;
+		for (let i = 0; i < n - 1; i++) {
+			const seg = dx[i] / 3;
+			d2 += ` C${(pts[i].x + seg).toFixed(1)},${(pts[i].y + tangents[i] * seg).toFixed(1)} ${(pts[i + 1].x - seg).toFixed(1)},${(pts[i + 1].y - tangents[i + 1] * seg).toFixed(1)} ${pts[i + 1].x.toFixed(1)},${pts[i + 1].y.toFixed(1)}`;
+		}
+		return d2;
 	};
 
 	const formatShortDate = (date: string) => {
