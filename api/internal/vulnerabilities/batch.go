@@ -31,6 +31,17 @@ type BatchScanResult struct {
 	EnrichDone          int    `json:"enrich_done,omitempty"`
 }
 
+type BatchPURLStats struct {
+	TotalDistinct       int
+	SBOMDistinct        int
+	ManifestAdded       int
+	ManifestDeduped     int
+	ManifestNonExact    int
+	ManifestUnsupported int
+	ManifestEmpty       int
+	ManifestTotal       int
+}
+
 type osvBatchRequest struct {
 	Queries []osvBatchQuery `json:"queries"`
 }
@@ -54,12 +65,12 @@ type osvBatchResponse struct {
 func RunBatchScan(ctx context.Context, db *gorm.DB, onProgress func(BatchScanResult)) (BatchScanResult, error) {
 	log.Printf("[osv-scan] starting batch vulnerability scan")
 
-	purls, sbomCount, manifestCount, err := collectBatchPURLs(ctx, db)
+	purls, stats, err := CollectBatchPURLs(ctx, db)
 	if err != nil {
 		return BatchScanResult{}, fmt.Errorf("fetch purls: %w", err)
 	}
 
-	log.Printf("[osv-scan] found %d distinct versioned PURLs (%d from SBOMs, %d from manifests)", len(purls), sbomCount, manifestCount)
+	log.Printf("[osv-scan] found %d distinct versioned PURLs (%d from SBOMs, %d from manifests)", len(purls), stats.SBOMDistinct, stats.ManifestAdded)
 
 	notify := func(r BatchScanResult) {
 		if onProgress != nil {
@@ -166,7 +177,7 @@ func RunBatchScan(ctx context.Context, db *gorm.DB, onProgress func(BatchScanRes
 	return result, nil
 }
 
-func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, error) {
+func CollectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, BatchPURLStats, error) {
 	var sbomPURLs []string
 	if err := db.WithContext(ctx).Raw(`
 		SELECT DISTINCT purl
@@ -176,24 +187,7 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 		  AND purl_version != ''
 		  AND is_root = false
 	`).Scan(&sbomPURLs).Error; err != nil {
-		return nil, 0, 0, err
-	}
-
-	var manifestDeps []manifests.ManifestDependency
-	if err := db.WithContext(ctx).
-		Model(&manifests.ManifestDependency{}).
-		Select("name", "version", "constraint", "ecosystem").
-		Where("version IS NOT NULL AND version <> ''").
-		Find(&manifestDeps).Error; err != nil {
-		return nil, 0, 0, err
-	}
-
-	type manifestPURLStats struct {
-		added              int
-		deduped            int
-		skippedNonExact    int
-		skippedUnsupported int
-		skippedEmpty       int
+		return nil, BatchPURLStats{}, err
 	}
 
 	seen := make(map[string]struct{}, len(sbomPURLs))
@@ -205,7 +199,16 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 		seen[purl] = struct{}{}
 	}
 
-	stats := manifestPURLStats{}
+	stats := BatchPURLStats{SBOMDistinct: len(sbomPURLs)}
+	var manifestDeps []manifests.ManifestDependency
+	if err := db.WithContext(ctx).
+		Model(&manifests.ManifestDependency{}).
+		Select("name", "version", "constraint", "ecosystem").
+		Where("version IS NOT NULL AND version <> ''").
+		Find(&manifestDeps).Error; err != nil {
+		return nil, BatchPURLStats{}, err
+	}
+	stats.ManifestTotal = len(manifestDeps)
 	for _, dep := range manifestDeps {
 		purl := manifests.BuildDependencyPURL(dep)
 		if purl == "" {
@@ -213,34 +216,35 @@ func collectBatchPURLs(ctx context.Context, db *gorm.DB) ([]string, int, int, er
 			constraint := strings.TrimSpace(dep.Constraint)
 			switch {
 			case version == "" || version == "*":
-				stats.skippedEmpty++
+				stats.ManifestEmpty++
 			case dep.Ecosystem == "gradle-plugin" || dep.Ecosystem == "sbt-plugin" || dep.Ecosystem == "":
-				stats.skippedUnsupported++
+				stats.ManifestUnsupported++
 			case constraint != "" && constraint != version && constraint != "="+version && constraint != "=="+version:
-				stats.skippedNonExact++
+				stats.ManifestNonExact++
 			default:
-				stats.skippedUnsupported++
+				stats.ManifestUnsupported++
 			}
 			continue
 		}
 		if _, ok := seen[purl]; ok {
-			stats.deduped++
+			stats.ManifestDeduped++
 			continue
 		}
 		seen[purl] = struct{}{}
-		stats.added++
+		stats.ManifestAdded++
 	}
 
 	log.Printf("[osv-scan] manifest purl conversion: total_dependencies=%d added=%d deduped=%d skipped_non_exact=%d skipped_unsupported=%d skipped_empty=%d",
-		len(manifestDeps), stats.added, stats.deduped, stats.skippedNonExact, stats.skippedUnsupported, stats.skippedEmpty)
+		len(manifestDeps), stats.ManifestAdded, stats.ManifestDeduped, stats.ManifestNonExact, stats.ManifestUnsupported, stats.ManifestEmpty)
 
 	purls := make([]string, 0, len(seen))
 	for purl := range seen {
 		purls = append(purls, purl)
 	}
 	sort.Strings(purls)
+	stats.TotalDistinct = len(purls)
 
-	return purls, len(sbomPURLs), stats.added, nil
+	return purls, stats, nil
 }
 
 // enrichVulnDetails fetches full details from /v1/vulns/{id} for any stored

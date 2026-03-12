@@ -9,12 +9,14 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
 
 // appSummaryCacheTTL is long because the cache is version-gated by the
 // materialized view refresh timestamp — not by wall-clock expiry.
 const appSummaryCacheTTL = 24 * time.Hour
+const appSummaryCacheKey = "app:summary:v2"
 
 type AppSummaryCounts struct {
 	SBOMCount             int64 `json:"sbom_count"`
@@ -23,6 +25,9 @@ type AppSummaryCounts struct {
 	ImageCount            int64 `json:"image_count"`
 	ComponentCount        int64 `json:"component_count"`
 	ComponentVersionCount int64 `json:"component_version_count"`
+	OSVPURLCount          int64 `json:"osv_purl_count"`
+	OSVSBOMPURLCount      int64 `json:"osv_sbom_purl_count"`
+	OSVManifestPURLCount  int64 `json:"osv_manifest_purl_count"`
 	LicenseCount          int64 `json:"license_count"`
 	MissingLicenseCount   int64 `json:"missing_license_count"`
 	SecretsCount          int64 `json:"secrets_count"`
@@ -88,15 +93,10 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 			return
 		}
 
-		// Cheap single-row lookup: last materialized view refresh time.
-		var viewRefreshedAt time.Time
-		db.WithContext(r.Context()).Raw(
-			"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'sbom_component_view' LIMIT 1",
-		).Scan(&viewRefreshedAt)
+		watermark := appSummaryWatermark(r.Context(), db)
 
-		const cacheKey = "app:summary"
-		if entry, ok, _ := cache.GetJSON[appSummaryCacheEntry](r.Context(), c, cacheKey); ok {
-			if !viewRefreshedAt.IsZero() && !entry.ViewRefreshedAt.Before(viewRefreshedAt) {
+		if entry, ok, _ := cache.GetJSON[appSummaryCacheEntry](r.Context(), c, appSummaryCacheKey); ok {
+			if !watermark.IsZero() && !entry.ViewRefreshedAt.Before(watermark) {
 				// Cache is current with the materialized view.
 				writeJSON(w, http.StatusOK, entry.Response)
 				return
@@ -114,10 +114,7 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 					log.Printf("app summary background refresh: %v", err)
 					return
 				}
-				_ = cache.SetJSON(ctx, c, cacheKey, appSummaryCacheEntry{
-					ViewRefreshedAt: viewRefreshedAt,
-					Response:        resp,
-				}, appSummaryCacheTTL)
+				_ = maybeStoreAppSummary(ctx, c, watermark, resp)
 			}()
 			return
 		}
@@ -128,12 +125,36 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, appSummaryCacheEntry{
-			ViewRefreshedAt: viewRefreshedAt,
-			Response:        resp,
-		}, appSummaryCacheTTL)
+		_ = maybeStoreAppSummary(r.Context(), c, watermark, resp)
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+func maybeStoreAppSummary(ctx context.Context, c cache.Store, watermark time.Time, resp AppSummaryResponse) error {
+	if !cache.ShouldStore(ctx) {
+		return nil
+	}
+	return cache.SetJSON(ctx, c, appSummaryCacheKey, appSummaryCacheEntry{
+		ViewRefreshedAt: watermark,
+		Response:        resp,
+	}, appSummaryCacheTTL)
+}
+
+func appSummaryWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var sbomRefreshedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'sbom_component_view' LIMIT 1",
+	).Scan(&sbomRefreshedAt)
+
+	var latestManifestCreatedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(created_at), TIMESTAMPTZ 'epoch') FROM manifest_dependencies",
+	).Scan(&latestManifestCreatedAt)
+
+	if latestManifestCreatedAt.After(sbomRefreshedAt) {
+		return latestManifestCreatedAt
+	}
+	return sbomRefreshedAt
 }
 
 func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, error) {
@@ -176,6 +197,14 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 	`).Scan(&resp.Counts).Error; err != nil {
 		return resp, err
 	}
+
+	purls, purlStats, err := vulnerabilities.CollectBatchPURLs(ctx, db)
+	if err != nil {
+		return resp, err
+	}
+	resp.Counts.OSVPURLCount = int64(len(purls))
+	resp.Counts.OSVSBOMPURLCount = int64(purlStats.SBOMDistinct)
+	resp.Counts.OSVManifestPURLCount = int64(purlStats.ManifestAdded)
 
 	// Scanners
 	if err := db.WithContext(ctx).Raw(`

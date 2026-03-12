@@ -53,6 +53,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		r.Use(middleware.RealIP)
 		r.Use(middleware.Logger)
 		r.Use(middleware.Recoverer)
+		r.Use(cache.Middleware)
 
 		if authService != nil {
 			r.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
@@ -74,6 +75,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		r.Use(middleware.RealIP)
 		r.Use(middleware.Logger)
 		r.Use(middleware.Recoverer)
+		r.Use(cache.Middleware)
 		r.Use(middleware.Timeout(60 * time.Second))
 
 		r.Route("/api", func(api chi.Router) {

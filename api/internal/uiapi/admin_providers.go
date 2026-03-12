@@ -254,7 +254,7 @@ func AdminProvidersDeleteHandler(authService *auth.Service, store *providerconfi
 			_ = c.Delete(r.Context(), fmt.Sprintf("contributors:%s", repoID))
 		}
 		// Evict aggregate caches that include provider data.
-		_ = c.Delete(r.Context(), "app:summary")
+		_ = c.Delete(r.Context(), appSummaryCacheKey)
 
 		w.WriteHeader(http.StatusNoContent)
 	}

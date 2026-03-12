@@ -412,7 +412,7 @@ let isAdmin = $state(false);
 		</div>
 	</aside>
 
-	<div class="flex h-full flex-1 flex-col">
+	<div class="flex h-full min-w-0 flex-1 flex-col">
 		<main class="flex-1 overflow-y-auto bg-[var(--main-content-bg)] px-3 pb-8 pt-10 sm:px-6">
 			<div class="mx-auto w-full max-w-[1520px] space-y-8 p-5 text-[0.9rem] sm:p-8">
 				{@render children?.()}

@@ -30,6 +30,9 @@ type Store interface {
 // Returns (zero, false, nil) on cache miss.
 func GetJSON[T any](ctx context.Context, s Store, key string) (T, bool, error) {
 	var zero T
+	if ShouldBypass(ctx) {
+		return zero, false, nil
+	}
 	raw, ok, err := s.Get(ctx, key)
 	if err != nil || !ok {
 		return zero, false, err
@@ -43,6 +46,9 @@ func GetJSON[T any](ctx context.Context, s Store, key string) (T, bool, error) {
 
 // SetJSON marshals value and stores it with the given TTL.
 func SetJSON[T any](ctx context.Context, s Store, key string, value T, ttl time.Duration) error {
+	if !ShouldStore(ctx) {
+		return nil
+	}
 	raw, err := json.Marshal(value)
 	if err != nil {
 		return err

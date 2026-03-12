@@ -114,7 +114,6 @@
 		border-radius: 0.5rem;
 		border: 1px solid var(--border-color);
 		overflow-x: auto;
-		max-width: 100%;
 		margin: 1rem 0;
 	}
 	.prose :global(pre code) {
