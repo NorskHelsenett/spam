@@ -147,11 +147,11 @@
 					on:mouseenter={() => (hoveredIndex = seg.index)}
 					on:mouseleave={() => (hoveredIndex = null)}
 				>
-					<span class="inline-flex items-center gap-2">
-						<span class="h-2.5 w-2.5 rounded-full" style="background: {seg.color}"></span>
-						{seg.label}
+					<span class="inline-flex min-w-0 items-center gap-2">
+						<span class="h-2.5 w-2.5 shrink-0 rounded-full" style="background: {seg.color}"></span>
+						<span class="truncate">{seg.label}</span>
 					</span>
-					<span class="text-[var(--text-bright)]">{seg.value}</span>
+					<span class="shrink-0 text-[var(--text-bright)]">{seg.value}</span>
 				</button>
 			{/each}
 		</div>
