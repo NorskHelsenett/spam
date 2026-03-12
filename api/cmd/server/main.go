@@ -101,6 +101,7 @@ func run() error {
 		"migrations/20260311_fix_component_vulnerabilities_schema.sql",
 		"migrations/20260310_create_trivy_scan_tables.sql",
 		"migrations/20260312_enable_trivy_scan_history.sql",
+		"migrations/20260312_create_vuln_dashboard_snapshots.sql",
 		"migrations/20260310_fix_component_vulnerabilities_purl_column.sql",
 		"migrations/20260311_create_view_unified_repositories_vulnerabilities.sql",
 		"migrations/20260311_fix_sbom_component_view_implicit_root.sql",

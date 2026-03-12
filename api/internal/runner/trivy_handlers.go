@@ -12,6 +12,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -143,6 +144,9 @@ func trivyScanResultHandler(db *gorm.DB) http.HandlerFunc {
 			log.Printf("trivy/result: store %s: %v", sbomID, err)
 			http.Error(w, "failed to store result", http.StatusInternalServerError)
 			return
+		}
+		if _, err := vulnmetrics.Refresh(r.Context(), db, time.Now().UTC()); err != nil {
+			log.Printf("trivy/result: refresh dashboard metrics for %s: %v", sbomID, err)
 		}
 
 		w.WriteHeader(http.StatusNoContent)

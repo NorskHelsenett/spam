@@ -2,12 +2,12 @@ package uiapi
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -20,61 +20,11 @@ func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			return
 		}
 
-		var summary struct {
-			TotalCritical int        `json:"total_critical"`
-			TotalHigh     int        `json:"total_high"`
-			TotalMedium   int        `json:"total_medium"`
-			TotalLow      int        `json:"total_low"`
-			TotalUnknown  int        `json:"total_unknown"`
-			TotalVulns    int        `json:"total_vulns"`
-			ScannedSBOMs  int        `json:"scanned_sboms"`
-			LastScannedAt *time.Time `json:"last_scanned_at"`
+		summary, err := vulnmetrics.LoadSummary(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load vulnerability summary", http.StatusInternalServerError)
+			return
 		}
-
-		type trivyRow struct {
-			TotalCritical int
-			TotalHigh     int
-			TotalMedium   int
-			TotalLow      int
-			TotalUnknown  int
-			ScannedSBOMs  int
-			LastScannedAt *time.Time
-		}
-		var trivy trivyRow
-		db.WithContext(r.Context()).Raw(`
-			SELECT
-				COUNT(DISTINCT sbom_id) AS scanned_sboms,
-				MAX(scanned_at)         AS last_scanned_at
-			FROM trivy_scan_results
-		`).Scan(&trivy)
-
-		type vulnCounts struct {
-			TotalCritical int
-			TotalHigh     int
-			TotalMedium   int
-			TotalLow      int
-			TotalUnknown  int
-		}
-		var counts vulnCounts
-		db.WithContext(r.Context()).Raw(`
-			SELECT
-				COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS total_critical,
-				COUNT(*) FILTER (WHERE severity = 'HIGH')     AS total_high,
-				COUNT(*) FILTER (WHERE severity = 'MEDIUM')   AS total_medium,
-				COUNT(*) FILTER (WHERE severity = 'LOW')      AS total_low,
-				COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS total_unknown
-			FROM view_unified_repositories_vulnerabilities
-		`).Scan(&counts)
-
-		summary.TotalCritical = counts.TotalCritical
-		summary.TotalHigh = counts.TotalHigh
-		summary.TotalMedium = counts.TotalMedium
-		summary.TotalLow = counts.TotalLow
-		summary.TotalUnknown = counts.TotalUnknown
-		summary.ScannedSBOMs = trivy.ScannedSBOMs
-		summary.LastScannedAt = trivy.LastScannedAt
-		summary.TotalVulns = summary.TotalCritical + summary.TotalHigh + summary.TotalMedium + summary.TotalLow + summary.TotalUnknown
-
 		writeJSON(w, http.StatusOK, summary)
 	}
 }
@@ -199,36 +149,10 @@ func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			}
 		}
 
-		type trendRow struct {
-			Date     string `json:"date"`
-			Critical int    `json:"critical"`
-			High     int    `json:"high"`
-			Medium   int    `json:"medium"`
-			Low      int    `json:"low"`
-			Unknown  int    `json:"unknown"`
-		}
-
-		var rows []trendRow
-		if err := db.WithContext(r.Context()).Raw(`
-			SELECT
-				TO_CHAR(DATE(scanned_at), 'YYYY-MM-DD') AS date,
-				COALESCE(SUM(critical_count), 0)::int   AS critical,
-				COALESCE(SUM(high_count), 0)::int       AS high,
-				COALESCE(SUM(medium_count), 0)::int     AS medium,
-				COALESCE(SUM(low_count), 0)::int        AS low,
-				COALESCE(SUM(unknown_count), 0)::int    AS unknown
-			FROM trivy_scan_results
-			WHERE scanned_at >= now() - (? * INTERVAL '1 day')
-			GROUP BY DATE(scanned_at)
-			ORDER BY DATE(scanned_at) ASC
-		`, days).Scan(&rows).Error; err != nil {
-			log.Printf("vuln/trend: days=%d query failed: %v", days, err)
+		rows, err := vulnmetrics.LoadTrend(r.Context(), db, days)
+		if err != nil {
 			http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
 			return
-		}
-
-		if rows == nil {
-			rows = []trendRow{}
 		}
 
 		writeJSON(w, http.StatusOK, rows)

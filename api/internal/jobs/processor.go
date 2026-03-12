@@ -9,6 +9,7 @@ import (
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -70,6 +71,9 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 	})
 	if err != nil {
 		return result, err
+	}
+	if _, err := vulnmetrics.Refresh(ctx, db, time.Now().UTC()); err != nil {
+		return result, fmt.Errorf("refresh vulnerability dashboard metrics: %w", err)
 	}
 	return result, nil
 }
