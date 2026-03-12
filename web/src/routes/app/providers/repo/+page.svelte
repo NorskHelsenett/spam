@@ -649,6 +649,27 @@
 	const formatDependencyTitle = (dep: RepoDependency) => dep.version
 		? `${dep.name}@${dep.version}`
 		: dep.name;
+
+	const dependencyPackageURL = (dep: RepoDependency) => {
+		const ecosystem = dep.ecosystem.toLowerCase();
+		const name = dep.name;
+		switch (ecosystem) {
+			case 'npm':
+				return `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}`;
+			case 'nuget':
+				return `https://www.nuget.org/packages/${encodeURIComponent(name)}`;
+			case 'golang':
+				return `https://pkg.go.dev/${name}`;
+			case 'github':
+			case 'github-action':
+			case 'github-actions':
+				return `https://github.com/${name}`;
+			case 'pypi':
+				return `https://pypi.org/project/${encodeURIComponent(name)}/`;
+			default:
+				return '';
+		}
+	};
 </script>
 
 <svelte:head>
@@ -1144,7 +1165,18 @@
 														</div>
 														<div class="min-w-0 flex-1 space-y-1.5">
 															<div class="flex flex-wrap items-center gap-2">
-																<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{formatDependencyTitle(dep)}</p>
+																{#if dependencyPackageURL(dep)}
+																	<a
+																		href={dependencyPackageURL(dep)}
+																		target="_blank"
+																		rel="noopener noreferrer"
+																		class="truncate text-sm font-semibold text-[var(--accent)] transition-opacity hover:underline"
+																	>
+																		{formatDependencyTitle(dep)}
+																	</a>
+																{:else}
+																	<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{formatDependencyTitle(dep)}</p>
+																{/if}
 																<div class="ml-auto flex flex-wrap items-center gap-2">
 																	{#each dep.sources as source}
 																		{@const badge = sourceBadgeInfo(source)}
@@ -1168,9 +1200,13 @@
 																{:else}
 																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}</span>
 																{/if}
-																<span class="uppercase tracking-wide text-[var(--text-tertiary)]">{dep.ecosystem}</span>
+																<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[8px] text-[var(--text-muted)] uppercase tracking-wide">
+																	{dep.ecosystem}
+																</span>
 																{#if dep.origin_path && dep.origin_path !== group.groupPath}
-																	<span class="font-mono">{dep.origin_path}</span>
+																	<span class="rounded-md bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[8px] text-[var(--text-muted)]">
+																		{dep.origin_path}
+																	</span>
 																{/if}
 															</div>
 														</div>
