@@ -654,19 +654,28 @@
 	const dependencyPackageURL = (dep: RepoDependency) => {
 		const ecosystem = dep.ecosystem.toLowerCase();
 		const name = dep.name;
+		const version = dep.version;
 		switch (ecosystem) {
 			case 'npm':
-				return `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}`;
+				return version
+					? `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}/v/${encodeURIComponent(version)}`
+					: `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}`;
 			case 'nuget':
-				return `https://www.nuget.org/packages/${encodeURIComponent(name)}`;
+				return version
+					? `https://www.nuget.org/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+					: `https://www.nuget.org/packages/${encodeURIComponent(name)}`;
 			case 'golang':
-				return `https://pkg.go.dev/${name}`;
+				return version
+					? `https://pkg.go.dev/${name}@${encodeURIComponent(version)}`
+					: `https://pkg.go.dev/${name}`;
 			case 'github':
 			case 'github-action':
 			case 'github-actions':
 				return `https://github.com/${name}`;
 			case 'pypi':
-				return `https://pypi.org/project/${encodeURIComponent(name)}/`;
+				return version
+					? `https://pypi.org/project/${encodeURIComponent(name)}/${encodeURIComponent(version)}/`
+					: `https://pypi.org/project/${encodeURIComponent(name)}/`;
 			default:
 				return '';
 		}
