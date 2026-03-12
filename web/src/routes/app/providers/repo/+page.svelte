@@ -655,11 +655,13 @@
 		const ecosystem = dep.ecosystem.toLowerCase();
 		const name = dep.name;
 		const version = dep.version;
+		const encodedName = encodeURIComponent(name).replace(/%2F/g, '/');
+		const mavenMatch = name.match(/^([^:]+):([^:]+)$/);
 		switch (ecosystem) {
 			case 'npm':
 				return version
-					? `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}/v/${encodeURIComponent(version)}`
-					: `https://www.npmjs.com/package/${encodeURIComponent(name).replace(/%2F/g, '/')}`;
+					? `https://www.npmjs.com/package/${encodedName}/v/${encodeURIComponent(version)}`
+					: `https://www.npmjs.com/package/${encodedName}`;
 			case 'nuget':
 				return version
 					? `https://www.nuget.org/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
@@ -676,6 +678,36 @@
 				return version
 					? `https://pypi.org/project/${encodeURIComponent(name)}/${encodeURIComponent(version)}/`
 					: `https://pypi.org/project/${encodeURIComponent(name)}/`;
+			case 'maven':
+			case 'gradle':
+				if (!mavenMatch) return '';
+				return version
+					? `https://mvnrepository.com/artifact/${encodeURIComponent(mavenMatch[1])}/${encodeURIComponent(mavenMatch[2])}/${encodeURIComponent(version)}`
+					: `https://mvnrepository.com/artifact/${encodeURIComponent(mavenMatch[1])}/${encodeURIComponent(mavenMatch[2])}`;
+			case 'composer':
+				return version
+					? `https://packagist.org/packages/${encodedName}#${encodeURIComponent(version)}`
+					: `https://packagist.org/packages/${encodedName}`;
+			case 'rubygems':
+			case 'gem':
+				return version
+					? `https://rubygems.org/gems/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`
+					: `https://rubygems.org/gems/${encodeURIComponent(name)}`;
+			case 'cargo':
+			case 'rust':
+				return version
+					? `https://crates.io/crates/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+					: `https://crates.io/crates/${encodeURIComponent(name)}`;
+			case 'pub':
+			case 'dart':
+				return version
+					? `https://pub.dev/packages/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`
+					: `https://pub.dev/packages/${encodeURIComponent(name)}`;
+			case 'hex':
+			case 'elixir':
+				return version
+					? `https://hex.pm/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
+					: `https://hex.pm/packages/${encodeURIComponent(name)}`;
 			default:
 				return '';
 		}
