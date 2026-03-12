@@ -476,6 +476,8 @@
 	let osvLoading = $state(false);
 	let osvTriggering = $state(false);
 	let osvError = $state('');
+	let cacheClearing = $state(false);
+	let cacheMessage = $state('');
 
 	const loadOSVStatus = async () => {
 		try {
@@ -507,6 +509,26 @@
 			osvError = 'Failed to start scan.';
 		} finally {
 			osvTriggering = false;
+		}
+	};
+
+	const clearCache = async () => {
+		cacheClearing = true;
+		cacheMessage = '';
+		try {
+			const response = await fetch('/api/admin/cache/clear', {
+				method: 'POST',
+				credentials: 'include'
+			});
+			if (!response.ok) {
+				cacheMessage = 'Failed to clear application cache.';
+				return;
+			}
+			cacheMessage = 'Application cache cleared. Cached views will repopulate on the next request or refresh job.';
+		} catch {
+			cacheMessage = 'Failed to clear application cache.';
+		} finally {
+			cacheClearing = false;
 		}
 	};
 
@@ -984,20 +1006,36 @@
 				Checks all SBOM components against the OSV database. Results are cached per component for 24 h.
 			</p>
 		</div>
-		<button
-			type="button"
-			class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
-			onclick={triggerOSVScan}
-			disabled={osvTriggering || osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY'}
-		>
-			<Play size={14} />
-			{osvTriggering ? 'Starting…' : 'Run OSV Scan'}
-		</button>
+		<div class="flex flex-wrap items-center gap-2">
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm font-semibold text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+				onclick={clearCache}
+				disabled={cacheClearing}
+			>
+				<Trash2 size={14} />
+				{cacheClearing ? 'Clearing…' : 'Clear Cache'}
+			</button>
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+				onclick={triggerOSVScan}
+				disabled={osvTriggering || osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY'}
+			>
+				<Play size={14} />
+				{osvTriggering ? 'Starting…' : 'Run OSV Scan'}
+			</button>
+		</div>
 	</header>
 
 	{#if osvError}
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
 			{osvError}
+		</div>
+	{/if}
+	{#if cacheMessage}
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--text-secondary)]">
+			{cacheMessage}
 		</div>
 	{/if}
 

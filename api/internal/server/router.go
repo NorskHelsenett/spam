@@ -99,6 +99,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
+				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
 				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
 
@@ -171,7 +172,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
 				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
-			v.Get("/list", uiapi.VulnListHandler(db, authService))
+				v.Get("/list", uiapi.VulnListHandler(db, authService))
 			})
 		}
 

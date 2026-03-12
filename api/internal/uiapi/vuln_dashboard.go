@@ -1,10 +1,8 @@
 package uiapi
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -38,35 +36,10 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		type repoRow struct {
-			RepoID        string     `json:"repo_id"`
-			RepoSlug      string     `json:"repo_slug"`
-			CriticalCount int        `json:"critical_count"`
-			HighCount     int        `json:"high_count"`
-			MediumCount   int        `json:"medium_count"`
-			LowCount      int        `json:"low_count"`
-			UnknownCount  int        `json:"unknown_count"`
-			LastScannedAt *time.Time `json:"last_scanned_at"`
-		}
-
-		var rows []repoRow
-		db.WithContext(r.Context()).Raw(`
-			SELECT
-				repo_id,
-				MAX(repo_slug)                                                    AS repo_slug,
-				COUNT(*) FILTER (WHERE severity = 'CRITICAL')                    AS critical_count,
-				COUNT(*) FILTER (WHERE severity = 'HIGH')                        AS high_count,
-				COUNT(*) FILTER (WHERE severity = 'MEDIUM')                      AS medium_count,
-				COUNT(*) FILTER (WHERE severity = 'LOW')                         AS low_count,
-				COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS unknown_count,
-				MAX(scanned_at)                                                   AS last_scanned_at
-			FROM view_unified_repositories_vulnerabilities
-			GROUP BY repo_id
-			ORDER BY critical_count DESC, high_count DESC, medium_count DESC
-		`).Scan(&rows)
-
-		if rows == nil {
-			rows = []repoRow{}
+		rows, err := vulnmetrics.LoadRepos(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load vulnerability repos", http.StatusInternalServerError)
+			return
 		}
 
 		writeJSON(w, http.StatusOK, rows)
@@ -82,51 +55,20 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		limit := 5000
 		repoID := r.URL.Query().Get("repo_id")
-
-		type vulnRow struct {
-			RepoID           string `json:"repo_id"`
-			RepoSlug         string `json:"repo_slug"`
-			VulnID           string `json:"vuln_id"`
-			Severity         string `json:"severity"`
-			PkgName          string `json:"pkg_name"`
-			InstalledVersion string `json:"installed_version"`
-			FixedVersion     string `json:"fixed_version"`
-			Title            string `json:"title"`
-			Description      string `json:"description"`
-			Source           string `json:"source"`
+		rows, err := vulnmetrics.LoadList(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load vulnerability list", http.StatusInternalServerError)
+			return
 		}
-
-		var rows []vulnRow
-		var args []any
-		where := ""
 		if repoID != "" {
-			where = "WHERE repo_id = ?"
-			args = append(args, repoID)
-		}
-		args = append(args, limit)
-
-		query := fmt.Sprintf(`
-			SELECT repo_id, repo_slug, vuln_id, severity, pkg_name, installed_version, fixed_version, title, description, source
-			FROM view_unified_repositories_vulnerabilities
-			%s
-			ORDER BY
-				CASE severity
-					WHEN 'CRITICAL' THEN 1
-					WHEN 'HIGH'     THEN 2
-					WHEN 'MEDIUM'   THEN 3
-					WHEN 'LOW'      THEN 4
-					ELSE 5
-				END,
-				vuln_id
-			LIMIT ?
-		`, where)
-
-		db.WithContext(r.Context()).Raw(query, args...).Scan(&rows)
-
-		if rows == nil {
-			rows = []vulnRow{}
+			filtered := make([]vulnmetrics.VulnRow, 0, len(rows))
+			for _, row := range rows {
+				if row.RepoID == repoID {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
 		}
 
 		writeJSON(w, http.StatusOK, rows)
