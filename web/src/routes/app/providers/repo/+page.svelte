@@ -71,6 +71,7 @@
 		readme: string;
 		commits?: CommitInfo[];
 		contributors?: ContributorInfo[];
+		repo_id?: string;
 	};
 
 	type SecurityData = {
@@ -146,6 +147,7 @@
 	let resolvedProvider = $state('');
 	let resolvedBaseUrl = $state('');
 	let resolvedProviderId = $state('');
+	let resolvedRepoDbId = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
 	let totalRuns = $state(0);
 	let securityData: SecurityData = $state({
@@ -189,6 +191,7 @@
 		resolvedProvider = provider;
 		resolvedBaseUrl = baseUrl;
 		resolvedProviderId = providerId;
+		resolvedRepoDbId = repoDbId;
 
 		if (!path && !repoDbId) {
 			error = 'No repository path specified.';
@@ -243,6 +246,9 @@
 
 			const data: RepoDetailsResponse = await response.json();
 			details = data.details;
+			if (!resolvedRepoDbId && data.repo_id) {
+				resolvedRepoDbId = data.repo_id;
+			}
 			if (!resolvedPath && data.details?.full_path) {
 				resolvedPath = data.details.full_path;
 			}
@@ -261,7 +267,7 @@
 
 	// Fetch real security data from API
 	const fetchSecurityData = async (provider: string, repoPath: string, repo: RepoDetails, readmeContent: string) => {
-		const { repoDbId } = getParams();
+		const repoDbId = resolvedRepoDbId;
 		if (!repoDbId) {
 			generateMockSecurityData(repo, readmeContent);
 			return;
@@ -383,7 +389,7 @@
 
 	// Check for active scans on this repo
 	const checkActiveScans = async () => {
-		const { repoDbId } = getParams();
+		const repoDbId = resolvedRepoDbId;
 		if (!repoDbId) return;
 
 		try {
@@ -490,7 +496,7 @@
 	);
 
 	const openVulnDialog = async () => {
-		const { repoDbId } = getParams();
+		const repoDbId = resolvedRepoDbId;
 		vulnDialogOpen = true;
 		if (vulnDialogData.length > 0) return;
 		vulnDialogLoading = true;
@@ -534,7 +540,7 @@
 	let secretsDialogLoading = $state(false);
 
 	const openSecretsDialog = async () => {
-		const { repoDbId } = getParams();
+		const repoDbId = resolvedRepoDbId;
 		secretsDialogOpen = true;
 		if (secretsDialogData.length > 0) return;
 		secretsDialogLoading = true;

@@ -103,7 +103,6 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 	return store.GetActiveToken(r.Context(), providerID)
 }
 
-
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
 // defaultListCacheTTL is used when no provider_id is present or poll_interval is unset.
@@ -637,6 +636,7 @@ type RepoDetailsResponse struct {
 	Readme       string                      `json:"readme"`
 	Commits      []providers.CommitInfo      `json:"commits,omitempty"`
 	Contributors []providers.ContributorInfo `json:"contributors,omitempty"`
+	RepoID       string                      `json:"repo_id,omitempty"`
 }
 
 // enrichContributors fills in missing contributor data from commits and generates
@@ -1138,8 +1138,17 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			return
 		}
 
+		repoID := repoDBID
+		if repoID == "" && db != nil {
+			repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
+		}
+
 		cacheKey := fmt.Sprintf("provider:details:%s:%s", providerID, repoPath)
 		if cached, ok, _ := cache.GetJSON[RepoDetailsResponse](r.Context(), c, cacheKey); ok {
+			if cached.RepoID == "" && repoID != "" {
+				cached.RepoID = repoID
+				_ = cache.SetJSON(r.Context(), c, cacheKey, cached, store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL))
+			}
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
@@ -1148,10 +1157,6 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		// Use repo_id directly when provided (skips the org/slug lookup).
 		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
 		if db != nil {
-			repoID := repoDBID
-			if repoID == "" {
-				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
-			}
 			if repoID != "" {
 				if dbCache, dbErr := assets.GetRepoCache(r.Context(), c, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
 					var details providers.RepoDetails
@@ -1165,6 +1170,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 							Readme:       dbCache.ReadmeContent,
 							Commits:      commits,
 							Contributors: contribs,
+							RepoID:       repoID,
 						}
 						_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 						writeJSON(w, http.StatusOK, resp)
@@ -1283,10 +1289,6 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		// Persist to DB so subsequent requests and restarts can skip the API.
 		if db != nil && details != nil {
-			repoID := repoDBID
-			if repoID == "" {
-				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
-			}
 			if repoID != "" {
 				detailsBytes, _ := json.Marshal(details)
 				commitsBytes, _ := json.Marshal(commits)
@@ -1301,6 +1303,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			Readme:       readme,
 			Commits:      commits,
 			Contributors: contributors,
+			RepoID:       repoID,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 		writeJSON(w, http.StatusOK, resp)
