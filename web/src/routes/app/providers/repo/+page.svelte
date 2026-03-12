@@ -536,11 +536,13 @@
 	};
 
 	type RepoDependency = {
+		group_path: string;
 		name: string;
 		ecosystem: string;
 		version: string;
 		sources: string[];
 		direct: boolean;
+		origin_path?: string;
 	};
 
 	let secretsDialogOpen = $state(false);
@@ -571,6 +573,23 @@
 		if (dependenciesDialogTab === 'direct') return dependenciesDialogData.filter((dep) => dep.direct);
 		if (dependenciesDialogTab === 'transitive') return dependenciesDialogData.filter((dep) => !dep.direct);
 		return dependenciesDialogData;
+	});
+
+	const dependencyGroups = $derived.by(() => {
+		const groups = new Map<string, RepoDependency[]>();
+		for (const dep of dependenciesDialogFiltered) {
+			const groupPath = dep.group_path || 'Scanner detected';
+			const existing = groups.get(groupPath);
+			if (existing) {
+				existing.push(dep);
+			} else {
+				groups.set(groupPath, [dep]);
+			}
+		}
+		return Array.from(groups.entries()).map(([groupPath, dependencies]) => ({
+			groupPath,
+			dependencies
+		}));
 	});
 
 	const openDependenciesDialog = async () => {
@@ -1068,38 +1087,51 @@
 							<p class="text-sm font-medium text-[var(--text-secondary)]">No matches in this filter</p>
 						</div>
 					{:else}
-						<div class="space-y-2">
-							{#each dependenciesDialogFiltered as dep}
-								<article class="rounded-xl px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
-									<div class="flex flex-wrap items-start justify-between gap-3">
-										<div class="min-w-0 flex-1">
-											<div class="flex flex-wrap items-center gap-2">
-												<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{dep.name}</p>
-												<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">
-													{dep.ecosystem}
-												</span>
-												{#if dep.direct}
-													<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-400">Direct</span>
-												{:else}
-													<span class="rounded-full bg-[var(--hover-bg)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">Transitive</span>
-												{/if}
-											</div>
-											<p class="mt-1 font-mono text-xs text-[var(--text-secondary)]">{dep.version || '(no version)'}</p>
-										</div>
-										<div class="flex flex-wrap items-center justify-end gap-2">
-											{#each dep.sources as source}
-												{@const badge = sourceBadgeInfo(source)}
-												{#if badge}
-													{@const Icon = badge.icon}
-													<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] {badge.className}" title={badge.title}>
-														<Icon class="h-3 w-3" />
-														{badge.label}
-													</span>
-												{/if}
-											{/each}
-										</div>
+						<div class="space-y-4">
+							{#each dependencyGroups as group}
+								<section class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/30">
+									<div class="border-b border-[var(--border-color)]/60 px-4 py-3">
+										<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
+										<p class="mt-1 text-xs text-[var(--text-muted)]">{group.dependencies.length} dependency entries</p>
 									</div>
-								</article>
+									<div class="divide-y divide-[var(--border-color)]/40">
+										{#each group.dependencies as dep}
+											<article class="px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+												<div class="flex flex-wrap items-start justify-between gap-3">
+													<div class="min-w-0 flex-1">
+														<div class="flex flex-wrap items-center gap-2">
+															<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{dep.name}</p>
+															<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">
+																{dep.ecosystem}
+															</span>
+															{#if dep.direct}
+																<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-400">Direct</span>
+															{:else}
+																<span class="rounded-full bg-[var(--hover-bg)] px-2 py-0.5 text-[11px] text-[var(--text-muted)]">Transitive</span>
+															{/if}
+														</div>
+														<p class="mt-1 font-mono text-xs text-[var(--text-secondary)]">{dep.version || '(no version)'}</p>
+														{#if dep.origin_path && dep.origin_path !== group.groupPath}
+															<p class="mt-1 text-xs text-[var(--text-muted)]">Detected from {dep.origin_path}</p>
+														{/if}
+													</div>
+													<div class="flex flex-wrap items-center justify-end gap-2">
+														{#each dep.sources as source}
+															{@const badge = sourceBadgeInfo(source)}
+															{#if badge}
+																{@const Icon = badge.icon}
+																<span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] {badge.className}" title={badge.title}>
+																	<Icon class="h-3 w-3" />
+																	{badge.label}
+																</span>
+															{/if}
+														{/each}
+													</div>
+												</div>
+											</article>
+										{/each}
+									</div>
+								</section>
 							{/each}
 						</div>
 					{/if}
