@@ -47,12 +47,12 @@
 		...data.flatMap((d) => [d.critical, d.high, d.medium, d.low])
 	);
 
-	const xPos = (i: number) =>
+	$: xPos = (i: number) =>
 		data.length <= 1 ? PAD.left + chartW / 2 : PAD.left + (i / (data.length - 1)) * chartW;
 
-	const yPos = (v: number) => PAD.top + chartH - (v / maxVal) * chartH;
+	$: yPos = (v: number) => PAD.top + chartH - (v / maxVal) * chartH;
 
-	const makePath = (key: TrendKey) => {
+	$: makePath = (key: TrendKey) => {
 		if (data.length === 0) return '';
 		return data
 			.map((d, i) => `${i === 0 ? 'M' : 'L'}${xPos(i).toFixed(1)},${yPos(d[key]).toFixed(1)}`)
@@ -186,7 +186,6 @@
 					class="pointer-events-none absolute z-20 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl space-y-1"
 					style="left: {tooltipX + 12}px; top: {Math.max(0, tooltipY - 80)}px;"
 				>
-					<p class="uppercase tracking-widest text-[var(--text-muted)] mb-1">{formatShortDate(d.date)}</p>
 					{#each series as s}
 						<div class="flex items-center gap-2 justify-between">
 							<span class="flex items-center gap-1.5">
