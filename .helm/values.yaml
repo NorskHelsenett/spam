@@ -336,7 +336,7 @@ runner:
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 trivyScanner:
   enabled: false
-  schedule: "0 1 * * *"        # 1am nightly
+  schedule: "0 6 * * *"        # 6am nightly
   parallelism: 3               # Number of concurrent scanner pods
   activeDeadlineSeconds: 14400  # 4h max runtime
   resources:
