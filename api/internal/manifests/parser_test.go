@@ -63,6 +63,49 @@ func TestParseCsproj(t *testing.T) {
 	}
 }
 
+func TestParseDirectoryPackagesProps(t *testing.T) {
+	content := `<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="Avalonia" Version="11.3.12" />
+    <PackageVersion Update="Newtonsoft.Json" Version="13.0.3" />
+    <!-- <PackageVersion Include="Ignored" Version="0.0.1" /> -->
+  </ItemGroup>
+</Project>
+`
+
+	manifestID := "test-manifest-directory-packages"
+	deps := parseDirectoryPackagesProps(manifestID, content)
+
+	if len(deps) != 2 {
+		t.Fatalf("Expected 2 dependencies, got %d", len(deps))
+	}
+
+	expectedDeps := map[string]string{
+		"Avalonia":        "11.3.12",
+		"Newtonsoft.Json": "13.0.3",
+	}
+
+	for _, dep := range deps {
+		expectedVersion, ok := expectedDeps[dep.Name]
+		if !ok {
+			t.Errorf("Unexpected dependency: %s", dep.Name)
+			continue
+		}
+		if dep.Version != expectedVersion {
+			t.Errorf("Wrong version for %s: expected %s, got %s", dep.Name, expectedVersion, dep.Version)
+		}
+		if dep.Ecosystem != "nuget" {
+			t.Errorf("Wrong ecosystem for %s: expected nuget, got %s", dep.Name, dep.Ecosystem)
+		}
+		if !dep.Direct {
+			t.Errorf("Expected %s to be marked as direct dependency", dep.Name)
+		}
+	}
+}
+
 func TestParseGoMod(t *testing.T) {
 	content := `module picoblog
 
@@ -175,6 +218,7 @@ func TestDetectManifestTypeSupportedSet(t *testing.T) {
 	}{
 		{path: "package.json", want: "package.json"},
 		{path: "go.mod", want: "go.mod"},
+		{path: "Directory.Packages.props", want: "Directory.Packages.props"},
 		{path: "Pipfile", want: "Pipfile"},
 		{path: "pom.xml", want: "pom.xml"},
 		{path: "package-lock.json", want: "package-lock.json"},

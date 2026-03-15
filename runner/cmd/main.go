@@ -551,7 +551,7 @@ func (r *Runner) findDependencyManifests() []string {
 	// We intentionally collect broadly so manifests are available for search and
 	// incremental parser improvements even when dependency extraction is partial.
 	patterns := []string{
-		"*.csproj", "packages.config", "*.fsproj", "*.vbproj", // .NET
+		"*.csproj", "packages.config", "*.fsproj", "*.vbproj", "Directory.Packages.props", // .NET
 		"package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", // Node.js
 		"bun.lock", "bun.lockb", // Bun
 		"pom.xml", "build.gradle", "build.gradle.kts", "gradle.lock", "gradle.properties", "settings.gradle", "settings.gradle.kts", "libs.versions.toml", "build.sbt", "project/build.properties", "project/plugins.sbt", // Java/Kotlin/Scala
