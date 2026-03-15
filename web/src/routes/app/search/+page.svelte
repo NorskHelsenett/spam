@@ -334,7 +334,7 @@
 						</button>
 					{/if}
 				</div>
-			<Select value={target} options={targetOptions} onchange={() => loadResults()} class="w-full sm:w-[13rem]" />
+			<Select bind:value={target} options={targetOptions} onchange={() => loadResults()} class="w-full sm:w-[13rem]" />
 		</div>
 
 		{#if error}
