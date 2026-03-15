@@ -200,7 +200,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, BellRing, Boxes, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
+	import { ChartPie, BellRing, ShieldAlert, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -208,7 +208,7 @@ let isAdmin = $state(false);
 
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
-		{ href: '/app/agents', label: 'SBOMs', icon: Boxes },
+		{ href: '/app/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
 		{ href: '/app/runs', label: 'Runs', icon: Play },
@@ -412,7 +412,7 @@ let isAdmin = $state(false);
 		</div>
 	</aside>
 
-	<div class="flex h-full flex-1 flex-col">
+	<div class="flex h-full min-w-0 flex-1 flex-col">
 		<main class="flex-1 overflow-y-auto bg-[var(--main-content-bg)] px-3 pb-8 pt-10 sm:px-6">
 			<div class="mx-auto w-full max-w-[1520px] space-y-8 p-5 text-[0.9rem] sm:p-8">
 				{@render children?.()}

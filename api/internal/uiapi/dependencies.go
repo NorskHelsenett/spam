@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -1191,6 +1192,21 @@ type dependencyAssetsResponse struct {
 	PageSize int               `json:"page_size"`
 }
 
+type RepoDependencyItem struct {
+	GroupPath  string   `json:"group_path"`
+	Name       string   `json:"name"`
+	Ecosystem  string   `json:"ecosystem"`
+	Version    string   `json:"version"`
+	Sources    []string `json:"sources"`
+	Direct     bool     `json:"direct"`
+	OriginPath string   `json:"origin_path,omitempty"`
+}
+
+type repoDependenciesResponse struct {
+	Dependencies []RepoDependencyItem `json:"dependencies"`
+	Total        int                  `json:"total"`
+}
+
 // DependencyDetailHandler returns detailed information about a dependency by name and ecosystem
 func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1551,4 +1567,241 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			PageSize: pageSize,
 		})
 	}
+}
+
+// RepoDependenciesListHandler returns merged dependency rows for a single repository.
+func RepoDependenciesListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		repoID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		query := `
+			WITH latest_repo_binding AS (
+				SELECT sb.sbom_id, sb.asset_ref_id
+				FROM sbom_bindings sb
+				JOIN repo_commits rc ON rc.id = sb.asset_ref_id
+				WHERE sb.asset_type = 'REPO_COMMIT'
+				  AND rc.repo_id = ?
+				ORDER BY rc.created_at DESC
+				LIMIT 1
+			),
+			latest_sbom_json AS (
+				SELECT
+					lrb.sbom_id,
+					convert_from(s.content_bytes, 'utf8')::jsonb AS doc
+				FROM latest_repo_binding lrb
+				JOIN sboms s ON s.id = lrb.sbom_id
+			),
+			sbom_component_paths AS (
+				SELECT
+					COALESCE(comp->>'bom-ref', comp->>'purl') AS component_ref,
+					MAX(prop->>'value') FILTER (WHERE prop->>'name' = 'syft:location:0:path') AS origin_path
+				FROM latest_sbom_json lsj
+				JOIN LATERAL jsonb_array_elements(COALESCE(lsj.doc->'components', '[]'::jsonb)) comp ON TRUE
+				LEFT JOIN LATERAL jsonb_array_elements(COALESCE(comp->'properties', '[]'::jsonb)) prop ON TRUE
+				GROUP BY COALESCE(comp->>'bom-ref', comp->>'purl')
+			),
+			sbom_rows AS (
+				SELECT DISTINCT
+					COALESCE(s.package_name, s.normalized_name, s.name) AS name,
+					s.kind AS ecosystem,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') AS version,
+					scp.origin_path AS origin_path,
+					false AS direct,
+					'sbom' AS source
+				FROM sbom_component_view s
+				JOIN latest_repo_binding lrb ON lrb.sbom_id = s.sbom_id AND lrb.asset_ref_id = s.asset_ref_id
+				LEFT JOIN sbom_component_paths scp ON scp.component_ref = s.component_ref
+				WHERE s.asset_type = 'REPO_COMMIT'
+				  AND s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+			),
+			manifest_rows AS (
+				SELECT
+					md.name,
+					md.ecosystem,
+					COALESCE(md.version, '') AS version,
+					m.path AS origin_path,
+					BOOL_OR(md.direct) AS direct,
+					'manifest' AS source
+				FROM manifest_dependencies md
+				JOIN manifests m ON m.id = md.manifest_id
+				WHERE m.repo_id = ?
+				  AND md.name IS NOT NULL
+				GROUP BY md.name, md.ecosystem, COALESCE(md.version, ''), m.path
+			),
+			rows AS (
+				SELECT name, ecosystem, version, origin_path, direct, source FROM sbom_rows
+				UNION ALL
+				SELECT name, ecosystem, version, origin_path, direct, source FROM manifest_rows
+			)
+			SELECT
+				name,
+				ecosystem,
+				version,
+				origin_path,
+				direct,
+				source
+			FROM rows
+			ORDER BY
+				LOWER(COALESCE(origin_path, '')) ASC,
+				direct DESC,
+				LOWER(name) ASC,
+				LOWER(version) ASC
+		`
+
+		rows, err := db.WithContext(r.Context()).Raw(query, repoID, repoID).Rows()
+		if err != nil {
+			log.Printf("repo dependencies query error: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+
+		type repoDependencyKey struct {
+			groupPath string
+			name      string
+			ecosystem string
+			version   string
+		}
+
+		merged := make(map[repoDependencyKey]*RepoDependencyItem)
+		for rows.Next() {
+			var (
+				name, ecosystem, version, source string
+				direct                           bool
+				originPath                       sql.NullString
+			)
+			if err := rows.Scan(&name, &ecosystem, &version, &originPath, &direct, &source); err != nil {
+				log.Printf("repo dependencies scan error: %v", err)
+				continue
+			}
+
+			rawOriginPath := cleanDependencyPath(originPath.String)
+			groupPath := normalizeDependencyGroupPath(rawOriginPath)
+			key := repoDependencyKey{
+				groupPath: groupPath,
+				name:      name,
+				ecosystem: ecosystem,
+				version:   version,
+			}
+
+			item, exists := merged[key]
+			if !exists {
+				item = &RepoDependencyItem{
+					GroupPath:  groupPath,
+					Name:       name,
+					Ecosystem:  ecosystem,
+					Version:    version,
+					Direct:     direct,
+					OriginPath: rawOriginPath,
+					Sources:    []string{},
+				}
+				merged[key] = item
+			}
+
+			item.Direct = item.Direct || direct
+			if item.OriginPath == "" && rawOriginPath != "" {
+				item.OriginPath = rawOriginPath
+			}
+			if !containsString(item.Sources, source) {
+				item.Sources = append(item.Sources, source)
+			}
+		}
+
+		dependencies := make([]RepoDependencyItem, 0, len(merged))
+		for _, item := range merged {
+			sort.Strings(item.Sources)
+			dependencies = append(dependencies, *item)
+		}
+		sort.Slice(dependencies, func(i, j int) bool {
+			if dependencies[i].GroupPath != dependencies[j].GroupPath {
+				return dependencies[i].GroupPath < dependencies[j].GroupPath
+			}
+			if dependencies[i].Direct != dependencies[j].Direct {
+				return dependencies[i].Direct && !dependencies[j].Direct
+			}
+			if dependencies[i].Name != dependencies[j].Name {
+				return strings.ToLower(dependencies[i].Name) < strings.ToLower(dependencies[j].Name)
+			}
+			return strings.ToLower(dependencies[i].Version) < strings.ToLower(dependencies[j].Version)
+		})
+
+		writeJSON(w, http.StatusOK, repoDependenciesResponse{
+			Dependencies: dependencies,
+			Total:        len(dependencies),
+		})
+	}
+}
+
+func normalizeDependencyGroupPath(path string) string {
+	path = cleanDependencyPath(path)
+	if path == "" {
+		return "Scanner detected"
+	}
+
+	dir := filepath.ToSlash(filepath.Dir(path))
+	base := filepath.Base(path)
+	join := func(name string) string {
+		if dir == "." || dir == "" {
+			return name
+		}
+		return filepath.ToSlash(filepath.Join(dir, name))
+	}
+
+	switch base {
+	case "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb":
+		return join("package.json")
+	case "go.sum":
+		return join("go.mod")
+	case "Cargo.lock":
+		return join("Cargo.toml")
+	case "Gemfile.lock":
+		return join("Gemfile")
+	case "composer.lock":
+		return join("composer.json")
+	case "pubspec.lock":
+		return join("pubspec.yaml")
+	case "mix.lock":
+		return join("mix.exs")
+	case "Podfile.lock":
+		return join("Podfile")
+	case "Cartfile.resolved":
+		return join("Cartfile")
+	case "Manifest.toml":
+		return join("Project.toml")
+	case "poetry.lock":
+		return join("pyproject.toml")
+	case "Pipfile.lock":
+		return join("Pipfile")
+	default:
+		return path
+	}
+}
+
+func cleanDependencyPath(path string) string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	path = strings.TrimPrefix(path, "./")
+	path = strings.TrimLeft(path, "/")
+	if path == "." {
+		return ""
+	}
+	return path
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

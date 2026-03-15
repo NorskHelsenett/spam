@@ -2,9 +2,10 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { CheckCircle, XCircle, Clock, Loader2 } from 'lucide-svelte';
+	import { CheckCircle, XCircle, Clock, Loader2, AlertTriangle, Trash2, RotateCcw } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import RocketLaunch from '$lib/components/icons/RocketLaunch.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
 	type Run = {
 		id: string;
@@ -34,12 +35,9 @@
 
 	const handleRepoLinkClick = (event: MouseEvent, url: string) => {
 		event.stopPropagation();
-
-		// Keep native browser behavior for new-tab/window gestures.
 		if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
 			return;
 		}
-
 		event.preventDefault();
 		goto(url);
 	};
@@ -79,8 +77,15 @@
 	let searchInput = $state('');
 	let searchTerm = $state('');
 	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
-	let sortField = $state<SortField>('status');
-	let sortDirection = $state<SortDirection>('asc');
+	let sortField = $state<SortField>('created');
+	let sortDirection = $state<SortDirection>('desc');
+
+	// Bulk action dialog
+	let dialogOpen = $state(false);
+	let dialogAction = $state<'reschedule' | 'delete' | null>(null);
+	let dialogLoading = $state(false);
+	let actionMessage = $state('');
+	let actionError = $state('');
 
 	let loadRunsInFlight = false;
 	let loadRunsQueued = false;
@@ -88,7 +93,6 @@
 
 	const isActiveRunStatus = (status: string) => status === 'QUEUED' || status === 'RUNNING';
 
-	/** Restart the polling interval based on whether there are active runs. */
 	const reschedulePoll = () => {
 		if (pollTimer) clearInterval(pollTimer);
 		const hasActive = runs.some((r) => isActiveRunStatus(r.status));
@@ -99,6 +103,7 @@
 		selectedFilter.statuses.length > 0 ? `&status=${encodeURIComponent(selectedFilter.statuses.join(','))}` : '';
 	const getRepoQuery = () =>
 		searchTerm.trim().length > 0 ? `&repo_path=${encodeURIComponent(searchTerm.trim())}` : '';
+	const getSortQuery = () => `&sort_by=${sortField}&sort_dir=${sortDirection}`;
 
 	const loadRuns = async () => {
 		if (loadRunsInFlight) {
@@ -111,14 +116,10 @@
 		error = '';
 		try {
 			const response = await fetch(
-				`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}${getRepoQuery()}`,
-				{
-				credentials: 'include'
-				}
+				`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}${getRepoQuery()}${getSortQuery()}`,
+				{ credentials: 'include' }
 			);
-			if (!response.ok) {
-				throw new Error('Failed to load runs');
-			}
+			if (!response.ok) throw new Error('Failed to load runs');
 			const data: RunsResponse = await response.json();
 			runs = data.runs;
 			totalCount = data.total_count;
@@ -152,9 +153,7 @@
 	};
 
 	const scheduleSearch = () => {
-		if (searchDebounce) {
-			clearTimeout(searchDebounce);
-		}
+		if (searchDebounce) clearTimeout(searchDebounce);
 		searchDebounce = setTimeout(() => {
 			searchDebounce = null;
 			applySearch();
@@ -174,76 +173,45 @@
 				runs = runs.map((run) => {
 					const update = activeById.get(run.id);
 					if (!update || update.status === run.status) return run;
-					if (isActiveRunStatus(run.status) && !isActiveRunStatus(update.status)) {
-						needsReload = true;
-					}
+					if (isActiveRunStatus(run.status) && !isActiveRunStatus(update.status)) needsReload = true;
 					return { ...run, status: update.status, error: update.error ?? run.error };
 				});
-				if (needsReload && !loadRunsInFlight) {
-					setTimeout(loadRuns, 500);
-				}
-			} catch {
-				// ignore malformed events
-			}
+				if (needsReload && !loadRunsInFlight) setTimeout(loadRuns, 500);
+			} catch { /* ignore */ }
 		});
 	};
 
 	const stopActiveRunStream = () => {
-		if (activeRunStream) {
-			activeRunStream.close();
-			activeRunStream = null;
-		}
+		if (activeRunStream) { activeRunStream.close(); activeRunStream = null; }
 	};
 
-	onMount(() => {
-		if (!browser) return;
-		loadRuns();
-		startActiveRunStream();
-	});
+	onMount(() => { if (!browser) return; loadRuns(); startActiveRunStream(); });
 
 	onDestroy(() => {
-		if (searchDebounce) {
-			clearTimeout(searchDebounce);
-			searchDebounce = null;
-		}
-		if (pollTimer) {
-			clearInterval(pollTimer);
-			pollTimer = null;
-		}
+		if (searchDebounce) { clearTimeout(searchDebounce); searchDebounce = null; }
+		if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
 		stopActiveRunStream();
 	});
 
 	const getStatusIcon = (status: string) => {
 		switch (status) {
-			case 'QUEUED':
-				return Clock;
-			case 'RUNNING':
-				return Loader2;
-			case 'SUCCEEDED':
-				return CheckCircle;
-			case 'FAILED':
-				return XCircle;
-			case 'CANCELLED':
-				return XCircle;
-			default:
-				return Clock;
+			case 'QUEUED': return Clock;
+			case 'RUNNING': return Loader2;
+			case 'SUCCEEDED': return CheckCircle;
+			case 'FAILED': return XCircle;
+			case 'CANCELLED': return XCircle;
+			default: return Clock;
 		}
 	};
 
 	const getStatusColor = (status: string) => {
 		switch (status) {
-			case 'QUEUED':
-				return 'var(--text-secondary)';
-			case 'RUNNING':
-				return 'var(--info)';
-			case 'SUCCEEDED':
-				return 'var(--success)';
-			case 'FAILED':
-				return 'var(--error)';
-			case 'CANCELLED':
-				return 'var(--warning)';
-			default:
-				return 'var(--text-secondary)';
+			case 'QUEUED': return 'var(--text-secondary)';
+			case 'RUNNING': return 'var(--info)';
+			case 'SUCCEEDED': return 'var(--success)';
+			case 'FAILED': return 'var(--error)';
+			case 'CANCELLED': return 'var(--warning)';
+			default: return 'var(--text-secondary)';
 		}
 	};
 
@@ -251,7 +219,6 @@
 		const date = new Date(dateStr);
 		const now = new Date();
 		const diff = now.getTime() - date.getTime();
-
 		if (diff < 60000) return 'Just now';
 		if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
 		if (diff < 86400000) return `${Math.floor(diff / 3600000)} hours ago`;
@@ -263,60 +230,66 @@
 		const startDate = new Date(start);
 		const endDate = end ? new Date(end) : new Date();
 		const diff = endDate.getTime() - startDate.getTime();
-
 		if (diff < 1000) return '<1s';
 		if (diff < 60000) return `${Math.floor(diff / 1000)}s`;
 		if (diff < 3600000) return `${Math.floor(diff / 60000)}m ${Math.floor((diff % 60000) / 1000)}s`;
 		return `${Math.floor(diff / 3600000)}h ${Math.floor((diff % 3600000) / 60000)}m`;
 	};
 
-	const durationMs = (run: Run) => {
-		if (!run.started_at) return 0;
-		const startDate = new Date(run.started_at).getTime();
-		const endDate = run.finished_at ? new Date(run.finished_at).getTime() : Date.now();
-		return Math.max(0, endDate - startDate);
-	};
-
-	const createdMs = (run: Run) => new Date(run.created_at).getTime();
-
-	const statusPriority = (status: string) => {
-		if (status === 'RUNNING') return 0;
-		if (status === 'QUEUED') return 1;
-		if (status === 'FAILED') return 2;
-		return 3;
-	};
-
-	const sortedRuns = $derived.by(() => {
-		const sorted = [...runs];
-		sorted.sort((a, b) => {
-			let compare = 0;
-			if (sortField === 'status') {
-				compare = statusPriority(a.status) - statusPriority(b.status);
-			} else if (sortField === 'provider') {
-				compare = (a.provider || '').localeCompare(b.provider || '', undefined, { sensitivity: 'base' });
-			} else if (sortField === 'duration') {
-				compare = durationMs(a) - durationMs(b);
-			} else {
-				compare = createdMs(a) - createdMs(b);
-			}
-			return sortDirection === 'asc' ? compare : -compare;
-		});
-		return sorted;
-	});
-
 	const toggleSort = (field: SortField) => {
 		if (sortField === field) {
 			sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
-			return;
+		} else {
+			sortField = field;
+			sortDirection = field === 'created' ? 'desc' : 'asc';
 		}
-		sortField = field;
-		sortDirection = field === 'created' ? 'desc' : 'asc';
-		// status sort: asc = running first (priority 0→3), desc = finished first
+		page = 1;
+		loadRuns();
 	};
 
 	const sortIndicator = (field: SortField) => {
 		if (sortField !== field) return '';
 		return sortDirection === 'asc' ? '↑' : '↓';
+	};
+
+	const hasFailedRuns = $derived(runs.some((r) => r.status === 'FAILED') || selectedFilter.id === 'error');
+
+	const openDialog = (action: 'reschedule' | 'delete') => {
+		dialogAction = action;
+		actionMessage = '';
+		actionError = '';
+		dialogOpen = true;
+	};
+
+	const executeDialogAction = async () => {
+		if (!dialogAction || dialogLoading) return;
+		dialogLoading = true;
+		try {
+			const isReschedule = dialogAction === 'reschedule';
+			const res = await fetch(
+				isReschedule ? '/api/runs/failed/reschedule' : '/api/runs/failed',
+				{ method: isReschedule ? 'POST' : 'DELETE', credentials: 'include' }
+			);
+			if (!res.ok) {
+				const text = await res.text();
+				throw new Error(text || (isReschedule ? 'Failed to reschedule' : 'Failed to delete'));
+			}
+			const data = await res.json();
+			dialogOpen = false;
+			if (isReschedule) {
+				actionMessage = `Rescheduled ${data.rescheduled} job(s), ${data.skipped} skipped (already have newer runs)`;
+			} else {
+				actionMessage = `Deleted ${data.deleted} failed job(s)`;
+			}
+			setTimeout(() => { actionMessage = ''; }, 6000);
+			await loadRuns();
+		} catch (e) {
+			actionError = e instanceof Error ? e.message : 'Action failed';
+			setTimeout(() => { actionError = ''; }, 6000);
+			dialogOpen = false;
+		} finally {
+			dialogLoading = false;
+		}
 	};
 </script>
 
@@ -331,18 +304,52 @@
 				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Runs</h1>
 				<p class="text-sm text-[var(--text-tertiary)]">SBOM generation and security scanning jobs</p>
 			</div>
-			<button
-				type="button"
-				class="btn btn-ghost"
-				onclick={loadRuns}
-				disabled={refreshing}
-			>
-				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
-					<RotateCw size={14} />
-				</span>
-				Refresh
-			</button>
+			<div class="flex items-center gap-2">
+				{#if hasFailedRuns}
+					<button
+						type="button"
+						class="btn btn-ghost text-[var(--warning)] hover:bg-[var(--warning)]/10"
+						onclick={() => openDialog('reschedule')}
+						title="Re-queue failed jobs that have no newer run"
+					>
+						<RotateCcw size={14} />
+						Reschedule Failed
+					</button>
+					<button
+						type="button"
+						class="btn btn-ghost text-[var(--error)] hover:bg-[var(--error)]/10"
+						onclick={() => openDialog('delete')}
+						title="Delete all failed jobs"
+					>
+						<Trash2 size={14} />
+						Delete Failed
+					</button>
+				{/if}
+				<button
+					type="button"
+					class="btn btn-ghost"
+					onclick={loadRuns}
+					disabled={refreshing}
+				>
+					<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
+						<RotateCw size={14} />
+					</span>
+					Refresh
+				</button>
+			</div>
 		</header>
+
+		{#if actionMessage}
+			<div class="rounded-2xl border border-[var(--success)]/30 bg-[var(--success)]/10 p-4 text-sm text-[var(--success)]">
+				{actionMessage}
+			</div>
+		{/if}
+
+		{#if actionError}
+			<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-4 text-sm text-[var(--error)]">
+				{actionError}
+			</div>
+		{/if}
 
 		{#if error}
 			<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/10 p-4 text-sm text-[var(--error)]">
@@ -369,9 +376,7 @@
 					placeholder="Search repo..."
 					bind:value={searchInput}
 					oninput={scheduleSearch}
-					onkeydown={(event) => {
-						if (event.key === 'Enter') applySearch();
-					}}
+					onkeydown={(event) => { if (event.key === 'Enter') applySearch(); }}
 				/>
 			</div>
 		</div>
@@ -390,36 +395,36 @@
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-							<tr>
-								<th class="px-5 py-3 text-left">
-									<button type="button" class="sort-btn" onclick={() => toggleSort('status')}>
-										Status {sortIndicator('status')}
-									</button>
-								</th>
-								<th class="px-5 py-3 text-left">Repository</th>
-								<th class="px-5 py-3 text-left">
-									<button type="button" class="sort-btn" onclick={() => toggleSort('provider')}>
-										Provider {sortIndicator('provider')}
-									</button>
-								</th>
-								<th class="px-5 py-3 text-left">Branch</th>
-								<th class="px-5 py-3 text-left">
-									<button type="button" class="sort-btn" onclick={() => toggleSort('duration')}>
-										Duration {sortIndicator('duration')}
-									</button>
-								</th>
-								<th class="px-5 py-3 text-left">
-									<button type="button" class="sort-btn" onclick={() => toggleSort('created')}>
-										Created {sortIndicator('created')}
-									</button>
-								</th>
-							</tr>
-						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each sortedRuns as run}
-								{@const StatusIcon = getStatusIcon(run.status)}
-					<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" onclick={() => goto(`/app/runs/${run.id}`)}>
-									<td class="px-5 py-3">
+						<tr>
+							<th class="px-5 py-3 text-left">
+								<button type="button" class="sort-btn" onclick={() => toggleSort('status')}>
+									Status {sortIndicator('status')}
+								</button>
+							</th>
+							<th class="px-5 py-3 text-left">Repository</th>
+							<th class="px-5 py-3 text-left">
+								<button type="button" class="sort-btn" onclick={() => toggleSort('provider')}>
+									Provider {sortIndicator('provider')}
+								</button>
+							</th>
+							<th class="px-5 py-3 text-left">Branch</th>
+							<th class="px-5 py-3 text-left">
+								<button type="button" class="sort-btn" onclick={() => toggleSort('duration')}>
+									Duration {sortIndicator('duration')}
+								</button>
+							</th>
+							<th class="px-5 py-3 text-left">
+								<button type="button" class="sort-btn" onclick={() => toggleSort('created')}>
+									Created {sortIndicator('created')}
+								</button>
+							</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+						{#each runs as run}
+							{@const StatusIcon = getStatusIcon(run.status)}
+							<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" onclick={() => goto(`/app/runs/${run.id}`)}>
+								<td class="px-5 py-3">
 									<span class="flex items-center gap-2" style={`color: ${getStatusColor(run.status)}`}>
 										<StatusIcon size={16} class={run.status === 'RUNNING' ? 'animate-spin' : ''} />
 										<span class="text-xs font-semibold uppercase">{run.status}</span>
@@ -479,6 +484,33 @@
 		{/if}
 	</section>
 </div>
+
+<!-- Reschedule confirm -->
+<ConfirmDialog
+	bind:open={dialogOpen}
+	title={dialogAction === 'delete' ? 'Delete Failed Jobs' : 'Reschedule Failed Jobs'}
+	description={dialogAction === 'delete'
+		? 'All failed jobs will be permanently deleted. This cannot be undone.'
+		: 'Failed jobs will be re-queued. Jobs with a newer successful or pending run for the same repo will be skipped.'}
+	iconVariant={dialogAction === 'delete' ? 'danger' : 'warning'}
+	buttons={[
+		{ label: 'Cancel', variant: 'ghost', onclick: () => { dialogOpen = false; }, disabled: dialogLoading },
+		{
+			label: dialogAction === 'delete' ? 'Delete All' : 'Reschedule',
+			variant: dialogAction === 'delete' ? 'danger' : 'warning',
+			loading: dialogLoading,
+			onclick: executeDialogAction
+		}
+	]}
+>
+	{#snippet icon()}
+		{#if dialogAction === 'delete'}
+			<Trash2 size={26} />
+		{:else}
+			<AlertTriangle size={26} />
+		{/if}
+	{/snippet}
+</ConfirmDialog>
 
 <style>
 	.filter-active {

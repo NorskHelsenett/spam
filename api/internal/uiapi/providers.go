@@ -103,11 +103,11 @@ func resolveProviderToken(r *http.Request, store *providerconfig.Store) (string,
 	return store.GetActiveToken(r.Context(), providerID)
 }
 
-
 // GitHubReposHandler handles the GitHub repos endpoint.
 // GET /api/providers/github/{owner}/repos
 // defaultListCacheTTL is used when no provider_id is present or poll_interval is unset.
 const defaultListCacheTTL = 10 * time.Minute
+const defaultRepoDetailsCacheTTL = 15 * time.Minute
 
 // resolvePollTTL returns the provider's configured poll_interval as a cache TTL,
 // falling back to defaultListCacheTTL if the provider_id param is absent or unset.
@@ -369,21 +369,16 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 		page, pageSize := parsePagination(r)
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
-		baseURL := r.URL.Query().Get("base_url")
+		rawBaseURL := r.URL.Query().Get("base_url")
+		giteaProviderID := r.URL.Query().Get("provider_id")
 
-		if baseURL == "" {
-			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
-			return
-		}
-
-		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", baseURL, owner, page, pageSize)
+		cacheKey := fmt.Sprintf("gitea:repos:%s:%s:p%d:ps%d", rawBaseURL, owner, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GiteaReposResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
 		// Serve from provider-level repo list cache (populated by sync/warm).
-		giteaProviderID := r.URL.Query().Get("provider_id")
 		if served := serveFromProviderRepoList(w, r, c, store, db, giteaProviderID, owner, page, pageSize, sortColumn, sortOrder,
 			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
 				return GiteaReposResponse{Repos: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
@@ -391,9 +386,14 @@ func GiteaReposHandler(authService *auth.Service, store *providerconfig.Store, c
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		// base_url from the client is a lookup hint only; the actual URL comes from the DB.
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), giteaProviderID, providerconfig.ProviderGitea, rawBaseURL, owner)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "no configured Gitea provider found for this base_url", http.StatusBadRequest)
 			return
 		}
 
@@ -443,22 +443,23 @@ func GiteaOrgsHandler(authService *auth.Service, store *providerconfig.Store, c 
 		}
 
 		page, pageSize := parsePagination(r)
-		baseURL := r.URL.Query().Get("base_url")
+		rawBaseURL := r.URL.Query().Get("base_url")
+		giteaProviderID := r.URL.Query().Get("provider_id")
 
-		if baseURL == "" {
-			http.Error(w, "base_url is required for Gitea", http.StatusBadRequest)
-			return
-		}
-
-		cacheKey := fmt.Sprintf("gitea:orgs:%s:p%d:ps%d", baseURL, page, pageSize)
+		cacheKey := fmt.Sprintf("gitea:orgs:%s:p%d:ps%d", rawBaseURL, page, pageSize)
 		if cached, ok, _ := cache.GetJSON[GiteaOrgsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		// base_url from the client is a lookup hint only; the actual URL comes from the DB.
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), giteaProviderID, providerconfig.ProviderGitea, rawBaseURL, "")
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "no configured Gitea provider found for this base_url", http.StatusBadRequest)
 			return
 		}
 
@@ -636,6 +637,7 @@ type RepoDetailsResponse struct {
 	Readme       string                      `json:"readme"`
 	Commits      []providers.CommitInfo      `json:"commits,omitempty"`
 	Contributors []providers.ContributorInfo `json:"contributors,omitempty"`
+	RepoID       string                      `json:"repo_id,omitempty"`
 }
 
 // enrichContributors fills in missing contributor data from commits and generates
@@ -1096,11 +1098,10 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				ProviderInstanceID string
 				Org                string
 				Slug               string
-				ExternalID         string
 			}
 			if err := db.WithContext(r.Context()).
 				Table("repos").
-				Select("provider_instance_id, org, slug, external_id").
+				Select("provider_instance_id, org, slug").
 				Where("id = ?", repoDBID).
 				First(&repoRow).Error; err != nil {
 				http.Error(w, "repo not found", http.StatusNotFound)
@@ -1110,10 +1111,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			if repoRow.ProviderInstanceID != "" {
 				providerID = repoRow.ProviderInstanceID
 			}
-			if repoRow.ExternalID != "" {
-				// Prefer numeric external ID so the path never goes stale (GitLab, Gitea).
-				repoPath = repoRow.ExternalID
-			} else if repoRow.Org != "" && repoRow.Slug != "" {
+			if repoRow.Org != "" && repoRow.Slug != "" {
 				repoPath = repoRow.Org + "/" + repoRow.Slug
 			}
 		}
@@ -1141,22 +1139,27 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			return
 		}
 
+		repoID := repoDBID
+		if repoID == "" && db != nil {
+			repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
+		}
+
 		cacheKey := fmt.Sprintf("provider:details:%s:%s", providerID, repoPath)
 		if cached, ok, _ := cache.GetJSON[RepoDetailsResponse](r.Context(), c, cacheKey); ok {
+			if cached.RepoID == "" && repoID != "" {
+				cached.RepoID = repoID
+				_ = cache.SetJSON(r.Context(), c, cacheKey, cached, store.GetPollInterval(r.Context(), providerID, defaultRepoDetailsCacheTTL))
+			}
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
 		// DB cache fallback: serve from persisted data if fresh enough.
 		// Use repo_id directly when provided (skips the org/slug lookup).
-		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL)
+		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultRepoDetailsCacheTTL)
 		if db != nil {
-			repoID := repoDBID
-			if repoID == "" {
-				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
-			}
 			if repoID != "" {
-				if dbCache, dbErr := assets.GetRepoCache(r.Context(), db, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
+				if dbCache, dbErr := assets.GetRepoCache(r.Context(), c, repoID); dbErr == nil && time.Since(dbCache.SyncedAt) < cacheTTL {
 					var details providers.RepoDetails
 					if json.Unmarshal([]byte(dbCache.DetailsJSON), &details) == nil {
 						var commits []providers.CommitInfo
@@ -1168,6 +1171,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 							Readme:       dbCache.ReadmeContent,
 							Commits:      commits,
 							Contributors: contribs,
+							RepoID:       repoID,
 						}
 						_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 						writeJSON(w, http.StatusOK, resp)
@@ -1286,15 +1290,11 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		// Persist to DB so subsequent requests and restarts can skip the API.
 		if db != nil && details != nil {
-			repoID := repoDBID
-			if repoID == "" {
-				repoID = lookupRepoID(r.Context(), db, providerID, repoPath)
-			}
 			if repoID != "" {
 				detailsBytes, _ := json.Marshal(details)
 				commitsBytes, _ := json.Marshal(commits)
 				contribBytes, _ := json.Marshal(contributors)
-				_ = assets.UpsertRepoCache(r.Context(), db, repoID,
+				_ = assets.UpsertRepoCache(r.Context(), c, repoID,
 					string(detailsBytes), readme, string(commitsBytes), string(contribBytes))
 			}
 		}
@@ -1304,6 +1304,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			Readme:       readme,
 			Commits:      commits,
 			Contributors: contributors,
+			RepoID:       repoID,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, cacheTTL)
 		writeJSON(w, http.StatusOK, resp)

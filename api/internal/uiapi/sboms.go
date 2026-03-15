@@ -352,19 +352,34 @@ func countComponentsFromContent(format string, content []byte) int {
 			Metadata struct {
 				Component struct {
 					BomRef string `json:"bom-ref"`
+					Purl   string `json:"purl"`
 				} `json:"component"`
 			} `json:"metadata"`
 			Components []struct {
 				BomRef string `json:"bom-ref"`
+				Purl   string `json:"purl"`
 			} `json:"components"`
+			Dependencies []struct {
+				Ref       string   `json:"ref"`
+				DependsOn []string `json:"dependsOn"`
+			} `json:"dependencies"`
 		}
 		if err := json.Unmarshal(content, &doc); err != nil {
 			return 0
 		}
 		rootRef := doc.Metadata.Component.BomRef
+		if rootRef == "" {
+			rootRef = doc.Metadata.Component.Purl
+		}
+		if rootRef == "" && isImplicitCycloneDXRoot(doc.Components, doc.Dependencies) {
+			if len(doc.Components) == 1 {
+				rootRef = firstNonEmpty(doc.Components[0].BomRef, doc.Components[0].Purl)
+			}
+		}
 		count := 0
 		for _, c := range doc.Components {
-			if rootRef == "" || c.BomRef != rootRef {
+			componentRef := firstNonEmpty(c.BomRef, c.Purl)
+			if rootRef == "" || componentRef != rootRef {
 				count++
 			}
 		}
@@ -376,16 +391,42 @@ func countComponentsFromContent(format string, content []byte) int {
 		if err := json.Unmarshal(content, &doc); err != nil {
 			return 0
 		}
-		// Exclude the root "describes" package by subtracting 1 when present.
-		// A well-formed SPDX document always has at least one root package, so
-		// non-root packages are those beyond the first.
 		n := len(doc.Packages)
-		if n > 1 {
+		if n > 0 {
 			return n - 1
 		}
-		return n
+		return 0
 	}
 	return 0
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func isImplicitCycloneDXRoot(
+	components []struct {
+		BomRef string `json:"bom-ref"`
+		Purl   string `json:"purl"`
+	},
+	dependencies []struct {
+		Ref       string   `json:"ref"`
+		DependsOn []string `json:"dependsOn"`
+	},
+) bool {
+	if len(components) != 1 || len(dependencies) != 1 {
+		return false
+	}
+	componentRef := firstNonEmpty(components[0].BomRef, components[0].Purl)
+	if componentRef == "" || dependencies[0].Ref != componentRef {
+		return false
+	}
+	return len(dependencies[0].DependsOn) == 0
 }
 
 // extractCycloneDXComponents parses a CycloneDX JSON SBOM and returns the
@@ -470,18 +511,18 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// Count components from the materialized view; fall back to parsing the
-		// raw content when the view has not yet been refreshed (e.g. immediately
-		// after a run completes and the refresh job is still queued).
-		var componentCount int64
-		if err := db.WithContext(r.Context()).
-			Table("sbom_component_view").
-			Where("sbom_id = ? AND is_root = false", sbomID).
-			Count(&componentCount).Error; err != nil {
-			log.Printf("failed to count sbom components: %v", err)
-		}
+		// countComponentsFromContent is authoritative for known formats: it
+		// correctly handles explicit metadata.component, implicit root detection,
+		// and SPDX root packages. Fall back to the materialized view only for
+		// unrecognised formats or when content is unavailable.
+		componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
 		if componentCount == 0 {
-			componentCount = int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
+			if err := db.WithContext(r.Context()).
+				Table("sbom_component_view").
+				Where("sbom_id = ? AND is_root = false", sbomID).
+				Count(&componentCount).Error; err != nil {
+				log.Printf("failed to count sbom components: %v", err)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{

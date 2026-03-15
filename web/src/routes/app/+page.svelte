@@ -11,6 +11,9 @@
 		image_count: number;
 		component_count: number;
 		component_version_count: number;
+		osv_purl_count: number;
+		osv_sbom_purl_count: number;
+		osv_manifest_purl_count: number;
 		license_count: number;
 		missing_license_count: number;
 		secrets_count: number;
@@ -117,9 +120,15 @@
 				accent: 'var(--text-bright)'
 			},
 			{
-				label: 'Components',
+				label: 'SBOM components',
 				value: c.component_count,
-				description: `${c.component_version_count} versions indexed`,
+				description: `${c.component_version_count} SBOM versions indexed`,
+				accent: 'var(--info)'
+			},
+			{
+				label: 'Components',
+				value: c.osv_purl_count,
+				description: `${c.osv_sbom_purl_count} SBOM + ${c.osv_manifest_purl_count} manifest`,
 				accent: 'var(--info)'
 			},
 			{
@@ -198,7 +207,7 @@
 		<div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
 			<div class="space-y-3">
 				<span class="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--accent-dark)]/50 bg-[var(--accent-dark)]/15 px-3 py-1 text-[10px] font-medium uppercase tracking-[0.32em] text-[var(--accent)] sm:text-xs">
-					SBOM Control Center
+					SPAM Control Center
 				</span>
 				<div class="space-y-2">
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl md:text-4xl">
@@ -227,7 +236,7 @@
 		{:else if error}
 			<p class="text-sm text-[var(--error)]">{error}</p>
 		{:else if summary}
-			<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+			<div class="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
 				{#each metricCards() as metric}
 					<article class="metric-card rounded-2xl p-4 sm:p-6">
 						<h2 class="text-sm uppercase tracking-[0.24em] text-[var(--text-muted)]">{metric.label}</h2>

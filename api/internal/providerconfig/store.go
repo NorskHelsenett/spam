@@ -369,8 +369,12 @@ func (s *Store) Delete(ctx context.Context, providerID string) ([]string, error)
 		}
 
 		if len(repoIDs) > 0 {
-			// Delete cached provider data for these repos.
-			if err := tx.Where("repo_id IN ?", repoIDs).Delete(&assets.RepoCache{}).Error; err != nil {
+			// Delete cached provider data from kv_store for these repos.
+			keys := make([]string, len(repoIDs))
+			for i, id := range repoIDs {
+				keys[i] = assets.RepoCacheKey(id)
+			}
+			if err := tx.Exec("DELETE FROM kv_store WHERE key IN ?", keys).Error; err != nil {
 				return err
 			}
 
@@ -546,33 +550,40 @@ func FindProviderMatch(ctx context.Context, db *gorm.DB, providerType, baseURL, 
 	}
 
 	repoPath = strings.Trim(repoPath, "/")
+	return matchProvider(providerType, repoPath, providers), nil
+}
+
+// matchProvider selects the best provider from candidates for a given repoPath.
+// It is a pure function so it can be unit-tested without a database.
+func matchProvider(providerType, repoPath string, candidates []ProviderInstance) *ProviderInstance {
 	owner := repoPath
 	if parts := strings.Split(repoPath, "/"); len(parts) > 0 {
 		owner = parts[0]
 	}
 
 	var best *ProviderInstance
-	for i, provider := range providers {
+	for i, provider := range candidates {
 		if providerType == ProviderGitHub {
 			if provider.OwnerPath == owner {
-				best = &providers[i]
+				best = &candidates[i]
 				break
 			}
 			continue
 		}
 		if provider.OwnerPath == "" {
 			if best == nil {
-				best = &providers[i]
+				best = &candidates[i]
 			}
 			continue
 		}
-		if strings.HasPrefix(repoPath, provider.OwnerPath) {
+		ownerPrefix := strings.TrimRight(provider.OwnerPath, "/")
+		if repoPath == ownerPrefix || strings.HasPrefix(repoPath, ownerPrefix+"/") {
 			if best == nil || len(provider.OwnerPath) > len(best.OwnerPath) {
-				best = &providers[i]
+				best = &candidates[i]
 			}
 		}
 	}
-	return best, nil
+	return best
 }
 
 func GetActiveToken(ctx context.Context, db *gorm.DB, providerID string, key []byte) (string, error) {
@@ -615,42 +626,36 @@ func (s *Store) GetActiveTokenByBaseURL(ctx context.Context, providerType, baseU
 }
 
 // ResolveProviderAccess returns the effective base URL and active token for a
-// provider. It resolves by provider_id first (from providerID), then by
-// base_url+repoPath. When baseURL is empty and a match is found via
-// owner-path, the provider's stored BaseURL is returned as resolvedBaseURL so
-// callers can construct the correct API client even without an explicit base_url.
+// provider. The base URL is ALWAYS taken from the database — the client-supplied
+// baseURL is used only as a lookup hint to identify the matching provider, never
+// as the actual URL used for outbound requests (SSRF mitigation).
 func (s *Store) ResolveProviderAccess(ctx context.Context, providerID, providerType, baseURL, repoPath string) (resolvedBaseURL, token string, err error) {
 	if s == nil {
-		return baseURL, "", nil
+		return "", "", nil
 	}
-	resolvedBaseURL = baseURL
 
 	if providerID != "" {
+		var p ProviderInstance
+		if dbErr := s.db.WithContext(ctx).First(&p, "id = ? AND enabled = true", providerID).Error; dbErr != nil {
+			return "", "", fmt.Errorf("provider not found: %w", dbErr)
+		}
 		token, err = s.GetActiveToken(ctx, providerID)
 		if err != nil {
-			return resolvedBaseURL, "", err
+			return "", "", err
 		}
-		if baseURL == "" {
-			var p ProviderInstance
-			if dbErr := s.db.WithContext(ctx).First(&p, "id = ?", providerID).Error; dbErr == nil {
-				resolvedBaseURL = p.BaseURL
-			}
-		}
-		return resolvedBaseURL, token, nil
+		return p.BaseURL, token, nil
 	}
 
+	// baseURL from the client is used only as a hint to narrow the DB search.
 	p, err := FindProviderMatch(ctx, s.db, providerType, baseURL, repoPath)
 	if err != nil || p == nil {
-		return resolvedBaseURL, "", err
+		return "", "", err
 	}
 	token, err = GetActiveToken(ctx, s.db, p.ID, s.key)
 	if err != nil {
-		return resolvedBaseURL, "", err
+		return "", "", err
 	}
-	if baseURL == "" {
-		resolvedBaseURL = p.BaseURL
-	}
-	return resolvedBaseURL, token, nil
+	return p.BaseURL, token, nil
 }
 
 // GetPollInterval returns the configured poll_interval for a provider as a

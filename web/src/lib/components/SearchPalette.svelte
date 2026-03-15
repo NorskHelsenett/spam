@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
+	import VulnBadges from '$lib/components/VulnBadges.svelte';
 
 	type RepoResult = {
 		id: string;
@@ -46,6 +47,7 @@
 		sbom: { latest?: { component_count: number; format: string } };
 		dependencies: { total: number };
 		secrets: { latest_count: number };
+		vulnerabilities?: { summary?: { critical: number; high: number; medium: number; low: number } };
 	};
 
 	let open = $state(false);
@@ -311,6 +313,8 @@
 		return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 	};
 
+	const fmt = (n: number | null | undefined) => (n ?? 0).toLocaleString('en-US').replace(/,/g, '\u202f');
+
 	const selectedItem = $derived(flatItems[selectedIndex] ?? null);
 </script>
 
@@ -321,7 +325,7 @@
 		role="presentation"
 	>
 		<div
-			class="fixed left-1/2 top-[16%] z-50 w-[95vw] max-w-2xl -translate-x-1/2 overflow-hidden rounded-2xl shadow-2xl"
+			class="fixed left-1/2 top-[16%] z-50 w-[95vw] max-w-4xl -translate-x-1/2 overflow-hidden rounded-2xl shadow-2xl"
 			style="background: var(--bg-soft); border: 1px solid var(--bg2);"
 			role="dialog"
 			aria-modal="true"
@@ -358,7 +362,7 @@
 				<div class="flex">
 
 					<!-- Left: results list -->
-					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-52 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
+					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-72 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped] as [, group]}
@@ -466,12 +470,22 @@
 										</p>
 									{/if}
 								</div>
+								{#if repoPreview.vulnerabilities?.summary && (repoPreview.vulnerabilities.summary.critical > 0 || repoPreview.vulnerabilities.summary.high > 0 || repoPreview.vulnerabilities.summary.medium > 0 || repoPreview.vulnerabilities.summary.low > 0)}
+									<div class="mb-4 pb-1">
+										<VulnBadges
+											critical={repoPreview.vulnerabilities.summary.critical}
+											high={repoPreview.vulnerabilities.summary.high}
+											medium={repoPreview.vulnerabilities.summary.medium}
+											low={repoPreview.vulnerabilities.summary.low}
+										/>
+									</div>
+								{/if}
 								<div class="space-y-2.5">
 									<div class="flex items-center gap-2.5">
 										<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Dependencies</span>
 										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-											{repoPreview.dependencies.total > 0 ? repoPreview.dependencies.total : '—'}
+											{repoPreview.dependencies.total > 0 ? fmt(repoPreview.dependencies.total) : '—'}
 										</span>
 									</div>
 									{#if repoPreview.sbom.latest}
@@ -479,7 +493,7 @@
 											<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
 											<span class="text-[11px]" style="color: var(--text-muted);">SBOM</span>
 											<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">
-												{repoPreview.sbom.latest.format} · {repoPreview.sbom.latest.component_count} components
+												{repoPreview.sbom.latest.format} · {fmt(repoPreview.sbom.latest.component_count)} components
 											</span>
 										</div>
 									{/if}
@@ -487,7 +501,7 @@
 										<ShieldCheck size={13} style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-muted)'}; flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Secrets</span>
 										<span class="ml-auto text-[11px] font-medium" style="color: {repoPreview.secrets.latest_count > 0 ? 'var(--error)' : 'var(--text-primary)'};">
-											{repoPreview.secrets.latest_count > 0 ? `${repoPreview.secrets.latest_count} found` : 'None found'}
+											{repoPreview.secrets.latest_count > 0 ? `${fmt(repoPreview.secrets.latest_count)} found` : 'None found'}
 										</span>
 									</div>
 									{#if repoPreview.runs.latest}
@@ -510,7 +524,7 @@
 									<div class="flex items-center gap-2.5">
 										<Play size={12} style="color: var(--text-muted); flex-shrink:0;" />
 										<span class="text-[11px]" style="color: var(--text-muted);">Total scans</span>
-										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{repoPreview.runs.total}</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(repoPreview.runs.total)}</span>
 									</div>
 								</div>
 
@@ -634,9 +648,9 @@
 								}}
 								class="-mx-3 flex w-[calc(100%+1.5rem)] items-center justify-between gap-6 rounded-xl px-3 py-2 text-left transition-colors duration-150 hover:bg-[var(--hover-bg)]"
 							>
-							<div style="display: flex; align-items: center; gap: 1.2em;">
-								<Microscope size={20} style="color: var(--accent); flex-shrink: 0;" />
-								<div class="ml-2">
+							<div style="display: flex; align-items: center; gap: 1.5em;">
+								<Microscope size={20} style="color: var(--accent); flex-shrink: 0; margin-left: 0.5em;" />
+								<div class="ml-[0.2em]">
 									<p style="color: var(--text-primary); font-size: 0.92em; font-weight: 500;">Advanced search</p>
 									<p style="color: var(--text-muted); font-size: 0.78em; margin-top: 0.3em;">Search manifests, SBOMs, secrets, contributors, languages, commits, repos, and README</p>
 								</div>

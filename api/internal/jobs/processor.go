@@ -8,6 +8,8 @@ import (
 	"time"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -42,6 +44,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processCreateRun(ctx, db, job, runExecutor)
 	case JobTypeRefreshSBOMViews:
 		return processRefreshSBOMViews(ctx, db)
+	case JobTypeOSVScan:
+		return processOSVScan(ctx, db, job.ID)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -57,6 +61,21 @@ func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, err
 		return nil, err
 	}
 	return map[string]string{"status": "refreshed"}, nil
+}
+
+func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	result, err := vulnerabilities.RunBatchScan(ctx, db, func(progress vulnerabilities.BatchScanResult) {
+		if data, jsonErr := json.Marshal(progress); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", data)
+		}
+	})
+	if err != nil {
+		return result, err
+	}
+	if _, err := vulnmetrics.Refresh(ctx, db, time.Now().UTC()); err != nil {
+		return result, fmt.Errorf("refresh vulnerability dashboard metrics: %w", err)
+	}
+	return result, nil
 }
 
 func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {

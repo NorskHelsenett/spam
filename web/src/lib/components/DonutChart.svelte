@@ -13,8 +13,8 @@
 	let tooltipX = 0;
 	let tooltipY = 0;
 
-	const size = 112;
-	const strokeWidth = 18;
+	const size = 156;
+	const strokeWidth = 20;
 	const radius = (size - strokeWidth) / 2;
 	const circumference = 2 * Math.PI * radius;
 	const center = size / 2;
@@ -52,16 +52,16 @@
 	})();
 </script>
 
-<div class="rounded-2xl p-0 bg-[var(--card-bg)]/20 p-5" style="padding: 0">
+<div class="rounded-2xl bg-[var(--card-bg)]/20">
 	<div class="flex items-center justify-between">
 		<p class="text-sm uppercase tracking-[0.22em] text-[var(--text-muted)]">{title}</p>
 		<p class="text-xs text-[var(--text-tertiary)]">{total.toLocaleString()} components</p>
 	</div>
-	<div class="mt-5 flex flex-col gap-4 sm:flex-row sm:items-center">
-		<div class="relative h-36 w-36 p-4">
+	<div class="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center">
+		<div class="relative h-44 w-44 shrink-0">
 			<svg
 				viewBox="0 0 {size} {size}"
-				class="h-28 w-28 -rotate-90 overflow-visible"
+				class="h-44 w-44 -rotate-90 overflow-visible p-[1em]"
 				on:mousemove={handleMouseMove}
 				role="img"
 				aria-label="Donut chart showing {title}"
@@ -115,9 +115,9 @@
 					/>
 				{/each}
 			</svg>
-			<div class="pointer-events-none absolute inset-4 grid place-items-center">
-				<div class="grid h-18 w-18 place-items-center rounded-full bg-[var(--main-content-bg)]">
-					<span class="text-base font-semibold text-[var(--text-bright)]">{total}</span>
+			<div class="pointer-events-none absolute inset-0 grid place-items-center">
+				<div class="grid h-20 w-20 place-items-center rounded-full bg-[var(--main-content-bg)]">
+					<span class="text-lg font-semibold text-[var(--text-bright)]">{total}</span>
 				</div>
 			</div>
 			{#if hoveredIndex !== null}
@@ -147,11 +147,11 @@
 					on:mouseenter={() => (hoveredIndex = seg.index)}
 					on:mouseleave={() => (hoveredIndex = null)}
 				>
-					<span class="inline-flex items-center gap-2">
-						<span class="h-2.5 w-2.5 rounded-full" style="background: {seg.color}"></span>
-						{seg.label}
+					<span class="inline-flex min-w-0 items-center gap-2">
+						<span class="h-2.5 w-2.5 shrink-0 rounded-full" style="background: {seg.color}"></span>
+						<span class="truncate">{seg.label}</span>
 					</span>
-					<span class="text-[var(--text-bright)]">{seg.value}</span>
+					<span class="shrink-0 text-[var(--text-bright)]">{seg.value}</span>
 				</button>
 			{/each}
 		</div>

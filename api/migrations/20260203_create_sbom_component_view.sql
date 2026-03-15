@@ -82,6 +82,23 @@ deps AS (
   LEFT JOIN LATERAL jsonb_array_elements(COALESCE(sj.doc->'dependencies', '[]'::jsonb)) AS d ON TRUE
   LEFT JOIN LATERAL jsonb_array_elements_text(COALESCE(d->'dependsOn', '[]'::jsonb)) AS dep ON TRUE
   GROUP BY sj.sbom_id, sj.asset_type, sj.asset_ref_id, d->>'ref'
+),
+implicit_root_component AS (
+  SELECT
+    comp.sbom_id,
+    comp.asset_type,
+    comp.asset_ref_id,
+    MIN(comp.component_ref) AS component_ref
+  FROM components comp
+  LEFT JOIN deps dep
+    ON dep.sbom_id = comp.sbom_id
+    AND dep.asset_type IS NOT DISTINCT FROM comp.asset_type
+    AND dep.asset_ref_id IS NOT DISTINCT FROM comp.asset_ref_id
+  GROUP BY comp.sbom_id, comp.asset_type, comp.asset_ref_id
+  HAVING COUNT(*) = 1
+     AND COUNT(dep.component_ref) = 1
+     AND MIN(dep.component_ref) = MIN(comp.component_ref)
+     AND COALESCE(MAX(cardinality(dep.depends_on)), 0) = 0
 )
 SELECT
   c.sbom_id,
@@ -92,7 +109,7 @@ SELECT
   c.version,
   c.type,
   c.licenses,
-  c.is_root,
+  (c.is_root OR ir.component_ref IS NOT NULL) AS is_root,
   COALESCE(d.depends_on, ARRAY[]::text[]) AS depends_on,
   NULLIF(substring(c.purl from '^pkg:([^/]+)'), '') AS kind,
   NULLIF(
@@ -204,6 +221,11 @@ LEFT JOIN deps d
   AND d.asset_type IS NOT DISTINCT FROM c.asset_type
   AND d.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
   AND d.component_ref = c.component_ref
+LEFT JOIN implicit_root_component ir
+  ON ir.sbom_id = c.sbom_id
+  AND ir.asset_type IS NOT DISTINCT FROM c.asset_type
+  AND ir.asset_ref_id IS NOT DISTINCT FROM c.asset_ref_id
+  AND ir.component_ref = c.component_ref
 WITH NO DATA;
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_sbom_component_mv

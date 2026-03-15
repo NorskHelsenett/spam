@@ -51,3 +51,20 @@ func AdminViewsStatusHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		writeJSON(w, http.StatusOK, map[string][]viewRefreshStatus{"views": rows})
 	}
 }
+
+// AdminCacheClearHandler clears all kv_store cache entries.
+func AdminCacheClearHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.RequireAdmin(r); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if err := db.WithContext(r.Context()).Exec("DELETE FROM kv_store").Error; err != nil {
+			http.Error(w, "failed to clear cache", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	}
+}

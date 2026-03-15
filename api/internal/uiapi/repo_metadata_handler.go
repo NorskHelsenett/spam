@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const repoMetadataCacheTTL = 30 * time.Second
+const repoMetadataCacheTTL = 15 * time.Minute
 
 // RepoMetadataHandler returns a unified metadata response for a repo.
 // GET /api/repos/metadata?repo_id=<uuid>
@@ -37,10 +37,11 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 
 		repoMeta, repoDBID := loadRepoMetadata(r, db, repoID)
 		latestCommit := loadRepoLatestCommit(r, db, repoDBID)
-		runs := loadRepoRuns(r, db, repoMeta.Org, repoMeta.Slug, repoDBID)
+		runs := loadRepoRuns(r, db, repoDBID)
 		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount, runs.Latest)
 		secrets := loadRepoSecrets(r, db, runs.Latest)
+		vulnerabilities := loadRepoVulnerabilities(r, db, repoDBID)
 
 		resp := RepoMetadataResponse{
 			Repo:            repoMeta,
@@ -50,7 +51,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 			Dependencies:    deps,
 			Secrets:         secrets,
 			Hygiene:         RepoMetadataHygiene{},
-			Vulnerabilities: RepoMetadataVulnerabilities{},
+			Vulnerabilities: vulnerabilities,
 		}
 		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoMetadataCacheTTL)
 		writeJSON(w, http.StatusOK, resp)
@@ -119,16 +120,21 @@ func loadRepoLatestCommit(r *http.Request, db *gorm.DB, repoDBID string) *RepoMe
 	}
 }
 
-func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID string) RepoMetadataRuns {
+func loadRepoRuns(r *http.Request, db *gorm.DB, repoDBID string) RepoMetadataRuns {
 	response := RepoMetadataRuns{
 		Total:    0,
 		Timeline: []RepoMetadataRunSummary{},
 	}
-
-	query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", "CREATE_RUN")
-	if org != "" && slug != "" {
-		query = query.Where("payload::text LIKE ?", "%"+org+"/"+slug+"%")
+	if repoDBID == "" {
+		return response
 	}
+
+	query := db.WithContext(r.Context()).
+		Table("jobs").
+		Joins(`JOIN repo_commits rc
+			ON rc.repo_id = ?
+			AND rc.commit_sha = COALESCE(NULLIF(jobs.commit_hash, ''), NULLIF(jobs.payload->>'commit_sha', ''))`, repoDBID).
+		Where("jobs.type = ?", "CREATE_RUN")
 
 	query.Where("finished_at IS NOT NULL").Count(&response.Total)
 
@@ -142,8 +148,8 @@ func loadRepoRuns(r *http.Request, db *gorm.DB, org, slug string, repoDBID strin
 		FinishedAt *time.Time
 		Result     []byte
 	}
-	if err := query.Select("id, status, payload, commit_hash, created_at, locked_at, finished_at, result").
-		Order("created_at DESC").
+	if err := query.Select("jobs.id, jobs.status, jobs.payload, jobs.commit_hash, jobs.created_at, jobs.locked_at, jobs.finished_at, jobs.result").
+		Order("jobs.created_at DESC").
 		Limit(10).
 		Find(&rows).Error; err != nil {
 		return response
@@ -254,22 +260,28 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSB
 	}
 
 	var sbom struct {
-		ID        string
-		Format    string
-		CreatedAt time.Time
+		ID           string
+		Format       string
+		CreatedAt    time.Time
+		ContentBytes []byte
 	}
 	if err := db.WithContext(r.Context()).Table("sboms").
-		Select("id, format, created_at").
+		Select("id, format, created_at, content_bytes").
 		Where("id = ?", sbomID).
 		First(&sbom).Error; err != nil {
 		return RepoMetadataSBOM{}, 0
 	}
 
-	var componentCount int64
-	if err := db.WithContext(r.Context()).Table("sbom_component_view").
-		Where("sbom_id = ? AND is_root = false", sbomID).
-		Count(&componentCount).Error; err != nil {
-		componentCount = 0
+	// countComponentsFromContent correctly handles explicit metadata.component,
+	// implicit root detection (single-component SBOMs), and SPDX root packages.
+	// Fall back to the materialized view only for unrecognised formats.
+	componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
+	if componentCount == 0 {
+		if err := db.WithContext(r.Context()).Table("sbom_component_view").
+			Where("sbom_id = ? AND is_root = false", sbomID).
+			Count(&componentCount).Error; err != nil {
+			componentCount = 0
+		}
 	}
 
 	return RepoMetadataSBOM{
@@ -332,5 +344,31 @@ func loadRepoSecrets(r *http.Request, db *gorm.DB, latestRun *RepoMetadataRunSum
 		LatestRunID:   latestRun.ID,
 		LatestCount:   secret.Count,
 		LastScannedAt: secret.CreatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+func loadRepoVulnerabilities(r *http.Request, db *gorm.DB, repoDBID string) RepoMetadataVulnerabilities {
+	if repoDBID == "" {
+		return RepoMetadataVulnerabilities{}
+	}
+
+	var summary RepoMetadataVulnSummary
+	db.WithContext(r.Context()).Raw(`
+		SELECT
+			COUNT(*) FILTER (WHERE severity = 'CRITICAL') AS critical,
+			COUNT(*) FILTER (WHERE severity = 'HIGH')     AS high,
+			COUNT(*) FILTER (WHERE severity = 'MEDIUM')   AS medium,
+			COUNT(*) FILTER (WHERE severity = 'LOW')      AS low,
+			COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW')) AS unknown
+		FROM view_unified_repositories_vulnerabilities
+		WHERE repo_id = ?
+	`, repoDBID).Scan(&summary)
+
+	if summary.Critical == 0 && summary.High == 0 && summary.Medium == 0 && summary.Low == 0 && summary.Unknown == 0 {
+		return RepoMetadataVulnerabilities{}
+	}
+
+	return RepoMetadataVulnerabilities{
+		Summary: &summary,
 	}
 }

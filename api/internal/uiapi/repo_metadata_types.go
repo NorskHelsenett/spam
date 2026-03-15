@@ -94,6 +94,7 @@ type RepoMetadataVulnSummary struct {
 	High     int `json:"high"`
 	Medium   int `json:"medium"`
 	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
 }
 
 type RepoMetadataVulnItem struct {

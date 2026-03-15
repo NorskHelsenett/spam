@@ -1,11 +1,14 @@
 package runner
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
@@ -140,6 +143,13 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Process SBOM file
+	verifiedCommitSHA, verifyErr := verifyAndPersistRunCommit(r.Context(), s.db, payload, commitHash)
+	if verifyErr != nil {
+		log.Printf("run %s commit verification failed: %v", runID, verifyErr)
+		http.Error(w, verifyErr.Error(), http.StatusConflict)
+		return
+	}
+
 	sbomFile, _, err := r.FormFile("sbom")
 	if err == nil {
 		defer sbomFile.Close()
@@ -149,18 +159,13 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		} else {
 			hash := sha256.Sum256(sbomData)
 
-			commitSHA := commitHash
-			if commitSHA == "" {
-				commitSHA = payload.CommitSHA
-			}
-
 			var storedSBOMID string
 			err := s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 				var binding *artifacts.BindingInput
-				if payload.RepoID != "" && commitSHA != "" {
+				if payload.RepoID != "" && verifiedCommitSHA != "" {
 					commit, err := assets.UpsertRepoCommit(r.Context(), tx, assets.RepoCommitInput{
 						RepoID:    payload.RepoID,
-						CommitSHA: commitSHA,
+						CommitSHA: verifiedCommitSHA,
 						Ref:       payload.Ref,
 					})
 					if err != nil {
@@ -169,7 +174,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 						binding = &artifacts.BindingInput{
 							AssetType:       artifacts.AssetTypeRepoCommit,
 							AssetRefID:      commit.ID,
-							CommitSHA:       commitSHA,
+							CommitSHA:       verifiedCommitSHA,
 							Source:          "spam-runner",
 							CreatedByUserID: "system",
 						}
@@ -268,8 +273,8 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Update run with commit hash if provided
-	if commitHash != "" {
-		if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", runID).Update("commit_hash", commitHash).Error; err != nil {
+	if verifiedCommitSHA != "" {
+		if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", runID).Update("commit_hash", verifiedCommitSHA).Error; err != nil {
 			log.Printf("failed to update commit hash: %v", err)
 		}
 	}
@@ -284,4 +289,33 @@ func extractBearerToken(r *http.Request) string {
 		return auth[7:]
 	}
 	return ""
+}
+
+func verifyAndPersistRunCommit(ctx context.Context, db *gorm.DB, payload jobs.CreateRunPayload, observedCommitSHA string) (string, error) {
+	observedCommitSHA = strings.TrimSpace(observedCommitSHA)
+	expectedCommitSHA := strings.TrimSpace(payload.CommitSHA)
+	commitSHA := observedCommitSHA
+	if commitSHA == "" {
+		commitSHA = expectedCommitSHA
+	}
+
+	if payload.RepoID == "" {
+		return commitSHA, nil
+	}
+	if commitSHA == "" {
+		return "", fmt.Errorf("missing commit hash for repo-linked run")
+	}
+	if expectedCommitSHA != "" && observedCommitSHA != "" && !strings.EqualFold(expectedCommitSHA, observedCommitSHA) {
+		return "", fmt.Errorf("runner checked out %s but job expected %s", observedCommitSHA, expectedCommitSHA)
+	}
+
+	if _, err := assets.UpsertRepoCommit(ctx, db, assets.RepoCommitInput{
+		RepoID:    payload.RepoID,
+		CommitSHA: commitSHA,
+		Ref:       payload.Ref,
+	}); err != nil {
+		return "", fmt.Errorf("persist repo commit: %w", err)
+	}
+
+	return commitSHA, nil
 }

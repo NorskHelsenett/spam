@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import { X, Package, GitBranch, Container, CheckCircle, Microscope, FileCode, Scale, ExternalLink, Github, Gitlab, Download } from 'lucide-svelte';
+	import { X, Package, GitBranch, Container, CheckCircle, Microscope, FileCode, Scale, ExternalLink, Github, Gitlab, Download, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
 	type ComponentVersion = {
@@ -149,6 +149,20 @@
 	let copiedEmail = $state('');
 	let copiedEmailTimer: ReturnType<typeof setTimeout> | null = null;
 
+	type Vulnerability = {
+		vuln_id: string;
+		summary: string;
+		fixed_in?: string;
+		source: string;
+		vex_status?: string;
+		vex_justification?: string;
+		vex_detail?: string;
+	};
+
+	let vulns: Vulnerability[] = $state([]);
+	let vulnsLoading = $state(false);
+	let vulnsCheckedPurl = $state('');
+
 	$effect(() => {
 		if (name && ecosystem) {
 			loadDetail(name, ecosystem);
@@ -171,6 +185,32 @@
 			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
 		};
 	});
+
+	$effect(() => {
+		const purl = componentDetail?.purl;
+		if (!purl || selectedVersions.length !== 1) {
+			vulns = [];
+			vulnsCheckedPurl = '';
+			return;
+		}
+		const versionedPurl = `${purl}@${selectedVersions[0]}`;
+		if (versionedPurl === vulnsCheckedPurl) return;
+		loadVulns(versionedPurl);
+	});
+
+	const loadVulns = async (versionedPurl: string) => {
+		vulnsLoading = true;
+		vulnsCheckedPurl = versionedPurl;
+		try {
+			const params = new URLSearchParams({ purl: versionedPurl });
+			const response = await fetch(`/api/dependencies/vulnerabilities?${params}`, { credentials: 'include' });
+			if (response.ok) vulns = (await response.json()) ?? [];
+		} catch {
+			vulns = [];
+		} finally {
+			vulnsLoading = false;
+		}
+	};
 
 	const findProviderInstance = (provider: string, providerBaseURL?: string) => {
 		return providerInstances.find((p) =>
@@ -554,7 +594,64 @@
 				</div>
 			</div>
 
-			{#if assetsLoading}
+			<!-- Vulnerabilities (shown when exactly one version is selected) -->
+		{#if selectedVersions.length === 1}
+			<div class="border-b border-[var(--border-color)]/60 px-4 py-3">
+				<div class="mb-2 flex items-center gap-2">
+					<ShieldAlert class="h-3.5 w-3.5 shrink-0 text-[var(--text-muted)]" />
+					<span class="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</span>
+					<span class="ml-auto text-[10px] text-[var(--text-muted)]">{selectedVersions[0]}</span>
+				</div>
+				{#if vulnsLoading}
+					<div class="space-y-1.5">
+						{#each [1, 2] as _}
+							<div class="h-8 animate-pulse rounded-lg bg-[var(--hover-bg)]"></div>
+						{/each}
+					</div>
+				{:else if vulns.length === 0}
+					<div class="flex items-center gap-2 rounded-lg bg-green-500/5 px-3 py-2">
+						<ShieldCheck class="h-4 w-4 shrink-0 text-green-400" />
+						<span class="text-[11px] text-green-400">No known vulnerabilities</span>
+					</div>
+				{:else}
+					<div class="space-y-1.5">
+						{#each vulns as v}
+							{@const isNotAffected = v.vex_status === 'not_affected' || v.vex_status === 'fixed'}
+							<div class="rounded-lg border px-3 py-2 {isNotAffected ? 'border-[var(--border-color)]/40 opacity-60' : 'border-red-500/30 bg-red-500/5'}">
+								<div class="flex items-start gap-2">
+									{#if isNotAffected}
+										<ShieldCheck class="mt-0.5 h-3.5 w-3.5 shrink-0 text-green-400" />
+									{:else if v.vex_status === 'under_investigation'}
+										<ShieldQuestion class="mt-0.5 h-3.5 w-3.5 shrink-0 text-yellow-400" />
+									{:else}
+										<ShieldAlert class="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+									{/if}
+									<div class="min-w-0 flex-1">
+										<div class="flex items-center gap-2">
+											<span class="font-mono text-[11px] font-semibold text-[var(--text-bright)]">{v.vuln_id}</span>
+											{#if v.fixed_in}
+												<span class="rounded bg-green-500/10 px-1.5 py-0.5 text-[10px] text-green-400">fix: {v.fixed_in}</span>
+											{/if}
+											{#if v.vex_status}
+												<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)]">{v.vex_status}</span>
+											{/if}
+										</div>
+										{#if v.summary}
+											<p class="mt-0.5 text-[10px] leading-snug text-[var(--text-secondary)]">{v.summary}</p>
+										{/if}
+										{#if v.vex_justification}
+											<p class="mt-0.5 text-[10px] text-[var(--text-muted)]">{v.vex_justification}</p>
+										{/if}
+									</div>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if assetsLoading}
 				<div class="space-y-4 p-4">
 					{#each [1, 2] as _}
 						<div>

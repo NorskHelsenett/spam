@@ -3,13 +3,13 @@
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, X, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab } from 'lucide-svelte';
+	import { Search, SearchX, X, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab, Bug } from 'lucide-svelte';
 	import Select from '$lib/components/Select.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
-	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme';
+	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme' | 'vulnerability';
 
 	type AdvancedSearchResult = {
 		type: AdvancedSearchType;
@@ -56,6 +56,7 @@
 	let previewRawEl: HTMLDivElement | undefined = $state();
 	let previewFindingCount = $state(0);
 	let activeFindingIndex = $state(0);
+	let searchInputEl: HTMLInputElement | undefined = $state();
 
 	const targetOptions = [
 		{ value: 'all', label: 'All targets' },
@@ -64,6 +65,7 @@
 		{ value: 'manifest', label: 'Manifest files' },
 		{ value: 'sbom', label: 'SBOM files' },
 		{ value: 'secret', label: 'Secrets' },
+		{ value: 'vulnerability', label: 'Vulnerabilities' },
 		{ value: 'contributor', label: 'Contributors' },
 		{ value: 'language', label: 'Languages' },
 		{ value: 'readme', label: 'README files' }
@@ -87,6 +89,8 @@
 				return Braces;
 			case 'readme':
 				return BookOpen;
+			case 'vulnerability':
+				return Bug;
 			default:
 				return GitBranch;
 		}
@@ -102,6 +106,17 @@
 			case 'contributor': return 'Contributor';
 			case 'language': return 'Language';
 			case 'readme': return 'README';
+			case 'vulnerability': return 'Vulnerability';
+		}
+	};
+
+	const severityColor = (severity: string) => {
+		switch (severity?.toUpperCase()) {
+			case 'CRITICAL': return 'text-[var(--red)] bg-[var(--red)]/10';
+			case 'HIGH': return 'text-[var(--orange)] bg-[var(--orange)]/10';
+			case 'MEDIUM': return 'text-[var(--yellow)] bg-[var(--yellow)]/10';
+			case 'LOW': return 'text-[var(--green)] bg-[var(--green)]/10';
+			default: return 'text-[var(--text-muted)] bg-[var(--hover-bg)]';
 		}
 	};
 
@@ -274,6 +289,7 @@
 			query = q;
 			loadResults();
 		}
+		searchInputEl?.focus();
 	});
 </script>
 
@@ -285,7 +301,7 @@
 	<section class="panel-surface flex h-[calc(100vh-7rem)] flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2">
 			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Advanced Search</h1>
-			<p class="text-sm text-[var(--text-tertiary)]">Search inside manifests, SBOMs, secrets, contributors, languages, commit IDs, repositories, and README files.</p>
+			<p class="text-sm text-[var(--text-tertiary)]">Search inside manifests, SBOMs, vulnerabilities (CVE IDs, packages), secrets, contributors, languages, commit IDs, repositories, and README files.</p>
 		</header>
 
 			<div class="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
@@ -294,8 +310,9 @@
 					<input
 						type="text"
 						bind:value={query}
+						autofocus
 						oninput={scheduleSearch}
-						placeholder="Search for java, pom.xml, commit SHA, secrets, contributor email, README text..."
+						placeholder="Search for CVE-2021-44228, log4j, pom.xml, commit SHA, secrets, contributor email..."
 						class="h-11 w-full rounded-full border border-[var(--border-color)] bg-[var(--card-bg)] pl-11 pr-10 text-sm text-[var(--text-primary)] outline-none transition placeholder:text-[var(--text-tertiary)] focus:border-[var(--accent)]"
 					/>
 					{#if query.trim()}
@@ -317,7 +334,7 @@
 						</button>
 					{/if}
 				</div>
-			<Select value={target} options={targetOptions} onchange={() => loadResults()} class="w-full sm:w-[13rem]" />
+			<Select bind:value={target} options={targetOptions} onchange={() => loadResults()} class="w-full sm:w-[13rem]" />
 		</div>
 
 		{#if error}
@@ -380,6 +397,12 @@
 									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">installation</span>, <span class="font-mono">quickstart</span></p>
 								</div>
 							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Bug class="h-5 w-5 text-[var(--accent)]" /> Vulnerabilities</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">CVE-2021-44228</span>, <span class="font-mono">log4j</span>, <span class="font-mono">openssl</span></p>
+								</div>
+							</div>
 						</div>
 					</div>
 					{:else if results.length === 0}
@@ -428,15 +451,19 @@
 											{/each}
 										</p>
 										{#if r.value}
-											<p class="mt-1 font-mono text-xs text-[var(--text-muted)]">
-												{#each splitHighlighted(r.value, query) as part}
-													{#if part.match}
-														<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
-													{:else}
-														{part.text}
-													{/if}
-												{/each}
-											</p>
+											{#if r.type === 'vulnerability'}
+												<span class="mt-1 inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide {severityColor(r.value)}">{r.value}</span>
+											{:else}
+												<p class="mt-1 font-mono text-xs text-[var(--text-muted)]">
+													{#each splitHighlighted(r.value, query) as part}
+														{#if part.match}
+															<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+														{:else}
+															{part.text}
+														{/if}
+													{/each}
+												</p>
+											{/if}
 										{/if}
 										<p class="mt-1 line-clamp-2 text-xs text-[var(--text-tertiary)]">
 											{#each splitHighlighted(r.snippet || `${r.title} ${r.value || ''}`, query) as part}

@@ -6,6 +6,7 @@ type JobType = string
 const (
 	JobTypeCreateRun        JobType = "CREATE_RUN"
 	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
+	JobTypeOSVScan          JobType = "OSV_SCAN"
 )
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.

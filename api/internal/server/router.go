@@ -22,6 +22,7 @@ type RouterOptions struct {
 	RunExecutor   *runner.RunExecutor
 	ProviderStore *providerconfig.Store
 	Cache         cache.Store
+	HMACKey       string
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -52,6 +53,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		r.Use(middleware.RealIP)
 		r.Use(middleware.Logger)
 		r.Use(middleware.Recoverer)
+		r.Use(cache.Middleware)
 
 		if authService != nil {
 			r.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
@@ -73,6 +75,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		r.Use(middleware.RealIP)
 		r.Use(middleware.Logger)
 		r.Use(middleware.Recoverer)
+		r.Use(cache.Middleware)
 		r.Use(middleware.Timeout(60 * time.Second))
 
 		r.Route("/api", func(api chi.Router) {
@@ -98,6 +101,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
+				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
+				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
+				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
@@ -118,11 +124,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies/export/detail.csv", uiapi.DependencyDetailExportCSVHandler(db, authService))
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
+				api.Get("/dependencies/vulnerabilities", uiapi.DependencyVulnerabilitiesHandler(db, authService))
+				api.Post("/dependencies/vex", uiapi.DependencyVEXHandler(db, authService))
 				api.Get("/search/advanced", uiapi.AdvancedSearchHandler(db, authService))
 				api.Get("/search/preview", uiapi.AdvancedSearchPreviewHandler(db, authService))
 				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
 				api.Get("/repos/contributors", uiapi.RepoContributorsHandler(db, authService, providerStore, appCache))
+				api.Get("/repos/dependencies/list", uiapi.RepoDependenciesListHandler(db, authService))
 				api.Get("/repos/security", uiapi.RepoSecurityCountsHandler(db, authService))
+				api.Get("/repos/secrets/list", uiapi.RepoSecretsListHandler(db, authService))
 				api.Get("/repos/metadata", uiapi.RepoMetadataHandler(db, authService, appCache))
 				api.Get("/providers/instances", uiapi.ProvidersInstancesHandler(db, authService, providerStore))
 				api.Get("/providers/details", uiapi.ProviderRepoDetailsHandler(authService, providerStore, db, appCache))
@@ -142,6 +152,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
 				api.Post("/runs", uiapi.RunsCreateHandler(db, authService))
+				api.Post("/runs/failed/reschedule", uiapi.RunsRescheduleFailedHandler(db, authService))
+				api.Delete("/runs/failed", uiapi.RunsDeleteFailedHandler(db, authService))
 				// scan-all is registered in the no-timeout SSE group above
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
@@ -157,6 +169,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				}
 			}
 		})
+
+		if authService != nil {
+			r.Route("/api/vuln", func(v chi.Router) {
+				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
+				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
+				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
+				v.Get("/list", uiapi.VulnListHandler(db, authService))
+			})
+		}
 
 		if spaHandler != nil && authService != nil {
 			r.Handle("/*", authService.SPAGuard(spaHandler))

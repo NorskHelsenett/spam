@@ -48,7 +48,8 @@
 		--tab-index: 0;
 		position: relative;
 		display: grid;
-		grid-template-columns: repeat(var(--tab-count), minmax(0, 1fr));
+		grid-template-columns: repeat(var(--tab-count), 1fr);
+		min-width: max-content;
 		gap: 6px;
 		padding: 4px;
 		border: 1px solid var(--border-color);
@@ -81,6 +82,7 @@
 		color: var(--text-secondary);
 		cursor: pointer;
 		user-select: none;
+		white-space: nowrap;
 		transition: color 200ms ease;
 	}
 

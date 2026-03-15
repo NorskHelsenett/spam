@@ -7,6 +7,14 @@ import (
 )
 
 func parseCsproj(manifestID, content string) []ManifestDependency {
+	return parseDotnetPackageTag(manifestID, content, "PackageReference")
+}
+
+func parseDirectoryPackagesProps(manifestID, content string) []ManifestDependency {
+	return parseDotnetPackageTag(manifestID, content, "PackageVersion")
+}
+
+func parseDotnetPackageTag(manifestID, content, tagName string) []ManifestDependency {
 	var deps []ManifestDependency
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
@@ -14,23 +22,15 @@ func parseCsproj(manifestID, content string) []ManifestDependency {
 		if strings.HasPrefix(trimmed, "<!--") {
 			continue
 		}
-		if !strings.Contains(line, "PackageReference") {
+		if !strings.Contains(line, tagName) {
 			continue
 		}
 
-		var name, version string
-		if idx := strings.Index(line, `Include="`); idx != -1 {
-			start := idx + 9
-			if end := strings.Index(line[start:], `"`); end != -1 {
-				name = line[start : start+end]
-			}
+		name := extractXMLAttribute(line, "Include")
+		if name == "" {
+			name = extractXMLAttribute(line, "Update")
 		}
-		if idx := strings.Index(line, `Version="`); idx != -1 {
-			start := idx + 9
-			if end := strings.Index(line[start:], `"`); end != -1 {
-				version = line[start : start+end]
-			}
-		}
+		version := extractXMLAttribute(line, "Version")
 
 		if name != "" && version != "" {
 			deps = append(deps, ManifestDependency{
@@ -44,6 +44,21 @@ func parseCsproj(manifestID, content string) []ManifestDependency {
 		}
 	}
 	return deps
+}
+
+func extractXMLAttribute(line, attr string) string {
+	attrPrefix := attr + `="`
+	idx := strings.Index(line, attrPrefix)
+	if idx == -1 {
+		return ""
+	}
+
+	start := idx + len(attrPrefix)
+	end := strings.Index(line[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+	return line[start : start+end]
 }
 
 func parsePackagesConfig(manifestID, content string) []ManifestDependency {

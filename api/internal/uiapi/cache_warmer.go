@@ -18,9 +18,6 @@ import (
 
 const (
 	defaultSyncTTL = time.Hour
-	// maxRepoCacheAge caps how long we skip a full API fetch even if PushedAt
-	// hasn't changed, so dormant repos still get a periodic consistency check.
-	maxRepoCacheAge = 7 * 24 * time.Hour
 	// repoListTTL is the in-memory TTL for the provider repo list. It is kept
 	// long so that the list survives rate-limit periods between sync cycles.
 	// The list is refreshed on every successful sync, not on expiry.
@@ -86,7 +83,7 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 	if err != nil {
 		log.Printf("cache warmer: %s db count error: %v", p.DisplayName, err)
 	}
-	freshCount, err := assets.CountFreshRepoCacheByProvider(ctx, db, p.ID, freshSince)
+	freshCount, err := assets.CountFreshRepoCacheByProvider(ctx, db, c, p.ID, freshSince)
 	if err != nil {
 		log.Printf("cache warmer: %s fresh count error: %v", p.DisplayName, err)
 	}
@@ -97,7 +94,7 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 	// Case 1: all provider repos are cached and fresh (DB may have extra stale rows
 	// from repos deleted/made-private on the provider) — restore from DB only.
 	if providerTotal >= 0 && freshCount >= int64(providerTotal) {
-		if rebuildFromDB(ctx, db, c, p, ttl) {
+		if rebuildResponseCache(ctx, db, c, p, ttl) {
 			log.Printf("cache warmer: %s fully restored from DB", p.DisplayName)
 			return
 		}
@@ -105,7 +102,7 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 
 	// Case 2: DB has at least as many repos as provider but some cache is missing/stale.
 	if providerTotal >= 0 && dbCount >= int64(providerTotal) && freshCount < int64(providerTotal) {
-		rebuildFromDB(ctx, db, c, p, ttl) // restore what we can
+		rebuildResponseCache(ctx, db, c, p, ttl) // restore what we can
 		missing := int64(providerTotal) - freshCount
 		log.Printf("cache warmer: %s filling %d stale/missing cache entries", p.DisplayName, missing)
 		warmMissingCache(ctx, db, c, p, token, freshSince)
@@ -115,7 +112,7 @@ func warmProviderSmart(ctx context.Context, db *gorm.DB, store *providerconfig.S
 	// Case 3a: count call failed (e.g. rate limited) but DB has repos — use DB as
 	// source of truth and fill missing cache entries without pagination.
 	if providerTotal < 0 && dbCount > 0 {
-		rebuildFromDB(ctx, db, c, p, ttl)
+		rebuildResponseCache(ctx, db, c, p, ttl)
 		if freshCount < dbCount {
 			log.Printf("cache warmer: %s count unavailable, filling %d stale/missing from DB", p.DisplayName, dbCount-freshCount)
 			warmMissingCache(ctx, db, c, p, token, freshSince)
@@ -135,11 +132,12 @@ func providerTTL(p providerconfig.ProviderInstance) time.Duration {
 	return defaultSyncTTL
 }
 
-// rebuildFromDB attempts to restore the in-memory cache for a provider from
-// persisted DB data without making any provider API calls.
+// rebuildResponseCache restores the short-lived response-format cache keys
+// (provider:details:*, contributors:*, provider:repos:*) from the longer-lived
+// repo:cache:* entries in kv_store, without making any provider API calls.
 // Returns true if enough fresh cache entries were found and restored.
-func rebuildFromDB(ctx context.Context, db *gorm.DB, c cache.Store, p providerconfig.ProviderInstance, ttl time.Duration) bool {
-	dbCaches, err := assets.ListRepoCacheByProvider(ctx, db, p.ID)
+func rebuildResponseCache(ctx context.Context, db *gorm.DB, c cache.Store, p providerconfig.ProviderInstance, ttl time.Duration) bool {
+	dbCaches, err := assets.ListRepoCacheByProvider(ctx, db, c, p.ID)
 	if err != nil || len(dbCaches) == 0 {
 		return false
 	}
@@ -333,7 +331,7 @@ func fetchRepoFullData(ctx context.Context, p providerconfig.ProviderInstance, t
 // missing or stale — no pagination, no re-discovery, just targeted gap-filling.
 // Uses a conservative 500ms delay between repos to avoid rate-limit (429) errors.
 func warmMissingCache(ctx context.Context, db *gorm.DB, c cache.Store, p providerconfig.ProviderInstance, token string, freshSince time.Time) {
-	repos, err := assets.ListReposWithStaleCacheByProvider(ctx, db, p.ID, freshSince)
+	repos, err := assets.ListReposWithStaleCacheByProvider(ctx, db, c, p.ID, freshSince)
 	if err != nil {
 		log.Printf("cache warmer: %s list stale repos: %v", p.DisplayName, err)
 		return
@@ -351,10 +349,10 @@ func warmMissingCache(ctx context.Context, db *gorm.DB, c cache.Store, p provide
 
 		// If the repo hasn't been pushed since the last cache entry and the
 		// cache isn't older than maxRepoCacheAge, restore from DB — no API call.
-		if dbCache, err := assets.GetRepoCache(ctx, db, repo.ID); err == nil {
+		if dbCache, err := assets.GetRepoCache(ctx, c, repo.ID); err == nil {
 			providerUpdatedAt := repo.ProviderUpdatedAt
 			repoUnchanged := providerUpdatedAt != nil && !providerUpdatedAt.After(dbCache.SyncedAt)
-			cacheStale := time.Since(dbCache.SyncedAt) >= maxRepoCacheAge
+			cacheStale := time.Since(dbCache.SyncedAt) >= assets.MaxRepoCacheAge
 			if repoUnchanged && !cacheStale {
 				detailsCacheKey := fmt.Sprintf("provider:details:%s:%s", p.ID, strings.Trim(path, "/"))
 				if _, ok, _ := cache.GetJSON[RepoDetailsResponse](ctx, c, detailsCacheKey); !ok {
@@ -403,7 +401,7 @@ func warmMissingCache(ctx context.Context, db *gorm.DB, c cache.Store, p provide
 		detailsBytes, _ := json.Marshal(details)
 		commitsBytes, _ := json.Marshal(commits)
 		contribsBytes, _ := json.Marshal(contribs)
-		if dbErr := assets.UpsertRepoCache(ctx, db, repo.ID,
+		if dbErr := assets.UpsertRepoCache(ctx, c, repo.ID,
 			string(detailsBytes), readme, string(commitsBytes), string(contribsBytes),
 		); dbErr != nil {
 			log.Printf("cache warmer: %s persist cache %s: %v", p.DisplayName, path, dbErr)

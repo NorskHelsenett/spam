@@ -533,7 +533,7 @@
 	{:else if run}
 		{@const StatusIcon = getStatusIcon(run.status)}
 
-		<section class="panel-surface space-y-6 px-6 py-8 sm:px-10">
+		<article class="panel-surface space-y-6 px-6 py-8 sm:px-10">
 			<div class="flex items-start justify-between gap-4">
 				<div class="flex-1">
 					<div class="flex items-center gap-3">
@@ -594,7 +594,7 @@
 				{@const secretsArtifact = artifacts.find(a => a.type === 'secrets')}
 				{@const manifestsArtifact = artifacts.find(a => a.type === 'manifests')}
 				<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+					<div class="metric-card rounded-2xl p-4 sm:p-6">
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Components</p>
 							<Package class="h-5 w-5 text-[var(--success)]" />
@@ -604,7 +604,7 @@
 						</p>
 						<p class="mt-1 text-xs text-[var(--text-muted)]">from SBOM analysis</p>
 					</div>
-					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+					<div class="metric-card rounded-2xl p-4 sm:p-6">
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Secrets Found</p>
 							<Shield class="h-5 w-5" style="color: {secretsArtifact && secretsArtifact.count > 0 ? 'var(--warning)' : 'var(--success)'}" />
@@ -614,7 +614,7 @@
 						</p>
 						<p class="mt-1 text-xs text-[var(--text-muted)]">from secret detection scan</p>
 					</div>
-					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-5">
+					<div class="metric-card rounded-2xl p-4 sm:p-6">
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Manifests</p>
 							<FileCode class="h-5 w-5 text-[var(--accent)]" />
@@ -628,7 +628,7 @@
 			{/if}
 
 			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Provider</p>
 					{#if run.base_url}
 						<a
@@ -647,17 +647,17 @@
 						</a>
 					{/if}
 				</div>
-				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Duration</p>
 					<p class="mt-1 font-mono text-lg font-semibold text-[var(--text-bright)]">
 						{formatDuration(run.started_at, run.finished_at)}
 					</p>
 				</div>
-				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Created</p>
 					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.created_at)}</p>
 				</div>
-				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Finished</p>
 					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.finished_at)}</p>
 				</div>
@@ -668,10 +668,10 @@
 					K8s Job: {run.k8s_job_name}
 				</div>
 			{/if}
-		</section>
+		</article>
 
 		<!-- Timeline Section -->
-		<section class="panel-surface px-6 py-6 sm:px-10">
+		<article class="panel-surface px-6 py-6 sm:px-10">
 			<div class="mb-4 flex items-center justify-between">
 				<h2 class="flex items-center gap-2 text-lg font-semibold text-[var(--text-bright)]">
 					<Activity class="h-5 w-5 text-[var(--accent)]" />
@@ -699,9 +699,9 @@
 					commitHash={run.commit_sha || ''}
 				/>
 			{/if}
-		</section>
+		</article>
 
-		<section class="panel-surface space-y-6 px-6 py-8 sm:px-10">
+		<article class="panel-surface space-y-6 px-6 py-8 sm:px-10">
 			<!-- Results Section -->
 			{#if run.status === 'SUCCEEDED' && artifacts.length > 0}
 				<div class="space-y-4">
@@ -791,7 +791,7 @@
 			<p class="text-xs text-[var(--text-muted)]">
 				Full ID: {run.id}
 			</p>
-		</section>
+		</article>
 	{/if}
 </div>
 

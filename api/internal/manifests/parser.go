@@ -86,6 +86,8 @@ func detectManifestType(path string) string {
 	switch {
 	case strings.HasSuffix(base, ".csproj"), strings.HasSuffix(base, ".fsproj"), strings.HasSuffix(base, ".vbproj"):
 		return "csproj"
+	case base == "Directory.Packages.props":
+		return "Directory.Packages.props"
 	case base == "packages.config":
 		return "packages.config"
 	case base == "package.json":
@@ -225,6 +227,8 @@ func parseDependenciesByType(manifestID, manifestType, content string) []Manifes
 	switch manifestType {
 	case "csproj":
 		return parseCsproj(manifestID, content)
+	case "Directory.Packages.props":
+		return parseDirectoryPackagesProps(manifestID, content)
 	case "packages.config":
 		return parsePackagesConfig(manifestID, content)
 	case "package.json":

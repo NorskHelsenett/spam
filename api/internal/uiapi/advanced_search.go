@@ -50,20 +50,21 @@ type advancedSearchDBRow struct {
 }
 
 var advancedSearchTargets = map[string]struct{}{
-	"manifest":    {},
-	"sbom":        {},
-	"secret":      {},
-	"contributor": {},
-	"language":    {},
-	"commit":      {},
-	"repo":        {},
-	"readme":      {},
+	"manifest":      {},
+	"sbom":          {},
+	"secret":        {},
+	"contributor":   {},
+	"language":      {},
+	"commit":        {},
+	"repo":          {},
+	"readme":        {},
+	"vulnerability": {},
 }
 
 func normalizeAdvancedTargets(target string) []string {
 	target = strings.TrimSpace(strings.ToLower(target))
 	if target == "" || target == "all" {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vulnerability"}
 	}
 	parts := strings.Split(target, ",")
 	out := make([]string, 0, len(parts))
@@ -342,6 +343,69 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			ORDER BY rc.synced_at DESC
 			LIMIT ?
 		`, like, perTargetLimit).Scan(&rows).Error
+		return rows, err
+	case "vulnerability":
+		err := db.WithContext(r.Context()).Raw(`
+			SELECT * FROM (
+				-- Trivy results
+				SELECT
+					'vulnerability' AS type,
+					'trivy/' || tsr.id || '/' || (vuln->>'VulnerabilityID') AS source_ref,
+					r.id AS repo_id,
+					r.provider,
+					COALESCE(pi.id, '') AS provider_id,
+					COALESCE(pi.base_url, '') AS base_url,
+					COALESCE(pi.owner_path, '') AS owner_path,
+					r.org,
+					r.slug,
+					vuln->>'VulnerabilityID' AS title,
+					COALESCE(vuln->>'Severity', 'UNKNOWN') AS value,
+					(COALESCE(vuln->>'PkgName', '') || ' ' || COALESCE(vuln->>'InstalledVersion', '') || ' - ' || COALESCE(vuln->>'Title', '') || ' ' || COALESCE(vuln->>'Description', '')) AS source_text,
+					tsr.scanned_at AS created_at
+				FROM trivy_scan_results tsr
+				JOIN repos r ON r.id = tsr.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
+				WHERE
+					vuln->>'VulnerabilityID' ILIKE ?
+					OR vuln->>'PkgName' ILIKE ?
+					OR vuln->>'Title' ILIKE ?
+					OR vuln->>'Description' ILIKE ?
+
+				UNION ALL
+
+				-- OSV results
+				SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
+					'vulnerability' AS type,
+					'osv/' || cv.vuln_id || '/' || rc.repo_id AS source_ref,
+					r.id AS repo_id,
+					r.provider,
+					COALESCE(pi.id, '') AS provider_id,
+					COALESCE(pi.base_url, '') AS base_url,
+					COALESCE(pi.owner_path, '') AS owner_path,
+					r.org,
+					r.slug,
+					cv.vuln_id AS title,
+					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN') AS value,
+					(COALESCE(sc.package_name, cv.purl, '') || ' ' || COALESCE(sc.purl_version, '') || ' - ' || COALESCE(cv.summary, '') || ' ' || COALESCE(cv.description, '')) AS source_text,
+					cv.checked_at AS created_at
+				FROM component_vulnerabilities cv
+				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
+				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
+				JOIN repos r ON r.id = rc.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+				WHERE cv.vuln_id <> '_none'
+				AND (
+					cv.vuln_id ILIKE ?
+					OR cv.summary ILIKE ?
+					OR cv.description ILIKE ?
+					OR sc.package_name ILIKE ?
+				)
+			) combined
+			ORDER BY created_at DESC
+			LIMIT ?
+		`, like, like, like, like, like, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
 	default:
 		return []advancedSearchDBRow{}, nil
@@ -686,6 +750,108 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Raw = strings.TrimSpace(row.Details + "\n\n" + row.Readme + "\n\n" + row.Commits + "\n\n" + row.Contribs)
 			resp.Metadata["repo"] = row.Org + "/" + row.Slug
 			resp.Metadata["provider"] = row.Provider
+		case "vulnerability":
+		// source_ref is "trivy/{tsr_id}/{vuln_id}" or "osv/{vuln_id}/{repo_id}"
+		parts := strings.SplitN(sourceRef, "/", 3)
+		if len(parts) != 3 {
+			http.Error(w, "invalid source_ref for vulnerability", http.StatusBadRequest)
+			return
+		}
+		vulnSource, id1, id2 := parts[0], parts[1], parts[2]
+
+		switch vulnSource {
+		case "trivy":
+			tsrID, vulnID := id1, id2
+			var vulnRow struct {
+				RepoID   string
+				Provider string
+				Org      string
+				Slug     string
+				VulnJSON string
+				Target   string
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT
+					r.id AS repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					vuln::text AS vuln_json,
+					COALESCE(result.result->>'Target', '') AS target
+				FROM trivy_scan_results tsr
+				JOIN repos r ON r.id = tsr.repo_id
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
+				WHERE tsr.id = ? AND vuln->>'VulnerabilityID' = ?
+				LIMIT 1
+			`, tsrID, vulnID).Scan(&vulnRow).Error
+			if err != nil || vulnRow.RepoID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
+			resp.Raw = vulnRow.VulnJSON
+			resp.Metadata["vuln_id"] = vulnID
+			resp.Metadata["scan_id"] = tsrID
+			resp.Metadata["source"] = "trivy"
+			if vulnRow.Target != "" {
+				resp.Metadata["target"] = vulnRow.Target
+			}
+		case "osv":
+			vulnID, repoID2 := id1, id2
+			var osvRow struct {
+				RepoID      string
+				Provider    string
+				Org         string
+				Slug        string
+				VulnID      string
+				Summary     string
+				Description string
+				Severity    string
+				FixedIn     string
+				PkgName     string
+				PkgVersion  string
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT DISTINCT ON (cv.vuln_id)
+					r.id AS repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					cv.vuln_id,
+					COALESCE(cv.summary, '') AS summary,
+					COALESCE(cv.description, '') AS description,
+					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN') AS severity,
+					COALESCE(cv.fixed_in, '') AS fixed_in,
+					COALESCE(sc.package_name, cv.purl, '') AS pkg_name,
+					COALESCE(sc.purl_version, '') AS pkg_version
+				FROM component_vulnerabilities cv
+				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
+				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
+				JOIN repos r ON r.id = rc.repo_id
+				WHERE cv.vuln_id = ? AND rc.repo_id = ?
+				LIMIT 1
+			`, vulnID, repoID2).Scan(&osvRow).Error
+			if err != nil || osvRow.RepoID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			resp.RepoID, resp.Provider, resp.Org, resp.Slug = osvRow.RepoID, osvRow.Provider, osvRow.Org, osvRow.Slug
+			resp.Raw = osvRow.Description
+			resp.Metadata["vuln_id"] = osvRow.VulnID
+			resp.Metadata["summary"] = osvRow.Summary
+			resp.Metadata["severity"] = osvRow.Severity
+			resp.Metadata["source"] = "osv"
+			if osvRow.FixedIn != "" {
+				resp.Metadata["fixed_in"] = osvRow.FixedIn
+			}
+			if osvRow.PkgName != "" {
+				resp.Metadata["package"] = osvRow.PkgName + "@" + osvRow.PkgVersion
+			}
+		default:
+			http.Error(w, "unknown vulnerability source", http.StatusBadRequest)
+			return
+		}
 		}
 
 		if repoID != "" && resp.RepoID != "" && repoID != resp.RepoID {

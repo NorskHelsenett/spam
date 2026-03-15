@@ -1,0 +1,72 @@
+{{- if .Values.trivyScanner.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-trivy-scanner
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-trivy-scanner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: trivy-scanner
+    app.kubernetes.io/managed-by: Helm
+spec:
+  schedule: {{ .Values.trivyScanner.schedule | quote }}
+  concurrencyPolicy: Allow
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.trivyScanner.activeDeadlineSeconds | default 14400 }}
+      ttlSecondsAfterFinished: 3600
+      parallelism: {{ .Values.trivyScanner.parallelism | default 3 }}
+      completions: {{ .Values.trivyScanner.parallelism | default 3 }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}-trivy-scanner
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: trivy-scanner
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: trivy-scanner
+              image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default "latest" }}"
+              imagePullPolicy: {{ .Values.runner.image.pullPolicy }}
+              command: ["/usr/local/bin/trivy-scanner"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: false
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+              env:
+                - name: SPAM_API_URL
+                  value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
+                - name: RUNNER_HMAC_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-runner
+                      key: RUNNER_HMAC_KEY
+                - name: TRIVY_CACHE_DIR
+                  value: /trivy-cache
+              volumeMounts:
+                - name: trivy-cache
+                  mountPath: /trivy-cache
+              {{- with .Values.trivyScanner.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          volumes:
+            - name: trivy-cache
+              emptyDir: {}
+{{- end }}

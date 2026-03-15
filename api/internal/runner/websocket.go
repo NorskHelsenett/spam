@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/gorilla/websocket"
 )
 
@@ -124,8 +125,32 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		case "commit_hash":
 			log.Printf("received commit hash for run %s: %s", claims.RunID, msg.CommitHash)
-			// Store commit hash in database
-			if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", claims.RunID).Update("commit_hash", msg.CommitHash).Error; err != nil {
+			var run Run
+			if err := s.db.WithContext(r.Context()).Where("id = ?", claims.RunID).First(&run).Error; err != nil {
+				log.Printf("failed to load run for commit hash: %v", err)
+				continue
+			}
+
+			var payload jobs.CreateRunPayload
+			if len(run.Payload) > 0 {
+				if err := json.Unmarshal(run.Payload, &payload); err != nil {
+					log.Printf("failed to unmarshal run payload for commit hash: %v", err)
+					continue
+				}
+			}
+
+			verifiedCommitSHA, err := verifyAndPersistRunCommit(r.Context(), s.db, payload, msg.CommitHash)
+			if err != nil {
+				log.Printf("failed to verify commit hash for run %s: %v", claims.RunID, err)
+				continue
+			}
+
+			if verifiedCommitSHA == "" {
+				continue
+			}
+
+			// Store commit hash in database after it has been verified.
+			if err := s.db.WithContext(r.Context()).Model(&Run{}).Where("id = ?", claims.RunID).Update("commit_hash", verifiedCommitSHA).Error; err != nil {
 				log.Printf("failed to update commit hash: %v", err)
 			}
 

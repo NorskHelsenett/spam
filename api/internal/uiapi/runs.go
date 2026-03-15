@@ -77,6 +77,26 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		repoPath := r.URL.Query().Get("repo_path")
 		repoID := r.URL.Query().Get("repo_id")
 
+		sortBy := r.URL.Query().Get("sort_by")
+		sortDir := r.URL.Query().Get("sort_dir")
+		if sortDir != "asc" && sortDir != "desc" {
+			sortDir = "desc"
+		}
+		var orderClause string
+		switch sortBy {
+		case "status":
+			orderClause = fmt.Sprintf(
+				"CASE status WHEN 'RUNNING' THEN 0 WHEN 'QUEUED' THEN 1 WHEN 'FAILED' THEN 2 ELSE 3 END %s, created_at DESC",
+				strings.ToUpper(sortDir),
+			)
+		case "provider":
+			orderClause = fmt.Sprintf("payload->>'provider' %s, created_at DESC", strings.ToUpper(sortDir))
+		case "duration":
+			orderClause = fmt.Sprintf("(COALESCE(finished_at, NOW()) - COALESCE(locked_at, created_at)) %s", strings.ToUpper(sortDir))
+		default: // "created" or empty
+			orderClause = fmt.Sprintf("created_at %s", strings.ToUpper(sortDir))
+		}
+
 		var total int64
 		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
 		if len(statuses) == 1 {
@@ -108,7 +128,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		offset := (page - 1) * pageSize
 		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
-			Order("created_at DESC").
+			Order(orderClause).
 			Offset(offset).
 			Limit(pageSize).
 			Find(&jobRecords).Error; err != nil {
@@ -277,25 +297,45 @@ func RunsCreateHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			return
 		}
 
-		// Build clone URL based on provider
-		cloneURL := buildCloneURL(req.Provider, req.RepoPath, req.BaseURL)
+		// Resolve provider and its stored base URL from the database.
+		// Never trust req.BaseURL from the client — it could be an attacker-
+		// controlled URL that would receive the provider token (SSRF).
+		providerID := strings.TrimSpace(req.ProviderID)
+		var storedBaseURL string
+		if providerID != "" {
+			var pi struct{ BaseURL string }
+			if err := db.WithContext(r.Context()).
+				Table("provider_instances").
+				Select("base_url").
+				Where("id = ? AND enabled = true", providerID).
+				Scan(&pi).Error; err != nil || pi.BaseURL == "" {
+				http.Error(w, "provider not found or has no base URL", http.StatusBadRequest)
+				return
+			}
+			storedBaseURL = pi.BaseURL
+		} else {
+			match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, "", req.RepoPath)
+			if err != nil || match == nil || match.BaseURL == "" {
+				http.Error(w, "no configured provider found for this repo", http.StatusBadRequest)
+				return
+			}
+			providerID = match.ID
+			storedBaseURL = match.BaseURL
+		}
+
+		// Build clone URL using only the server-side base URL, never the client-supplied one.
+		cloneURL := buildCloneURL(req.Provider, req.RepoPath, storedBaseURL)
 		if cloneURL == "" {
-			http.Error(w, "invalid provider or repo_path", http.StatusBadRequest)
+			http.Error(w, "could not build clone URL", http.StatusBadRequest)
 			return
 		}
 
-		providerID := strings.TrimSpace(req.ProviderID)
-		if providerID == "" {
-			if match, err := providerconfig.FindProviderMatch(r.Context(), db, req.Provider, req.BaseURL, req.RepoPath); err == nil && match != nil {
-				providerID = match.ID
-			}
-		}
-
+		fullPath := strings.Trim(req.RepoPath, "/")
 		org := ""
-		slug := req.RepoPath
-		if parts := strings.Split(req.RepoPath, "/"); len(parts) > 1 {
-			org = parts[0]
-			slug = parts[len(parts)-1]
+		slug := fullPath
+		if lastSlash := strings.LastIndex(fullPath, "/"); lastSlash >= 0 {
+			org = fullPath[:lastSlash]
+			slug = fullPath[lastSlash+1:]
 		}
 
 		repo, err := assets.UpsertRepo(r.Context(), db, assets.RepoInput{
@@ -563,18 +603,13 @@ func RunsActiveStreamHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 // buildCloneURL constructs a clone URL based on provider and repo path.
 func buildCloneURL(provider, repoPath, baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	repoPath = strings.Trim(repoPath, "/")
+	if baseURL == "" || repoPath == "" {
+		return ""
+	}
 	switch provider {
-	case "github":
-		return "https://github.com/" + repoPath + ".git"
-	case "gitlab":
-		if baseURL != "" {
-			return baseURL + "/" + repoPath + ".git"
-		}
-		return "https://gitlab.com/" + repoPath + ".git"
-	case "gitea", "forgejo":
-		if baseURL == "" {
-			return ""
-		}
+	case "github", "gitlab", "gitea", "forgejo":
 		return baseURL + "/" + repoPath + ".git"
 	default:
 		return ""
@@ -854,5 +889,72 @@ func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		writeJSON(w, http.StatusOK, secret)
+	}
+}
+
+// RunsRescheduleFailedHandler resets failed runs to QUEUED for repos that have no newer non-failed run.
+// POST /api/runs/failed/reschedule
+func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		var totalFailed int64
+		db.WithContext(r.Context()).Table("jobs").
+			Where("type = ? AND status = ?", jobs.JobTypeCreateRun, jobs.JobStatusFailed).
+			Count(&totalFailed)
+
+		result := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE type = ? AND status = ?
+			  AND payload->>'repo_id' != ''
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs j2
+			      WHERE j2.type = ?
+			        AND j2.status IN ('QUEUED', 'RUNNING', 'SUCCEEDED')
+			        AND j2.payload->>'repo_id' = jobs.payload->>'repo_id'
+			        AND j2.created_at > jobs.created_at
+			  )`,
+			jobs.JobTypeCreateRun, jobs.JobStatusFailed, jobs.JobTypeCreateRun,
+		)
+		if result.Error != nil {
+			log.Printf("failed to reschedule failed runs: %v", result.Error)
+			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]int64{
+			"rescheduled": result.RowsAffected,
+			"skipped":     totalFailed - result.RowsAffected,
+		})
+	}
+}
+
+// RunsDeleteFailedHandler deletes all failed runs.
+// DELETE /api/runs/failed
+func RunsDeleteFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		result := db.WithContext(r.Context()).Exec(
+			"DELETE FROM jobs WHERE type = ? AND status = ?",
+			jobs.JobTypeCreateRun, jobs.JobStatusFailed,
+		)
+		if result.Error != nil {
+			log.Printf("failed to delete failed runs: %v", result.Error)
+			http.Error(w, "failed to delete failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]int64{
+			"deleted": result.RowsAffected,
+		})
 	}
 }
