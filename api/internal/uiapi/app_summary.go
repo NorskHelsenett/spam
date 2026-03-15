@@ -178,10 +178,29 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		latest_repo_secrets AS (
 			SELECT DISTINCT ON (repo_id)
 				repo_id,
-				finding_count
+				findings
 			FROM run_secrets
 			WHERE repo_id IS NOT NULL AND repo_id <> ''
 			ORDER BY repo_id, created_at DESC
+		),
+		latest_repo_secret_findings AS (
+			SELECT DISTINCT
+				COALESCE(
+					NULLIF(finding ->> 'Fingerprint', ''),
+					md5(
+						concat_ws(
+							'|',
+							COALESCE(finding ->> 'RuleID', ''),
+							COALESCE(finding ->> 'Description', ''),
+							COALESCE(finding ->> 'File', ''),
+							COALESCE(finding ->> 'StartLine', ''),
+							COALESCE(finding ->> 'Match', ''),
+							COALESCE(finding ->> 'Secret', '')
+						)
+					)
+				) AS dedupe_key
+			FROM latest_repo_secrets rs
+			CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
 		)
 		SELECT
 			(SELECT COUNT(*) FROM sbom_bindings) AS sbom_count,
@@ -192,7 +211,7 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			cs.component_version_count,
 			cs.license_count,
 			cs.missing_license_count,
-			COALESCE((SELECT SUM(finding_count) FROM latest_repo_secrets), 0) AS secrets_count
+			COALESCE((SELECT COUNT(*) FROM latest_repo_secret_findings), 0) AS secrets_count
 		FROM comp_stats cs
 	`).Scan(&resp.Counts).Error; err != nil {
 		return resp, err
