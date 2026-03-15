@@ -60,6 +60,7 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 		token := ""
 		label := req.Provider
 		baseURL := ""
+		providerOwnerPath := ""
 		if store != nil && req.ProviderID != "" {
 			if t, err := store.GetActiveToken(r.Context(), req.ProviderID); err == nil {
 				token = t
@@ -69,10 +70,19 @@ func ScanAllHandler(db *gorm.DB, authService *auth.Service, store *providerconfi
 					if p.ID == req.ProviderID {
 						label = p.DisplayName
 						baseURL = p.BaseURL
+						providerOwnerPath = p.OwnerPath
 						break
 					}
 				}
 			}
+		}
+
+		// Prefer the configured owner/group when the request omits it.
+		if req.Owner == "" && (req.Provider == "github" || req.Provider == "gitea" || req.Provider == "forgejo") {
+			req.Owner = providerOwnerPath
+		}
+		if req.Group == "" && req.Provider == "gitlab" {
+			req.Group = providerOwnerPath
 		}
 
 		// Set SSE headers — no timeout middleware on this route.
@@ -121,7 +131,7 @@ func scanAllGitHub(ctx context.Context, db *gorm.DB, owner, baseURL, providerID,
 		return 0, []string{"owner is required"}
 	}
 
-	client := providers.NewGitHubClient(baseURL, token)
+	client := providers.NewGitHubClient(githubAPIBaseURL(baseURL), token)
 	var allErrors []string
 	var totalQueued int
 	page := 1
