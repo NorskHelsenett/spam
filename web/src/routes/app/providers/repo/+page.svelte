@@ -1433,7 +1433,7 @@
 						<div class="flex flex-col items-center justify-center py-16 text-center">
 							<Shield class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
 							<p class="text-sm font-medium text-[var(--text-secondary)]">No secrets found</p>
-							<p class="mt-1 text-xs text-[var(--text-muted)]">No Gitleaks findings for this repository.</p>
+							<p class="mt-1 text-xs text-[var(--text-muted)]">No BetterLeaks findings for this repository.</p>
 						</div>
 					{:else}
 						<div class="space-y-1 p-2">

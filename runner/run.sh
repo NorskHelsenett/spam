@@ -179,33 +179,35 @@ fi
 
 [ $CANCELLED -eq 1 ] && exit 130
 
-which gitleaks >/dev/null 2>&1 || {
-    echo "ERROR: gitleaks not found in PATH"
+which betterleaks >/dev/null 2>&1 || {
+    echo "ERROR: betterleaks not found in PATH"
     exit 1
 }
 
-# Run Gitleaks scan
-log "Running Gitleaks scan..."
-# Gitleaks returns exit code 1 when secrets are found, which is expected
-gitleaks detect --source . --report-format json --report-path "$WORK_DIR/gitleaks.json" > "$WORK_DIR/gitleaks.log" 2>&1
-GITLEAKS_EXIT=$?
+# Run BetterLeaks scan
+log "Running BetterLeaks scan..."
+# BetterLeaks returns exit code 1 when secrets are found, which is expected
+set +e
+betterleaks dir . --report-format json --report-path "$WORK_DIR/betterleaks.json" --no-banner > "$WORK_DIR/betterleaks.log" 2>&1
+BETTERLEAKS_EXIT=$?
+set -e
 while IFS= read -r line; do
     log "$line"
-done < "$WORK_DIR/gitleaks.log"
+done < "$WORK_DIR/betterleaks.log"
 
-if [ $GITLEAKS_EXIT -eq 0 ]; then
-    log "Gitleaks: No secrets detected"
-elif [ $GITLEAKS_EXIT -eq 1 ]; then
-    log "Gitleaks: Potential secrets detected"
+if [ $BETTERLEAKS_EXIT -eq 0 ]; then
+    log "BetterLeaks: No secrets detected"
+elif [ $BETTERLEAKS_EXIT -eq 1 ]; then
+    log "BetterLeaks: Potential secrets detected"
 else
-    log "WARNING: Gitleaks scan encountered errors"
+    log "WARNING: BetterLeaks scan encountered errors"
 fi
 
 [ $CANCELLED -eq 1 ] && exit 130
 
-# Ensure gitleaks output file exists (empty if scan failed)
-if [ ! -f "$WORK_DIR/gitleaks.json" ] || [ ! -s "$WORK_DIR/gitleaks.json" ]; then
-    echo '[]' > "$WORK_DIR/gitleaks.json"
+# Ensure betterleaks output file exists (empty if scan failed)
+if [ ! -f "$WORK_DIR/betterleaks.json" ] || [ ! -s "$WORK_DIR/betterleaks.json" ]; then
+    echo '[]' > "$WORK_DIR/betterleaks.json"
 fi
 
 # Upload results to worker
@@ -215,7 +217,7 @@ if [ "$WORKER_URL" != "local" ]; then
         -H "Authorization: Bearer $RUN_TOKEN" \
         -F "run_id=$RUN_ID" \
         -F "sbom=@$WORK_DIR/sbom.json" \
-        -F "secrets=@$WORK_DIR/gitleaks.json"; then
+        -F "secrets=@$WORK_DIR/betterleaks.json"; then
         log "ERROR: Failed to upload results"
         send_done 1
         exit 1
@@ -225,7 +227,7 @@ else
     OUTPUT_DIR="${OUTPUT_DIR:-/output}"
     if [ -d "$OUTPUT_DIR" ] && [ -w "$OUTPUT_DIR" ]; then
         cp "$WORK_DIR/sbom.json" "$OUTPUT_DIR/sbom.json"
-        cp "$WORK_DIR/gitleaks.json" "$OUTPUT_DIR/gitleaks.json"
+        cp "$WORK_DIR/betterleaks.json" "$OUTPUT_DIR/betterleaks.json"
         log "Local mode: Results saved to $OUTPUT_DIR"
     else
         log "Local mode: No output directory mounted, results not saved"
@@ -245,11 +247,11 @@ else
     log "SBOM Dependencies: $SBOM_DEPS"
 fi
 
-GITLEAKS_SECRETS=$(jq 'length // 0' "$WORK_DIR/gitleaks.json" 2>/dev/null || echo "0")
-if [ "$GITLEAKS_SECRETS" -gt 0 ]; then
-    log "Gitleaks Secrets: $GITLEAKS_SECRETS (WARNING: secrets detected!)"
+BETTERLEAKS_SECRETS=$(jq 'length // 0' "$WORK_DIR/betterleaks.json" 2>/dev/null || echo "0")
+if [ "$BETTERLEAKS_SECRETS" -gt 0 ]; then
+    log "BetterLeaks Secrets: $BETTERLEAKS_SECRETS (WARNING: secrets detected!)"
 else
-    log "Gitleaks Secrets: 0"
+    log "BetterLeaks Secrets: 0"
 fi
 log "=================================="
 log ""

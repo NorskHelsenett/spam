@@ -59,7 +59,7 @@ func (RunLog) TableName() string {
 	return "run_logs"
 }
 
-// RunSecret stores Gitleaks findings for a run.
+// RunSecret stores secret scanner findings for a run.
 type RunSecret struct {
 	ID           string         `gorm:"primaryKey;size:36" json:"id"`
 	RunID        string         `gorm:"size:36;not null;index" json:"run_id"`
