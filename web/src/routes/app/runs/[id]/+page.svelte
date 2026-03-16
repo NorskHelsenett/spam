@@ -117,16 +117,13 @@
 		if (secretsDialogData.length > 0) return;
 		secretsDialogLoading = true;
 		try {
-			const res = await fetch(`/api/runs/${id}/secrets`, { credentials: 'include' });
+			const url = run?.repo_id
+				? `/api/repos/secrets/list?repo_id=${encodeURIComponent(run.repo_id)}`
+				: `/api/runs/${id}/secrets`;
+			const res = await fetch(url, { credentials: 'include' });
 			if (res.ok) {
 				const data = await res.json();
-				secretsDialogData = (data.findings || []).map((f: any) => ({
-					rule_id: f.RuleID ?? f.rule_id ?? '',
-					description: f.Description ?? f.description ?? '',
-					file: f.File ?? f.file ?? '',
-					start_line: f.StartLine ?? f.start_line ?? 0,
-					match: f.Match ?? f.match ?? ''
-				}));
+				secretsDialogData = Array.isArray(data) ? data : (data.findings || []);
 			}
 		} finally {
 			secretsDialogLoading = false;
