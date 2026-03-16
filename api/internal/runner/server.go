@@ -66,7 +66,6 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
 		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
-		r.Get("/api/trivy/job/status", s.handleTrivyJobStatus)
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
@@ -194,24 +193,4 @@ func (s *Server) handleGetK8sStatus(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprintf(w, `{"job_name":"%s","namespace":"%s","active":%d,"succeeded":%d,"failed":%d}`,
 		job.Name, job.Namespace, job.Status.Active, job.Status.Succeeded, job.Status.Failed)
-}
-
-const trivyAdhocJobName = "trivy-adhoc"
-
-// handleTrivyJobStatus returns the K8s pod counts for the trivy adhoc job.
-func (s *Server) handleTrivyJobStatus(w http.ResponseWriter, r *http.Request) {
-	if s.k8sClient == nil {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"active":0,"succeeded":0,"failed":0}`)
-		return
-	}
-	job, err := s.k8sClient.GetJobStatus(r.Context(), trivyAdhocJobName, s.cfg.Namespace)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"active":0,"succeeded":0,"failed":0}`)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"active":%d,"succeeded":%d,"failed":%d}`,
-		job.Status.Active, job.Status.Succeeded, job.Status.Failed)
 }

@@ -22,8 +22,7 @@ type RouterOptions struct {
 	RunExecutor   *runner.RunExecutor
 	ProviderStore *providerconfig.Store
 	Cache         cache.Store
-	HMACKey       []byte
-	WorkerURL     string
+	HMACKey       string
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -106,7 +105,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
 				api.Post("/admin/trivy/scan", uiapi.AdminTrivyScanHandler(db, authService))
-				api.Get("/admin/trivy/scan/status", uiapi.AdminTrivyScanStatusHandler(db, authService, opts.WorkerURL, opts.HMACKey))
+				api.Get("/admin/trivy/scan/status", uiapi.AdminTrivyScanStatusHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))

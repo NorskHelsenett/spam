@@ -577,9 +577,9 @@
 		finished_at?: string;
 		error?: string;
 		pending_count?: number;
-		active_leases?: number;
 		scanned_count?: number;
 		last_scanned_at?: string;
+		scan_complete?: boolean;
 	};
 
 	let trivyStatus: TrivyScanStatus = $state({});
@@ -631,8 +631,7 @@
 				trivyStatus.job_status === 'QUEUED' ||
 				trivyStatus.job_status === 'RUNNING' ||
 				trivyStatus.job_status === 'RETRY' ||
-				(trivyStatus.active_leases ?? 0) > 0 ||
-				(trivyStatus.pending_count ?? 0) > 0;
+				!trivyStatus.scan_complete;
 			if (active) pollTrivyStatus();
 		}, 3000);
 	};
@@ -869,8 +868,7 @@
 					trivyStatus.job_status === 'QUEUED' ||
 					trivyStatus.job_status === 'RUNNING' ||
 					trivyStatus.job_status === 'RETRY' ||
-					(trivyStatus.active_leases ?? 0) > 0 ||
-					(trivyStatus.pending_count ?? 0) > 0;
+					!trivyStatus.scan_complete;
 				if (active) pollTrivyStatus();
 			});
 			updatePreview();
@@ -1441,70 +1439,28 @@
 		</div>
 	{/if}
 
-	<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-		<!-- Trigger status -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-				<ShieldAlert size={16} />
-				<span>Trigger status</span>
-			</div>
-			<p class="mt-2 text-sm font-semibold">
+	{#if trivyStatus.job_id}
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 space-y-2">
+			<div class="flex items-center justify-between">
 				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {trivyJobStatusClass(trivyStatus.job_status)}">
-					{trivyJobStatusLabel(trivyStatus.job_status)}
+					{trivyStatus.scan_complete ? 'Scan complete' : trivyJobStatusLabel(trivyStatus.job_status)}
 				</span>
-			</p>
-			{#if trivyStatus.created_at}
-				<p class="mt-1 flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
-					<Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}
-				</p>
-			{/if}
-			{#if trivyStatus.finished_at}
-				<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
-					Dispatched {new Date(trivyStatus.finished_at).toLocaleString()}
-				</p>
-			{/if}
-		</div>
-
-		<!-- Active scanners -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-				<ShieldCheck size={16} />
-				<span>Active scanners</span>
+				{#if trivyStatus.pending_count}
+					<span class="text-xs text-amber-400">{trivyStatus.pending_count} SBOMs pending</span>
+				{:else if trivyStatus.scan_complete}
+					<span class="text-xs text-green-400">{trivyStatus.scanned_count} SBOMs scanned</span>
+				{/if}
 			</div>
-			<p class="mt-2 text-2xl font-semibold {(trivyStatus.active_leases ?? 0) > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">
-				{trivyStatus.active_leases ?? '—'}
-			</p>
-			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Pods currently scanning</p>
-		</div>
-
-		<!-- Scanned SBOMs -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-				<ShieldCheck size={16} />
-				<span>SBOMs scanned</span>
+			<div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--text-muted)]">
+				{#if trivyStatus.created_at}
+					<span class="flex items-center gap-1"><Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}</span>
+				{/if}
+				{#if trivyStatus.last_scanned_at}
+					<span>Last scan {new Date(trivyStatus.last_scanned_at).toLocaleString()}</span>
+				{/if}
 			</div>
-			<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">
-				{trivyStatus.scanned_count ?? '—'}
-			</p>
-			{#if trivyStatus.last_scanned_at}
-				<p class="mt-1 text-[11px] text-[var(--text-muted)]">
-					Last scan {new Date(trivyStatus.last_scanned_at).toLocaleString()}
-				</p>
-			{/if}
 		</div>
-
-		<!-- Pending SBOMs -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-				<Clock size={16} />
-				<span>Pending SBOMs</span>
-			</div>
-			<p class="mt-2 text-2xl font-semibold {(trivyStatus.pending_count ?? 0) > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">
-				{trivyStatus.pending_count ?? '—'}
-			</p>
-			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Not yet scanned</p>
-		</div>
-	</div>
+	{/if}
 
 	{#if trivyStatus.error}
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">

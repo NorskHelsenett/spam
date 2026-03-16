@@ -97,8 +97,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-runner
                   key: RUNNER_HMAC_KEY
-            - name: RUNNER_WORKER_URL
-              value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
             {{- end }}
             {{- if .Values.postgresql.enabled }}
             - name: POSTGRES_HOST
