@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { FileWarning, X } from 'lucide-svelte';
+	import { FileWarning, X, KeyRound } from 'lucide-svelte';
 
 	type Finding = {
 		rule_id: string;
@@ -9,14 +9,53 @@
 		match: string;
 	};
 
+	const cleanMatch = (s: string) =>
+		s.endsWith('"') && !s.slice(0, -1).includes('"') ? s.slice(0, -1) : s;
+
+	const tryDecodeBase64 = (s: string): string | null => {
+		const decode = (candidate: string): string | null => {
+			const norm = candidate.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+			if (padded.length < 8 || !/^[A-Za-z0-9+/]+=*$/.test(padded)) return null;
+			try {
+				const decoded = atob(padded);
+				if (/[\x00-\x08\x0e-\x1f\x7f]/.test(decoded)) return null;
+				try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
+				return decoded;
+			} catch {
+				return null;
+			}
+		};
+
+		const b64chars = '[A-Za-z0-9+/\\-_]';
+		const candidates: (string | null | undefined)[] = [
+			// key := "value" or key = "value" (assignment with quoted string)
+			s.match(new RegExp(`:=?\\s*["'](${b64chars}+=*)["']$`))?.[1],
+			// Key: value  (header-style, e.g. "Token: cashuAeyJ...")
+			s.match(new RegExp(`:\\s*(${b64chars}+=*)$`))?.[1],
+			// Bare assignment: key=value (no quotes, = not part of base64 padding)
+			s.match(new RegExp(`[^=]=["']?(${b64chars}+=*)["']?$`))?.[1],
+			// First eyJ... substring (base64-encoded JSON — very common for JWTs / tokens)
+			s.match(new RegExp(`eyJ${b64chars}+=*`))?.[0],
+			// Whole string
+			s,
+		];
+
+		for (const c of candidates) {
+			if (!c) continue;
+			const result = decode(c);
+			if (result) return result;
+		}
+		return null;
+	};
+
+
 	let {
 		repoId,
-		secretType,
 		repoName,
 		onClose = () => {}
 	}: {
 		repoId: string;
-		secretType: string;
 		repoName: string;
 		onClose?: () => void;
 	} = $props();
@@ -24,15 +63,25 @@
 	let findings: Finding[] = $state([]);
 	let loading = $state(false);
 
+	const grouped = $derived.by(() => {
+		const map = new Map<string, Finding[]>();
+		for (const f of findings) {
+			const key = f.rule_id || 'unknown';
+			if (!map.has(key)) map.set(key, []);
+			map.get(key)!.push(f);
+		}
+		return Array.from(map.entries());
+	});
+
 	$effect(() => {
-		if (repoId && secretType) load();
+		if (repoId) load();
 	});
 
 	const load = async () => {
 		loading = true;
 		findings = [];
 		try {
-			const params = new URLSearchParams({ repo_id: repoId, secret_type: secretType });
+			const params = new URLSearchParams({ repo_id: repoId });
 			const res = await fetch(`/api/secrets/findings?${params}`, { credentials: 'include' });
 			if (res.ok) findings = await res.json();
 		} catch {
@@ -45,21 +94,32 @@
 
 <div class="flex h-full flex-col overflow-hidden rounded-l-[10px] bg-[var(--bg-soft)]">
 	<!-- Header -->
-	<div class="shrink-0 border-b border-[var(--border-color)] p-5">
+	<div class="shrink-0 p-5">
 		<div class="flex items-start gap-3">
-			<FileWarning class="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+			<KeyRound class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
 			<div class="min-w-0 flex-1">
-				<h2 class="truncate text-base font-semibold text-[var(--text-bright)]">{repoName}</h2>
-				<div class="mt-1.5 flex items-center gap-2">
-					<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
-						{secretType}
-					</span>
-					{#if !loading}
-						<span class="text-[11px] text-[var(--text-muted)]">
-							{findings.length} finding{findings.length !== 1 ? 's' : ''}
-						</span>
-					{/if}
+				<div class="flex items-center gap-2">
+					<a
+						href="/app/providers/repo/{repoId}"
+						class="truncate text-base font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline"
+					>
+						{repoName}
+					</a>
 				</div>
+				{#if !loading && findings.length > 0}
+					<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
+						{findings.length} finding{findings.length !== 1 ? 's' : ''}
+					</p>
+					<div class="mt-2 flex flex-wrap gap-1.5">
+						{#each grouped as [ruleId, group]}
+							<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-400">
+								<FileWarning class="h-3 w-3 shrink-0" />
+								{ruleId}
+								<span class="ml-0.5 font-semibold">{group.length}</span>
+							</span>
+						{/each}
+					</div>
+				{/if}
 			</div>
 			<button
 				type="button"
@@ -79,35 +139,45 @@
 		</div>
 	{:else if findings.length === 0}
 		<div class="flex flex-1 items-center justify-center p-8 text-center">
-			<p class="text-sm text-[var(--text-muted)]">No findings for this type.</p>
+			<p class="text-sm text-[var(--text-muted)]">No findings for this repo.</p>
 		</div>
 	{:else}
-		<div class="flex-1 overflow-y-auto">
-			<div class="space-y-1 p-2">
-				{#each findings as f}
-					<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
-						<div class="flex items-start gap-4">
-							<div class="w-40 shrink-0 pt-0.5">
-								<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
-									<FileWarning class="h-3 w-3 shrink-0" />
-									<span class="truncate">{f.rule_id || 'unknown'}</span>
-								</span>
-							</div>
-							<div class="min-w-0 flex-1 space-y-1.5">
-								{#if f.description}
-									<p class="text-sm text-[var(--text-secondary)]">{f.description}</p>
-								{/if}
-								{#if f.file}
-									<p class="font-mono text-xs text-[var(--text-muted)]">{f.file}{f.start_line ? `:${f.start_line}` : ''}</p>
-								{/if}
-								{#if f.match}
-									<div class="break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{f.match}</div>
-								{/if}
-							</div>
-						</div>
-					</article>
-				{/each}
-			</div>
+		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]">
+			{#each grouped as [ruleId, group]}
+				<div>
+					<!-- Group header -->
+					<div class="flex items-center gap-3 px-4 py-3">
+						<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
+							<FileWarning class="h-3 w-3 shrink-0" />
+							{ruleId}
+						</span>
+						<span class="text-[11px] text-[var(--text-muted)]">{group.length} finding{group.length !== 1 ? 's' : ''}</span>
+					</div>
+					<!-- Findings -->
+					<div class="space-y-1 border-t border-[var(--border-color)]/60 p-1 bg-[var(--bg-soft)]">
+						{#each group as f}
+							<article class="rounded-lg px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+								<div class="min-w-0 space-y-1.5">
+									{#if f.description}
+										<p class="text-sm font-semibold text-[var(--text-bright)]">{f.description}</p>
+									{/if}
+									{#if f.file}
+										<p class="font-mono text-xs text-[var(--text-muted)]">{f.file}{f.start_line ? `:${f.start_line}` : ''}</p>
+									{/if}
+									{#if f.match}
+										{@const raw = cleanMatch(f.match)}
+										{@const decoded = tryDecodeBase64(raw)}
+										<div class="break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
+										{#if decoded}
+											<div class="whitespace-pre-wrap break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
+										{/if}
+									{/if}
+								</div>
+							</article>
+						{/each}
+					</div>
+				</div>
+			{/each}
 		</div>
 	{/if}
 </div>

@@ -151,7 +151,7 @@
 	let drawerRow: TableRow | null = null;
 
 	const openDrawer = (row: TableRow) => {
-		if (drawerOpen && drawerRow?.repo_id === row.repo_id && drawerRow?.secret_type === row.secret_type) {
+		if (drawerOpen && drawerRow?.repo_id === row.repo_id) {
 			drawerOpen = false;
 			drawerRow = null;
 		} else {
@@ -320,7 +320,7 @@
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 								{#each sortedRows as row}
 									<tr
-										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] {drawerOpen && drawerRow?.repo_id === row.repo_id && drawerRow?.secret_type === row.secret_type ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] {drawerOpen && drawerRow?.repo_id === row.repo_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
 										onclick={() => openDrawer(row)}
 									>
 										<td class="px-5 py-3">
@@ -355,7 +355,6 @@
 						>
 							<SecretsDrawer
 								repoId={drawerRow.repo_id}
-								secretType={drawerRow.secret_type}
 								repoName={repoShortName(drawerRow.repo)}
 								onClose={() => { drawerOpen = false; drawerRow = null; }}
 							/>

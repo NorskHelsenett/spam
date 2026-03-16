@@ -280,9 +280,8 @@ func SecretsFindingsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		}
 
 		repoID := r.URL.Query().Get("repo_id")
-		secretType := r.URL.Query().Get("secret_type")
-		if repoID == "" || secretType == "" {
-			http.Error(w, "repo_id and secret_type are required", http.StatusBadRequest)
+		if repoID == "" {
+			http.Error(w, "repo_id is required", http.StatusBadRequest)
 			return
 		}
 
@@ -314,14 +313,13 @@ exploded AS (
     ) AS dedupe_key
   FROM latest
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(findings, '[]'::jsonb)) AS finding
-  WHERE COALESCE(finding->>'RuleID', 'unknown') = ?
 )
 SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match
 FROM exploded
-ORDER BY dedupe_key, file, start_line`
+ORDER BY dedupe_key, rule_id, file, start_line`
 
 		var rows []SecretFindingRow
-		if err := db.WithContext(r.Context()).Raw(query, repoID, secretType).Scan(&rows).Error; err != nil {
+		if err := db.WithContext(r.Context()).Raw(query, repoID).Scan(&rows).Error; err != nil {
 			http.Error(w, "failed to load secret findings", http.StatusInternalServerError)
 			return
 		}
