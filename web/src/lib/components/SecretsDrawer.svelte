@@ -62,6 +62,7 @@
 
 	let findings: Finding[] = $state([]);
 	let loading = $state(false);
+	let activeFilter: string | null = $state(null);
 
 	const grouped = $derived.by(() => {
 		const map = new Map<string, Finding[]>();
@@ -73,8 +74,12 @@
 		return Array.from(map.entries());
 	});
 
+	const visibleGroups = $derived(
+		activeFilter ? grouped.filter(([ruleId]) => ruleId === activeFilter) : grouped
+	);
+
 	$effect(() => {
-		if (repoId) load();
+		if (repoId) { activeFilter = null; load(); }
 	});
 
 	const load = async () => {
@@ -94,7 +99,7 @@
 
 <div class="flex h-full flex-col overflow-hidden rounded-l-[10px] bg-[var(--bg-soft)]">
 	<!-- Header -->
-	<div class="shrink-0 p-5">
+	<div class="shrink-0 p-7">
 		<div class="flex items-start gap-3">
 			<KeyRound class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
 			<div class="min-w-0 flex-1">
@@ -112,11 +117,15 @@
 					</p>
 					<div class="mt-2 flex flex-wrap gap-1.5">
 						{#each grouped as [ruleId, group]}
-							<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-[11px] font-medium text-red-400">
+							<button
+								type="button"
+								onclick={() => activeFilter = activeFilter === ruleId ? null : ruleId}
+								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilter === ruleId ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilter ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
+							>
 								<FileWarning class="h-3 w-3 shrink-0" />
 								{ruleId}
 								<span class="ml-0.5 font-semibold">{group.length}</span>
-							</span>
+							</button>
 						{/each}
 					</div>
 				{/if}
@@ -143,20 +152,21 @@
 		</div>
 	{:else}
 		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]">
-			{#each grouped as [ruleId, group]}
+			{#each visibleGroups as [ruleId, group]}
 				<div>
 					<!-- Group header -->
-					<div class="flex items-center gap-3 px-4 py-3">
-						<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
-							<FileWarning class="h-3 w-3 shrink-0" />
-							{ruleId}
-						</span>
-						<span class="text-[11px] text-[var(--text-muted)]">{group.length} finding{group.length !== 1 ? 's' : ''}</span>
+					<div class="flex items-center justify-center gap-3 px-7 py-4">
+						<div class="h-px w-28 bg-[var(--border-color)]/60"></div>
+						<div class="flex flex-col items-center gap-0.5">
+							<span class="text-sm font-semibold text-[var(--text-secondary)]">{ruleId}</span>
+							<span class="text-[11px] text-[var(--text-muted)]">{group.length} finding{group.length !== 1 ? 's' : ''}</span>
+						</div>
+						<div class="h-px w-28 bg-[var(--border-color)]/60"></div>
 					</div>
 					<!-- Findings -->
-					<div class="space-y-1 border-t border-[var(--border-color)]/60 p-1 bg-[var(--bg-soft)]">
+					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
 						{#each group as f}
-							<article class="rounded-lg px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+							<article class="rounded-lg px-6 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
 								<div class="min-w-0 space-y-1.5">
 									{#if f.description}
 										<p class="text-sm font-semibold text-[var(--text-bright)]">{f.description}</p>

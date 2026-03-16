@@ -349,9 +349,9 @@
 
 					{#if drawerOpen && drawerRow}
 						<div
-							class="absolute inset-y-0 right-0 z-10 w-[680px] border-l border-[var(--border-color)] rounded-l-[10px]"
-							in:fly={{ x: 680, duration: 240, easing: cubicOut, opacity: 1 }}
-							out:fly={{ x: 680, duration: 200, easing: cubicIn, opacity: 1 }}
+							class="absolute inset-y-0 right-0 z-10 w-[780px] border-l border-[var(--border-color)] rounded-l-[10px]"
+							in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
+							out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 						>
 							<SecretsDrawer
 								repoId={drawerRow.repo_id}
