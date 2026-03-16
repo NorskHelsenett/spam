@@ -153,41 +153,36 @@
 	<title>Secrets — Spam Monitor</title>
 </svelte:head>
 
-<div class="space-y-6">
-	<!-- Back button -->
-	<div>
-		<button
-			type="button"
-			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-			onclick={goBack}
-		>
-			<ArrowLeft class="h-4 w-4" />
-			Back
-		</button>
-	</div>
-
-	{#if loading}
-		<div class="flex items-center justify-center py-20">
-			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-		</div>
-	{:else if error}
-		<div class="rounded-2xl border border-[var(--red)]/30 bg-[var(--red)]/10 px-4 py-3 text-sm text-[var(--red)]">
-			{error}
-		</div>
-	{:else}
-		<!-- Main stats panel -->
-		<article class="panel-surface space-y-6 px-6 py-6 sm:px-10">
-			<!-- Header -->
-			<div>
-				<div class="flex items-center gap-3">
-					<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
-					<h1 class="text-2xl font-semibold text-[var(--text-bright)]">Secrets</h1>
+<div class="space-y-8 sm:space-y-12">
+	<!-- Stats + charts panel -->
+	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+		<!-- Header -->
+		<header class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+			<div class="flex items-center gap-3">
+				<button
+					type="button"
+					class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
+					onclick={goBack}
+				>
+					<ArrowLeft class="h-4 w-4" />
+				</button>
+				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
+				<div>
+					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Secrets</h1>
+					<p class="text-sm text-[var(--text-tertiary)]">Secret scan results across all repositories.</p>
 				</div>
-				<p class="mt-1 text-sm text-[var(--text-muted)]">
-					Secret scan results across all repositories · {fmt(donutTotal)} total findings
-				</p>
 			</div>
+		</header>
 
+		{#if loading}
+			<div class="flex items-center justify-center py-20">
+				<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+			</div>
+		{:else if error}
+			<div class="rounded-2xl border border-[var(--red)]/30 bg-[var(--red)]/10 px-4 py-3 text-sm text-[var(--red)]">
+				{error}
+			</div>
+		{:else}
 			<!-- Metric cards -->
 			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
 				<div class="metric-card space-y-1 rounded-2xl p-4">
@@ -231,70 +226,80 @@
 					/>
 				</div>
 			</div>
-		</article>
+		{/if}
+	</article>
 
-		<!-- Data table -->
-		<div class="relative flex flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+	<!-- Data table panel -->
+	<section class="panel-surface flex flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10 h-[calc(100vh-7rem)]">
+		<header>
+			<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">Per-repository secret findings from the latest scan.</p>
+		</header>
+
+		{#if !loading && !error}
 			{#if tableRows.length === 0}
-				<div class="flex flex-col items-center justify-center py-16 text-center">
-					<KeyRound class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
-					<p class="text-sm font-medium text-[var(--text-secondary)]">No secrets found</p>
-					<p class="mt-1 text-xs text-[var(--text-muted)]">No secret scan results yet — run a scan on a repository to see results here.</p>
+				<div class="flex flex-1 items-center justify-center">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<KeyRound class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-sm text-[var(--text-muted)]">No secrets found.</p>
+					</div>
 				</div>
 			{:else}
-				<div class="overflow-x-auto">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-							<tr>
-								<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('repo')}>
-									<span class="flex items-center gap-1">
-										Repository
-										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'repo'} class:text-transparent={sortKey !== 'repo'}>
-											{sortArrow('repo')}
+				<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<div class="flex-1 overflow-y-auto">
+						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+								<tr>
+									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('repo')}>
+										<span class="flex items-center gap-1">
+											Repository
+											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'repo'} class:text-transparent={sortKey !== 'repo'}>
+												{sortArrow('repo')}
+											</span>
 										</span>
-									</span>
-								</th>
-								<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
-									<span class="flex items-center gap-1">
-										Secret Type
-										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'secret_type'} class:text-transparent={sortKey !== 'secret_type'}>
-											{sortArrow('secret_type')}
+									</th>
+									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
+										<span class="flex items-center gap-1">
+											Secret Type
+											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'secret_type'} class:text-transparent={sortKey !== 'secret_type'}>
+												{sortArrow('secret_type')}
+											</span>
 										</span>
-									</span>
-								</th>
-								<th class="cursor-pointer px-5 py-3 text-right transition hover:text-[var(--text-secondary)]" onclick={() => setSort('unique_finding_count')}>
-									<span class="inline-flex items-center gap-1">
-										Findings
-										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'unique_finding_count'} class:text-transparent={sortKey !== 'unique_finding_count'}>
-											{sortArrow('unique_finding_count')}
+									</th>
+									<th class="cursor-pointer px-5 py-3 text-right transition hover:text-[var(--text-secondary)]" onclick={() => setSort('unique_finding_count')}>
+										<span class="inline-flex items-center gap-1">
+											Findings
+											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'unique_finding_count'} class:text-transparent={sortKey !== 'unique_finding_count'}>
+												{sortArrow('unique_finding_count')}
+											</span>
 										</span>
-									</span>
-								</th>
-							</tr>
-						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each sortedRows as row}
-								<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
-									<td class="px-5 py-3">
-										<div class="flex items-center gap-2">
-											<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
-											<span class="font-mono font-semibold text-[var(--text-bright)]" title={row.repo}>{row.repo}</span>
-										</div>
-									</td>
-									<td class="px-5 py-3">
-										<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
-											{row.secret_type}
-										</span>
-									</td>
-									<td class="px-5 py-3 text-right tabular-nums font-semibold text-[var(--text-bright)]">
-										{fmt(row.unique_finding_count)}
-									</td>
+									</th>
 								</tr>
-							{/each}
-						</tbody>
-					</table>
+							</thead>
+							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+								{#each sortedRows as row}
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+										<td class="px-5 py-3">
+											<div class="flex items-center gap-2">
+												<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
+												<span class="font-mono font-semibold text-[var(--text-bright)]" title={row.repo}>{row.repo}</span>
+											</div>
+										</td>
+										<td class="px-5 py-3">
+											<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
+												{row.secret_type}
+											</span>
+										</td>
+										<td class="px-5 py-3 text-right tabular-nums font-semibold text-[var(--text-bright)]">
+											{fmt(row.unique_finding_count)}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
 				</div>
 			{/if}
-		</div>
-	{/if}
+		{/if}
+	</section>
 </div>
