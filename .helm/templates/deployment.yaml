@@ -97,8 +97,6 @@ spec:
                 secretKeyRef:
                   name: {{ .Release.Name }}-runner
                   key: RUNNER_HMAC_KEY
-            - name: TRIVY_SCANNER_CRONJOB_NAME
-              value: "{{ .Release.Name }}-trivy-scanner"
             {{- end }}
             {{- if .Values.postgresql.enabled }}
             - name: POSTGRES_HOST

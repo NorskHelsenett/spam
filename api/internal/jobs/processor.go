@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -93,17 +94,21 @@ func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecuto
 		return nil, NonRetryable(errors.New("trivy job creation not available: runner not enabled"))
 	}
 
-	var payload TrivyAdhocPayload
-	if len(job.Payload) > 0 {
-		if err := json.Unmarshal(job.Payload, &payload); err != nil {
-			return nil, NonRetryable(fmt.Errorf("unmarshal payload: %w", err))
+	// CronJob name comes from the worker's own environment — the worker owns K8s config.
+	cronJobName := strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME"))
+	if cronJobName == "" {
+		// Fall back to payload for backwards compatibility.
+		var payload TrivyAdhocPayload
+		if len(job.Payload) > 0 {
+			_ = json.Unmarshal(job.Payload, &payload)
 		}
+		cronJobName = payload.CronJobName
 	}
-	if payload.CronJobName == "" {
-		return nil, NonRetryable(errors.New("cronjob_name missing from payload"))
+	if cronJobName == "" {
+		return nil, NonRetryable(errors.New("TRIVY_SCANNER_CRONJOB_NAME not configured on worker"))
 	}
 
-	if err := creator.CreateTrivyAdhocJob(ctx, payload.CronJobName); err != nil {
+	if err := creator.CreateTrivyAdhocJob(ctx, cronJobName); err != nil {
 		if isAlreadyRunning(err) {
 			return nil, NonRetryable(err)
 		}

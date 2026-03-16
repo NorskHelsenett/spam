@@ -2,8 +2,6 @@ package uiapi
 
 import (
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -12,15 +10,14 @@ import (
 )
 
 type trivyScanStatus struct {
-	Configured   bool   `json:"configured"`
-	JobID        string `json:"job_id,omitempty"`
-	JobStatus    string `json:"job_status,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	FinishedAt   string `json:"finished_at,omitempty"`
-	Error        string `json:"error,omitempty"`
-	PendingCount int64  `json:"pending_count"`
-	ActiveLeases int64  `json:"active_leases"`
-	ScannedCount int64  `json:"scanned_count"`
+	JobID         string `json:"job_id,omitempty"`
+	JobStatus     string `json:"job_status,omitempty"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	FinishedAt    string `json:"finished_at,omitempty"`
+	Error         string `json:"error,omitempty"`
+	PendingCount  int64  `json:"pending_count"`
+	ActiveLeases  int64  `json:"active_leases"`
+	ScannedCount  int64  `json:"scanned_count"`
 	LastScannedAt string `json:"last_scanned_at,omitempty"`
 }
 
@@ -35,7 +32,6 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 		}
 
 		var status trivyScanStatus
-		status.Configured = strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME")) != ""
 
 		// Most recent TRIVY_ADHOC_SCAN job.
 		var job jobs.Job
@@ -85,20 +81,14 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 }
 
 // AdminTrivyScanHandler enqueues a TRIVY_ADHOC_SCAN job.
-// The worker will pick it up and create an ad-hoc K8s Job from the trivy-scanner CronJob.
-// Returns 409 if a job is already active, 503 if TRIVY_SCANNER_CRONJOB_NAME is not configured.
+// The worker picks it up and creates a K8s Job from the trivy-scanner CronJob.
+// Returns 409 if a job is already active.
 //
 // POST /api/admin/trivy/scan
 func AdminTrivyScanHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-
-		cronJobName := strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME"))
-		if cronJobName == "" {
-			http.Error(w, "TRIVY_SCANNER_CRONJOB_NAME not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -116,7 +106,6 @@ func AdminTrivyScanHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 		job, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
 			Type:        jobs.JobTypeTrivyAdhocScan,
 			MaxAttempts: 2,
-			Payload:     jobs.TrivyAdhocPayload{CronJobName: cronJobName},
 		})
 		if err != nil {
 			http.Error(w, "failed to enqueue scan: "+err.Error(), http.StatusInternalServerError)
