@@ -125,6 +125,14 @@
 	const sortArrow = (key: SortKey) =>
 		sortKey === key ? (sortAsc ? '↑' : '↓') : '↑';
 
+	const repoShortName = (url: string) => {
+		try {
+			return new URL(url).pathname.replace(/\.git$/, '').replace(/^\//, '');
+		} catch {
+			return url;
+		}
+	};
+
 	onMount(async () => {
 		try {
 			const [tableRes, distRes, trendRes] = await Promise.all([
@@ -282,16 +290,17 @@
 										<td class="px-5 py-3">
 											<div class="flex items-center gap-2">
 												<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
-												<span class="font-mono font-semibold text-[var(--text-bright)]" title={row.repo}>{row.repo}</span>
+												<span class="font-semibold text-[var(--text-bright)]">{repoShortName(row.repo)}</span>
 											</div>
+											<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={row.repo}>{row.repo}</p>
 										</td>
 										<td class="px-5 py-3">
 											<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
 												{row.secret_type}
 											</span>
 										</td>
-										<td class="px-5 py-3 text-right tabular-nums font-semibold text-[var(--text-bright)]">
-											{fmt(row.unique_finding_count)}
+										<td class="px-5 py-3 text-right">
+											<span class="inline-flex items-center rounded-full bg-[var(--accent)]/10 px-2.5 py-0.5 font-semibold tabular-nums text-xs text-[var(--accent)]">{fmt(row.unique_finding_count)}</span>
 										</td>
 									</tr>
 								{/each}
