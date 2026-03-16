@@ -75,13 +75,13 @@ else
     echo "✗ SBOM not found: $OUTPUT_DIR/sbom.json"
 fi
 
-if [ -f "$OUTPUT_DIR/gitleaks.json" ]; then
-    GITLEAKS_SIZE=$(du -h "$OUTPUT_DIR/gitleaks.json" | cut -f1)
-    echo "✓ Gitleaks scan: $OUTPUT_DIR/gitleaks.json ($GITLEAKS_SIZE)"
+if [ -f "$OUTPUT_DIR/betterleaks.json" ]; then
+    BETTERLEAKS_SIZE=$(du -h "$OUTPUT_DIR/betterleaks.json" | cut -f1)
+    echo "✓ BetterLeaks scan: $OUTPUT_DIR/betterleaks.json ($BETTERLEAKS_SIZE)"
     
     # Show secrets count if jq is available
     if command -v jq &> /dev/null; then
-        SECRET_COUNT=$(jq '. | length' "$OUTPUT_DIR/gitleaks.json" 2>/dev/null || echo "?")
+        SECRET_COUNT=$(jq '. | length' "$OUTPUT_DIR/betterleaks.json" 2>/dev/null || echo "?")
         if [ "$SECRET_COUNT" = "0" ]; then
             echo "  - No secrets found ✓"
         else
@@ -89,7 +89,7 @@ if [ -f "$OUTPUT_DIR/gitleaks.json" ]; then
         fi
     fi
 else
-    echo "✓ Gitleaks scan: No secrets file (none found)"
+    echo "✓ BetterLeaks scan: No secrets file (none found)"
 fi
 
 echo ""

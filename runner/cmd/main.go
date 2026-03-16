@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -307,7 +308,7 @@ func (r *Runner) runPipeline() int {
 	// Run SBOM generation
 	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
 	sbomPath := filepath.Join(r.artifactDir, "sbom.json")
-	gitleaksPath := filepath.Join(r.artifactDir, "gitleaks.json")
+	betterleaksPath := filepath.Join(r.artifactDir, "betterleaks.json")
 	manifestsPath := filepath.Join(r.artifactDir, "manifests.json")
 
 	var sbomErr error
@@ -333,16 +334,23 @@ func (r *Runner) runPipeline() int {
 	}
 
 	// Run secret scan
-	r.log("Running gitleaks for secret detection...")
-	if err := r.runCommand("gitleaks", "detect", "--source", r.workDir, "--report-path", gitleaksPath, "--report-format", "json", "--no-git"); err != nil {
-		// Gitleaks exits 1 if secrets found, but that's expected
-		r.log("Gitleaks scan completed")
+	r.log("Running BetterLeaks for secret detection...")
+	if err := r.runCommand("betterleaks", "dir", r.workDir, "--report-path", betterleaksPath, "--report-format", "json", "--no-banner"); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			r.log("BetterLeaks: Potential secrets detected")
+		} else {
+			r.log(fmt.Sprintf("BetterLeaks scan failed: %v", err))
+			return 1
+		}
+	} else {
+		r.log("BetterLeaks: No secrets detected")
 	}
 
-	// Ensure gitleaks.json exists (create empty array if no secrets found)
-	if _, err := os.Stat(gitleaksPath); os.IsNotExist(err) {
-		if err := os.WriteFile(gitleaksPath, []byte("[]"), 0644); err != nil {
-			r.log(fmt.Sprintf("Failed to create empty gitleaks file: %v", err))
+	// Ensure betterleaks.json exists (create empty array if no secrets found)
+	if _, err := os.Stat(betterleaksPath); os.IsNotExist(err) {
+		if err := os.WriteFile(betterleaksPath, []byte("[]"), 0644); err != nil {
+			r.log(fmt.Sprintf("Failed to create empty BetterLeaks file: %v", err))
 		}
 	}
 
@@ -354,9 +362,9 @@ func (r *Runner) runPipeline() int {
 			return 1
 		}
 
-		r.log("Uploading gitleaks results...")
-		if err := r.uploadFile(gitleaksPath, "gitleaks"); err != nil {
-			r.log(fmt.Sprintf("Failed to upload gitleaks: %v", err))
+		r.log("Uploading BetterLeaks results...")
+		if err := r.uploadFile(betterleaksPath, "secrets"); err != nil {
+			r.log(fmt.Sprintf("Failed to upload BetterLeaks results: %v", err))
 			return 1
 		}
 
@@ -385,11 +393,11 @@ func (r *Runner) runPipeline() int {
 				r.log("✓ SBOM saved")
 			}
 
-			// Copy gitleaks results
-			if err := r.copyFile(gitleaksPath, filepath.Join(outputDir, "gitleaks.json")); err != nil {
-				r.log(fmt.Sprintf("Failed to copy gitleaks: %v", err))
+			// Copy BetterLeaks results
+			if err := r.copyFile(betterleaksPath, filepath.Join(outputDir, "betterleaks.json")); err != nil {
+				r.log(fmt.Sprintf("Failed to copy BetterLeaks results: %v", err))
 			} else {
-				r.log("✓ Gitleaks results saved")
+				r.log("✓ BetterLeaks results saved")
 			}
 
 			// Copy manifests if they exist
@@ -487,11 +495,7 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 		}
 	}
 
-	// Add file field (use "sbom" or "secrets" based on fileType)
 	fieldName := fileType
-	if fileType == "gitleaks" {
-		fieldName = "secrets"
-	}
 
 	part, err := writer.CreateFormFile(fieldName, filepath.Base(filePath))
 	if err != nil {

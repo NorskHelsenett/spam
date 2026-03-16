@@ -116,7 +116,7 @@ func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.Hand
 	}
 }
 
-// SecretFinding is a single Gitleaks finding extracted from stored JSON.
+// SecretFinding is a single secret-scanner finding extracted from stored JSON.
 type SecretFinding struct {
 	RuleID      string `json:"rule_id"`
 	Description string `json:"description"`
@@ -171,7 +171,7 @@ func RepoSecretsListHandler(db *gorm.DB, authService *auth.Service) http.Handler
 			return
 		}
 
-		// Gitleaks output: array of objects with RuleID, Description, File, StartLine, Match
+		// BetterLeaks JSON is compatible with the fields we consume here.
 		var raw []struct {
 			RuleID      string `json:"RuleID"`
 			Description string `json:"Description"`

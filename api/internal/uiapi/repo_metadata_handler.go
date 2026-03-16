@@ -272,17 +272,7 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSB
 		return RepoMetadataSBOM{}, 0
 	}
 
-	// countComponentsFromContent correctly handles explicit metadata.component,
-	// implicit root detection (single-component SBOMs), and SPDX root packages.
-	// Fall back to the materialized view only for unrecognised formats.
-	componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
-	if componentCount == 0 {
-		if err := db.WithContext(r.Context()).Table("sbom_component_view").
-			Where("sbom_id = ? AND is_root = false", sbomID).
-			Count(&componentCount).Error; err != nil {
-			componentCount = 0
-		}
-	}
+	componentCount := sbomComponentCount(r.Context(), db, sbomID, sbom.Format, sbom.ContentBytes)
 
 	return RepoMetadataSBOM{
 		Latest: &RepoMetadataSBOMItem{
@@ -313,11 +303,7 @@ func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomCom
 		deps.FromManifest = manifestCount
 	}
 
-	if deps.FromManifest > deps.FromSBOM {
-		deps.Total = deps.FromManifest
-	} else {
-		deps.Total = deps.FromSBOM
-	}
+	deps.Total = deps.FromSBOM + deps.FromManifest
 
 	return deps
 }

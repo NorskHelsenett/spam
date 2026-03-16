@@ -5,6 +5,9 @@
 	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, GitCommit, Package, Shield, FileCode, Eye, Download, Activity, ExternalLink } from 'lucide-svelte';
 	import RunTimeline from '$lib/components/RunTimeline.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import Gitea from '$lib/components/icons/Gitea.svelte';
+	import SecretsDialog from '$lib/components/SecretsDialog.svelte';
+	import DependenciesDialog from '$lib/components/DependenciesDialog.svelte';
 
 	type Run = {
 		id: string;
@@ -62,6 +65,25 @@
 		is_error?: boolean;
 	};
 
+	type SecretFinding = {
+		rule_id: string;
+		description: string;
+		file: string;
+		start_line: number;
+		match: string;
+	};
+
+	type RepoDependency = {
+		group_path: string;
+		name: string;
+		ecosystem: string;
+		version: string;
+		sources: string[];
+		direct: boolean;
+		origin_path?: string;
+	};
+	// Note: types kept here only for the fetch function signatures; dialog logic lives in the components
+
 	let run: Run | null = $state(null);
 	let artifacts: Artifact[] = $state([]);
 	let loading = $state(true);
@@ -77,6 +99,54 @@
 	let podStatus: PodStatus | null = $state(null);
 	let showTimeline = $state(true);
 	let k8sPollingDisabled = $state(false);
+	let now = $state(Date.now());
+	let ticker: ReturnType<typeof setInterval> | null = null;
+
+	// Secrets dialog
+	let secretsDialogOpen = $state(false);
+	let secretsDialogLoading = $state(false);
+	let secretsDialogData = $state<SecretFinding[]>([]);
+
+	// Dependencies dialog (SBOM / Manifests)
+	let dependenciesDialogOpen = $state(false);
+	let dependenciesDialogLoading = $state(false);
+	let dependenciesDialogData = $state<RepoDependency[]>([]);
+	let dependenciesDialogSource = $state<'all' | 'sbom' | 'manifest'>('all');
+	const openSecretsDialog = async () => {
+		const id = $page.params.id;
+		secretsDialogOpen = true;
+		if (secretsDialogData.length > 0) return;
+		secretsDialogLoading = true;
+		try {
+			const url = run?.repo_id
+				? `/api/repos/secrets/list?repo_id=${encodeURIComponent(run.repo_id)}`
+				: `/api/runs/${id}/secrets`;
+			const res = await fetch(url, { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				secretsDialogData = Array.isArray(data) ? data : (data.findings || []);
+			}
+		} finally {
+			secretsDialogLoading = false;
+		}
+	};
+
+	const openDependenciesDialog = async (source: 'all' | 'sbom' | 'manifest' = 'all') => {
+		dependenciesDialogSource = source;
+		dependenciesDialogOpen = true;
+		if (dependenciesDialogData.length > 0) return;
+		if (!run?.repo_id) return;
+		dependenciesDialogLoading = true;
+		try {
+			const res = await fetch(`/api/repos/dependencies/list?repo_id=${encodeURIComponent(run.repo_id)}`, { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				dependenciesDialogData = data.dependencies || [];
+			}
+		} finally {
+			dependenciesDialogLoading = false;
+		}
+	};
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -307,10 +377,17 @@
 						if (data.secret_id) run.secret_id = data.secret_id;
 						if (data.commit_hash) run.commit_sha = data.commit_hash;
 
+						// Update timestamps from SSE data
+						if (data.started_at) run.started_at = data.started_at;
+						if (data.finished_at) run.finished_at = data.finished_at;
+
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
 						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
-							loadArtifacts(id, run);
+							// Reload run to get latest timestamps
+							loadRun(false).then(() => {
+								if (run) loadArtifacts(id, run);
+							});
 							loadK8sEvents(id);
 						}
 					}
@@ -403,6 +480,9 @@
 			await loadK8sEvents(id);
 		}
 
+		// Start ticker for live duration updates
+		ticker = setInterval(() => { now = Date.now(); }, 1000);
+
 		// Try SSE for both running and completed runs to capture K8s events and logs
 		connectSSE();
 	});
@@ -415,6 +495,10 @@
 		if (eventsInterval) {
 			clearInterval(eventsInterval);
 			eventsInterval = null;
+		}
+		if (ticker) {
+			clearInterval(ticker);
+			ticker = null;
 		}
 	});
 
@@ -453,13 +537,21 @@
 
 	const formatDate = (dateStr?: string) => {
 		if (!dateStr) return '-';
-		return new Date(dateStr).toLocaleString();
+		const d = new Date(dateStr);
+		if (isNaN(d.getTime())) return '-';
+		const dy = String(d.getDate()).padStart(2, '0');
+		const mo = String(d.getMonth() + 1).padStart(2, '0');
+		const yr = String(d.getFullYear());
+		const hr = String(d.getHours()).padStart(2, '0');
+		const mi = String(d.getMinutes()).padStart(2, '0');
+		const sc = String(d.getSeconds()).padStart(2, '0');
+		return `${dy}.${mo}.${yr} ${hr}:${mi}:${sc}`;
 	};
 
 	const formatDuration = (start?: string, end?: string) => {
 		if (!start) return '-';
 		const startDate = new Date(start);
-		const endDate = end ? new Date(end) : new Date();
+		const endDate = end ? new Date(end) : new Date(now);
 		const diff = endDate.getTime() - startDate.getTime();
 
 		if (diff < 1000) return '<1s';
@@ -594,7 +686,11 @@
 				{@const secretsArtifact = artifacts.find(a => a.type === 'secrets')}
 				{@const manifestsArtifact = artifacts.find(a => a.type === 'manifests')}
 				<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-					<div class="metric-card rounded-2xl p-4 sm:p-6">
+					<button
+						type="button"
+						class="metric-card rounded-2xl p-4 sm:p-6 w-full text-left cursor-pointer transition hover:ring-1 hover:ring-[var(--accent)]/40"
+						onclick={() => openDependenciesDialog('sbom')}
+					>
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Components</p>
 							<Package class="h-5 w-5 text-[var(--success)]" />
@@ -603,8 +699,12 @@
 							{sbomArtifact?.count ?? '-'}
 						</p>
 						<p class="mt-1 text-xs text-[var(--text-muted)]">from SBOM analysis</p>
-					</div>
-					<div class="metric-card rounded-2xl p-4 sm:p-6">
+					</button>
+					<button
+						type="button"
+						class="metric-card rounded-2xl p-4 sm:p-6 w-full text-left cursor-pointer transition hover:ring-1 hover:ring-[var(--warning)]/40"
+						onclick={openSecretsDialog}
+					>
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Secrets Found</p>
 							<Shield class="h-5 w-5" style="color: {secretsArtifact && secretsArtifact.count > 0 ? 'var(--warning)' : 'var(--success)'}" />
@@ -613,8 +713,12 @@
 							{secretsArtifact?.count ?? '-'}
 						</p>
 						<p class="mt-1 text-xs text-[var(--text-muted)]">from secret detection scan</p>
-					</div>
-					<div class="metric-card rounded-2xl p-4 sm:p-6">
+					</button>
+					<button
+						type="button"
+						class="metric-card rounded-2xl p-4 sm:p-6 w-full text-left cursor-pointer transition hover:ring-1 hover:ring-[var(--accent)]/40"
+						onclick={() => openDependenciesDialog('manifest')}
+					>
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Manifests</p>
 							<FileCode class="h-5 w-5 text-[var(--accent)]" />
@@ -623,29 +727,44 @@
 							{manifestsArtifact?.count ?? '-'}
 						</p>
 						<p class="mt-1 text-xs text-[var(--text-muted)]">dependency files detected</p>
-					</div>
+					</button>
 				</div>
 			{/if}
 
 			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Provider</p>
-					{#if run.base_url}
-						<a
-							href="/app/providers{run.provider_id ? `?tab=${run.provider_id}` : ''}"
-							class="mt-1 inline-flex items-center gap-1.5 text-sm font-semibold text-[var(--text-bright)] transition hover:text-[var(--accent)]"
-						>
-							{run.base_url.replace(/^https?:\/\//, '')}
-						</a>
-						<p class="text-xs capitalize text-[var(--text-muted)]">{run.provider || ''}</p>
-					{:else}
-						<a
-							href="/app/providers{run.provider ? `?tab=${run.provider}` : ''}"
-							class="mt-1 inline-flex items-center gap-1.5 text-lg font-semibold capitalize text-[var(--text-bright)] transition hover:text-[var(--accent)]"
-						>
-							{run.provider || '-'}
-						</a>
-					{/if}
+					<div class="mt-1 flex items-center gap-2">
+						{#if run.provider === 'gitlab'}
+							<svg class="h-4 w-4 shrink-0 text-[var(--text-secondary)]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+								<path d="M23.955 13.587l-1.342-4.135-2.664-8.189a.455.455 0 00-.867 0L16.418 9.45H7.582L4.918 1.263a.455.455 0 00-.867 0L1.386 9.45.044 13.587a.924.924 0 00.331 1.023L12 23.054l11.625-8.443a.92.92 0 00.33-1.024" />
+							</svg>
+						{:else if run.provider === 'gitea' || run.provider === 'forgejo'}
+							<Gitea size={16} />
+						{:else}
+							<svg class="h-4 w-4 shrink-0 text-[var(--text-secondary)]" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+								<path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
+							</svg>
+						{/if}
+						<div>
+							{#if run.base_url}
+								<a
+									href="/app/providers{run.provider_id ? `?tab=${run.provider_id}` : ''}"
+									class="text-sm font-semibold text-[var(--text-bright)] transition hover:text-[var(--accent)]"
+								>
+									{run.base_url.replace(/^https?:\/\//, '')}
+								</a>
+								<p class="text-xs capitalize text-[var(--text-muted)]">{run.provider || ''}</p>
+							{:else}
+								<a
+									href="/app/providers{run.provider ? `?tab=${run.provider}` : ''}"
+									class="text-sm font-semibold capitalize text-[var(--text-bright)] transition hover:text-[var(--accent)]"
+								>
+									{run.provider || '-'}
+								</a>
+							{/if}
+						</div>
+					</div>
 				</div>
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Duration</p>
@@ -655,11 +774,11 @@
 				</div>
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Created</p>
-					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.created_at)}</p>
+					<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>{formatDate(run.created_at)}</p>
 				</div>
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Finished</p>
-					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.finished_at)}</p>
+					<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>{formatDate(run.finished_at)}</p>
 				</div>
 			</div>
 
@@ -794,6 +913,9 @@
 		</article>
 	{/if}
 </div>
+
+<SecretsDialog bind:open={secretsDialogOpen} loading={secretsDialogLoading} data={secretsDialogData} />
+<DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} sourceFilter={dependenciesDialogSource} />
 
 <!-- Raw Data Dialog -->
 <Dialog bind:open={showRawDialog} showCloseButton={false} onClose={() => {}}>

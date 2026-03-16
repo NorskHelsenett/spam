@@ -90,7 +90,7 @@ export const mockRun = {
 		{ line: 'Running syft...', ts: ts(4) },
 		{ line: 'Collecting dependency manifest files', ts: ts(6) },
 		{ line: 'Found 3 dependency manifest files', ts: ts(8) },
-		{ line: 'Running gitleaks...', ts: ts(10) },
+		{ line: 'Running BetterLeaks...', ts: ts(10) },
 		{ line: 'leaks found: 0', ts: ts(12) },
 		{ line: 'Uploading SBOM', ts: ts(14) },
 		{ line: 'Uploading dependency manifests', ts: ts(15) },

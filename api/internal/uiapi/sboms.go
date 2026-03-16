@@ -368,20 +368,20 @@ func countComponentsFromContent(format string, content []byte) int {
 			return 0
 		}
 		rootRef := doc.Metadata.Component.BomRef
+		rootPurl := doc.Metadata.Component.Purl
 		if rootRef == "" {
-			rootRef = doc.Metadata.Component.Purl
+			rootRef = rootPurl
 		}
-		if rootRef == "" && isImplicitCycloneDXRoot(doc.Components, doc.Dependencies) {
-			if len(doc.Components) == 1 {
-				rootRef = firstNonEmpty(doc.Components[0].BomRef, doc.Components[0].Purl)
-			}
+		if rootRef == "" {
+			rootRef = cycloneDXDependencyGraphRoot(doc.Components, doc.Dependencies)
 		}
 		count := 0
 		for _, c := range doc.Components {
 			componentRef := firstNonEmpty(c.BomRef, c.Purl)
-			if rootRef == "" || componentRef != rootRef {
-				count++
+			if rootRef != "" && (componentRef == rootRef || (rootPurl != "" && c.Purl == rootPurl)) {
+				continue
 			}
+			count++
 		}
 		return count
 	case "spdx-json":
@@ -409,7 +409,10 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func isImplicitCycloneDXRoot(
+// cycloneDXDependencyGraphRoot returns the bom-ref of the root component by
+// finding the entry in dependencies.ref that no other component depends on.
+// This handles SBOMs that omit metadata.component or use mismatched bom-refs.
+func cycloneDXDependencyGraphRoot(
 	components []struct {
 		BomRef string `json:"bom-ref"`
 		Purl   string `json:"purl"`
@@ -418,15 +421,32 @@ func isImplicitCycloneDXRoot(
 		Ref       string   `json:"ref"`
 		DependsOn []string `json:"dependsOn"`
 	},
-) bool {
-	if len(components) != 1 || len(dependencies) != 1 {
-		return false
+) string {
+	if len(components) == 0 || len(dependencies) == 0 {
+		return ""
 	}
-	componentRef := firstNonEmpty(components[0].BomRef, components[0].Purl)
-	if componentRef == "" || dependencies[0].Ref != componentRef {
-		return false
+	// Build set of component refs present in the components array
+	componentRefs := make(map[string]bool, len(components))
+	for _, c := range components {
+		if ref := firstNonEmpty(c.BomRef, c.Purl); ref != "" {
+			componentRefs[ref] = true
+		}
 	}
-	return len(dependencies[0].DependsOn) == 0
+	// Find all refs that are depended upon by at least one other entry
+	dependedOn := make(map[string]bool)
+	for _, d := range dependencies {
+		for _, dep := range d.DependsOn {
+			dependedOn[dep] = true
+		}
+	}
+	// Root = a dependency entry whose ref is a known component and is not
+	// depended upon by anyone else. Return the first match.
+	for _, d := range dependencies {
+		if componentRefs[d.Ref] && !dependedOn[d.Ref] {
+			return d.Ref
+		}
+	}
+	return ""
 }
 
 // extractCycloneDXComponents parses a CycloneDX JSON SBOM and returns the
@@ -455,6 +475,35 @@ func extractCycloneDXComponents(payload []byte) ([]cycloneDXComponent, error) {
 		})
 	}
 	return out, nil
+}
+
+// sbomComponentCount returns the non-root component count for an SBOM.
+// It prefers the materialized view when a root component was detected (is_root=true),
+// which means the count excludes the root. If no root was detected in the view (all
+// rows have is_root=false), it falls back to parsing the SBOM content directly —
+// which uses the dependency graph to identify and exclude the root.
+func sbomComponentCount(ctx context.Context, db *gorm.DB, sbomID, format string, content []byte) int64 {
+	var rootCount int64
+	_ = db.WithContext(ctx).Table("sbom_component_view").
+		Where("sbom_id = ? AND is_root = true", sbomID).
+		Count(&rootCount)
+
+	var nonRootCount int64
+	_ = db.WithContext(ctx).Table("sbom_component_view").
+		Where("sbom_id = ? AND is_root = false", sbomID).
+		Count(&nonRootCount)
+
+	// If the view has entries and at least one is marked as root, trust it.
+	if nonRootCount > 0 && rootCount > 0 {
+		return nonRootCount
+	}
+	// No root detected in the view (root was not in metadata.component or bom-refs
+	// didn't match). Use the Go parser which also tries the dependency graph.
+	if parsed := int64(countComponentsFromContent(format, content)); parsed > 0 {
+		return parsed
+	}
+	// Last resort: return the raw count from the view (may include root).
+	return nonRootCount
 }
 
 // SBOMDownloadHandler downloads an SBOM by ID.
@@ -511,19 +560,7 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// countComponentsFromContent is authoritative for known formats: it
-		// correctly handles explicit metadata.component, implicit root detection,
-		// and SPDX root packages. Fall back to the materialized view only for
-		// unrecognised formats or when content is unavailable.
-		componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
-		if componentCount == 0 {
-			if err := db.WithContext(r.Context()).
-				Table("sbom_component_view").
-				Where("sbom_id = ? AND is_root = false", sbomID).
-				Count(&componentCount).Error; err != nil {
-				log.Printf("failed to count sbom components: %v", err)
-			}
-		}
+		componentCount := sbomComponentCount(r.Context(), db, sbomID, sbom.Format, sbom.ContentBytes)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id":              sbom.ID,

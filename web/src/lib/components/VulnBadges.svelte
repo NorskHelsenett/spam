@@ -15,9 +15,9 @@
 		size?: 'sm' | 'md';
 	} = $props();
 
-	const iconClass = size === 'sm' ? 'h-3 w-3' : 'h-4 w-4';
-	const textClass = size === 'sm' ? 'text-xs' : 'text-sm';
-	const gapClass = size === 'sm' ? 'gap-2' : 'gap-4';
+	const iconClass = $derived(size === 'sm' ? 'h-3 w-3' : 'h-4 w-4');
+	const textClass = $derived(size === 'sm' ? 'text-xs' : 'text-sm');
+	const gapClass = $derived(size === 'sm' ? 'gap-2' : 'gap-4');
 </script>
 
 <div class="flex items-center {gapClass} {textClass}">

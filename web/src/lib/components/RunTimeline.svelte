@@ -92,7 +92,7 @@
 		{ id: 'run-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'run' },
 		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
 		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
-		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running Gitleaks scan', icon: Shield, category: 'run' },
+		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running BetterLeaks scan', icon: Shield, category: 'run' },
 		{ id: 'run-upload', title: 'Uploading Results', defaultDescription: 'Sending data to server', icon: Upload, category: 'run' },
 	];
 
@@ -146,7 +146,7 @@
 					description: match ? `Found ${match[1]} manifest file(s)` : 'Manifests collected',
 					status: 'completed'
 				});
-			} else if (line.includes('Running gitleaks')) {
+			} else if (line.includes('Running BetterLeaks')) {
 				const manifests = completed.get('run-manifests');
 				if (manifests && manifests.status === 'running') {
 					completed.set('run-manifests', {
@@ -170,7 +170,7 @@
 						existing.status = 'warning';
 					}
 				}
-			} else if (line.includes('Uploading SBOM') || line.includes('Uploading gitleaks') || line.includes('Uploading dependency')) {
+			} else if (line.includes('Uploading SBOM') || line.includes('Uploading BetterLeaks') || line.includes('Uploading dependency')) {
 				const existing = completed.get('run-upload');
 				if (!existing) {
 					completed.set('run-upload', {

@@ -15,8 +15,8 @@ FROM ghcr.io/anchore/syft:latest AS syft
 # Get trivy binary
 FROM aquasec/trivy:latest AS trivy
 
-# Get gitleaks binary
-FROM ghcr.io/gitleaks/gitleaks:latest AS gitleaks
+# Get betterleaks binary
+FROM ghcr.io/betterleaks/betterleaks:latest AS betterleaks
 
 # Runtime stage
 FROM alpine:3.20
@@ -26,7 +26,7 @@ RUN apk add --no-cache git ca-certificates
 # Copy binaries from official images
 COPY --from=syft /syft /usr/local/bin/syft
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
-COPY --from=gitleaks /usr/bin/gitleaks /usr/local/bin/gitleaks
+COPY --from=betterleaks /usr/bin/betterleaks /usr/local/bin/betterleaks
 
 # Copy Go binaries from builder
 COPY --from=builder /build/runner /usr/local/bin/runner

@@ -858,7 +858,7 @@ func RunEventsHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 	}
 }
 
-// RunSecretsHandler retrieves gitleaks findings for a run.
+// RunSecretsHandler retrieves secret scanner findings for a run.
 // GET /api/runs/{id}/secrets
 func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
