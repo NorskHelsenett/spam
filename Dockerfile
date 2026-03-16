@@ -14,7 +14,7 @@ COPY web/ .
 RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # 2. Go build stage
-FROM golang:1.25-alpine AS gobuilder
+FROM golang:1.26-alpine AS gobuilder
 # Cross-compilation setup
 ARG TARGETOS
 ARG TARGETARCH

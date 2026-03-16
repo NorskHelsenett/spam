@@ -13,6 +13,11 @@
 			"autostart": true
 		},
 	},
+	"remoteEnv": {
+		"GOPATH": "/tmp/go",
+		"GOCACHE": "/tmp/go/pkg/cache",
+		"GOMODCACHE": "/tmp/go/pkg/mod"
+	},
 	"customizations": {
 		"vscode": {
 			"extensions": [

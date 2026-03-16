@@ -569,6 +569,95 @@
 		}
 	};
 
+	// ── Trivy scanner ──────────────────────────────────────────────────────
+	type TrivyScanStatus = {
+		job_id?: string;
+		job_status?: string;
+		created_at?: string;
+		finished_at?: string;
+		error?: string;
+		pending_count?: number;
+		active_leases?: number;
+		scanned_count?: number;
+		last_scanned_at?: string;
+	};
+
+	let trivyStatus: TrivyScanStatus = $state({});
+	let trivyTriggering = $state(false);
+	let trivyError = $state('');
+	let trivyPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const loadTrivyStatus = async () => {
+		try {
+			const response = await fetch('/api/admin/trivy/scan/status', { credentials: 'include' });
+			if (response.ok) trivyStatus = await response.json();
+		} catch { /* ignore */ }
+	};
+
+	const triggerTrivyScan = async () => {
+		trivyTriggering = true;
+		trivyError = '';
+		try {
+			const response = await fetch('/api/admin/trivy/scan', {
+				method: 'POST',
+				credentials: 'include'
+			});
+			if (response.status === 409) {
+				trivyError = 'A scan job is already queued or running.';
+				return;
+			}
+			if (response.status === 503) {
+				trivyError = 'Trivy scanner not configured (TRIVY_SCANNER_CRONJOB_NAME missing).';
+				return;
+			}
+			if (!response.ok) {
+				trivyError = 'Failed to start scan.';
+				return;
+			}
+			await loadTrivyStatus();
+			pollTrivyStatus();
+		} catch {
+			trivyError = 'Failed to start scan.';
+		} finally {
+			trivyTriggering = false;
+		}
+	};
+
+	const pollTrivyStatus = () => {
+		if (trivyPollTimer) clearTimeout(trivyPollTimer);
+		trivyPollTimer = setTimeout(async () => {
+			await loadTrivyStatus();
+			const active =
+				trivyStatus.job_status === 'QUEUED' ||
+				trivyStatus.job_status === 'RUNNING' ||
+				trivyStatus.job_status === 'RETRY' ||
+				(trivyStatus.active_leases ?? 0) > 0;
+			if (active) pollTrivyStatus();
+		}, 3000);
+	};
+
+	const trivyJobStatusLabel = (status?: string) => {
+		switch (status) {
+			case 'QUEUED': return 'Queued';
+			case 'RUNNING': return 'Running…';
+			case 'RETRY': return 'Retrying';
+			case 'SUCCEEDED': return 'Job created';
+			case 'FAILED': return 'Failed';
+			default: return 'Never triggered';
+		}
+	};
+
+	const trivyJobStatusClass = (status?: string) => {
+		switch (status) {
+			case 'RUNNING':
+			case 'QUEUED':
+			case 'RETRY': return 'text-amber-400 border-amber-400/40';
+			case 'SUCCEEDED': return 'text-green-400 border-green-400/40';
+			case 'FAILED': return 'text-[var(--error)] border-[var(--error)]/40';
+			default: return 'text-[var(--text-tertiary)] border-[var(--border-color)]';
+		}
+	};
+
 	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
 
 	const refreshSyncStatuses = async () => {
@@ -769,6 +858,14 @@
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
 			});
+			loadTrivyStatus().then(() => {
+				const active =
+					trivyStatus.job_status === 'QUEUED' ||
+					trivyStatus.job_status === 'RUNNING' ||
+					trivyStatus.job_status === 'RETRY' ||
+					(trivyStatus.active_leases ?? 0) > 0;
+				if (active) pollTrivyStatus();
+			});
 			updatePreview();
 
 			// Restore sync states for any in-progress syncs (e.g. after navigating away and back).
@@ -784,6 +881,7 @@
 				window.removeEventListener('scroll', closeTooltip, true);
 				window.removeEventListener('resize', closeTooltip);
 				if (osvPollTimer) clearTimeout(osvPollTimer);
+				if (trivyPollTimer) clearTimeout(trivyPollTimer);
 			};
 		}
 	});
@@ -1315,6 +1413,106 @@
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
 			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
 			<p class="mt-1 text-sm text-[var(--text-secondary)]">{osvStatus.error}</p>
+		</div>
+	{/if}
+</section>
+
+<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Trivy Scanner</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">
+				Runs as a scheduled K8s CronJob. Trigger an ad-hoc scan to pick up new SBOMs immediately.
+			</p>
+		</div>
+		<div class="flex flex-wrap items-center gap-2">
+			<button
+				type="button"
+				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+				onclick={triggerTrivyScan}
+				disabled={trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
+			>
+				<Play size={14} />
+				{trivyTriggering ? 'Starting…' : 'Run Trivy Scan'}
+			</button>
+		</div>
+	</header>
+
+	{#if trivyError}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
+			{trivyError}
+		</div>
+	{/if}
+
+	<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+		<!-- Trigger status -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldAlert size={16} />
+				<span>Trigger status</span>
+			</div>
+			<p class="mt-2 text-sm font-semibold">
+				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {trivyJobStatusClass(trivyStatus.job_status)}">
+					{trivyJobStatusLabel(trivyStatus.job_status)}
+				</span>
+			</p>
+			{#if trivyStatus.created_at}
+				<p class="mt-1 flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+					<Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}
+				</p>
+			{/if}
+			{#if trivyStatus.finished_at}
+				<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
+					Finished {new Date(trivyStatus.finished_at).toLocaleString()}
+				</p>
+			{/if}
+		</div>
+
+		<!-- Active scanners -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Active scanners</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold {(trivyStatus.active_leases ?? 0) > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">
+				{trivyStatus.active_leases ?? '—'}
+			</p>
+			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Pods currently scanning</p>
+		</div>
+
+		<!-- Scanned SBOMs -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>SBOMs scanned</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">
+				{trivyStatus.scanned_count ?? '—'}
+			</p>
+			{#if trivyStatus.last_scanned_at}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">
+					Last scan {new Date(trivyStatus.last_scanned_at).toLocaleString()}
+				</p>
+			{/if}
+		</div>
+
+		<!-- Pending SBOMs -->
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<Clock size={16} />
+				<span>Pending SBOMs</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold {(trivyStatus.pending_count ?? 0) > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">
+				{trivyStatus.pending_count ?? '—'}
+			</p>
+			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Not yet scanned</p>
+		</div>
+	</div>
+
+	{#if trivyStatus.error}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{trivyStatus.error}</p>
 		</div>
 	{/if}
 </section>

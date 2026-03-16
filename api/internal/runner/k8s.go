@@ -507,6 +507,88 @@ func (k *K8sClient) GetJobEvents(ctx context.Context, jobName, namespace string)
 	return result, nil
 }
 
+// GetJobStatusString returns a simple status string for a named job.
+// Returns "not_found" when the job does not exist.
+func (k *K8sClient) GetJobStatusString(ctx context.Context, jobName string) (string, error) {
+	if k.cfg.LocalMode {
+		return "not_found", nil
+	}
+	job, err := k.clientset.BatchV1().Jobs(k.cfg.Namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return "not_found", nil
+		}
+		return "", fmt.Errorf("get job: %w", err)
+	}
+	switch {
+	case job.Status.Succeeded > 0:
+		return "succeeded", nil
+	case job.Status.Failed > 0:
+		return "failed", nil
+	case job.Status.Active > 0:
+		return "running", nil
+	default:
+		return "pending", nil
+	}
+}
+
+// CreateTrivyAdhocJob creates an ad-hoc K8s Job from an existing CronJob's template.
+// If a job with the given name already exists and is still running, it returns an error.
+// If it has finished (succeeded or failed), the old job is deleted before creating a new one.
+func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobName string, ttlSecondsAfterFinished int32) error {
+	if k.cfg.LocalMode {
+		return fmt.Errorf("create job from cronjob not supported in local mode")
+	}
+	namespace := k.cfg.Namespace
+
+	// Check whether a prior adhoc job still exists.
+	existing, err := k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("check existing job: %w", err)
+	}
+	if err == nil {
+		// Still active — refuse to create a duplicate.
+		if existing.Status.Active > 0 {
+			return fmt.Errorf("ad-hoc trivy scan job is already running")
+		}
+		// Finished — delete it so we can recreate.
+		propagation := metav1.DeletePropagationBackground
+		if delErr := k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: &propagation,
+		}); delErr != nil {
+			return fmt.Errorf("delete previous job: %w", delErr)
+		}
+	}
+
+	// Fetch the CronJob template.
+	cronJob, err := k.clientset.BatchV1().CronJobs(namespace).Get(ctx, cronJobName, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get cronjob %s: %w", cronJobName, err)
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/part-of":  "spam",
+				"spam.io/adhoc-trivy-scan":  "true",
+			},
+			Annotations: map[string]string{
+				"spam.io/created-by": "admin-adhoc",
+			},
+		},
+		Spec: cronJob.Spec.JobTemplate.Spec,
+	}
+	job.Spec.TTLSecondsAfterFinished = &ttlSecondsAfterFinished
+
+	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("create job: %w", err)
+	}
+	log.Printf("created adhoc trivy scan job: %s/%s", namespace, jobName)
+	return nil
+}
+
 // GetPodLogs retrieves logs from the runner pod associated with a job.
 func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, tailLines *int64) (string, error) {
 	if k.cfg.LocalMode {
@@ -625,6 +707,14 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 
 	log.Printf("created run job: run_id=%s job=%s/%s", runID, namespace, jobName)
 	return nil
+}
+
+// CreateTrivyAdhocJob implements jobs.TrivyJobCreator for the worker.
+// It creates an ad-hoc trivy scanner K8s Job from the given CronJob template,
+// with a fixed 12-hour TTL so it cleans itself up.
+func (e *RunExecutor) CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error {
+	const ttl = int32(12 * 3600)
+	return e.k8s.CreateTrivyAdhocJob(ctx, cronJobName, "trivy-adhoc", ttl)
 }
 
 // CancelRun cancels a running job.

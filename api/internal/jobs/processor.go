@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
@@ -12,6 +13,12 @@ import (
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
+
+// TrivyJobCreator is implemented by the runner when K8s is available.
+// It allows the worker to create an ad-hoc trivy scanner K8s job.
+type TrivyJobCreator interface {
+	CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error
+}
 
 // retryableError wraps an error to signal the worker to retry without counting
 // the attempt against the job's max attempts.
@@ -46,6 +53,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processRefreshSBOMViews(ctx, db)
 	case JobTypeOSVScan:
 		return processOSVScan(ctx, db, job.ID)
+	case JobTypeTrivyAdhocScan:
+		return processTrivyAdhocScan(ctx, job, runExecutor)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -76,6 +85,36 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 		return result, fmt.Errorf("refresh vulnerability dashboard metrics: %w", err)
 	}
 	return result, nil
+}
+
+func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecutor) (interface{}, error) {
+	creator, ok := runExecutor.(TrivyJobCreator)
+	if !ok {
+		return nil, NonRetryable(errors.New("trivy job creation not available: runner not enabled"))
+	}
+
+	var payload TrivyAdhocPayload
+	if len(job.Payload) > 0 {
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return nil, NonRetryable(fmt.Errorf("unmarshal payload: %w", err))
+		}
+	}
+	if payload.CronJobName == "" {
+		return nil, NonRetryable(errors.New("cronjob_name missing from payload"))
+	}
+
+	if err := creator.CreateTrivyAdhocJob(ctx, payload.CronJobName); err != nil {
+		if isAlreadyRunning(err) {
+			return nil, NonRetryable(err)
+		}
+		return nil, err
+	}
+
+	return map[string]string{"status": "created", "cronjob": payload.CronJobName}, nil
+}
+
+func isAlreadyRunning(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "AlreadyExists"))
 }
 
 func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {
