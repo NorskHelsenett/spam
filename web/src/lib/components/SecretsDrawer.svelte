@@ -35,6 +35,10 @@
 			s.match(new RegExp(`:\\s*(${b64chars}+=*)$`))?.[1],
 			// Bare assignment: key=value (no quotes, = not part of base64 padding)
 			s.match(new RegExp(`[^=]=["']?(${b64chars}+=*)["']?$`))?.[1],
+			// YAML-style with trailing text: "key: <base64> kind: Secret" or similar
+			s.match(new RegExp(`:\\s+(${b64chars}{20,}=*)\\s+\\w+:`))?.[1],
+			// Longest base64 sequence (20+ chars to avoid false positives)
+			s.match(new RegExp(`${b64chars}{20,}=*`))?.[0],
 			// First eyJ... substring (base64-encoded JSON — very common for JWTs / tokens)
 			s.match(new RegExp(`eyJ${b64chars}+=*`))?.[0],
 			// Whole string
