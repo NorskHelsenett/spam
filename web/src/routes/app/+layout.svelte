@@ -30,6 +30,7 @@
 	};
 
 	const formatMetricCardTextNode = (node: Text) => {
+		if (node.parentElement?.closest('[data-no-format]')) return;
 		const value = node.nodeValue ?? '';
 		const nextValue = value.replace(/-?\d(?:[\d,\s]*\d)?/g, (token) => formatMetricNumber(token));
 		if (nextValue !== value) {

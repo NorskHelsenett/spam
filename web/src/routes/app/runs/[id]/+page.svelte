@@ -537,14 +537,15 @@
 
 	const formatDate = (dateStr?: string) => {
 		if (!dateStr) return '-';
-		return new Date(dateStr).toLocaleString('fr-FR', {
-			day: '2-digit',
-			month: '2-digit',
-			year: 'numeric',
-			hour: '2-digit',
-			minute: '2-digit',
-			second: '2-digit'
-		});
+		const d = new Date(dateStr);
+		if (isNaN(d.getTime())) return '-';
+		const dy = String(d.getDate()).padStart(2, '0');
+		const mo = String(d.getMonth() + 1).padStart(2, '0');
+		const yr = String(d.getFullYear());
+		const hr = String(d.getHours()).padStart(2, '0');
+		const mi = String(d.getMinutes()).padStart(2, '0');
+		const sc = String(d.getSeconds()).padStart(2, '0');
+		return `${dy}.${mo}.${yr} ${hr}:${mi}:${sc}`;
 	};
 
 	const formatDuration = (start?: string, end?: string) => {
@@ -773,11 +774,11 @@
 				</div>
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Created</p>
-					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.created_at)}</p>
+					<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>{formatDate(run.created_at)}</p>
 				</div>
 				<div class="metric-card rounded-2xl p-4 sm:p-6">
 					<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Finished</p>
-					<p class="mt-1 text-sm text-[var(--text-bright)]">{formatDate(run.finished_at)}</p>
+					<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>{formatDate(run.finished_at)}</p>
 				</div>
 			</div>
 
