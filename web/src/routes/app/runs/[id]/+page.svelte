@@ -77,6 +77,8 @@
 	let podStatus: PodStatus | null = $state(null);
 	let showTimeline = $state(true);
 	let k8sPollingDisabled = $state(false);
+	let now = $state(Date.now());
+	let ticker: ReturnType<typeof setInterval> | null = null;
 
 	const loadRun = async (shouldLoadArtifacts = true) => {
 		const id = $page.params.id;
@@ -307,10 +309,17 @@
 						if (data.secret_id) run.secret_id = data.secret_id;
 						if (data.commit_hash) run.commit_sha = data.commit_hash;
 
+						// Update timestamps from SSE data
+						if (data.started_at) run.started_at = data.started_at;
+						if (data.finished_at) run.finished_at = data.finished_at;
+
 						// Load artifacts with the new IDs
 						// The manifest count is included in the SSE event, frontend will fetch details
 						if (run.status === 'SUCCEEDED' || run.status === 'FAILED') {
-							loadArtifacts(id, run);
+							// Reload run to get latest timestamps
+							loadRun(false).then(() => {
+								if (run) loadArtifacts(id, run);
+							});
 							loadK8sEvents(id);
 						}
 					}
@@ -403,6 +412,9 @@
 			await loadK8sEvents(id);
 		}
 
+		// Start ticker for live duration updates
+		ticker = setInterval(() => { now = Date.now(); }, 1000);
+
 		// Try SSE for both running and completed runs to capture K8s events and logs
 		connectSSE();
 	});
@@ -415,6 +427,10 @@
 		if (eventsInterval) {
 			clearInterval(eventsInterval);
 			eventsInterval = null;
+		}
+		if (ticker) {
+			clearInterval(ticker);
+			ticker = null;
 		}
 	});
 
@@ -453,13 +469,20 @@
 
 	const formatDate = (dateStr?: string) => {
 		if (!dateStr) return '-';
-		return new Date(dateStr).toLocaleString();
+		return new Date(dateStr).toLocaleString('fr-FR', {
+			day: '2-digit',
+			month: '2-digit',
+			year: 'numeric',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit'
+		});
 	};
 
 	const formatDuration = (start?: string, end?: string) => {
 		if (!start) return '-';
 		const startDate = new Date(start);
-		const endDate = end ? new Date(end) : new Date();
+		const endDate = end ? new Date(end) : new Date(now);
 		const diff = endDate.getTime() - startDate.getTime();
 
 		if (diff < 1000) return '<1s';
