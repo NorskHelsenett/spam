@@ -778,6 +778,11 @@
 	];
 
 	let users: UserSummary[] = $state([]);
+	const approvedUsers = $derived(users.filter(u => u.approved && !u.hidden));
+	const adminCount = $derived(approvedUsers.filter(u => u.role === 'admin').length);
+	const readerCount = $derived(approvedUsers.filter(u => u.role === 'global_reader').length);
+	const defaultCount = $derived(approvedUsers.filter(u => u.role === 'default').length);
+	const pendingUsers = $derived(users.filter(u => !u.approved && !u.hidden));
 	let usersLoading = $state(true);
 	let usersError = $state('');
 	let savingUser = $state<string | null>(null);
@@ -894,55 +899,42 @@
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Settings</h1>
-				<p class="text-sm text-[var(--text-tertiary)]">
-					Configure provider tokens that power the Git providers view.
-				</p>
-			</div>
-			<div class="flex flex-wrap items-center gap-2">
-			<button
-				type="button"
-				class="btn btn-ghost"
-				onclick={loadProviders}
-				disabled={refreshing}
-			>
-				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
-					<RotateCw size={14} />
-				</span>
-				Refresh
-			</button>
-			</div>
+		<header class="flex items-baseline gap-3">
+			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Settings</h1>
 		</header>
 
-		<div class="grid gap-4 lg:grid-cols-3">
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-					<ShieldCheck size={16} />
-					<span>Write-only tokens</span>
-				</div>
-				<p class="mt-2 text-xs text-[var(--text-tertiary)]">
-					PATs are masked immediately after creation and never shown again.
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+			<!-- Users with access + role breakdown as subtitles -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Users</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{usersLoading ? '—' : approvedUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">
+					{usersLoading ? '' : `${adminCount} admin · ${readerCount} reader · ${defaultCount} default`}
 				</p>
 			</div>
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-					<KeyRound size={16} />
-					<span>Admin-only control</span>
-				</div>
-				<p class="mt-2 text-xs text-[var(--text-tertiary)]">
-					Providers added here are the only ones visible to end users.
-				</p>
+			<!-- Pending users -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Pending</h3>
+				<p class="text-3xl font-bold {!usersLoading && pendingUsers.length > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">{usersLoading ? '—' : pendingUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">awaiting approval</p>
 			</div>
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<p class="text-xs text-[var(--text-tertiary)]">
-					{#if providers.length === 0}
-						Default GitHub + GitLab tabs would appear for users.
-					{:else}
-						Only these configured providers would appear for users.
-					{/if}
-				</p>
+			<!-- Providers -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Providers</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{refreshing ? '—' : providers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">configured sources</p>
+			</div>
+			<!-- OSV -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">OSV</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{osvStatus.result?.scanned ?? '—'}</p>
+				<p class="text-xs text-[var(--text-muted)]">{osvStatus.result?.vulns_found != null ? `${osvStatus.result.vulns_found} vulns found` : 'components scanned'}</p>
+			</div>
+			<!-- Trivy -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Trivy</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{trivyStatus.scanned_count ?? '—'}</p>
+				<p class="text-xs text-[var(--text-muted)]">{trivyStatus.pending_count != null ? `${trivyStatus.pending_count} pending` : 'SBOMs scanned'}</p>
 			</div>
 		</div>
 	</section>
