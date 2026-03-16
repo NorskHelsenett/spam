@@ -1,15 +1,20 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
+	import { fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { ArrowLeft, KeyRound, GitBranch } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
+	import SecretsDrawer from '$lib/components/SecretsDrawer.svelte';
 
 	type TableRow = {
 		repo: string;
+		repo_id: string;
 		secret_type: string;
 		unique_finding_count: number;
+		last_scanned: string;
 	};
 
 	type DistributionRow = {
@@ -133,6 +138,28 @@
 		}
 	};
 
+	const fmtRelative = (iso: string) => {
+		const diff = Date.now() - new Date(iso).getTime();
+		const days = Math.floor(diff / 86_400_000);
+		if (days === 0) return 'today';
+		if (days === 1) return 'yesterday';
+		if (days < 30) return `${days}d ago`;
+		return `${Math.floor(days / 30)}mo ago`;
+	};
+
+	let drawerOpen = false;
+	let drawerRow: TableRow | null = null;
+
+	const openDrawer = (row: TableRow) => {
+		if (drawerOpen && drawerRow?.repo_id === row.repo_id && drawerRow?.secret_type === row.secret_type) {
+			drawerOpen = false;
+			drawerRow = null;
+		} else {
+			drawerRow = row;
+			drawerOpen = true;
+		}
+	};
+
 	onMount(async () => {
 		try {
 			const [tableRes, distRes, trendRes] = await Promise.all([
@@ -161,19 +188,24 @@
 	<title>Secrets — Spam Monitor</title>
 </svelte:head>
 
-<div class="space-y-8 sm:space-y-12">
+<div class="space-y-4">
+	<!-- Back button -->
+	<div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
+			onclick={goBack}
+		>
+			<ArrowLeft class="h-4 w-4" />
+			Back
+		</button>
+	</div>
+
 	<!-- Stats + charts panel -->
 	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<!-- Header -->
 		<header class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
 			<div class="flex items-center gap-3">
-				<button
-					type="button"
-					class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-					onclick={goBack}
-				>
-					<ArrowLeft class="h-4 w-4" />
-				</button>
 				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
 				<div>
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Secrets</h1>
@@ -282,11 +314,15 @@
 											</span>
 										</span>
 									</th>
+									<th class="px-5 py-3 text-right">Last Scanned</th>
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 								{#each sortedRows as row}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+									<tr
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] {drawerOpen && drawerRow?.repo_id === row.repo_id && drawerRow?.secret_type === row.secret_type ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+										onclick={() => openDrawer(row)}
+									>
 										<td class="px-5 py-3">
 											<div class="flex items-center gap-2">
 												<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
@@ -302,11 +338,29 @@
 										<td class="px-5 py-3 text-right">
 											<span class="inline-flex items-center rounded-full bg-[var(--accent)]/10 px-2.5 py-0.5 font-semibold tabular-nums text-xs text-[var(--accent)]">{fmt(row.unique_finding_count)}</span>
 										</td>
+										<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]" title={row.last_scanned}>
+											{fmtRelative(row.last_scanned)}
+										</td>
 									</tr>
 								{/each}
 							</tbody>
 						</table>
 					</div>
+
+					{#if drawerOpen && drawerRow}
+						<div
+							class="absolute inset-y-0 right-0 z-10 w-[680px] border-l border-[var(--border-color)] rounded-l-[10px]"
+							in:fly={{ x: 680, duration: 240, easing: cubicOut, opacity: 1 }}
+							out:fly={{ x: 680, duration: 200, easing: cubicIn, opacity: 1 }}
+						>
+							<SecretsDrawer
+								repoId={drawerRow.repo_id}
+								secretType={drawerRow.secret_type}
+								repoName={repoShortName(drawerRow.repo)}
+								onClose={() => { drawerOpen = false; drawerRow = null; }}
+							/>
+						</div>
+					{/if}
 				</div>
 			{/if}
 		{/if}

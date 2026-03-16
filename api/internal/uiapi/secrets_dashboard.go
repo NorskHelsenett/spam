@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
@@ -9,9 +10,11 @@ import (
 
 // SecretTableRow represents a row in the secrets datatable.
 type SecretTableRow struct {
-	Repo               string `json:"repo"`
-	SecretType         string `json:"secret_type"`
-	UniqueFindingCount int64  `json:"unique_finding_count"`
+	Repo               string    `json:"repo"`
+	RepoID             string    `json:"repo_id"`
+	SecretType         string    `json:"secret_type"`
+	UniqueFindingCount int64     `json:"unique_finding_count"`
+	LastScanned        time.Time `json:"last_scanned"`
 }
 
 // SecretDistributionRow represents a row in the secrets donut chart.
@@ -33,7 +36,8 @@ func SecretsDashboardTableHandler(db *gorm.DB, authService *auth.Service) http.H
 WITH latest_repo_secrets AS (
   SELECT DISTINCT ON (rs.repo_id)
     rs.repo_id,
-    rs.findings
+    rs.findings,
+    rs.created_at
   FROM run_secrets rs
   WHERE rs.repo_id IS NOT NULL
     AND rs.repo_id <> ''
@@ -42,6 +46,7 @@ WITH latest_repo_secrets AS (
 deduped_findings AS (
   SELECT DISTINCT
     lrs.repo_id,
+    lrs.created_at AS last_scanned,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
@@ -72,14 +77,16 @@ SELECT
     ),
     '/'
   ) || '/' || r.org || '/' || r.slug || '.git' AS repo,
+  r.id AS repo_id,
   df.secret_type,
-  COUNT(*) AS unique_finding_count
+  COUNT(*) AS unique_finding_count,
+  MAX(df.last_scanned) AS last_scanned
 FROM deduped_findings df
 JOIN repos r
   ON r.id = df.repo_id
 LEFT JOIN provider_instances pi
   ON pi.id = r.provider_instance_id
-GROUP BY repo, df.secret_type
+GROUP BY repo, r.id, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
 		var rows []SecretTableRow
@@ -238,8 +245,8 @@ SELECT
 FROM ranked
 GROUP BY CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END
 ORDER BY
-  CASE WHEN secret_type = 'other' THEN 1 ELSE 0 END,
-  finding_count DESC`
+  CASE WHEN (CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END) = 'other' THEN 1 ELSE 0 END,
+  SUM(finding_count) DESC`
 
 		var rows []SecretDistributionRow
 		if err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error; err != nil {
@@ -248,6 +255,78 @@ ORDER BY
 		}
 		if rows == nil {
 			rows = []SecretDistributionRow{}
+		}
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+// SecretFindingRow is a single deduplicated finding returned for the drawer.
+type SecretFindingRow struct {
+	RuleID      string `json:"rule_id"`
+	Description string `json:"description"`
+	File        string `json:"file"`
+	StartLine   int    `json:"start_line"`
+	Match       string `json:"match"`
+}
+
+// SecretsFindingsHandler returns deduplicated individual findings for a given
+// repo + secret type, sourced from the latest run only.
+//
+// GET /api/secrets/findings?repo_id=...&secret_type=...
+func SecretsFindingsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+
+		repoID := r.URL.Query().Get("repo_id")
+		secretType := r.URL.Query().Get("secret_type")
+		if repoID == "" || secretType == "" {
+			http.Error(w, "repo_id and secret_type are required", http.StatusBadRequest)
+			return
+		}
+
+		query := `
+WITH latest AS (
+  SELECT findings
+  FROM run_secrets
+  WHERE repo_id = ?
+  ORDER BY created_at DESC
+  LIMIT 1
+),
+exploded AS (
+  SELECT DISTINCT
+    COALESCE(finding->>'RuleID', 'unknown')   AS rule_id,
+    COALESCE(finding->>'Description', '')     AS description,
+    COALESCE(finding->>'File', '')            AS file,
+    COALESCE((finding->>'StartLine')::int, 0) AS start_line,
+    COALESCE(finding->>'Match', '')           AS match,
+    COALESCE(
+      NULLIF(finding->>'Fingerprint', ''),
+      md5(concat_ws('|',
+        COALESCE(finding->>'RuleID', ''),
+        COALESCE(finding->>'Description', ''),
+        COALESCE(finding->>'File', ''),
+        COALESCE(finding->>'StartLine', ''),
+        COALESCE(finding->>'Match', ''),
+        COALESCE(finding->>'Secret', '')
+      ))
+    ) AS dedupe_key
+  FROM latest
+  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(findings, '[]'::jsonb)) AS finding
+  WHERE COALESCE(finding->>'RuleID', 'unknown') = ?
+)
+SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match
+FROM exploded
+ORDER BY dedupe_key, file, start_line`
+
+		var rows []SecretFindingRow
+		if err := db.WithContext(r.Context()).Raw(query, repoID, secretType).Scan(&rows).Error; err != nil {
+			http.Error(w, "failed to load secret findings", http.StatusInternalServerError)
+			return
+		}
+		if rows == nil {
+			rows = []SecretFindingRow{}
 		}
 		writeJSON(w, http.StatusOK, rows)
 	}
