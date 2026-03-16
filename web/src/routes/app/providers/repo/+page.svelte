@@ -5,10 +5,12 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, CheckCircle, ChevronRight, ChevronDown
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import SecretsDialog from '$lib/components/SecretsDialog.svelte';
+	import DependenciesDialog from '$lib/components/DependenciesDialog.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import EmptyCommits from '$lib/components/icons/EmptyCommits.svelte';
 	import EmptyContributors from '$lib/components/icons/EmptyContributors.svelte';
@@ -551,9 +553,6 @@
 	let dependenciesDialogOpen = $state(false);
 	let dependenciesDialogLoading = $state(false);
 	let dependenciesDialogData = $state<RepoDependency[]>([]);
-	let dependenciesDialogTab = $state('all');
-	let collapsedDependencyGroups = $state<Record<string, boolean>>({});
-
 	const openSecretsDialog = async () => {
 		const repoDbId = resolvedRepoDbId;
 		secretsDialogOpen = true;
@@ -570,34 +569,6 @@
 		}
 	};
 
-	const dependenciesDialogFiltered = $derived.by(() => {
-		if (dependenciesDialogTab === 'direct') return dependenciesDialogData.filter((dep) => dep.direct);
-		if (dependenciesDialogTab === 'transitive') return dependenciesDialogData.filter((dep) => !dep.direct);
-		return dependenciesDialogData;
-	});
-
-	const dependencyGroups = $derived.by(() => {
-		const groups = new Map<string, RepoDependency[]>();
-		for (const dep of dependenciesDialogFiltered) {
-			const groupPath = dep.group_path || 'Scanner detected';
-			const existing = groups.get(groupPath);
-			if (existing) {
-				existing.push(dep);
-			} else {
-				groups.set(groupPath, [dep]);
-			}
-		}
-		return Array.from(groups.entries()).map(([groupPath, dependencies]) => ({
-			groupPath,
-			ecosystems: Array.from(new Set(dependencies.map((dep) => dep.ecosystem))).sort((a, b) => a.localeCompare(b)),
-			dependencies: [...dependencies].sort((a, b) => {
-				if (a.direct !== b.direct) return a.direct ? -1 : 1;
-				if (a.name !== b.name) return a.name.localeCompare(b.name);
-				return a.version.localeCompare(b.version);
-			})
-		}));
-	});
-
 	const openDependenciesDialog = async () => {
 		const repoDbId = resolvedRepoDbId;
 		if (!repoDbId) return;
@@ -613,103 +584,9 @@
 			if (res.ok) {
 				const data = await res.json();
 				dependenciesDialogData = data.dependencies || [];
-				collapsedDependencyGroups = {};
 			}
 		} finally {
 			dependenciesDialogLoading = false;
-		}
-	};
-
-	const toggleDependencyGroup = (groupPath: string) => {
-		collapsedDependencyGroups = {
-			...collapsedDependencyGroups,
-			[groupPath]: !collapsedDependencyGroups[groupPath]
-		};
-	};
-
-	const sourceBadgeInfo = (source: string) => {
-		if (source === 'manifest') {
-			return {
-				icon: FileCode,
-				label: 'Manifest',
-				className: 'bg-purple-500/10 text-purple-400',
-				title: 'From manifest file'
-			};
-		}
-		if (source === 'sbom') {
-			return {
-				icon: Microscope,
-				label: 'SBOM',
-				className: 'bg-blue-500/10 text-blue-400',
-				title: 'From SBOM scanner'
-			};
-		}
-		return null;
-	};
-
-	const formatDependencyTitle = (dep: RepoDependency) => dep.version
-		? `${dep.name}@${dep.version}`
-		: dep.name;
-
-	const dependencyPackageURL = (dep: RepoDependency) => {
-		const ecosystem = dep.ecosystem.toLowerCase();
-		const name = dep.name;
-		const version = dep.version;
-		const encodedName = encodeURIComponent(name).replace(/%2F/g, '/');
-		const mavenMatch = name.match(/^([^:]+):([^:]+)$/);
-		switch (ecosystem) {
-			case 'npm':
-				return version
-					? `https://www.npmjs.com/package/${encodedName}/v/${encodeURIComponent(version)}`
-					: `https://www.npmjs.com/package/${encodedName}`;
-			case 'nuget':
-				return version
-					? `https://www.nuget.org/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
-					: `https://www.nuget.org/packages/${encodeURIComponent(name)}`;
-			case 'golang':
-				return version
-					? `https://pkg.go.dev/${name}@${encodeURIComponent(version)}`
-					: `https://pkg.go.dev/${name}`;
-			case 'github':
-			case 'github-action':
-			case 'github-actions':
-				return `https://github.com/${name}`;
-			case 'pypi':
-				return version
-					? `https://pypi.org/project/${encodeURIComponent(name)}/${encodeURIComponent(version)}/`
-					: `https://pypi.org/project/${encodeURIComponent(name)}/`;
-			case 'maven':
-			case 'gradle':
-				if (!mavenMatch) return '';
-				return version
-					? `https://mvnrepository.com/artifact/${encodeURIComponent(mavenMatch[1])}/${encodeURIComponent(mavenMatch[2])}/${encodeURIComponent(version)}`
-					: `https://mvnrepository.com/artifact/${encodeURIComponent(mavenMatch[1])}/${encodeURIComponent(mavenMatch[2])}`;
-			case 'composer':
-				return version
-					? `https://packagist.org/packages/${encodedName}#${encodeURIComponent(version)}`
-					: `https://packagist.org/packages/${encodedName}`;
-			case 'rubygems':
-			case 'gem':
-				return version
-					? `https://rubygems.org/gems/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`
-					: `https://rubygems.org/gems/${encodeURIComponent(name)}`;
-			case 'cargo':
-			case 'rust':
-				return version
-					? `https://crates.io/crates/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
-					: `https://crates.io/crates/${encodeURIComponent(name)}`;
-			case 'pub':
-			case 'dart':
-				return version
-					? `https://pub.dev/packages/${encodeURIComponent(name)}/versions/${encodeURIComponent(version)}`
-					: `https://pub.dev/packages/${encodeURIComponent(name)}`;
-			case 'hex':
-			case 'elixir':
-				return version
-					? `https://hex.pm/packages/${encodeURIComponent(name)}/${encodeURIComponent(version)}`
-					: `https://hex.pm/packages/${encodeURIComponent(name)}`;
-			default:
-				return '';
 		}
 	};
 </script>
@@ -1106,170 +983,7 @@
 	{/if}
 </div>
 
-{#if dependenciesDialogOpen}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
-		onkeydown={(e) => e.key === 'Escape' && (dependenciesDialogOpen = false)}
-		onclick={(e) => e.target === e.currentTarget && (dependenciesDialogOpen = false)}
-	>
-		<div class="w-full max-w-5xl">
-			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
-				<div class="flex items-center justify-between px-6 py-4">
-					<div class="flex items-center gap-3">
-						<Package class="h-5 w-5 text-[var(--accent)]" />
-						<h2 class="text-base font-semibold text-[var(--text-bright)]">Dependencies</h2>
-						{#if !dependenciesDialogLoading}
-							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
-								{dependenciesDialogFiltered.length}
-							</span>
-						{/if}
-					</div>
-					<button
-						type="button"
-						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
-						onclick={() => (dependenciesDialogOpen = false)}
-					>
-						<X class="h-4 w-4" />
-					</button>
-				</div>
-
-				<div class="px-6">
-					<p class="text-sm text-[var(--text-muted)] pb-[1em]">Direct and transitive dependencies detected for this repository.</p>
-					{#if !dependenciesDialogLoading && dependenciesDialogData.length > 0}
-						<div class="mt-4">
-							<TabSelector
-								options={[
-									{ value: 'all', label: 'All' },
-									{ value: 'direct', label: 'Direct' },
-									{ value: 'transitive', label: 'Transitive' }
-								]}
-								bind:value={dependenciesDialogTab}
-							/>
-						</div>
-					{/if}
-				</div>
-
-				<div class="max-h-[65vh] overflow-y-auto p-4">
-					{#if dependenciesDialogLoading}
-						<div class="flex items-center justify-center py-20">
-							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-						</div>
-					{:else if dependenciesDialogData.length === 0}
-						<div class="flex flex-col items-center justify-center py-16 text-center">
-							<Package class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
-							<p class="text-sm font-medium text-[var(--text-secondary)]">No dependencies found</p>
-							<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no dependency data from manifests or SBOM scans yet.</p>
-						</div>
-					{:else if dependenciesDialogFiltered.length === 0}
-						<div class="flex flex-col items-center justify-center py-16 text-center">
-							<CheckCircle class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
-							<p class="text-sm font-medium text-[var(--text-secondary)]">No matches in this filter</p>
-						</div>
-					{:else}
-						<div class="space-y-4">
-							{#each dependencyGroups as group}
-								<section class="overflow-hidden border-0 shadow-none p-0" style="border: none; box-shadow: none; padding: 0;">
-									<div class="flex items-center justify-between gap-4 px-4 py-3">
-										<div class="min-w-0 flex-1">
-											<div class="flex flex-wrap items-center gap-2">
-												<p class="font-mono text-sm font-semibold text-[var(--text-bright)]">{group.groupPath}</p>
-												{#each group.ecosystems as ecosystem}
-													<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[8px] text-[var(--text-muted)] uppercase tracking-wide">
-														{ecosystem}
-													</span>
-												{/each}
-											</div>
-											<p class="mt-1 text-xs text-[var(--text-muted)]">{group.dependencies.length} dependency entries</p>
-										</div>
-										<button
-											type="button"
-											class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
-											onclick={() => toggleDependencyGroup(group.groupPath)}
-											aria-label={collapsedDependencyGroups[group.groupPath] ? `Expand ${group.groupPath}` : `Collapse ${group.groupPath}`}
-											title={collapsedDependencyGroups[group.groupPath] ? 'Expand' : 'Collapse'}
-										>
-											{#if collapsedDependencyGroups[group.groupPath]}
-												<ChevronRight class="h-4 w-4" />
-											{:else}
-												<ChevronDown class="h-4 w-4" />
-											{/if}
-										</button>
-									</div>
-									{#if !collapsedDependencyGroups[group.groupPath]}
-										<div class="space-y-1 border-t border-[var(--border-color)]/60 p-1">
-											{#each group.dependencies as dep}
-												<article class="rounded-lg px-4 py-3 transition-colors hover:bg-[var(--hover-bg-subtle)]">
-													<div class="flex items-start gap-4">
-														<div class="w-20 shrink-0 pt-0.5">
-															{#if dep.direct}
-																<span class="inline-flex items-center rounded-full border border-green-500/40 bg-green-500/10 px-2 py-0.5 text-xs font-semibold text-green-400">
-																	direct
-																</span>
-															{:else}
-																<span class="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--hover-bg)] px-2 py-0.5 text-xs font-semibold text-[var(--text-muted)]">
-																	transitive
-																</span>
-															{/if}
-														</div>
-														<div class="min-w-0 flex-1 space-y-1.5">
-															<div class="flex flex-wrap items-center gap-2">
-																{#if dependencyPackageURL(dep)}
-																	<a
-																		href={dependencyPackageURL(dep)}
-																		target="_blank"
-																		rel="noopener noreferrer"
-																		class="truncate text-sm font-semibold text-[var(--accent)] transition-opacity hover:underline"
-																	>
-																		{formatDependencyTitle(dep)}
-																	</a>
-																{:else}
-																	<p class="truncate text-sm font-semibold text-[var(--text-bright)]">{formatDependencyTitle(dep)}</p>
-																{/if}
-																<div class="ml-auto flex flex-wrap items-center gap-2">
-																	{#each dep.sources as source}
-																		{@const badge = sourceBadgeInfo(source)}
-																		{#if badge}
-																			{@const Icon = badge.icon}
-																			<span class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium {badge.className}" title={badge.title}>
-																				<Icon class="h-3 w-3" />
-																				{badge.label.toLowerCase()}
-																			</span>
-																		{/if}
-																	{/each}
-																</div>
-															</div>
-															<p class="text-sm text-[var(--text-secondary)]">
-																{dep.name}
-																<span class="text-[var(--text-muted)]"> in {dep.ecosystem}</span>
-															</p>
-															<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
-																{#if dep.version}
-																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}@{dep.version}</span>
-																{:else}
-																	<span class="font-mono">pkg:{dep.ecosystem}/{dep.name}</span>
-																{/if}
-																{#if dep.origin_path && dep.origin_path !== group.groupPath}
-																	<span class="rounded-md bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[8px] text-[var(--text-muted)]">
-																		{dep.origin_path}
-																	</span>
-																{/if}
-															</div>
-														</div>
-													</div>
-												</article>
-											{/each}
-										</div>
-									{/if}
-								</section>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</section>
-		</div>
-	</div>
-{/if}
+<DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} />
 
 <!-- Vulnerabilities dialog -->
 {#if vulnDialogOpen}
@@ -1394,80 +1108,4 @@
 {/if}
 
 <!-- Secrets & Issues dialog -->
-{#if secretsDialogOpen}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
-		onkeydown={(e) => e.key === 'Escape' && (secretsDialogOpen = false)}
-		onclick={(e) => e.target === e.currentTarget && (secretsDialogOpen = false)}
-	>
-		<div class="w-full max-w-4xl">
-			<section class="rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
-				<!-- Header -->
-				<div class="flex items-center justify-between px-6 py-4">
-					<div class="flex items-center gap-3">
-						<FileWarning class="h-5 w-5 text-red-400" />
-						<h2 class="text-base font-semibold text-[var(--text-bright)]">Secrets & Issues</h2>
-						{#if !secretsDialogLoading && secretsDialogData.length > 0}
-							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
-								{secretsDialogData.length}
-							</span>
-						{/if}
-					</div>
-					<button
-						type="button"
-						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
-						onclick={() => (secretsDialogOpen = false)}
-					>
-						<X class="h-4 w-4" />
-					</button>
-				</div>
-
-				<!-- Body -->
-				<div class="max-h-[65vh] overflow-y-auto">
-					{#if secretsDialogLoading}
-						<div class="flex items-center justify-center py-20">
-							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-						</div>
-					{:else if secretsDialogData.length === 0}
-						<div class="flex flex-col items-center justify-center py-16 text-center">
-							<Shield class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
-							<p class="text-sm font-medium text-[var(--text-secondary)]">No secrets found</p>
-							<p class="mt-1 text-xs text-[var(--text-muted)]">No BetterLeaks findings for this repository.</p>
-						</div>
-					{:else}
-						<div class="space-y-1 p-2">
-							{#each secretsDialogData as s}
-								<article class="rounded-xl px-5 py-4 hover:bg-[var(--hover-bg-subtle)] transition-colors">
-									<div class="flex items-start gap-4">
-										<!-- Rule pill -->
-										<div class="shrink-0 pt-0.5">
-											<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
-												<FileWarning class="h-3 w-3" />
-												{s.rule_id || 'unknown'}
-											</span>
-										</div>
-
-										<div class="min-w-0 flex-1 space-y-1.5">
-											{#if s.description}
-												<p class="text-sm text-[var(--text-secondary)]">{s.description}</p>
-											{/if}
-											<div class="text-xs text-[var(--text-muted)]">
-												{#if s.file}
-													<span class="font-mono">{s.file}{s.start_line ? `:${s.start_line}` : ''}</span>
-												{/if}
-											</div>
-											{#if s.match}
-												<div class="font-mono rounded bg-[var(--card-bg)] px-2 py-1.5 text-xs text-[var(--text-muted)] break-all">{s.match}</div>
-											{/if}
-										</div>
-									</div>
-								</article>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</section>
-		</div>
-	</div>
-{/if}
+<SecretsDialog bind:open={secretsDialogOpen} loading={secretsDialogLoading} data={secretsDialogData} />
