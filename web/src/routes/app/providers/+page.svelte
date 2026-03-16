@@ -43,6 +43,7 @@
 	let ghRepos: RepoData[] = $state([]);
 	let ghLoading = $state(false);
 	let ghError = $state('');
+	let ghErrorUrl = $state('');
 	let ghPage = $state(1);
 	let ghHasNextPage = $state(false);
 	let ghTotalCount = $state(0);
@@ -53,6 +54,7 @@
 	let glSubgroups: GroupData[] = $state([]);
 	let glLoading = $state(false);
 	let glError = $state('');
+	let glErrorUrl = $state('');
 	let glPage = $state(1);
 	let glHasNextPage = $state(false);
 	let glTotalCount = $state(0);
@@ -65,6 +67,7 @@
 	let cpSubgroups: GroupData[] = $state([]);
 	let cpLoading = $state(false);
 	let cpError = $state('');
+	let cpErrorUrl = $state('');
 	let cpPage = $state(1);
 	let cpHasNextPage = $state(false);
 	let cpTotalCount = $state(0);
@@ -342,6 +345,7 @@
 
 		ghLoading = true;
 		ghError = '';
+		ghErrorUrl = '';
 
 		try {
 			const params = new URLSearchParams({
@@ -350,10 +354,12 @@
 			});
 			// Use explicit provider_id, or resolve from managed providers so the
 			// request hits the cache instead of the live GitHub API.
-			const resolvedProviderId = ghProviderId ??
-				(managedProvidersEnabled
-					? (customProviders.find(p => p.type === 'github' && (!p.ownerPath || p.ownerPath === owner))?.id ?? null)
+			const resolvedProvider = ghProviderId
+				? (customProviders.find(p => p.id === ghProviderId) ?? null)
+				: (managedProvidersEnabled
+					? (customProviders.find(p => p.type === 'github' && (!p.ownerPath || p.ownerPath === owner)) ?? null)
 					: null);
+			const resolvedProviderId = resolvedProvider?.id ?? null;
 			if (resolvedProviderId) {
 				params.set('provider_id', resolvedProviderId);
 			}
@@ -361,6 +367,8 @@
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
 			}
+
+			const providerBaseUrl = resolvedProvider?.baseUrl ?? 'https://github.com';
 
 			const response = await fetch(`/api/providers/github/${encodeURIComponent(owner)}/repos?${params}`, {
 				credentials: 'include'
@@ -376,6 +384,7 @@
 				} else {
 					ghError = `Failed to fetch repositories (${response.status}).`;
 				}
+				ghErrorUrl = `${providerBaseUrl}/${owner}`;
 				ghRepos = [];
 				return;
 			}
@@ -425,6 +434,7 @@
 				} else {
 					glError = `Failed to fetch projects (${response.status}).`;
 				}
+				glErrorUrl = `https://gitlab.com/${glGroup}`;
 				glProjects = [];
 				return;
 			}
@@ -518,6 +528,7 @@
 				} else {
 					cpError = `Failed to fetch projects (${response.status}).`;
 				}
+				cpErrorUrl = provider.baseUrl;
 				cpProjects = [];
 				return;
 			}
@@ -1012,7 +1023,12 @@
 				{/if}
 
 				{#if ghError}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{ghError}</div>
+					<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						<span>{ghError}</span>
+						{#if ghErrorUrl}
+							<a href="{ghErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open provider →</a>
+						{/if}
+					</div>
 				{/if}
 
 				{#if ghRepos.length === 0 && !ghLoading && !ghError}
@@ -1079,7 +1095,12 @@
 				{/if}
 
 				{#if glError}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{glError}</div>
+					<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						<span>{glError}</span>
+						{#if glErrorUrl}
+							<a href="{glErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open provider →</a>
+						{/if}
+					</div>
 				{/if}
 
 				{#if glSubgroups.length > 0}
@@ -1211,7 +1232,12 @@
 							GitHub providers must include an org or user path.
 						</div>
 					{:else if ghError}
-						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{ghError}</div>
+						<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+							<span>{ghError}</span>
+							{#if ghErrorUrl}
+								<a href="{ghErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open provider →</a>
+							{/if}
+						</div>
 					{:else if ghRepos.length === 0 && !ghLoading}
 						<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
 					{:else if ghRepos.length > 0}
@@ -1276,7 +1302,12 @@
 				{/if}
 
 				{#if cpError}
-					<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{cpError}</div>
+					<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						<span>{cpError}</span>
+						{#if cpErrorUrl}
+							<a href="{cpErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open {provider.name} →</a>
+						{/if}
+					</div>
 				{/if}
 
 				{#if cpSubgroups.length > 0}

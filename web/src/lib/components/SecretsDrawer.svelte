@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { FileWarning, X, KeyRound } from 'lucide-svelte';
+	import { FileWarning, X, KeyRound, Eye, EyeOff } from 'lucide-svelte';
+	import { SvelteMap } from 'svelte/reactivity';
 
 	type Finding = {
 		rule_id: string;
@@ -12,6 +13,30 @@
 	const cleanMatch = (s: string) =>
 		s.endsWith('"') && !s.slice(0, -1).includes('"') ? s.slice(0, -1) : s;
 
+	const extractPemKey = (s: string): string | null => {
+		const match = s.match(/-----BEGIN [A-Z0-9 ]+ KEY-----[\s\S]+?-----END [A-Z0-9 ]+ KEY-----/);
+		return match ? match[0] : null;
+	};
+
+	const findAllBase64 = (s: string): Array<{value: string, decoded: string}> => {
+		const results: Array<{value: string, decoded: string}> = [];
+		const b64Pattern = /(?:^|[:\s=])([A-Za-z0-9+\-_]{16,}={0,2})(?:[\s"']|$)/g;
+		let match;
+		
+		while ((match = b64Pattern.exec(s)) !== null) {
+			const candidate = match[1];
+			if (candidate.length < 16) continue;
+			// Skip URLs and hex-only strings
+			if (/^[0-9a-fA-F]+$/.test(candidate)) continue;
+			
+			const decoded = tryDecodeBase64(candidate);
+			if (decoded && decoded !== candidate) {
+				results.push({ value: candidate, decoded });
+			}
+		}
+		return results;
+	};
+
 	const tryDecodeBase64 = (s: string): string | null => {
 		const decode = (candidate: string): string | null => {
 			const norm = candidate.replace(/-/g, '+').replace(/_/g, '/');
@@ -19,7 +44,18 @@
 			if (padded.length < 8 || !/^[A-Za-z0-9+/]+=*$/.test(padded)) return null;
 			try {
 				const decoded = atob(padded);
+				// Reject strings with control characters
+				// eslint-disable-next-line no-control-regex
 				if (/[\x00-\x08\x0e-\x1f\x7f]/.test(decoded)) return null;
+				// Reject if less than 70% printable ASCII or valid UTF-8
+				const printable = decoded.split('').filter(c => {
+					const code = c.charCodeAt(0);
+					return (code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13 || code >= 128;
+				}).length;
+				if (printable / decoded.length < 0.7) return null;
+				// Reject very short decoded strings unless they look like structured data
+				if (decoded.length < 10 && !/[{[\n:]/.test(decoded)) return null;
+				
 				try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
 				return decoded;
 			} catch {
@@ -36,13 +72,18 @@
 			// Bare assignment: key=value (no quotes, = not part of base64 padding)
 			s.match(new RegExp(`[^=]=["']?(${b64chars}+=*)["']?$`))?.[1],
 			// YAML-style with trailing text: "key: <base64> kind: Secret" or similar
-			s.match(new RegExp(`:\\s+(${b64chars}{20,}=*)\\s+\\w+:`))?.[1],
-			// Longest base64 sequence (20+ chars to avoid false positives)
-			s.match(new RegExp(`${b64chars}{20,}=*`))?.[0],
+			s.match(new RegExp(`:\\s+(${b64chars}{32,}=*)\\s+\\w+:`))?.[1],
+			// Longest base64 sequence (40+ chars, must have variety to avoid false positives)
+			(() => {
+				const match = s.match(new RegExp(`${b64chars}{40,}=*`))?.[0];
+				// Ensure it has enough entropy (not just repeated chars)
+				if (match && new Set(match.slice(0, 20)).size >= 8) return match;
+				return null;
+			})(),
 			// First eyJ... substring (base64-encoded JSON — very common for JWTs / tokens)
 			s.match(new RegExp(`eyJ${b64chars}+=*`))?.[0],
-			// Whole string
-			s,
+			// Whole string (only if it's long enough and looks base64-ish)
+			s.length >= 16 && /^[A-Za-z0-9+/\-_]+=*$/.test(s) ? s : null,
 		];
 
 		for (const c of candidates) {
@@ -67,9 +108,15 @@
 	let findings: Finding[] = $state([]);
 	let loading = $state(false);
 	let activeFilter: string | null = $state(null);
+	let decodedStates = new SvelteMap<string, boolean>();
+
+	const toggleDecode = (findingId: string) => {
+		const current = decodedStates.get(findingId) ?? false;
+		decodedStates.set(findingId, !current);
+	};
 
 	const grouped = $derived.by(() => {
-		const map = new Map<string, Finding[]>();
+		const map = new SvelteMap<string, Finding[]>();
 		for (const f of findings) {
 			const key = f.rule_id || 'unknown';
 			if (!map.has(key)) map.set(key, []);
@@ -120,7 +167,7 @@
 						{findings.length} finding{findings.length !== 1 ? 's' : ''}
 					</p>
 					<div class="mt-2 flex flex-wrap gap-1.5">
-						{#each grouped as [ruleId, group]}
+						{#each grouped as [ruleId, group] (ruleId)}
 							<button
 								type="button"
 								onclick={() => activeFilter = activeFilter === ruleId ? null : ruleId}
@@ -156,7 +203,7 @@
 		</div>
 	{:else}
 		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]">
-			{#each visibleGroups as [ruleId, group]}
+			{#each visibleGroups as [ruleId, group] (ruleId)}
 				<div>
 					<!-- Group header -->
 					<div class="flex items-center justify-center gap-3 px-7 py-4">
@@ -169,7 +216,7 @@
 					</div>
 					<!-- Findings -->
 					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
-						{#each group as f}
+						{#each group as f (`${f.file}-${f.start_line}-${f.match}`)}
 							<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
 								<div class="flex items-start gap-4">
 									<div class="w-40 shrink-0 pt-0.5">
@@ -187,11 +234,53 @@
 										{/if}
 										{#if f.match}
 											{@const raw = cleanMatch(f.match)}
-											{@const decoded = tryDecodeBase64(raw)}
-											<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
-											{#if decoded}
-												<div class="block whitespace-pre-wrap break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
-											{/if}
+											{@const findingId = `${f.file}-${f.start_line}-${f.rule_id}`}
+											{@const showDecoded = decodedStates.get(findingId) ?? false}
+											{@const pemKey = extractPemKey(raw)}
+											{@const base64Matches = findAllBase64(raw)}
+											{@const hasDecodable = pemKey || base64Matches.length > 0}
+											
+											<div class="space-y-2">
+												<div class="flex items-start gap-2">
+													<div class="inline-block max-w-full flex-1 break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
+													{#if hasDecodable}
+														<button
+															type="button"
+															onclick={() => toggleDecode(findingId)}
+															class="shrink-0 rounded p-1 transition hover:bg-[var(--hover-bg)]"
+															title={showDecoded ? 'Hide decoded' : 'Show decoded'}
+														>
+															{#if showDecoded}
+																<EyeOff class="h-3.5 w-3.5 text-[var(--accent)]" />
+															{:else}
+																<Eye class="h-3.5 w-3.5 text-[var(--text-muted)]" />
+															{/if}
+														</button>
+													{/if}
+												</div>
+												
+												{#if showDecoded}
+													{#if pemKey}
+														<div class="rounded border border-[var(--accent)]/20 bg-[var(--card-bg)] px-2 py-1.5">
+															<div class="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">Private Key</div>
+															<pre class="whitespace-pre-wrap break-all font-mono text-xs text-[var(--text-muted)]">{pemKey}</pre>
+														</div>
+													{/if}
+													{#if base64Matches.length > 0}
+														<div class="space-y-1.5">
+														{#each base64Matches as { value, decoded } (value)}
+																<div class="rounded border border-[var(--accent)]/20 bg-[var(--card-bg)] px-2 py-1.5">
+																	<div class="mb-1 flex items-center gap-2">
+																		<div class="text-[10px] font-semibold uppercase tracking-wide text-[var(--accent)]">Decoded</div>
+																		<div class="font-mono text-[10px] text-[var(--text-muted)]/50">{value.slice(0, 24)}...</div>
+																	</div>
+																	<pre class="whitespace-pre-wrap break-all font-mono text-xs text-[var(--text-bright)]">{decoded}</pre>
+																</div>
+															{/each}
+														</div>
+													{/if}
+												{/if}
+											</div>
 										{/if}
 									</div>
 								</div>
