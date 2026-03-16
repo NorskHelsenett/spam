@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, KeyRound } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -122,8 +122,8 @@
 		}
 	};
 
-	const sortIndicator = (key: SortKey) =>
-		sortKey === key ? (sortAsc ? ' ↑' : ' ↓') : '';
+	const sortArrow = (key: SortKey) =>
+		sortKey === key ? (sortAsc ? '↑' : '↓') : '↑';
 
 	onMount(async () => {
 		try {
@@ -234,7 +234,7 @@
 		</article>
 
 		<!-- Data table -->
-		<div class="rounded-2xl border border-[var(--border-color)] bg-[var(--card-bg)] overflow-hidden">
+		<div class="relative flex flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 			{#if tableRows.length === 0}
 				<div class="flex flex-col items-center justify-center py-16 text-center">
 					<KeyRound class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
@@ -243,38 +243,50 @@
 				</div>
 			{:else}
 				<div class="overflow-x-auto">
-					<table class="w-full text-xs">
-						<thead>
-							<tr class="border-b border-[var(--border-color)] text-[var(--text-muted)] uppercase tracking-wider">
-								<th class="px-5 py-3 text-left font-medium">
-									<button type="button" class="hover:text-[var(--accent)]" onclick={() => setSort('repo')}>
-										Repository{sortIndicator('repo')}
-									</button>
+					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+							<tr>
+								<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('repo')}>
+									<span class="flex items-center gap-1">
+										Repository
+										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'repo'} class:text-transparent={sortKey !== 'repo'}>
+											{sortArrow('repo')}
+										</span>
+									</span>
 								</th>
-								<th class="px-4 py-3 text-left font-medium">
-									<button type="button" class="hover:text-[var(--accent)]" onclick={() => setSort('secret_type')}>
-										Secret Type{sortIndicator('secret_type')}
-									</button>
+								<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
+									<span class="flex items-center gap-1">
+										Secret Type
+										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'secret_type'} class:text-transparent={sortKey !== 'secret_type'}>
+											{sortArrow('secret_type')}
+										</span>
+									</span>
 								</th>
-								<th class="px-4 py-3 text-right font-medium">
-									<button type="button" class="hover:text-[var(--accent)]" onclick={() => setSort('unique_finding_count')}>
-										Unique Findings{sortIndicator('unique_finding_count')}
-									</button>
+								<th class="cursor-pointer px-5 py-3 text-right transition hover:text-[var(--text-secondary)]" onclick={() => setSort('unique_finding_count')}>
+									<span class="inline-flex items-center gap-1">
+										Findings
+										<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'unique_finding_count'} class:text-transparent={sortKey !== 'unique_finding_count'}>
+											{sortArrow('unique_finding_count')}
+										</span>
+									</span>
 								</th>
 							</tr>
 						</thead>
-						<tbody>
-							{#each sortedRows as row, i}
-								<tr class="border-b border-[var(--border-color)]/50 {i % 2 === 0 ? '' : 'bg-[var(--card-bg)]/30'}">
-									<td class="max-w-xs truncate px-5 py-3 font-mono text-[var(--text-secondary)]" title={row.repo}>
-										{row.repo}
+						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+							{#each sortedRows as row}
+								<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+									<td class="px-5 py-3">
+										<div class="flex items-center gap-2">
+											<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
+											<span class="font-mono font-semibold text-[var(--text-bright)]" title={row.repo}>{row.repo}</span>
+										</div>
 									</td>
-									<td class="px-4 py-3 text-[var(--text-secondary)]">
-										<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--text-muted)]">
+									<td class="px-5 py-3">
+										<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
 											{row.secret_type}
 										</span>
 									</td>
-									<td class="px-4 py-3 text-right tabular-nums font-semibold text-[var(--text-bright)]">
+									<td class="px-5 py-3 text-right tabular-nums font-semibold text-[var(--text-bright)]">
 										{fmt(row.unique_finding_count)}
 									</td>
 								</tr>

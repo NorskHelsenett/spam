@@ -112,23 +112,51 @@ func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service) http.H
 		}
 
 		query := `
-WITH top_types AS (
-  SELECT COALESCE(finding->>'RuleID', 'unknown') AS secret_type
+WITH latest_run_per_repo_per_day AS (
+  SELECT DISTINCT ON (repo_id, date_trunc('day', created_at))
+    repo_id,
+    findings,
+    date_trunc('day', created_at)::date AS day
   FROM run_secrets
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(findings, '[]'::jsonb)) AS finding
-  WHERE created_at >= NOW() - INTERVAL '30 days'
+  WHERE repo_id IS NOT NULL AND repo_id <> ''
+    AND created_at >= NOW() - INTERVAL '30 days'
+  ORDER BY repo_id, date_trunc('day', created_at), created_at DESC
+),
+deduped_findings AS (
+  SELECT DISTINCT
+    lrs.day,
+    COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    lrs.repo_id,
+    COALESCE(
+      NULLIF(finding->>'Fingerprint', ''),
+      md5(
+        concat_ws(
+          '|',
+          COALESCE(finding->>'RuleID', ''),
+          COALESCE(finding->>'Description', ''),
+          COALESCE(finding->>'File', ''),
+          COALESCE(finding->>'StartLine', ''),
+          COALESCE(finding->>'Match', ''),
+          COALESCE(finding->>'Secret', '')
+        )
+      )
+    ) AS dedupe_key
+  FROM latest_run_per_repo_per_day lrs
+  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(lrs.findings, '[]'::jsonb)) AS finding
+),
+top_types AS (
+  SELECT secret_type
+  FROM deduped_findings
   GROUP BY secret_type
   ORDER BY COUNT(*) DESC
   LIMIT 5
 ),
 daily AS (
   SELECT
-    date_trunc('day', rs.created_at)::date AS day,
-    COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    day,
+    secret_type,
     COUNT(*) AS cnt
-  FROM run_secrets rs
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
-  WHERE rs.created_at >= NOW() - INTERVAL '30 days'
+  FROM deduped_findings
   GROUP BY day, secret_type
 )
 SELECT
@@ -169,14 +197,49 @@ WITH latest_repo_secrets AS (
   FROM run_secrets
   WHERE repo_id IS NOT NULL AND repo_id <> ''
   ORDER BY repo_id, created_at DESC
+),
+deduped_findings AS (
+  SELECT DISTINCT
+    COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    COALESCE(
+      NULLIF(finding->>'Fingerprint', ''),
+      md5(
+        concat_ws(
+          '|',
+          COALESCE(finding->>'RuleID', ''),
+          COALESCE(finding->>'Description', ''),
+          COALESCE(finding->>'File', ''),
+          COALESCE(finding->>'StartLine', ''),
+          COALESCE(finding->>'Match', ''),
+          COALESCE(finding->>'Secret', '')
+        )
+      )
+    ) AS dedupe_key
+  FROM latest_repo_secrets rs
+  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
+),
+counts AS (
+  SELECT
+    secret_type,
+    COUNT(*) AS finding_count
+  FROM deduped_findings
+  GROUP BY secret_type
+),
+ranked AS (
+  SELECT
+    secret_type,
+    finding_count,
+    ROW_NUMBER() OVER (ORDER BY finding_count DESC, secret_type ASC) AS rn
+  FROM counts
 )
 SELECT
-  COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
-  COUNT(*) AS finding_count
-FROM latest_repo_secrets rs
-CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
-GROUP BY COALESCE(finding->>'RuleID', 'unknown')
-ORDER BY finding_count DESC, secret_type ASC`
+  CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END AS secret_type,
+  SUM(finding_count) AS finding_count
+FROM ranked
+GROUP BY CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END
+ORDER BY
+  CASE WHEN secret_type = 'other' THEN 1 ELSE 0 END,
+  finding_count DESC`
 
 		var rows []SecretDistributionRow
 		if err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error; err != nil {
