@@ -111,6 +111,7 @@
 	let dependenciesDialogOpen = $state(false);
 	let dependenciesDialogLoading = $state(false);
 	let dependenciesDialogData = $state<RepoDependency[]>([]);
+	let dependenciesDialogSource = $state<'all' | 'sbom' | 'manifest'>('all');
 	const openSecretsDialog = async () => {
 		const id = $page.params.id;
 		secretsDialogOpen = true;
@@ -130,7 +131,8 @@
 		}
 	};
 
-	const openDependenciesDialog = async () => {
+	const openDependenciesDialog = async (source: 'all' | 'sbom' | 'manifest' = 'all') => {
+		dependenciesDialogSource = source;
 		dependenciesDialogOpen = true;
 		if (dependenciesDialogData.length > 0) return;
 		if (!run?.repo_id) return;
@@ -686,7 +688,7 @@
 					<button
 						type="button"
 						class="metric-card rounded-2xl p-4 sm:p-6 w-full text-left cursor-pointer transition hover:ring-1 hover:ring-[var(--accent)]/40"
-						onclick={openDependenciesDialog}
+						onclick={() => openDependenciesDialog('sbom')}
 					>
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Components</p>
@@ -714,7 +716,7 @@
 					<button
 						type="button"
 						class="metric-card rounded-2xl p-4 sm:p-6 w-full text-left cursor-pointer transition hover:ring-1 hover:ring-[var(--accent)]/40"
-						onclick={openDependenciesDialog}
+						onclick={() => openDependenciesDialog('manifest')}
 					>
 						<div class="flex items-center justify-between">
 							<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Manifests</p>
@@ -919,7 +921,7 @@
 </div>
 
 <SecretsDialog bind:open={secretsDialogOpen} loading={secretsDialogLoading} data={secretsDialogData} />
-<DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} />
+<DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} sourceFilter={dependenciesDialogSource} />
 
 <!-- Raw Data Dialog -->
 <Dialog bind:open={showRawDialog} showCloseButton={false} onClose={() => {}}>

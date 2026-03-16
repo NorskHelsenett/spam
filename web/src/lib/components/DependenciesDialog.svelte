@@ -15,20 +15,28 @@
 	let {
 		open = $bindable(false),
 		loading = false,
-		data = []
+		data = [],
+		sourceFilter = 'all'
 	}: {
 		open: boolean;
 		loading: boolean;
 		data: RepoDependency[];
+		sourceFilter?: 'all' | 'sbom' | 'manifest';
 	} = $props();
 
 	let tab = $state('all');
 	let collapsedGroups = $state<Record<string, boolean>>({});
 
-	const filtered = $derived.by(() => {
-		if (tab === 'direct') return data.filter((d) => d.direct);
-		if (tab === 'transitive') return data.filter((d) => !d.direct);
+	const sourceFiltered = $derived.by(() => {
+		if (sourceFilter === 'sbom') return data.filter((d) => d.sources.includes('sbom'));
+		if (sourceFilter === 'manifest') return data.filter((d) => d.sources.includes('manifest'));
 		return data;
+	});
+
+	const filtered = $derived.by(() => {
+		if (tab === 'direct') return sourceFiltered.filter((d) => d.direct);
+		if (tab === 'transitive') return sourceFiltered.filter((d) => !d.direct);
+		return sourceFiltered;
 	});
 
 	const groups = $derived.by(() => {
