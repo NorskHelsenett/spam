@@ -9,16 +9,25 @@ import (
 	"gorm.io/gorm"
 )
 
+type trivyRun struct {
+	StartedAt     string `json:"started_at"`
+	FinishedAt    string `json:"finished_at"`
+	SBOMCount     int64  `json:"sbom_count"`
+	CriticalCount int64  `json:"critical_count"`
+	HighCount     int64  `json:"high_count"`
+}
+
 type trivyScanStatus struct {
-	JobID         string `json:"job_id,omitempty"`
-	JobStatus     string `json:"job_status,omitempty"`
-	CreatedAt     string `json:"created_at,omitempty"`
-	FinishedAt    string `json:"finished_at,omitempty"`
-	Error         string `json:"error,omitempty"`
-	PendingCount  int64  `json:"pending_count"`
-	ScannedCount  int64  `json:"scanned_count"`
-	LastScannedAt string `json:"last_scanned_at,omitempty"`
-	ScanComplete  bool   `json:"scan_complete"`
+	JobID         string     `json:"job_id,omitempty"`
+	JobStatus     string     `json:"job_status,omitempty"`
+	CreatedAt     string     `json:"created_at,omitempty"`
+	FinishedAt    string     `json:"finished_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	PendingCount  int64      `json:"pending_count"`
+	ScannedCount  int64      `json:"scanned_count"`
+	LastScannedAt string     `json:"last_scanned_at,omitempty"`
+	ScanComplete  bool       `json:"scan_complete"`
+	RecentRuns    []trivyRun `json:"recent_runs"`
 }
 
 // AdminTrivyScanStatusHandler returns trivy scanner statistics plus the latest ad-hoc job status.
@@ -71,6 +80,40 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			status.PendingCount = pending
 		} else {
 			status.ScanComplete = true
+		}
+
+		// Recent runs: group scan results by day, last 10.
+		type runRow struct {
+			Day           time.Time
+			StartedAt     time.Time
+			FinishedAt    time.Time
+			SBOMCount     int64
+			CriticalCount int64
+			HighCount     int64
+		}
+		var rows []runRow
+		db.WithContext(r.Context()).Raw(`
+			SELECT
+				DATE_TRUNC('day', scanned_at) AS day,
+				MIN(scanned_at)               AS started_at,
+				MAX(scanned_at)               AS finished_at,
+				COUNT(DISTINCT sbom_id)       AS sbom_count,
+				SUM(critical_count)           AS critical_count,
+				SUM(high_count)               AS high_count
+			FROM trivy_scan_results
+			GROUP BY DATE_TRUNC('day', scanned_at)
+			ORDER BY day DESC
+			LIMIT 10
+		`).Scan(&rows)
+		status.RecentRuns = make([]trivyRun, 0, len(rows))
+		for _, row := range rows {
+			status.RecentRuns = append(status.RecentRuns, trivyRun{
+				StartedAt:     row.StartedAt.UTC().Format("2006-01-02T15:04:05Z"),
+				FinishedAt:    row.FinishedAt.UTC().Format("2006-01-02T15:04:05Z"),
+				SBOMCount:     row.SBOMCount,
+				CriticalCount: row.CriticalCount,
+				HighCount:     row.HighCount,
+			})
 		}
 
 		writeJSON(w, http.StatusOK, status)

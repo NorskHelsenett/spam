@@ -570,6 +570,14 @@
 	};
 
 	// ── Trivy scanner ──────────────────────────────────────────────────────
+	type TrivyRun = {
+		started_at: string;
+		finished_at: string;
+		sbom_count: number;
+		critical_count: number;
+		high_count: number;
+	};
+
 	type TrivyScanStatus = {
 		job_id?: string;
 		job_status?: string;
@@ -580,6 +588,7 @@
 		scanned_count?: number;
 		last_scanned_at?: string;
 		scan_complete?: boolean;
+		recent_runs?: TrivyRun[];
 	};
 
 	let trivyStatus: TrivyScanStatus = $state({});
@@ -1440,17 +1449,22 @@
 	{/if}
 
 	{#if trivyStatus.job_id}
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 space-y-2">
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 space-y-3">
 			<div class="flex items-center justify-between">
 				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {trivyJobStatusClass(trivyStatus.job_status)}">
 					{trivyStatus.scan_complete ? 'Scan complete' : trivyJobStatusLabel(trivyStatus.job_status)}
 				</span>
-				{#if trivyStatus.pending_count}
-					<span class="text-xs text-amber-400">{trivyStatus.pending_count} SBOMs pending</span>
-				{:else if trivyStatus.scan_complete}
-					<span class="text-xs text-green-400">{trivyStatus.scanned_count} SBOMs scanned</span>
-				{/if}
+				<span class="text-xs text-[var(--text-muted)]">
+					{trivyStatus.scanned_count ?? 0} / {(trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)} SBOMs scanned
+				</span>
 			</div>
+			{#if (trivyStatus.pending_count ?? 0) > 0}
+				{@const total = (trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)}
+				{@const pct = total > 0 ? Math.round(((trivyStatus.scanned_count ?? 0) / total) * 100) : 0}
+				<div class="h-1.5 w-full rounded-full bg-[var(--border-color)]/40">
+					<div class="h-1.5 rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
+				</div>
+			{/if}
 			<div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--text-muted)]">
 				{#if trivyStatus.created_at}
 					<span class="flex items-center gap-1"><Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}</span>
@@ -1466,6 +1480,31 @@
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
 			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
 			<p class="mt-1 text-sm text-[var(--text-secondary)]">{trivyStatus.error}</p>
+		</div>
+	{/if}
+
+	{#if trivyStatus.recent_runs && trivyStatus.recent_runs.length > 0}
+		<div class="space-y-1">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent runs</p>
+			<div class="divide-y divide-[var(--border-color)]/40 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				{#each trivyStatus.recent_runs as run}
+					<div class="flex items-center justify-between px-4 py-2.5 text-xs">
+						<div class="flex items-center gap-3">
+							<span class="text-[var(--text-secondary)]">{new Date(run.started_at).toLocaleDateString()}</span>
+							<span class="text-[var(--text-muted)]">{new Date(run.started_at).toLocaleTimeString()} – {new Date(run.finished_at).toLocaleTimeString()}</span>
+						</div>
+						<div class="flex items-center gap-4">
+							<span class="text-[var(--text-muted)]">{run.sbom_count} SBOMs</span>
+							{#if run.critical_count > 0}
+								<span class="text-red-400">{run.critical_count} critical</span>
+							{/if}
+							{#if run.high_count > 0}
+								<span class="text-orange-400">{run.high_count} high</span>
+							{/if}
+						</div>
+					</div>
+				{/each}
+			</div>
 		</div>
 	{/if}
 </section>
