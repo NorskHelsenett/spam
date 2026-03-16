@@ -140,7 +140,7 @@
 			if (res.ok) {
 				const data = await res.json();
 				dependenciesDialogData = data.dependencies || [];
-				}
+			}
 		} finally {
 			dependenciesDialogLoading = false;
 		}

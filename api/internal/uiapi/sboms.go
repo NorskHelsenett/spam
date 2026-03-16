@@ -511,18 +511,18 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// countComponentsFromContent is authoritative for known formats: it
-		// correctly handles explicit metadata.component, implicit root detection,
-		// and SPDX root packages. Fall back to the materialized view only for
-		// unrecognised formats or when content is unavailable.
-		componentCount := int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
+		// Prefer the materialized view (is_root = false) as it is authoritative.
+		// Fall back to parsing the SBOM content only when the view has not yet
+		// been populated (count == 0).
+		var componentCount int64
+		if err := db.WithContext(r.Context()).
+			Table("sbom_component_view").
+			Where("sbom_id = ? AND is_root = false", sbomID).
+			Count(&componentCount).Error; err != nil {
+			log.Printf("failed to count sbom components: %v", err)
+		}
 		if componentCount == 0 {
-			if err := db.WithContext(r.Context()).
-				Table("sbom_component_view").
-				Where("sbom_id = ? AND is_root = false", sbomID).
-				Count(&componentCount).Error; err != nil {
-				log.Printf("failed to count sbom components: %v", err)
-			}
+			componentCount = int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
