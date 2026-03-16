@@ -368,7 +368,6 @@
 				params.set('order', sortDirection);
 			}
 
-			const providerBaseUrl = resolvedProvider?.baseUrl ?? 'https://github.com';
 
 			const response = await fetch(`/api/providers/github/${encodeURIComponent(owner)}/repos?${params}`, {
 				credentials: 'include'
@@ -384,7 +383,9 @@
 				} else {
 					ghError = `Failed to fetch repositories (${response.status}).`;
 				}
-				ghErrorUrl = `${providerBaseUrl}/${owner}`;
+				if (resolvedProvider?.baseUrl) {
+					ghErrorUrl = `${resolvedProvider.baseUrl}/${owner}`;
+				}
 				ghRepos = [];
 				return;
 			}
@@ -434,8 +435,7 @@
 				} else {
 					glError = `Failed to fetch projects (${response.status}).`;
 				}
-				glErrorUrl = `https://gitlab.com/${glGroup}`;
-				glProjects = [];
+					glProjects = [];
 				return;
 			}
 
