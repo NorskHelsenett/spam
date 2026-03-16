@@ -12,6 +12,7 @@ import (
 )
 
 type trivyScanStatus struct {
+	Configured   bool   `json:"configured"`
 	JobID        string `json:"job_id,omitempty"`
 	JobStatus    string `json:"job_status,omitempty"`
 	CreatedAt    string `json:"created_at,omitempty"`
@@ -34,6 +35,7 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 		}
 
 		var status trivyScanStatus
+		status.Configured = strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME")) != ""
 
 		// Most recent TRIVY_ADHOC_SCAN job.
 		var job jobs.Job

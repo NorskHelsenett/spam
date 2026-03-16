@@ -571,6 +571,7 @@
 
 	// ── Trivy scanner ──────────────────────────────────────────────────────
 	type TrivyScanStatus = {
+		configured?: boolean;
 		job_id?: string;
 		job_status?: string;
 		created_at?: string;
@@ -607,7 +608,7 @@
 				return;
 			}
 			if (response.status === 503) {
-				trivyError = 'Trivy scanner not configured (TRIVY_SCANNER_CRONJOB_NAME missing).';
+				// Should not reach here since button is disabled when not configured.
 				return;
 			}
 			if (!response.ok) {
@@ -1425,7 +1426,8 @@
 				type="button"
 				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
 				onclick={triggerTrivyScan}
-				disabled={trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
+				disabled={!trivyStatus.configured || trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
+				title={!trivyStatus.configured ? 'TRIVY_SCANNER_CRONJOB_NAME is not configured' : undefined}
 			>
 				<Play size={14} />
 				{trivyTriggering ? 'Starting…' : 'Run Trivy Scan'}
