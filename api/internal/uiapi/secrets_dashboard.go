@@ -119,37 +119,58 @@ func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service) http.H
 		}
 
 		query := `
-WITH latest_run_per_repo_per_day AS (
-  SELECT DISTINCT ON (repo_id, date_trunc('day', created_at))
+WITH date_series AS (
+  SELECT generate_series(
+    date_trunc('day', NOW() - INTERVAL '30 days')::date,
+    date_trunc('day', NOW() - INTERVAL '1 day')::date,
+    '1 day'::interval
+  )::date AS day
+),
+all_repo_scans AS (
+  -- Latest scan per repo per day (all time, needed for carry-forward)
+  SELECT DISTINCT ON (repo_id, date_trunc('day', created_at)::date)
     repo_id,
     findings,
-    date_trunc('day', created_at)::date AS day
+    date_trunc('day', created_at)::date AS scan_day
   FROM run_secrets
   WHERE repo_id IS NOT NULL AND repo_id <> ''
-    AND created_at >= NOW() - INTERVAL '30 days'
-  ORDER BY repo_id, date_trunc('day', created_at), created_at DESC
+    AND created_at < date_trunc('day', NOW())
+  ORDER BY repo_id, date_trunc('day', created_at)::date, created_at DESC
+),
+repos AS (
+  -- Only repos with at least one scan within the 30-day window
+  SELECT DISTINCT repo_id FROM all_repo_scans
+  WHERE scan_day >= date_trunc('day', NOW()) - INTERVAL '30 days'
+),
+filled AS (
+  -- For each repo+day, carry forward the most recent scan on or before that day
+  SELECT DISTINCT ON (r.repo_id, ds.day)
+    r.repo_id,
+    ds.day,
+    ars.findings
+  FROM repos r
+  CROSS JOIN date_series ds
+  JOIN all_repo_scans ars ON ars.repo_id = r.repo_id AND ars.scan_day <= ds.day
+  ORDER BY r.repo_id, ds.day, ars.scan_day DESC
 ),
 deduped_findings AS (
   SELECT DISTINCT
-    lrs.day,
+    f.day,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
-    lrs.repo_id,
+    f.repo_id,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
-      md5(
-        concat_ws(
-          '|',
-          COALESCE(finding->>'RuleID', ''),
-          COALESCE(finding->>'Description', ''),
-          COALESCE(finding->>'File', ''),
-          COALESCE(finding->>'StartLine', ''),
-          COALESCE(finding->>'Match', ''),
-          COALESCE(finding->>'Secret', '')
-        )
-      )
+      md5(concat_ws('|',
+        COALESCE(finding->>'RuleID', ''),
+        COALESCE(finding->>'Description', ''),
+        COALESCE(finding->>'File', ''),
+        COALESCE(finding->>'StartLine', ''),
+        COALESCE(finding->>'Match', ''),
+        COALESCE(finding->>'Secret', '')
+      ))
     ) AS dedupe_key
-  FROM latest_run_per_repo_per_day lrs
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(lrs.findings, '[]'::jsonb)) AS finding
+  FROM filled f
+  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(f.findings, '[]'::jsonb)) AS finding
 ),
 top_types AS (
   SELECT secret_type
@@ -159,10 +180,7 @@ top_types AS (
   LIMIT 5
 ),
 daily AS (
-  SELECT
-    day,
-    secret_type,
-    COUNT(*) AS cnt
+  SELECT day, secret_type, COUNT(*) AS cnt
   FROM deduped_findings
   GROUP BY day, secret_type
 )

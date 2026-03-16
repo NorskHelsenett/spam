@@ -177,9 +177,9 @@
 									{#if f.match}
 										{@const raw = cleanMatch(f.match)}
 										{@const decoded = tryDecodeBase64(raw)}
-										<div class="break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
+										<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
 										{#if decoded}
-											<div class="whitespace-pre-wrap break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
+											<div class="whitespace-pre-wrap inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
 										{/if}
 									{/if}
 								</div>
