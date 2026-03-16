@@ -900,7 +900,10 @@
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex items-baseline gap-3">
-			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Settings</h1>
+			<div>
+				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Settings</h1>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">Manage providers, users, and scanner configuration.</p>
+			</div>
 		</header>
 
 		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
