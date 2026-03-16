@@ -115,7 +115,7 @@ func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecuto
 		return nil, err
 	}
 
-	return map[string]string{"status": "created", "cronjob": payload.CronJobName}, nil
+	return map[string]string{"status": "created", "cronjob": cronJobName}, nil
 }
 
 func isAlreadyRunning(err error) bool {
