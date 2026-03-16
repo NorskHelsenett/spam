@@ -201,7 +201,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -346,34 +346,18 @@ let isAdmin = $state(false);
 				<button
 					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
-						isActive('/app/admin/providers')
+						isActive('/app/admin/providers') || isActive('/app/users')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
 					onclick={() => goto('/app/admin/providers')}
-					aria-current={isActive('/app/admin/providers') ? 'page' : undefined}
-					aria-label="Admin Providers"
+					aria-current={isActive('/app/admin/providers') || isActive('/app/users') ? 'page' : undefined}
+					aria-label="Settings"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
 						<Settings size={18} stroke-width={1.7} />
 					</span>
-					<span class="font-medium">Admin Providers</span>
-				</button>
-				<button
-					type="button"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
-						isActive('/app/users')
-							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
-							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
-					}`}
-					onclick={() => goto('/app/users')}
-					aria-current={isActive('/app/users') ? 'page' : undefined}
-					aria-label="Users"
-				>
-					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
-						<UsersRound size={18} stroke-width={1.7} />
-					</span>
-					<span class="font-medium">Users</span>
+					<span class="font-medium">Settings</span>
 					{#if $newUserCount > 0}
 						<span class="ml-auto flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-bold text-[var(--bg-primary)]">
 							{$newUserCount > 99 ? '99+' : $newUserCount}
