@@ -631,7 +631,8 @@
 				trivyStatus.job_status === 'QUEUED' ||
 				trivyStatus.job_status === 'RUNNING' ||
 				trivyStatus.job_status === 'RETRY' ||
-				(trivyStatus.active_leases ?? 0) > 0;
+				(trivyStatus.active_leases ?? 0) > 0 ||
+				(trivyStatus.pending_count ?? 0) > 0;
 			if (active) pollTrivyStatus();
 		}, 3000);
 	};
@@ -868,7 +869,8 @@
 					trivyStatus.job_status === 'QUEUED' ||
 					trivyStatus.job_status === 'RUNNING' ||
 					trivyStatus.job_status === 'RETRY' ||
-					(trivyStatus.active_leases ?? 0) > 0;
+					(trivyStatus.active_leases ?? 0) > 0 ||
+					(trivyStatus.pending_count ?? 0) > 0;
 				if (active) pollTrivyStatus();
 			});
 			updatePreview();
@@ -1458,7 +1460,7 @@
 			{/if}
 			{#if trivyStatus.finished_at}
 				<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
-					Finished {new Date(trivyStatus.finished_at).toLocaleString()}
+					Dispatched {new Date(trivyStatus.finished_at).toLocaleString()}
 				</p>
 			{/if}
 		</div>
