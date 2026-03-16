@@ -166,22 +166,30 @@
 					<!-- Findings -->
 					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
 						{#each group as f}
-							<article class="rounded-lg px-6 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
-								<div class="min-w-0 space-y-1.5">
-									{#if f.description}
-										<p class="text-sm font-semibold text-[var(--text-bright)]">{f.description}</p>
-									{/if}
-									{#if f.file}
-										<p class="font-mono text-xs text-[var(--text-muted)]">{f.file}{f.start_line ? `:${f.start_line}` : ''}</p>
-									{/if}
-									{#if f.match}
-										{@const raw = cleanMatch(f.match)}
-										{@const decoded = tryDecodeBase64(raw)}
-										<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
-										{#if decoded}
-											<div class="whitespace-pre-wrap inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
+							<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+								<div class="flex items-start gap-4">
+									<div class="w-40 shrink-0 pt-0.5">
+										<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
+											<FileWarning class="h-3 w-3 shrink-0" />
+											<span class="truncate">{f.rule_id}</span>
+										</span>
+									</div>
+									<div class="min-w-0 flex-1 space-y-1.5">
+										{#if f.description}
+											<p class="text-sm text-[var(--text-secondary)]">{f.description}</p>
 										{/if}
-									{/if}
+										{#if f.file}
+											<p class="font-mono text-xs text-[var(--text-muted)]">{f.file}{f.start_line ? `:${f.start_line}` : ''}</p>
+										{/if}
+										{#if f.match}
+											{@const raw = cleanMatch(f.match)}
+											{@const decoded = tryDecodeBase64(raw)}
+											<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
+											{#if decoded}
+												<div class="block whitespace-pre-wrap break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
+											{/if}
+										{/if}
+									</div>
 								</div>
 							</article>
 						{/each}
