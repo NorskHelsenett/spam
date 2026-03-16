@@ -272,18 +272,7 @@ func loadRepoSBOM(r *http.Request, db *gorm.DB, repoDBID string) (RepoMetadataSB
 		return RepoMetadataSBOM{}, 0
 	}
 
-	// Prefer the materialized view (is_root = false) as it is authoritative.
-	// Fall back to parsing the SBOM content only when the view has not yet
-	// been populated (count == 0).
-	var componentCount int64
-	if err := db.WithContext(r.Context()).Table("sbom_component_view").
-		Where("sbom_id = ? AND is_root = false", sbomID).
-		Count(&componentCount).Error; err != nil {
-		componentCount = 0
-	}
-	if componentCount == 0 {
-		componentCount = int64(countComponentsFromContent(sbom.Format, sbom.ContentBytes))
-	}
+	componentCount := sbomComponentCount(r.Context(), db, sbomID, sbom.Format, sbom.ContentBytes)
 
 	return RepoMetadataSBOM{
 		Latest: &RepoMetadataSBOMItem{
@@ -314,11 +303,7 @@ func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomCom
 		deps.FromManifest = manifestCount
 	}
 
-	if deps.FromManifest > deps.FromSBOM {
-		deps.Total = deps.FromManifest
-	} else {
-		deps.Total = deps.FromSBOM
-	}
+	deps.Total = deps.FromSBOM + deps.FromManifest
 
 	return deps
 }
