@@ -120,7 +120,13 @@
 			const res = await fetch(`/api/runs/${id}/secrets`, { credentials: 'include' });
 			if (res.ok) {
 				const data = await res.json();
-				secretsDialogData = data.findings || [];
+				secretsDialogData = (data.findings || []).map((f: any) => ({
+					rule_id: f.RuleID ?? f.rule_id ?? '',
+					description: f.Description ?? f.description ?? '',
+					file: f.File ?? f.file ?? '',
+					start_line: f.StartLine ?? f.start_line ?? 0,
+					match: f.Match ?? f.match ?? ''
+				}));
 			}
 		} finally {
 			secretsDialogLoading = false;
