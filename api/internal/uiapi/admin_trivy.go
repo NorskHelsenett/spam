@@ -34,7 +34,7 @@ type trivyJobStatusResponse struct {
 
 // queryWorkerTrivyJobStatus calls the worker's internal endpoint to get K8s Job pod counts.
 // Returns (0, 0, 0) silently if the worker is unreachable or not configured.
-func queryWorkerTrivyJobStatus(workerURL, hmacKey string) (active, succeeded, failed int32) {
+func queryWorkerTrivyJobStatus(workerURL string, hmacKey []byte) (active, succeeded, failed int32) {
 	if workerURL == "" {
 		return
 	}
@@ -45,7 +45,7 @@ func queryWorkerTrivyJobStatus(workerURL, hmacKey string) (active, succeeded, fa
 	}
 
 	// HMAC-sign the empty body.
-	mac := hmac.New(sha256.New, []byte(hmacKey))
+	mac := hmac.New(sha256.New, hmacKey)
 	req.Header.Set("X-Scanner-Signature", hex.EncodeToString(mac.Sum(nil)))
 
 	resp, err := http.DefaultClient.Do(req)
@@ -65,7 +65,7 @@ func queryWorkerTrivyJobStatus(workerURL, hmacKey string) (active, succeeded, fa
 // AdminTrivyScanStatusHandler returns trivy scanner statistics plus the latest ad-hoc job status.
 //
 // GET /api/admin/trivy/scan/status
-func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service, workerURL, hmacKey string) http.HandlerFunc {
+func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service, workerURL string, hmacKey []byte) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)

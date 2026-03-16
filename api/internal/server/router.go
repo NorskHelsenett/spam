@@ -22,7 +22,7 @@ type RouterOptions struct {
 	RunExecutor   *runner.RunExecutor
 	ProviderStore *providerconfig.Store
 	Cache         cache.Store
-	HMACKey       string
+	HMACKey       []byte
 	WorkerURL     string
 }
 

@@ -143,6 +143,8 @@ func run() error {
 		} else {
 			routerOpts = &server.RouterOptions{
 				K8sClient: k8sClient,
+				HMACKey:   runnerCfg.HMACKey,
+				WorkerURL: runnerCfg.WorkerURL,
 			}
 			log.Printf("K8s client enabled for API server")
 		}
@@ -156,8 +158,6 @@ func run() error {
 		return fmt.Errorf("ensure kv_store table: %w", err)
 	}
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
-	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
-	routerOpts.WorkerURL = strings.TrimSpace(os.Getenv("RUNNER_WORKER_URL"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
