@@ -1,6 +1,11 @@
 package uiapi
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 
@@ -16,15 +21,51 @@ type trivyScanStatus struct {
 	FinishedAt    string `json:"finished_at,omitempty"`
 	Error         string `json:"error,omitempty"`
 	PendingCount  int64  `json:"pending_count"`
-	ActiveLeases  int64  `json:"active_leases"`
+	ActivePods    int32  `json:"active_leases"` // field name kept for frontend compat
 	ScannedCount  int64  `json:"scanned_count"`
 	LastScannedAt string `json:"last_scanned_at,omitempty"`
+}
+
+type trivyJobStatusResponse struct {
+	Active    int32 `json:"active"`
+	Succeeded int32 `json:"succeeded"`
+	Failed    int32 `json:"failed"`
+}
+
+// queryWorkerTrivyJobStatus calls the worker's internal endpoint to get K8s Job pod counts.
+// Returns (0, 0, 0) silently if the worker is unreachable or not configured.
+func queryWorkerTrivyJobStatus(workerURL, hmacKey string) (active, succeeded, failed int32) {
+	if workerURL == "" {
+		return
+	}
+	url := workerURL + "/api/trivy/job/status"
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return
+	}
+
+	// HMAC-sign the empty body.
+	mac := hmac.New(sha256.New, []byte(hmacKey))
+	req.Header.Set("X-Scanner-Signature", hex.EncodeToString(mac.Sum(nil)))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("trivy job status: worker unreachable: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	var result trivyJobStatusResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return
+	}
+	return result.Active, result.Succeeded, result.Failed
 }
 
 // AdminTrivyScanStatusHandler returns trivy scanner statistics plus the latest ad-hoc job status.
 //
 // GET /api/admin/trivy/scan/status
-func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service, workerURL, hmacKey string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -48,11 +89,8 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			}
 		}
 
-		// Count active leases (scanner pods currently working).
-		db.WithContext(r.Context()).
-			Table("trivy_scan_leases").
-			Where("expires_at > ?", time.Now().UTC()).
-			Count(&status.ActiveLeases)
+		// Active pods from the K8s Job via the worker.
+		status.ActivePods, _, _ = queryWorkerTrivyJobStatus(workerURL, hmacKey)
 
 		// Count distinct scanned SBOMs.
 		db.WithContext(r.Context()).

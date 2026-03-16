@@ -157,6 +157,7 @@ func run() error {
 	}
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
+	routerOpts.WorkerURL = strings.TrimSpace(os.Getenv("RUNNER_WORKER_URL"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
