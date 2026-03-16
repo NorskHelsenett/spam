@@ -177,6 +177,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
 			})
+			r.Route("/api/secrets", func(s chi.Router) {
+				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService))
+				s.Get("/distribution", uiapi.SecretsDashboardDistributionHandler(db, authService))
+				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService))
+			})
 		}
 
 		if spaHandler != nil && authService != nil {

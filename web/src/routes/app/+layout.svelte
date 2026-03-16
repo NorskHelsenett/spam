@@ -201,7 +201,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, BellRing, ShieldAlert, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, UsersRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -213,7 +213,7 @@ let isAdmin = $state(false);
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
 		{ href: '/app/runs', label: 'Runs', icon: Play },
-		{ href: '/app/notifications', label: 'Alerts', icon: BellRing }
+		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
@@ -355,7 +355,7 @@ let isAdmin = $state(false);
 					aria-label="Admin Providers"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
-						<KeyRound size={18} stroke-width={1.7} />
+						<Settings size={18} stroke-width={1.7} />
 					</span>
 					<span class="font-medium">Admin Providers</span>
 				</button>
