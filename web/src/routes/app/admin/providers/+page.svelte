@@ -726,6 +726,154 @@
 		finally { probeListLoading = false; }
 	};
 
+	// Selection toolbar for secrets
+	let selectionToolbar: { top: number; left: number; text: string; range: Range } | null = $state(null);
+
+	$effect(() => {
+		if (!probeListOpen) selectionToolbar = null;
+	});
+
+	const handleSecretSelect = () => {
+		// Small delay to let click-to-select-all finish first
+		setTimeout(() => {
+			const sel = window.getSelection();
+			if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+				selectionToolbar = null;
+				return;
+			}
+			const text = sel.toString().trim();
+			const range = sel.getRangeAt(0);
+			const rect = range.getBoundingClientRect();
+			selectionToolbar = {
+				top: Math.max(4, rect.top - 36),
+				left: Math.min(Math.max(80, rect.left + rect.width / 2), window.innerWidth - 80),
+				text,
+				range: range.cloneRange()
+			};
+		}, 10);
+	};
+
+	const tryBase64Decode = (s: string): string | null => {
+		try {
+			const norm = s.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+			const decoded = atob(padded);
+			// Reject control characters
+			if (/[\x00-\x08\x0e-\x1f\x7f]/.test(decoded)) return null;
+			// Reject if less than 80% printable ASCII / common UTF-8
+			const printable = [...decoded].filter(c => {
+				const code = c.charCodeAt(0);
+				return (code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13;
+			}).length;
+			if (printable / decoded.length < 0.8) return null;
+			// Reject very short or same as input
+			if (decoded.length < 2 || decoded === s) return null;
+			try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
+			return decoded;
+		} catch {
+			return null;
+		}
+	};
+
+	const copySelection = () => {
+		if (!selectionToolbar) return;
+		navigator.clipboard.writeText(selectionToolbar.text);
+		selectionToolbar = null;
+	};
+
+	const decodeSelection = () => {
+		if (!selectionToolbar) return;
+		const range = selectionToolbar.range;
+		const text = selectionToolbar.text;
+
+		// Try each whitespace-separated token for base64
+		const tokens = text.split(/(\s+)/);
+		let anyDecoded = false;
+		const frag = document.createDocumentFragment();
+
+		for (const token of tokens) {
+			if (/^\s+$/.test(token)) {
+				frag.appendChild(document.createTextNode(token));
+				continue;
+			}
+			// Strip common wrappers: quotes, trailing punctuation
+			const stripped = token.replace(/^["'`]+|["'`,:;]+$/g, '');
+			const decoded = stripped.length >= 4 ? tryBase64Decode(stripped) : null;
+			if (decoded) {
+				// Keep prefix/suffix that was stripped
+				const prefix = token.slice(0, token.indexOf(stripped));
+				const suffix = token.slice(token.indexOf(stripped) + stripped.length);
+				if (prefix) frag.appendChild(document.createTextNode(prefix));
+				const span = document.createElement('span');
+				span.textContent = decoded;
+				span.style.color = 'var(--accent)';
+				span.style.whiteSpace = 'pre-wrap';
+				span.title = `Original: ${stripped}`;
+				frag.appendChild(span);
+				if (suffix) frag.appendChild(document.createTextNode(suffix));
+				anyDecoded = true;
+			} else {
+				frag.appendChild(document.createTextNode(token));
+			}
+		}
+
+		if (anyDecoded) {
+			range.deleteContents();
+			range.insertNode(frag);
+		}
+
+		window.getSelection()?.removeAllRanges();
+		selectionToolbar = null;
+	};
+
+	// Auto-decode: find all base64 values in a secret element and replace inline
+	const autoDecodeElement = (el: HTMLElement) => {
+		const text = el.textContent || '';
+		// Match base64 patterns: JWT parts (eyJ...), long base64 strings, key=value base64
+		const b64Pattern = /(?:eyJ[A-Za-z0-9+/\-_]{10,}={0,2})|(?:[A-Za-z0-9+/\-_]{20,}={0,2})/g;
+		let match;
+		const replacements: { start: number; end: number; original: string; decoded: string }[] = [];
+
+		while ((match = b64Pattern.exec(text)) !== null) {
+			const candidate = match[0];
+			// Skip if it looks like a URL path or hex-only
+			if (/^[0-9a-fA-F]+$/.test(candidate)) continue;
+			if (candidate.includes('://')) continue;
+			const decoded = tryBase64Decode(candidate);
+			if (decoded && decoded !== candidate && decoded.length > 3) {
+				replacements.push({
+					start: match.index,
+					end: match.index + candidate.length,
+					original: candidate,
+					decoded
+				});
+			}
+		}
+
+		if (replacements.length === 0) return;
+
+		// Build new content with decoded spans
+		const frag = document.createDocumentFragment();
+		let cursor = 0;
+		for (const r of replacements) {
+			if (r.start > cursor) {
+				frag.appendChild(document.createTextNode(text.slice(cursor, r.start)));
+			}
+			const span = document.createElement('span');
+			span.style.color = 'var(--accent)';
+			span.style.whiteSpace = 'pre-wrap';
+			span.textContent = r.decoded;
+			span.title = `Original: ${r.original}`;
+			frag.appendChild(span);
+			cursor = r.end;
+		}
+		if (cursor < text.length) {
+			frag.appendChild(document.createTextNode(text.slice(cursor)));
+		}
+		el.textContent = '';
+		el.appendChild(frag);
+	};
+
 	const exportProbeCSV = () => {
 		const params = probeListStatuses.map(s => `status=${s}`).join('&');
 		window.open(`/api/admin/secrets/probe/export?${params}`, '_blank');
@@ -1835,7 +1983,11 @@
 				</div>
 			</div>
 		{:else}
-			<div class="max-h-[60vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="max-h-[60vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40"
+				onmouseup={handleSecretSelect}
+			>
 				<table class="w-full text-sm">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
@@ -1873,7 +2025,17 @@
 										<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{probe.reason}</p>
 									{/if}
 									{#if probe.locations.length > 0 && probe.locations[0].secret}
-										<div class="mt-1.5 inline-block max-w-full rounded bg-[var(--bg-hard)] px-2 py-1 font-mono text-xs text-[var(--text-muted)] break-all select-all cursor-text">{probe.locations[0].secret}</div>
+										<pre
+											class="mt-1.5 inline-block max-w-full rounded bg-[var(--bg-hard)] px-2 py-1 font-mono text-xs text-[var(--text-muted)] whitespace-pre-wrap break-all cursor-text"
+											onclick={(e) => {
+												const sel = window.getSelection();
+												if (sel && sel.toString().length > 0) return;
+												const range = document.createRange();
+												range.selectNodeContents(e.currentTarget as Node);
+												sel?.removeAllRanges();
+												sel?.addRange(range);
+											}}
+										>{probe.locations[0].secret}</pre>
 									{/if}
 									<p class="mt-1 text-[10px] text-[var(--text-muted)]">
 										Probed {new Date(probe.probed_at).toLocaleString()}
@@ -1921,6 +2083,30 @@
 		{/if}
 	</div>
 </Dialog>
+
+<!-- Selection toolbar -->
+{#if selectionToolbar}
+	<div
+		class="fixed z-[300] flex items-center gap-0.5 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-1 py-0.5 shadow-xl"
+		style="top: {selectionToolbar.top}px; left: {selectionToolbar.left}px; transform: translateX(-50%);"
+	>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+			onclick={copySelection}
+		>
+			<Copy size={11} /> Copy
+		</button>
+		<div class="h-4 w-px bg-[var(--border-color)]"></div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--accent)]"
+			onclick={decodeSelection}
+		>
+			B64
+		</button>
+	</div>
+{/if}
 
 <!-- Secret Probe Preview Dialog -->
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">

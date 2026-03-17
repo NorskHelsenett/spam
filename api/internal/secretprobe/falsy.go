@@ -17,14 +17,27 @@ func IsFalsy(secret string) (bool, string) {
 
 	lower := strings.ToLower(s)
 
-	// Known placeholder keywords
+	// Known placeholder values — these are strings that ARE the secret,
+	// not key names like "password" or "secret" which appear in the context.
 	placeholders := []string{
-		"example", "changeme", "password", "secret", "dummy",
-		"todo", "fixme", "replace", "insert", "your_",
-		"xxx", "test", "sample", "placeholder", "fake",
+		"changeme", "dummy", "placeholder", "fake_", "fake-",
+		"todo", "fixme", "replace_me", "insert_here",
+		"your_api_key", "your_token", "your_secret",
+		"xxxx", "example_", "example-", "sample_", "sample-",
+		"sk_test_", "pk_test_", "test_key", "test_token",
+	}
+	// Exact matches for very common placeholders
+	exactPlaceholders := []string{
+		"test", "example", "sample", "none", "null",
+		"undefined", "n/a", "na", "tbd",
 	}
 	for _, p := range placeholders {
 		if strings.Contains(lower, p) {
+			return true, "placeholder: " + p
+		}
+	}
+	for _, p := range exactPlaceholders {
+		if lower == p {
 			return true, "placeholder: " + p
 		}
 	}

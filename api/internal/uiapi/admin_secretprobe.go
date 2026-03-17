@@ -357,24 +357,32 @@ func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.
 			hashes[i] = p.SecretHash
 		}
 		type loc struct {
-			repoName, file, secret string
-			line                   int
+			repoName, repoURL, file, secret string
+			line                            int
 		}
 		locations := map[string][]loc{}
 		if len(hashes) > 0 {
 			type row struct {
 				RepoID   string
 				RepoName string
+				RepoURL  string
 				Findings json.RawMessage
 			}
 			var rows []row
 			db.WithContext(r.Context()).Raw(`
-				SELECT rs.repo_id, r.org || '/' || r.slug AS repo_name, rs.findings
+				SELECT rs.repo_id,
+				       r.org || '/' || r.slug AS repo_name,
+				       RTRIM(COALESCE(pi.base_url,
+				         CASE r.provider WHEN 'github' THEN 'https://github.com' WHEN 'gitlab' THEN 'https://gitlab.com' ELSE '' END
+				       ), '/') || '/' || r.org || '/' || r.slug AS repo_url,
+				       rs.findings
 				FROM (
 				  SELECT DISTINCT ON (repo_id) repo_id, findings
 				  FROM run_secrets WHERE repo_id IS NOT NULL AND repo_id <> ''
 				  ORDER BY repo_id, created_at DESC
-				) rs JOIN repos r ON r.id = rs.repo_id
+				) rs
+				JOIN repos r ON r.id = rs.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
 			`).Scan(&rows)
 			hashSet := map[string]bool{}
 			for _, h := range hashes {
@@ -401,7 +409,7 @@ func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.
 						continue
 					}
 					locations[hash] = append(locations[hash], loc{
-						repoName: row.RepoName, file: f.File, secret: secret, line: f.StartLine,
+						repoName: row.RepoName, repoURL: row.RepoURL, file: f.File, secret: secret, line: f.StartLine,
 					})
 				}
 			}
@@ -409,17 +417,17 @@ func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.
 
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=secret-probe-export.csv")
-		_, _ = fmt.Fprintln(w, "status,rule_id,reason,secret,repo,file,line,probed_at")
+		_, _ = fmt.Fprintln(w, "status,rule_id,reason,secret,repo,repo_url,file,line,probed_at")
 		for _, p := range probes {
 			locs := locations[p.SecretHash]
 			if len(locs) == 0 {
-				_, _ = fmt.Fprintf(w, "%s,%s,%s,,%s,,,%s\n",
+				_, _ = fmt.Fprintf(w, "%s,%s,%s,,,%s,,,%s\n",
 					csvEscape(string(p.Status)), csvEscape(p.RuleID), csvEscape(p.Reason), csvEscape(p.SecretHash), p.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"))
 			}
 			for _, l := range locs {
-				_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%d,%s\n",
+				_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%s,%d,%s\n",
 					csvEscape(string(p.Status)), csvEscape(p.RuleID), csvEscape(p.Reason),
-					csvEscape(l.secret), csvEscape(l.repoName), csvEscape(l.file), l.line,
+					csvEscape(l.secret), csvEscape(l.repoName), csvEscape(l.repoURL), csvEscape(l.file), l.line,
 					p.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"))
 			}
 		}

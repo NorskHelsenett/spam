@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Clock, Users } from 'lucide-svelte';
+	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Clock, Users, Copy } from 'lucide-svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 	type Finding = {
@@ -312,11 +312,87 @@
 			loadingMore = false;
 		}
 	};
+
+	// Selection toolbar
+	let selToolbar: { top: number; left: number; text: string; range: Range } | null = $state(null);
+
+	const handleDrawerSelect = () => {
+		setTimeout(() => {
+			const sel = window.getSelection();
+			if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+				selToolbar = null;
+				return;
+			}
+			const text = sel.toString().trim();
+			const range = sel.getRangeAt(0);
+			const rect = range.getBoundingClientRect();
+			selToolbar = {
+				top: Math.max(4, rect.top - 36),
+				left: Math.min(Math.max(80, rect.left + rect.width / 2), window.innerWidth - 80),
+				text,
+				range: range.cloneRange()
+			};
+		}, 10);
+	};
+
+	const tryB64 = (s: string): string | null => {
+		try {
+			const norm = s.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+			const decoded = atob(padded);
+			if (/[\x00-\x08\x0e-\x1f\x7f]/.test(decoded)) return null;
+			const printable = [...decoded].filter(c => {
+				const code = c.charCodeAt(0);
+				return (code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13;
+			}).length;
+			if (printable / decoded.length < 0.8) return null;
+			if (decoded.length < 2 || decoded === s) return null;
+			try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
+			return decoded;
+		} catch { return null; }
+	};
+
+	const copyToolbar = () => {
+		if (selToolbar) navigator.clipboard.writeText(selToolbar.text);
+		selToolbar = null;
+	};
+
+	const decodeToolbar = () => {
+		if (!selToolbar) return;
+		const range = selToolbar.range;
+		const text = selToolbar.text;
+		const tokens = text.split(/(\s+)/);
+		let anyDecoded = false;
+		const frag = document.createDocumentFragment();
+		for (const token of tokens) {
+			if (/^\s+$/.test(token)) { frag.appendChild(document.createTextNode(token)); continue; }
+			const stripped = token.replace(/^["'`]+|["'`,:;]+$/g, '');
+			const decoded = stripped.length >= 4 ? tryB64(stripped) : null;
+			if (decoded) {
+				const prefix = token.slice(0, token.indexOf(stripped));
+				const suffix = token.slice(token.indexOf(stripped) + stripped.length);
+				if (prefix) frag.appendChild(document.createTextNode(prefix));
+				const span = document.createElement('span');
+				span.textContent = decoded;
+				span.style.color = 'var(--accent)';
+				span.style.whiteSpace = 'pre-wrap';
+				span.title = `Original: ${stripped}`;
+				frag.appendChild(span);
+				if (suffix) frag.appendChild(document.createTextNode(suffix));
+				anyDecoded = true;
+			} else {
+				frag.appendChild(document.createTextNode(token));
+			}
+		}
+		if (anyDecoded) { range.deleteContents(); range.insertNode(frag); }
+		window.getSelection()?.removeAllRanges();
+		selToolbar = null;
+	};
 </script>
 
 <div class="flex h-full flex-col overflow-hidden rounded-l-[10px] bg-[var(--bg-soft)]">
 	<!-- Header -->
-	<div class="shrink-0 p-7">
+	<div class="shrink-0 pt-7 pl-7 pr-7 pb-2">
 		<div class="flex items-start gap-3">
 			<KeyRound class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
 			<div class="min-w-0 flex-1">
@@ -397,7 +473,7 @@
 						</p>
 					</div>
 					<div class="flex flex-col justify-end">
-						<p class="text-sm font-bold leading-tight text-[var(--text-bright)]">{repoDetails.updated_at ? fmtRelative(repoDetails.updated_at) : '—'}</p>
+						<p class="text-lg font-bold leading-tight text-[var(--text-bright)]">{repoDetails.updated_at ? fmtRelative(repoDetails.updated_at) : '—'}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
 							<Clock class="h-2.5 w-2.5" /> Last activity
 						</p>
@@ -467,7 +543,8 @@
 			<p class="text-sm text-[var(--text-muted)]">No findings for this repo.</p>
 		</div>
 	{:else}
-		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]">
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]" onmouseup={handleDrawerSelect}>
 			{#each visibleGroups as [ruleId, group] (ruleId)}
 				<div>
 					<!-- Group header -->
@@ -533,3 +610,26 @@
 		</div>
 	{/if}
 </div>
+
+{#if selToolbar}
+	<div
+		class="fixed z-[300] flex items-center gap-0.5 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-1 py-0.5 shadow-xl"
+		style="top: {selToolbar.top}px; left: {selToolbar.left}px; transform: translateX(-50%);"
+	>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+			onclick={copyToolbar}
+		>
+			<Copy size={11} /> Copy
+		</button>
+		<div class="h-4 w-px bg-[var(--border-color)]"></div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--accent)]"
+			onclick={decodeToolbar}
+		>
+			B64
+		</button>
+	</div>
+{/if}

@@ -219,7 +219,8 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			log.Printf("failed to read secrets: %v", err)
 		} else {
-			// Parse and store secrets findings
+			// Parse and store secrets findings, stripping absolute clone paths from File fields.
+			secretsData = stripClonePaths(secretsData)
 			var findings []interface{}
 			if err := json.Unmarshal(secretsData, &findings); err != nil {
 				log.Printf("failed to parse secrets: %v", err)
@@ -318,4 +319,64 @@ func verifyAndPersistRunCommit(ctx context.Context, db *gorm.DB, payload jobs.Cr
 	}
 
 	return commitSHA, nil
+}
+
+// stripClonePaths removes absolute clone directory prefixes from the "File"
+// fields in gitleaks/betterleaks JSON output. The scanner runs inside a
+// container where repos are cloned to paths like /work/<repo>, /tmp/scan/,
+// etc. We want relative paths only.
+func stripClonePaths(data []byte) []byte {
+	var findings []map[string]interface{}
+	if err := json.Unmarshal(data, &findings); err != nil {
+		return data
+	}
+
+	changed := false
+	for _, f := range findings {
+		file, ok := f["File"].(string)
+		if !ok || file == "" {
+			continue
+		}
+		if !strings.HasPrefix(file, "/") {
+			continue
+		}
+		// Strip everything up to and including the repo root directory.
+		// Common patterns: /work/<anything>/, /tmp/<anything>/, /home/<anything>/
+		// Strategy: find the first path component after known prefixes,
+		// or strip up to the 3rd slash (e.g. /work/repo/ → rest).
+		rel := file
+		prefixes := []string{"/work/", "/tmp/", "/home/", "/src/", "/app/", "/repo/", "/scan/"}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(file, prefix) {
+				rest := file[len(prefix):]
+				// Skip the next path component (the repo dir itself)
+				if idx := strings.Index(rest, "/"); idx >= 0 {
+					rel = rest[idx+1:]
+				} else {
+					rel = rest
+				}
+				break
+			}
+		}
+		// Fallback: if still absolute, strip up to 3rd /
+		if strings.HasPrefix(rel, "/") {
+			parts := strings.SplitN(rel, "/", 4)
+			if len(parts) >= 4 {
+				rel = parts[3]
+			}
+		}
+		if rel != file {
+			f["File"] = rel
+			changed = true
+		}
+	}
+
+	if !changed {
+		return data
+	}
+	out, err := json.Marshal(findings)
+	if err != nil {
+		return data
+	}
+	return out
 }
