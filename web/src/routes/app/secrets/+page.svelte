@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -110,12 +110,31 @@
 	let selectedProviders: string[] = $state([]);
 	let searchQuery = $state('');
 
-	// Derive available options from loaded data
+	// Derive available options from loaded data, disabling combinations that yield no results
+	const secretTypesForSelectedProviders = $derived(
+		selectedProviders.length > 0
+			? new Set(tableRows.filter((r) => selectedProviders.includes(r.provider)).map((r) => r.secret_type))
+			: null
+	);
+	const providersForSelectedSecretTypes = $derived(
+		selectedSecretTypes.length > 0
+			? new Set(tableRows.filter((r) => selectedSecretTypes.includes(r.secret_type)).map((r) => r.provider))
+			: null
+	);
+
 	const secretTypeOptions: MultiSelectOption[] = $derived(
-		[...new Set(tableRows.map((r) => r.secret_type))].sort().map((t) => ({ value: t, label: t }))
+		[...new Set(tableRows.map((r) => r.secret_type))].sort().map((t) => ({
+			value: t,
+			label: t,
+			disabled: secretTypesForSelectedProviders != null && !secretTypesForSelectedProviders.has(t)
+		})).sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.label.localeCompare(b.label))
 	);
 	const providerOptions: MultiSelectOption[] = $derived(
-		[...new Set(tableRows.map((r) => r.provider).filter(Boolean))].sort().map((p) => ({ value: p, label: p }))
+		[...new Set(tableRows.map((r) => r.provider).filter(Boolean))].sort().map((p) => ({
+			value: p,
+			label: p,
+			disabled: providersForSelectedSecretTypes != null && !providersForSelectedSecretTypes.has(p)
+		})).sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.label.localeCompare(b.label))
 	);
 
 	const activeFilterCount = $derived(
@@ -154,7 +173,7 @@
 		if (browser) history.back();
 	};
 
-	type SortKey = 'repo' | 'secret_type' | 'unique_finding_count';
+	type SortKey = 'repo' | 'secret_type' | 'unique_finding_count' | 'is_private';
 	let sortKey: SortKey = $state('repo');
 	let sortAsc = $state(true);
 
@@ -162,6 +181,8 @@
 		let cmp = 0;
 		if (sortKey === 'unique_finding_count') {
 			cmp = a.unique_finding_count - b.unique_finding_count;
+		} else if (sortKey === 'is_private') {
+			cmp = Number(a.is_private) - Number(b.is_private);
 		} else {
 			cmp = a[sortKey].localeCompare(b[sortKey]);
 		}
@@ -431,6 +452,14 @@
 											</span>
 										</span>
 									</th>
+									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('is_private')}>
+										<span class="flex items-center gap-1">
+											Visibility
+											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'is_private'} class:text-transparent={sortKey !== 'is_private'}>
+												{sortArrow('is_private')}
+											</span>
+										</span>
+									</th>
 									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
 										<span class="flex items-center gap-1">
 											Secret Type
@@ -461,10 +490,16 @@
 												<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
 												<span class="font-semibold text-[var(--text-bright)]">{repoShortName(row.repo)}</span>
 											</div>
-											<p class="mt-0.5 flex items-center gap-2.5 truncate text-xs text-[var(--text-muted)]" title={row.repo}>
+											<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={row.repo}>
 												{row.repo}
-												{#if row.is_private}<Lock class="h-3 w-3 shrink-0 text-[var(--text-muted)]" />{/if}
 											</p>
+										</td>
+										<td class="px-5 py-3">
+											{#if row.is_private}
+												<span class="inline-flex items-center gap-1 text-xs text-[var(--text-muted)]"><Lock class="h-3 w-3 shrink-0" /> Private</span>
+											{:else}
+												<span class="inline-flex items-center gap-1 text-xs text-[var(--warning)]"><Globe class="h-3 w-3 shrink-0" /> Public</span>
+											{/if}
 										</td>
 										<td class="px-5 py-3">
 											<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">
