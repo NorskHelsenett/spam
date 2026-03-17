@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -189,7 +190,27 @@ func AdminSecretProbePreviewHandler(db *gorm.DB, authService *auth.Service) http
 	}
 }
 
-// AdminSecretProbeListHandler returns probed secrets filtered by status.
+// ProbeListItem is a rich view of a probed secret including where it was found.
+type ProbeListItem struct {
+	SecretHash string               `json:"secret_hash"`
+	RuleID     string               `json:"rule_id"`
+	Status     secretprobe.Status   `json:"status"`
+	Reason     string               `json:"reason,omitempty"`
+	Metadata   string               `json:"metadata,omitempty"`
+	ProbedAt   string               `json:"probed_at"`
+	Locations  []ProbeListLocation  `json:"locations"`
+}
+
+type ProbeListLocation struct {
+	RepoID   string `json:"repo_id"`
+	RepoName string `json:"repo_name"`
+	RepoURL  string `json:"repo_url"`
+	File     string `json:"file,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Secret   string `json:"secret,omitempty"`
+}
+
+// AdminSecretProbeListHandler returns probed secrets with locations, filtered by status.
 //
 // GET /api/admin/secrets/probe/list?status=valid&status=revoked
 func AdminSecretProbeListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
@@ -214,11 +235,202 @@ func AdminSecretProbeListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			http.Error(w, "failed to load probes", http.StatusInternalServerError)
 			return
 		}
-		if probes == nil {
-			probes = []secretprobe.SecretProbe{}
+
+		// Collect hashes for location lookup.
+		hashes := make([]string, len(probes))
+		for i, p := range probes {
+			hashes[i] = p.SecretHash
 		}
-		writeJSON(w, http.StatusOK, probes)
+
+		// Find locations: scan latest findings per repo and match by hash.
+		locations := map[string][]ProbeListLocation{}
+		if len(hashes) > 0 {
+			type findingRow struct {
+				RepoID   string
+				RepoName string
+				RepoURL  string
+				Findings json.RawMessage
+			}
+			var rows []findingRow
+			db.WithContext(r.Context()).Raw(`
+				SELECT rs.repo_id,
+				       r.org || '/' || r.slug AS repo_name,
+				       RTRIM(COALESCE(pi.base_url,
+				         CASE r.provider WHEN 'github' THEN 'https://github.com' WHEN 'gitlab' THEN 'https://gitlab.com' ELSE '' END
+				       ), '/') || '/' || r.org || '/' || r.slug AS repo_url,
+				       rs.findings
+				FROM (
+				  SELECT DISTINCT ON (repo_id) repo_id, findings
+				  FROM run_secrets
+				  WHERE repo_id IS NOT NULL AND repo_id <> ''
+				  ORDER BY repo_id, created_at DESC
+				) rs
+				JOIN repos r ON r.id = rs.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+			`).Scan(&rows)
+
+			hashSet := map[string]bool{}
+			for _, h := range hashes {
+				hashSet[h] = true
+			}
+
+			for _, row := range rows {
+				var findings []struct {
+					RuleID    string `json:"RuleID"`
+					File      string `json:"File"`
+					StartLine int    `json:"StartLine"`
+					Match     string `json:"Match"`
+					Secret    string `json:"Secret"`
+				}
+				if json.Unmarshal(row.Findings, &findings) != nil {
+					continue
+				}
+				for _, f := range findings {
+					secret := secretprobe.ExtractSecret(f.Match)
+					if f.Secret != "" {
+						secret = f.Secret
+					}
+					hash := secretprobe.SecretHash(secret)
+					if !hashSet[hash] {
+						continue
+					}
+					locations[hash] = append(locations[hash], ProbeListLocation{
+						RepoID:   row.RepoID,
+						RepoName: row.RepoName,
+						RepoURL:  row.RepoURL,
+						File:     f.File,
+						Line:     f.StartLine,
+						Secret:   secret,
+					})
+				}
+			}
+		}
+
+		// Build response.
+		result := make([]ProbeListItem, 0, len(probes))
+		for _, p := range probes {
+			locs := locations[p.SecretHash]
+			if locs == nil {
+				locs = []ProbeListLocation{}
+			}
+			result = append(result, ProbeListItem{
+				SecretHash: p.SecretHash,
+				RuleID:     p.RuleID,
+				Status:     p.Status,
+				Reason:     p.Reason,
+				Metadata:   p.Metadata,
+				ProbedAt:   p.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"),
+				Locations:  locs,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+// AdminSecretProbeExportHandler exports probed secrets as CSV.
+//
+// GET /api/admin/secrets/probe/export?status=valid
+func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		// Reuse the list handler logic to get enriched data.
+		statuses := r.URL.Query()["status"]
+		q := db.WithContext(r.Context()).
+			Model(&secretprobe.SecretProbe{}).
+			Order("CASE status WHEN 'valid' THEN 0 WHEN 'revoked' THEN 1 WHEN 'expired' THEN 2 WHEN 'invalid' THEN 3 WHEN 'false_positive' THEN 4 WHEN 'unknown' THEN 5 WHEN 'error' THEN 6 ELSE 7 END, probed_at DESC")
+		if len(statuses) > 0 {
+			q = q.Where("status IN ?", statuses)
+		}
+		var probes []secretprobe.SecretProbe
+		if err := q.Find(&probes).Error; err != nil {
+			http.Error(w, "failed to load probes", http.StatusInternalServerError)
+			return
+		}
+
+		// Scan findings for locations (same as list handler).
+		hashes := make([]string, len(probes))
+		for i, p := range probes {
+			hashes[i] = p.SecretHash
+		}
+		type loc struct {
+			repoName, file, secret string
+			line                   int
+		}
+		locations := map[string][]loc{}
+		if len(hashes) > 0 {
+			type row struct {
+				RepoID   string
+				RepoName string
+				Findings json.RawMessage
+			}
+			var rows []row
+			db.WithContext(r.Context()).Raw(`
+				SELECT rs.repo_id, r.org || '/' || r.slug AS repo_name, rs.findings
+				FROM (
+				  SELECT DISTINCT ON (repo_id) repo_id, findings
+				  FROM run_secrets WHERE repo_id IS NOT NULL AND repo_id <> ''
+				  ORDER BY repo_id, created_at DESC
+				) rs JOIN repos r ON r.id = rs.repo_id
+			`).Scan(&rows)
+			hashSet := map[string]bool{}
+			for _, h := range hashes {
+				hashSet[h] = true
+			}
+			for _, row := range rows {
+				var findings []struct {
+					RuleID    string `json:"RuleID"`
+					File      string `json:"File"`
+					StartLine int    `json:"StartLine"`
+					Match     string `json:"Match"`
+					Secret    string `json:"Secret"`
+				}
+				if json.Unmarshal(row.Findings, &findings) != nil {
+					continue
+				}
+				for _, f := range findings {
+					secret := secretprobe.ExtractSecret(f.Match)
+					if f.Secret != "" {
+						secret = f.Secret
+					}
+					hash := secretprobe.SecretHash(secret)
+					if !hashSet[hash] {
+						continue
+					}
+					locations[hash] = append(locations[hash], loc{
+						repoName: row.RepoName, file: f.File, secret: secret, line: f.StartLine,
+					})
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "text/csv")
+		w.Header().Set("Content-Disposition", "attachment; filename=secret-probe-export.csv")
+		_, _ = fmt.Fprintln(w, "status,rule_id,reason,secret,repo,file,line,probed_at")
+		for _, p := range probes {
+			locs := locations[p.SecretHash]
+			if len(locs) == 0 {
+				_, _ = fmt.Fprintf(w, "%s,%s,%s,,%s,,,%s\n",
+					csvEscape(string(p.Status)), csvEscape(p.RuleID), csvEscape(p.Reason), csvEscape(p.SecretHash), p.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"))
+			}
+			for _, l := range locs {
+				_, _ = fmt.Fprintf(w, "%s,%s,%s,%s,%s,%s,%d,%s\n",
+					csvEscape(string(p.Status)), csvEscape(p.RuleID), csvEscape(p.Reason),
+					csvEscape(l.secret), csvEscape(l.repoName), csvEscape(l.file), l.line,
+					p.ProbedAt.UTC().Format("2006-01-02T15:04:05Z"))
+			}
+		}
+	}
+}
+
+func csvEscape(s string) string {
+	if strings.ContainsAny(s, ",\"\n\r") {
+		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+	}
+	return s
 }
 
 // AdminSecretProbeAuditHandler returns recent audit log entries.

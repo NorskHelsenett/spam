@@ -3,7 +3,7 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
 	import X from 'lucide-svelte/icons/x';
@@ -705,11 +705,13 @@
 	let probePreviewTab = $state('all');
 	let probeListOpen = $state(false);
 	let probeListTitle = $state('');
+	let probeListStatuses: string[] = $state([]);
 	let probeListItems: any[] = $state([]);
 	let probeListLoading = $state(false);
 
 	const openProbeList = async (title: string, statuses: string[]) => {
 		probeListTitle = title;
+		probeListStatuses = statuses;
 		probeListOpen = true;
 		probeListLoading = true;
 		probeListItems = [];
@@ -722,6 +724,11 @@
 			}
 		} catch { /* ignore */ }
 		finally { probeListLoading = false; }
+	};
+
+	const exportProbeCSV = () => {
+		const params = probeListStatuses.map(s => `status=${s}`).join('&');
+		window.open(`/api/admin/secrets/probe/export?${params}`, '_blank');
 	};
 	let probeExcludedHashes: Set<string> = $state(new Set());
 	let probePollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1798,69 +1805,118 @@
 </section>
 
 <!-- Secret Probe List Dialog -->
-<Dialog bind:open={probeListOpen} showCloseButton={false} maxWidth="max-w-4xl">
+<Dialog bind:open={probeListOpen} showCloseButton={false} maxWidth="max-w-6xl">
 	<div class="p-6 sm:p-8 space-y-5">
 		<div class="flex items-start justify-between">
 			<div>
 				<h2 class="text-xl font-semibold text-[var(--text-bright)]">{probeListTitle}</h2>
 				<p class="mt-1 text-sm text-[var(--text-tertiary)]">{probeListItems.length} secret{probeListItems.length !== 1 ? 's' : ''}</p>
 			</div>
-			<button
-				type="button"
-				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
-				onclick={() => (probeListOpen = false)}
-				aria-label="Close"
-			>
-				<X size={18} />
-			</button>
+			<div class="flex items-center gap-2">
+				<button
+					type="button"
+					class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+					onclick={() => (probeListOpen = false)}
+					aria-label="Close"
+				>
+					<X size={18} />
+				</button>
+			</div>
 		</div>
 
 		{#if probeListLoading}
 			<Loading message="Loading secrets" variant="bar" size="sm" />
 		{:else if probeListItems.length === 0}
-			<p class="py-6 text-center text-sm text-[var(--text-muted)]">No secrets found.</p>
+			<div class="flex flex-col items-center gap-3 py-10 text-center">
+				<ShieldCheck class="h-12 w-12 text-green-400" />
+				<div>
+					<p class="text-lg font-semibold text-[var(--text-bright)]">No secrets found</p>
+					<p class="mt-1 text-sm text-[var(--text-muted)]">No probed secrets match this filter.</p>
+				</div>
+			</div>
 		{:else}
 			<div class="max-h-[60vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				<table class="w-full text-xs">
+				<table class="w-full text-sm">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
-							<th class="px-3 py-2 text-left">Status</th>
-							<th class="px-3 py-2 text-left">Rule</th>
-							<th class="px-3 py-2 text-left">Reason</th>
-							<th class="px-3 py-2 text-left">Hash</th>
-							<th class="px-3 py-2 text-left">Probed</th>
+							<th class="px-5 py-2.5 text-left">Status</th>
+							<th class="px-5 py-2.5 text-left">Secret</th>
+							<th class="px-5 py-2.5 text-left">Found in</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">
 						{#each probeListItems as probe}
-							<tr class="text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]">
-								<td class="px-3 py-2">
-									<span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium
-										{probe.status === 'valid' ? 'border-red-500/40 bg-red-500/10 text-red-400' :
-										 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'border-green-500/40 bg-green-500/10 text-green-400' :
-										 probe.status === 'false_positive' ? 'border-[var(--border-color)] text-[var(--text-muted)]' :
+							<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]">
+								<!-- Status badge -->
+								<td class="px-5 py-3 whitespace-nowrap">
+									<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium
+										{probe.status === 'valid' ? 'border-red-500/30 bg-red-500/5 text-red-400' :
+										 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'border-green-500/30 bg-green-500/5 text-green-400' :
+										 probe.status === 'false_positive' ? 'border-[var(--border-color)] bg-[var(--hover-bg)] text-[var(--text-muted)]' :
 										 'border-[var(--border-color)] text-[var(--text-tertiary)]'}">
 										<span class="h-1.5 w-1.5 rounded-full
 											{probe.status === 'valid' ? 'bg-red-400' :
 											 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'bg-green-400' :
 											 'bg-[var(--text-muted)]'}"></span>
-										{probe.status}
+										{probe.status.toUpperCase()}
 									</span>
 								</td>
-								<td class="px-3 py-2 font-mono">{probe.rule_id}</td>
-								<td class="px-3 py-2 text-[var(--text-muted)] max-w-[200px]">
-									<span class="block truncate" title={probe.reason}>{probe.reason || '—'}</span>
+								<!-- Secret + rule + reason -->
+								<td class="px-5 py-3">
+									<div class="flex flex-wrap items-center gap-2">
+										<span class="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">
+											<FileWarning class="h-3 w-3 shrink-0" />
+											{probe.rule_id}
+										</span>
+									</div>
+									{#if probe.reason}
+										<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{probe.reason}</p>
+									{/if}
+									{#if probe.locations.length > 0 && probe.locations[0].secret}
+										<div class="mt-1.5 inline-block max-w-full rounded bg-[var(--bg-hard)] px-2 py-1 font-mono text-xs text-[var(--text-muted)] break-all select-all cursor-text">{probe.locations[0].secret}</div>
+									{/if}
+									<p class="mt-1 text-[10px] text-[var(--text-muted)]">
+										Probed {new Date(probe.probed_at).toLocaleString()}
+									</p>
 								</td>
-								<td class="px-3 py-2 font-mono text-[var(--text-muted)]">
-									<span class="select-all cursor-text" title={probe.secret_hash}>{probe.secret_hash.slice(0, 12)}…</span>
-								</td>
-								<td class="px-3 py-2 text-[var(--text-muted)]">
-									{new Date(probe.probed_at).toLocaleString()}
+								<!-- Locations -->
+								<td class="px-5 py-3">
+									{#if probe.locations.length > 0}
+										<div class="flex flex-col gap-1">
+											{#each probe.locations as loc}
+												<div>
+													<a
+														href="/app/providers/repo/{loc.repo_id}"
+														class="text-xs text-[var(--accent)] hover:underline break-all"
+													>
+														{loc.repo_name}
+													</a>
+													{#if loc.file}
+														<p class="font-mono text-[10px] text-[var(--text-muted)]">{loc.file}{loc.line ? `:${loc.line}` : ''}</p>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									{:else}
+										<span class="text-xs text-[var(--text-muted)]">—</span>
+									{/if}
 								</td>
 							</tr>
 						{/each}
 					</tbody>
 				</table>
+			</div>
+
+			<!-- Footer -->
+			<div class="flex justify-end pt-2">
+				<button
+					type="button"
+					class="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+					onclick={exportProbeCSV}
+				>
+					<Download size={11} />
+					Export CSV
+				</button>
 			</div>
 		{/if}
 	</div>
