@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Tag, Users } from 'lucide-svelte';
+	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Clock, Users } from 'lucide-svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 	type Finding = {
@@ -39,6 +39,16 @@
 	};
 
 	const PAGE_SIZE = 100;
+
+	const fmtRelative = (iso: string) => {
+		const diff = Date.now() - new Date(iso).getTime();
+		const days = Math.floor(diff / 86_400_000);
+		if (days === 0) return 'today';
+		if (days === 1) return 'yesterday';
+		if (days < 30) return `${days}d ago`;
+		if (days < 365) return `${Math.floor(days / 30)}mo ago`;
+		return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+	};
 
 	const cleanMatch = (s: string) =>
 		s.endsWith('"') && !s.slice(0, -1).includes('"') ? s.slice(0, -1) : s;
@@ -374,26 +384,26 @@
 			<div class="metric-card rounded-xl p-3">
 				<h3 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repository</h3>
 				<div class="mt-2 grid grid-cols-4 gap-2">
-					<div>
-						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.commits.toLocaleString()}</p>
+					<div class="flex flex-col justify-end">
+						<p class="text-lg font-bold leading-tight text-[var(--text-bright)]">{repoDetails.stats.commits.toLocaleString()}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
 							<GitCommitHorizontal class="h-2.5 w-2.5" /> Commits
 						</p>
 					</div>
-					<div>
-						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.branches.toLocaleString()}</p>
+					<div class="flex flex-col justify-end">
+						<p class="text-lg font-bold leading-tight text-[var(--text-bright)]">{repoDetails.stats.branches.toLocaleString()}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
 							<GitBranch class="h-2.5 w-2.5" /> Branches
 						</p>
 					</div>
-					<div>
-						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.releases.toLocaleString()}</p>
+					<div class="flex flex-col justify-end">
+						<p class="text-sm font-bold leading-tight text-[var(--text-bright)]">{repoDetails.updated_at ? fmtRelative(repoDetails.updated_at) : '—'}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
-							<Tag class="h-2.5 w-2.5" /> Releases
+							<Clock class="h-2.5 w-2.5" /> Last activity
 						</p>
 					</div>
-					<div>
-						<p class="text-lg font-bold text-[var(--text-bright)]">{Math.max(repoDetails.stats.contributors, contributors.length).toLocaleString()}</p>
+					<div class="flex flex-col justify-end">
+						<p class="text-lg font-bold leading-tight text-[var(--text-bright)]">{Math.max(repoDetails.stats.contributors, contributors.length).toLocaleString()}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
 							<Users class="h-2.5 w-2.5" /> Contributors
 						</p>
