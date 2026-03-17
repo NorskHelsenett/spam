@@ -57,7 +57,7 @@
 	.toggle-track::after {
 		content: '';
 		position: absolute;
-		top: 2px;
+		top: 3px;
 		left: 2px;
 		width: 16px;
 		height: 16px;
