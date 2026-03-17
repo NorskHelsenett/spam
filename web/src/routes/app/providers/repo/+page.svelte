@@ -234,8 +234,15 @@
 			}
 
 			if (!response.ok) {
-				if (response.status === 404) {
-					error = 'Repository not found. Private instances may require authentication.';
+				if (response.status === 403) {
+					try {
+						const body = await response.json();
+						error = body.error === 'provider_token_required' ? 'no-token' : 'access-denied';
+					} catch {
+						error = 'access-denied';
+					}
+				} else if (response.status === 404) {
+					error = 'Repository not found.';
 				} else if (response.status === 401) {
 					error = 'Authentication required. This instance requires a token to access project details.';
 				} else if (response.status === 429) {
@@ -629,6 +636,24 @@
 			<Clock class="mx-auto h-12 w-12 text-yellow-500" />
 			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Rate Limited</p>
 			<p class="mt-2 text-sm text-[var(--text-secondary)]">API rate limit reached. Please try again later.</p>
+		</div>
+	{:else if error === 'no-token'}
+		<div class="rounded-2xl border border-[var(--orange)]/30 bg-[var(--orange)]/5 p-8 text-center">
+			<Lock class="mx-auto h-12 w-12 text-[var(--orange)]" />
+			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Provider token required</p>
+			<p class="mt-2 text-sm text-[var(--text-secondary)]">
+				This repository was discovered during sync but the provider has no API token configured.
+				An API token is needed to fetch full repository details.
+			</p>
+		</div>
+	{:else if error === 'access-denied'}
+		<div class="rounded-2xl border border-[var(--orange)]/30 bg-[var(--orange)]/5 p-8 text-center">
+			<Lock class="mx-auto h-12 w-12 text-[var(--orange)]" />
+			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Access denied</p>
+			<p class="mt-2 text-sm text-[var(--text-secondary)]">
+				This repository is tracked but the provider API denied access.
+				The configured token may lack permission for this repository.
+			</p>
 		</div>
 	{:else if error}
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">

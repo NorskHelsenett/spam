@@ -163,6 +163,7 @@
 	let sentinelEl: HTMLDivElement | undefined = $state();
 	let repoDetails: RepoDetails | null = $state(null);
 	let contributors: ContributorInfo[] = $state([]);
+	let detailsError: string | null = $state(null);
 
 	const hasMore = $derived(findings.length < total);
 
@@ -232,6 +233,7 @@
 		total = 0;
 		repoDetails = null;
 		contributors = [];
+		detailsError = null;
 		try {
 			const params = new URLSearchParams({ repo_id: repoId, limit: String(PAGE_SIZE), offset: '0' });
 			const [findingsRes, detailsRes] = await Promise.all([
@@ -248,6 +250,14 @@
 				repoDetails = data.details ?? null;
 				contributors = data.contributors ?? [];
 			} else {
+				if (detailsRes?.status === 403) {
+					try {
+						const body = await detailsRes.json();
+						detailsError = body.error === 'provider_token_required' ? 'no-token' : 'access-denied';
+					} catch {
+						detailsError = 'access-denied';
+					}
+				}
 				// Fallback to metadata endpoint for basic info
 				try {
 					const metaRes = await fetch(`/api/repos/metadata?repo_id=${encodeURIComponent(repoId)}`, { credentials: 'include' });
@@ -342,8 +352,24 @@
 		</div>
 	</div>
 
+	<!-- Token warning -->
+	{#if detailsError && !loading}
+		<div class="shrink-0 px-7 pb-3">
+			<div class="flex items-center gap-2 rounded-lg border border-[var(--orange)]/30 bg-[var(--orange)]/5 px-3 py-2 text-[11px] text-[var(--orange)]">
+				<Lock class="h-3 w-3 shrink-0" />
+				<span>
+					{#if detailsError === 'no-token'}
+						Provider has no API token configured. Add a token for full repository details.
+					{:else}
+						Provider token lacks access to this repository.
+					{/if}
+				</span>
+			</div>
+		</div>
+	{/if}
+
 	<!-- Repo metadata -->
-	{#if repoDetails?.stats}
+	{#if repoDetails?.stats && (repoDetails.stats.commits > 0 || repoDetails.stats.branches > 0 || contributors.length > 0)}
 		<div class="shrink-0 px-7 pb-4">
 			<div class="metric-card rounded-xl p-3">
 				<h3 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repository</h3>

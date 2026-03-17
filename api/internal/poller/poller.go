@@ -193,7 +193,6 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			log.Printf("poller: upsert repo %s: %v", repo.FullPath, err)
 			continue
 		}
-
 		// Skip if this repo already has a finished run for this commit.
 		if p.hasFinishedJobForCommit(ctx, repoRecord.ID, latestSHA) {
 			skippedSame++

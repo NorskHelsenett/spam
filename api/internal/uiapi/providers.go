@@ -1186,6 +1186,26 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		var commits []providers.CommitInfo
 		var contributors []providers.ContributorInfo
 
+		// handleNotFound returns a specific error when a repo exists in our DB
+		// (was discovered during sync) but the provider API can't fetch its details.
+		handleNotFound := func(msg string) {
+			if repoDBID != "" {
+				if token == "" {
+					writeJSON(w, http.StatusForbidden, map[string]string{
+						"error":   "provider_token_required",
+						"message": "This repository was discovered during sync but the provider has no API token configured. Add a token to access repository details.",
+					})
+				} else {
+					writeJSON(w, http.StatusForbidden, map[string]string{
+						"error":   "provider_access_denied",
+						"message": "The provider API could not access this repository. The token may lack permission, or the repository may have been deleted.",
+					})
+				}
+				return
+			}
+			http.Error(w, msg, http.StatusNotFound)
+		}
+
 		switch instance.Type {
 		case providerconfig.ProviderGitHub:
 			parts := strings.SplitN(repoPath, "/", 2)
@@ -1197,7 +1217,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			d, err := client.GetRepoDetails(r.Context(), parts[0], parts[1])
 			if err != nil {
 				if errors.Is(err, providers.ErrNotFound) {
-					http.Error(w, "repository not found", http.StatusNotFound)
+					handleNotFound("repository not found")
 					return
 				}
 				if errors.Is(err, providers.ErrRateLimited) {
@@ -1223,7 +1243,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			d, err := client.GetRepoDetails(r.Context(), repoPath)
 			if err != nil {
 				if errors.Is(err, providers.ErrNotFound) {
-					http.Error(w, "project not found", http.StatusNotFound)
+					handleNotFound("project not found")
 					return
 				}
 				if errors.Is(err, providers.ErrRateLimited) {
@@ -1251,7 +1271,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			d, err := client.GetRepoDetails(r.Context(), parts[0], parts[1])
 			if err != nil {
 				if errors.Is(err, providers.ErrNotFound) {
-					http.Error(w, "repository not found", http.StatusNotFound)
+					handleNotFound("repository not found")
 					return
 				}
 				if errors.Is(err, providers.ErrRateLimited) {
