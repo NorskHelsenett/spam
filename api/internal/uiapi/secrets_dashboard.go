@@ -1,13 +1,45 @@
 package uiapi
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"gorm.io/gorm"
 )
+
+const (
+	secretsCacheTTL      = 24 * time.Hour
+	secretsTableCacheKey = "secrets:dashboard:table"
+	secretsTrendCacheKey = "secrets:dashboard:trend"
+	secretsDistCacheKey  = "secrets:dashboard:distribution"
+)
+
+// secretsCacheEntry wraps a cached response with the run_secrets watermark
+// so we can detect when new scan data has arrived and the cache is stale.
+type secretsCacheEntry[T any] struct {
+	Watermark time.Time `json:"watermark"`
+	Response  T         `json:"response"`
+}
+
+var secretsTableRefreshing atomic.Bool
+var secretsTrendRefreshing atomic.Bool
+var secretsDistRefreshing atomic.Bool
+
+// secretsWatermark returns the latest run_secrets created_at timestamp,
+// used to invalidate cached dashboard data when new scans complete.
+func secretsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var t time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(created_at), TIMESTAMPTZ 'epoch') FROM run_secrets",
+	).Scan(&t)
+	return t
+}
 
 // SecretTableRow represents a row in the secrets datatable.
 type SecretTableRow struct {
@@ -29,13 +61,48 @@ type SecretDistributionRow struct {
 // SecretsDashboardTableHandler returns per-repo secret type counts for the datatable.
 //
 // GET /api/secrets/table
-func SecretsDashboardTableHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func SecretsDashboardTableHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		query := `
+		watermark := secretsWatermark(r.Context(), db)
+
+		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[[]SecretTableRow]](r.Context(), c, secretsTableCacheKey); ok {
+			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+				writeJSON(w, http.StatusOK, entry.Response)
+				return
+			}
+			writeJSON(w, http.StatusOK, entry.Response)
+			go func() {
+				if !secretsTableRefreshing.CompareAndSwap(false, true) {
+					return
+				}
+				defer secretsTableRefreshing.Store(false)
+				ctx := context.Background()
+				rows, err := computeSecretsTable(ctx, db)
+				if err != nil {
+					log.Printf("secrets table background refresh: %v", err)
+					return
+				}
+				_ = maybeStoreSecretsCache(ctx, c, secretsTableCacheKey, watermark, rows)
+			}()
+			return
+		}
+
+		rows, err := computeSecretsTable(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load secrets table", http.StatusInternalServerError)
+			return
+		}
+		_ = maybeStoreSecretsCache(r.Context(), c, secretsTableCacheKey, watermark, rows)
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func computeSecretsTable(ctx context.Context, db *gorm.DB) ([]SecretTableRow, error) {
+	query := `
 WITH latest_repo_secrets AS (
   SELECT DISTINCT ON (rs.repo_id)
     rs.repo_id,
@@ -94,16 +161,14 @@ LEFT JOIN provider_instances pi
 GROUP BY repo, r.id, r.provider, r.is_private, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
-		var rows []SecretTableRow
-		if err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error; err != nil {
-			http.Error(w, "failed to load secrets table", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []SecretTableRow{}
-		}
-		writeJSON(w, http.StatusOK, rows)
+	var rows []SecretTableRow
+	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+		return nil, err
 	}
+	if rows == nil {
+		rows = []SecretTableRow{}
+	}
+	return rows, nil
 }
 
 // SecretTrendRow is a single data point for the secrets trend chart.
@@ -117,13 +182,48 @@ type SecretTrendRow struct {
 // grouping everything outside the top-5 types into "other".
 //
 // GET /api/secrets/trend
-func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		query := `
+		watermark := secretsWatermark(r.Context(), db)
+
+		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[[]SecretTrendRow]](r.Context(), c, secretsTrendCacheKey); ok {
+			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+				writeJSON(w, http.StatusOK, entry.Response)
+				return
+			}
+			writeJSON(w, http.StatusOK, entry.Response)
+			go func() {
+				if !secretsTrendRefreshing.CompareAndSwap(false, true) {
+					return
+				}
+				defer secretsTrendRefreshing.Store(false)
+				ctx := context.Background()
+				rows, err := computeSecretsTrend(ctx, db)
+				if err != nil {
+					log.Printf("secrets trend background refresh: %v", err)
+					return
+				}
+				_ = maybeStoreSecretsCache(ctx, c, secretsTrendCacheKey, watermark, rows)
+			}()
+			return
+		}
+
+		rows, err := computeSecretsTrend(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load secrets trend", http.StatusInternalServerError)
+			return
+		}
+		_ = maybeStoreSecretsCache(r.Context(), c, secretsTrendCacheKey, watermark, rows)
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func computeSecretsTrend(ctx context.Context, db *gorm.DB) ([]SecretTrendRow, error) {
+	query := `
 WITH date_series AS (
   SELECT generate_series(
     date_trunc('day', NOW() - INTERVAL '30 days')::date,
@@ -198,28 +298,61 @@ LEFT JOIN top_types tt ON tt.secret_type = d.secret_type
 GROUP BY d.day, CASE WHEN tt.secret_type IS NOT NULL THEN d.secret_type ELSE 'other' END
 ORDER BY d.day ASC, count DESC`
 
-		var rows []SecretTrendRow
-		if err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error; err != nil {
-			http.Error(w, "failed to load secrets trend", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []SecretTrendRow{}
-		}
-		writeJSON(w, http.StatusOK, rows)
+	var rows []SecretTrendRow
+	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+		return nil, err
 	}
+	if rows == nil {
+		rows = []SecretTrendRow{}
+	}
+	return rows, nil
 }
 
 // SecretsDashboardDistributionHandler returns secret type counts for the donut chart.
 //
 // GET /api/secrets/distribution
-func SecretsDashboardDistributionHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func SecretsDashboardDistributionHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		query := `
+		watermark := secretsWatermark(r.Context(), db)
+
+		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[[]SecretDistributionRow]](r.Context(), c, secretsDistCacheKey); ok {
+			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+				writeJSON(w, http.StatusOK, entry.Response)
+				return
+			}
+			writeJSON(w, http.StatusOK, entry.Response)
+			go func() {
+				if !secretsDistRefreshing.CompareAndSwap(false, true) {
+					return
+				}
+				defer secretsDistRefreshing.Store(false)
+				ctx := context.Background()
+				rows, err := computeSecretsDistribution(ctx, db)
+				if err != nil {
+					log.Printf("secrets distribution background refresh: %v", err)
+					return
+				}
+				_ = maybeStoreSecretsCache(ctx, c, secretsDistCacheKey, watermark, rows)
+			}()
+			return
+		}
+
+		rows, err := computeSecretsDistribution(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load secrets distribution", http.StatusInternalServerError)
+			return
+		}
+		_ = maybeStoreSecretsCache(r.Context(), c, secretsDistCacheKey, watermark, rows)
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func computeSecretsDistribution(ctx context.Context, db *gorm.DB) ([]SecretDistributionRow, error) {
+	query := `
 WITH latest_repo_secrets AS (
   SELECT DISTINCT ON (repo_id)
     repo_id,
@@ -271,16 +404,26 @@ ORDER BY
   CASE WHEN (CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END) = 'other' THEN 1 ELSE 0 END,
   SUM(finding_count) DESC`
 
-		var rows []SecretDistributionRow
-		if err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error; err != nil {
-			http.Error(w, "failed to load secrets distribution", http.StatusInternalServerError)
-			return
-		}
-		if rows == nil {
-			rows = []SecretDistributionRow{}
-		}
-		writeJSON(w, http.StatusOK, rows)
+	var rows []SecretDistributionRow
+	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+		return nil, err
 	}
+	if rows == nil {
+		rows = []SecretDistributionRow{}
+	}
+	return rows, nil
+}
+
+// maybeStoreSecretsCache stores a secrets dashboard response in the cache,
+// respecting the Cache-Control: no-store header.
+func maybeStoreSecretsCache[T any](ctx context.Context, c cache.Store, key string, watermark time.Time, response T) error {
+	if !cache.ShouldStore(ctx) {
+		return nil
+	}
+	return cache.SetJSON(ctx, c, key, secretsCacheEntry[T]{
+		Watermark: watermark,
+		Response:  response,
+	}, secretsCacheTTL)
 }
 
 // SecretFindingRow is a single deduplicated finding returned for the drawer.
