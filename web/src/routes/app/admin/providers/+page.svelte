@@ -1839,9 +1839,9 @@
 				<table class="w-full text-sm">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
-							<th class="px-5 py-2.5 text-left">Status</th>
+							<th class="px-5 py-2.5 text-left w-[100px]">Status</th>
 							<th class="px-5 py-2.5 text-left">Secret</th>
-							<th class="px-5 py-2.5 text-left">Found in</th>
+							<th class="px-5 py-2.5 text-left w-[28%]">Found in</th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">

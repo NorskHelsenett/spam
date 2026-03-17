@@ -638,7 +638,7 @@
 			<p class="mt-2 text-sm text-[var(--text-secondary)]">API rate limit reached. Please try again later.</p>
 		</div>
 	{:else if error === 'no-token'}
-		<div class="rounded-2xl border border-[var(--orange)]/30 bg-[var(--orange)]/5 p-8 text-center">
+		<div class="p-8 text-center">
 			<Lock class="mx-auto h-12 w-12 text-[var(--orange)]" />
 			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Provider token required</p>
 			<p class="mt-2 text-sm text-[var(--text-secondary)]">
@@ -647,7 +647,7 @@
 			</p>
 		</div>
 	{:else if error === 'access-denied'}
-		<div class="rounded-2xl border border-[var(--orange)]/30 bg-[var(--orange)]/5 p-8 text-center">
+		<div class="p-8 text-center">
 			<Lock class="mx-auto h-12 w-12 text-[var(--orange)]" />
 			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Access denied</p>
 			<p class="mt-2 text-sm text-[var(--text-secondary)]">
@@ -717,7 +717,7 @@
 			</div>
 
 			{#if scanError}
-				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-2 text-sm text-[var(--error)]">
+				<div class="rounded-xl border border-[var(--error)]/30 px-4 py-2 text-sm text-[var(--error)]">
 					{scanError}
 				</div>
 			{/if}

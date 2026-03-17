@@ -365,9 +365,9 @@
 	<!-- Token warning -->
 	{#if detailsError && !loading}
 		<div class="shrink-0 px-7 pb-3">
-			<div class="flex items-center gap-2 rounded-lg border border-[var(--orange)]/30 bg-[var(--orange)]/5 px-3 py-2 text-[11px] text-[var(--orange)]">
-				<Lock class="h-3 w-3 shrink-0" />
-				<span>
+			<div class="flex items-center gap-2 px-3 py-2 text-[11px] text-[var(--orange)]">
+				<Lock class="h-3 w-3 shrink-0 self-center" />
+				<span class="leading-tight">
 					{#if detailsError === 'no-token'}
 						Provider has no API token configured. Add a token for full repository details.
 					{:else}
