@@ -12,6 +12,7 @@
 	import Select from '$lib/components/Select.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
 	import Loading from '$lib/components/Loading.svelte';
+	import Checkbox from '$lib/components/Checkbox.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
@@ -700,6 +701,7 @@
 	let probePreviewOpen = $state(false);
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
+	let probeExcludedHashes: Set<string> = $state(new Set());
 	let probePollTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const buildCurl = (req: any, secret: string) => {
@@ -724,6 +726,7 @@
 	const loadProbePreview = async () => {
 		probePreviewLoading = true;
 		probePreview = [];
+		probeExcludedHashes = new Set();
 		try {
 			const res = await fetch('/api/admin/secrets/probe/preview', { credentials: 'include' });
 			if (res.ok) {
@@ -1756,7 +1759,7 @@
 </section>
 
 <!-- Secret Probe Preview Dialog -->
-<Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-4xl">
+<Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
 	<div class="p-6 sm:p-8 space-y-5">
 		<div>
 			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
@@ -1781,7 +1784,7 @@
 			<!-- Grouped request table -->
 			<div class="max-h-[50vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="w-full text-xs">
-					<thead class="sticky top-0 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
 							<th class="px-3 py-2 text-left w-8"></th>
 							<th class="px-3 py-2 text-left">Secret</th>
@@ -1794,14 +1797,12 @@
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">
 						{#each [...probePreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
-							{@const isSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
+							{@const isGroupSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
 							<!-- Group header row -->
 							<tr class="bg-[var(--hover-bg-subtle)]/50">
-								<td class="px-3 py-2">
-									<input
-										type="checkbox"
-										class="accent-[var(--accent)]"
-										checked={isSelected}
+								<td class="px-3 py-2 text-center">
+									<Checkbox
+										checked={isGroupSelected}
 										onchange={() => {
 											if (probeSelectedRules.length === 0) {
 												probeSelectedRules = probePreview.map(g => g.rule_id).filter(r => r !== group.rule_id);
@@ -1822,18 +1823,41 @@
 								</td>
 							</tr>
 							<!-- Item rows -->
-							{#if isSelected && group.items}
+							{#if isGroupSelected && group.items}
 								{#each group.items as item}
-									<tr class="text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]">
+									{@const isItemChecked = !probeExcludedHashes.has(item.secret_hash)}
+									<tr
+										class="cursor-pointer transition-opacity {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
+										onclick={(e) => {
+											const target = e.target as HTMLElement;
+											// Don't toggle when clicking on text content, buttons, or inputs
+											if (target.closest('button, a, input') || window.getSelection()?.toString()) return;
+											const next = new Set(probeExcludedHashes);
+											if (isItemChecked) { next.add(item.secret_hash); } else { next.delete(item.secret_hash); }
+											probeExcludedHashes = next;
+										}}
+									>
 										<td class="px-3 py-1.5">
-											{#if item.already_probed}
-												<span class="inline-block h-2 w-2 rounded-full {item.previous_status === 'valid' ? 'bg-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' || item.previous_status === 'invalid' ? 'bg-green-400' : item.previous_status === 'false_positive' ? 'bg-[var(--text-muted)]' : 'bg-[var(--border-color)]'}"></span>
-											{:else}
-												<span class="inline-block h-2 w-2 rounded-full bg-[var(--border-color)]"></span>
-											{/if}
+											<button
+												type="button"
+												class="mx-auto block h-2 w-2 rounded-full transition {isItemChecked ? 'bg-[var(--accent)]' : 'bg-[var(--border-color)]'}"
+												onclick={() => {
+													const next = new Set(probeExcludedHashes);
+													if (isItemChecked) {
+														next.add(item.secret_hash);
+													} else {
+														next.delete(item.secret_hash);
+													}
+													probeExcludedHashes = next;
+												}}
+											></button>
 										</td>
-										<td class="px-3 py-1.5 font-mono text-[var(--text-muted)] max-w-[200px]">
-											<span class="block truncate" title={item.secret}>{item.secret}</span>
+										<td class="px-3 py-1.5 font-mono max-w-[200px]">
+											<span
+												class="block truncate select-all cursor-text"
+												title={item.secret}
+												ondblclick={(e) => { const sel = window.getSelection(); const range = document.createRange(); range.selectNodeContents(e.currentTarget); sel?.removeAllRanges(); sel?.addRange(range); }}
+											>{item.secret}</span>
 											{#if item.is_falsy}
 												<span class="text-[9px] italic text-[var(--text-muted)]">({item.falsy_reason})</span>
 											{/if}
@@ -1842,10 +1866,10 @@
 											<td class="px-3 py-1.5">
 												<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px]">{item.requests[0].method}</span>
 											</td>
-											<td class="px-3 py-1.5 font-mono text-[var(--text-muted)] max-w-[250px]">
+											<td class="px-3 py-1.5 font-mono max-w-[250px]">
 												<span class="block truncate" title={item.requests[0].url}>{item.requests[0].url}</span>
 											</td>
-											<td class="px-3 py-1.5 text-[var(--text-muted)] max-w-[160px]">
+											<td class="px-3 py-1.5 max-w-[160px]">
 												<span class="block truncate" title={Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ')}>
 													{Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ') || '—'}
 												</span>
