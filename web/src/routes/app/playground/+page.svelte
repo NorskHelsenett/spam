@@ -14,6 +14,7 @@
 	import Checkbox from '$lib/components/Checkbox.svelte';
 	import Radio from '$lib/components/Radio.svelte';
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
+	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -97,6 +98,12 @@
 		{ value: 'slack-token', label: 'slack-token' }
 	];
 	let multiSelectTypesValue: string[] = $state(['jwt', 'private-key']);
+	const mockContributors = [
+		{ login: 'jonasbg', name: 'Jonas', email: 'jonas@example.com', avatar_url: 'https://avatars.githubusercontent.com/u/1508560?v=4', contributions: 142 },
+		{ login: 'dependabot[bot]', name: 'Dependabot', avatar_url: 'https://avatars.githubusercontent.com/in/29110?v=4', contributions: 87 },
+		{ login: 'alice', name: 'Alice Smith', email: 'alice@example.com', contributions: 34 },
+		{ login: 'bob', name: 'Bob', contributions: 12 },
+	];
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
@@ -508,6 +515,31 @@
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Health status</p>
 				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Calls /api/healthz on mount.</p>
 				<HealthStatus />
+			</div>
+		</div>
+
+		<div class="grid gap-6 lg:grid-cols-2">
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Contributor Avatars</p>
+				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Hover for tooltip with email copy. Reusable across drawers.</p>
+				<div class="space-y-4">
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">4 contributors</p>
+						<ContributorAvatars contributors={mockContributors} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Max 2</p>
+						<ContributorAvatars contributors={mockContributors} max={2} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Single contributor</p>
+						<ContributorAvatars contributors={[mockContributors[0]]} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">No avatar (fallback initials)</p>
+						<ContributorAvatars contributors={[mockContributors[2], mockContributors[3]]} />
+					</div>
+				</div>
 			</div>
 		</div>
 
