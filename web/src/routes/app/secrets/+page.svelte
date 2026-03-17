@@ -441,10 +441,10 @@
 			{:else}
 				<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 					<div class="flex-1 overflow-y-auto">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<table class="w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
-									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('repo')}>
+									<th class="w-[40%] cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('repo')}>
 										<span class="flex items-center gap-1">
 											Repository
 											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'repo'} class:text-transparent={sortKey !== 'repo'}>
@@ -452,7 +452,7 @@
 											</span>
 										</span>
 									</th>
-									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('is_private')}>
+									<th class="w-[10%] cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('is_private')}>
 										<span class="flex items-center gap-1">
 											Visibility
 											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'is_private'} class:text-transparent={sortKey !== 'is_private'}>
@@ -460,7 +460,7 @@
 											</span>
 										</span>
 									</th>
-									<th class="cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
+									<th class="w-[20%] cursor-pointer px-5 py-3 text-left transition hover:text-[var(--text-secondary)]" onclick={() => setSort('secret_type')}>
 										<span class="flex items-center gap-1">
 											Secret Type
 											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'secret_type'} class:text-transparent={sortKey !== 'secret_type'}>
@@ -468,7 +468,7 @@
 											</span>
 										</span>
 									</th>
-									<th class="cursor-pointer px-5 py-3 text-right transition hover:text-[var(--text-secondary)]" onclick={() => setSort('unique_finding_count')}>
+									<th class="w-[12%] cursor-pointer px-5 py-3 text-right transition hover:text-[var(--text-secondary)]" onclick={() => setSort('unique_finding_count')}>
 										<span class="inline-flex items-center gap-1">
 											Findings
 											<span class="w-3 text-center" class:text-[var(--accent)]={sortKey === 'unique_finding_count'} class:text-transparent={sortKey !== 'unique_finding_count'}>
@@ -476,7 +476,7 @@
 											</span>
 										</span>
 									</th>
-									<th class="px-5 py-3 text-right">Last Scanned</th>
+									<th class="w-[12%] px-5 py-3 text-right">Last Scanned</th>
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">

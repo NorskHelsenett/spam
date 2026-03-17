@@ -2167,17 +2167,18 @@
 			</div>
 
 			<!-- Grouped request table -->
-			<div class="max-h-[50vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="max-h-[50vh] overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
-							<th class="w-8 px-3 py-2 text-left"></th>
-							<th class="w-[20%] px-3 py-2 text-left">Secret</th>
-							<th class="w-[60px] px-3 py-2 text-left">Method</th>
-							<th class="px-3 py-2 text-left">URL</th>
+							<th class="w-[3%] px-3 py-2 text-left"></th>
+							<th class="w-[25%] px-3 py-2 text-left">Secret</th>
+							<th class="w-[7%] px-3 py-2 text-left">Method</th>
+							<th class="w-[30%] px-3 py-2 text-left">URL</th>
 							<th class="w-[20%] px-3 py-2 text-left">Headers</th>
-							<th class="w-[60px] px-3 py-2 text-left">Status</th>
-							<th class="w-8 px-3 py-2 text-left"></th>
+							<th class="w-[8%] px-3 py-2 text-left">Status</th>
+							<th class="w-[3%] px-3 py-2 text-left"></th>
+							<th class="px-3 py-2 text-left"></th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">
@@ -2237,7 +2238,7 @@
 												}}
 											></button>
 										</td>
-										<td class="px-3 py-1.5 font-mono truncate">
+										<td class="px-3 py-1.5 font-mono overflow-hidden">
 											<span
 												class="block truncate select-all cursor-text"
 												title={item.secret}
