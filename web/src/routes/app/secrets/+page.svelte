@@ -1,17 +1,21 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { fly } from 'svelte/transition';
+	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
 	import SecretsDrawer from '$lib/components/SecretsDrawer.svelte';
+	import Checkbox from '$lib/components/Checkbox.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
+	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
 
 	type TableRow = {
 		repo: string;
 		repo_id: string;
+		provider: string;
 		secret_type: string;
 		unique_finding_count: number;
 		last_scanned: string;
@@ -28,11 +32,11 @@
 		count: number;
 	};
 
-	let tableRows: TableRow[] = [];
-	let distribution: DistributionRow[] = [];
-	let trendRaw: TrendRaw[] = [];
-	let loading = true;
-	let error = '';
+	let tableRows: TableRow[] = $state([]);
+	let distribution: DistributionRow[] = $state([]);
+	let trendRaw: TrendRaw[] = $state([]);
+	let loading = $state(true);
+	let error = $state('');
 
 	const COLORS = [
 		'var(--red)',
@@ -45,16 +49,16 @@
 		'var(--gray)'
 	];
 
-	$: donutTotal = distribution.reduce((s, r) => s + r.finding_count, 0);
+	const donutTotal = $derived(distribution.reduce((s, r) => s + r.finding_count, 0));
 
-	$: donutSegments = distribution.map((r, i) => ({
+	const donutSegments = $derived(distribution.map((r, i) => ({
 		label: r.secret_type,
 		value: r.finding_count,
 		color: COLORS[i % COLORS.length]
-	}));
+	})));
 
 	// Pivot trend rows into per-date objects with dynamic keys
-	$: ({ trendData, trendSeries } = (() => {
+	const { trendData, trendSeries } = $derived.by(() => {
 		// Collect all distinct secret types in order of appearance
 		const typeSet = new Set<string>();
 		for (const r of trendRaw) typeSet.add(r.secret_type);
@@ -87,16 +91,49 @@
 		});
 
 		return { trendData: points, trendSeries: seriesList };
-	})());
+	});
 
-	$: groupedByRepo = (() => {
+	const groupedByRepo = $derived.by(() => {
 		const map = new Map<string, TableRow[]>();
 		for (const row of tableRows) {
 			if (!map.has(row.repo)) map.set(row.repo, []);
 			map.get(row.repo)!.push(row);
 		}
 		return Array.from(map.entries());
-	})();
+	});
+
+	// ── Filter state ──────────────────────────────────────────────────
+	let filterOpen = $state(false);
+	let publicOnly = $state(false);
+	let selectedSecretTypes: string[] = $state([]);
+	let selectedProviders: string[] = $state([]);
+
+	// Derive available options from loaded data
+	const secretTypeOptions: MultiSelectOption[] = $derived(
+		[...new Set(tableRows.map((r) => r.secret_type))].sort().map((t) => ({ value: t, label: t }))
+	);
+	const providerOptions: MultiSelectOption[] = $derived(
+		[...new Set(tableRows.map((r) => r.provider).filter(Boolean))].sort().map((p) => ({ value: p, label: p }))
+	);
+
+	const activeFilterCount = $derived(
+		(publicOnly ? 1 : 0) + (selectedSecretTypes.length > 0 ? 1 : 0) + (selectedProviders.length > 0 ? 1 : 0)
+	);
+
+	// Filtered rows (before sorting)
+	const filteredRows = $derived(
+		tableRows.filter((row) => {
+			if (selectedSecretTypes.length > 0 && !selectedSecretTypes.includes(row.secret_type)) return false;
+			if (selectedProviders.length > 0 && !selectedProviders.includes(row.provider)) return false;
+			return true;
+		})
+	);
+
+	const clearFilters = () => {
+		publicOnly = false;
+		selectedSecretTypes = [];
+		selectedProviders = [];
+	};
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
 
@@ -105,10 +142,10 @@
 	};
 
 	type SortKey = 'repo' | 'secret_type' | 'unique_finding_count';
-	let sortKey: SortKey = 'repo';
-	let sortAsc = true;
+	let sortKey: SortKey = $state('repo');
+	let sortAsc = $state(true);
 
-	$: sortedRows = [...tableRows].sort((a, b) => {
+	const sortedRows = $derived([...filteredRows].sort((a, b) => {
 		let cmp = 0;
 		if (sortKey === 'unique_finding_count') {
 			cmp = a.unique_finding_count - b.unique_finding_count;
@@ -116,7 +153,7 @@
 			cmp = a[sortKey].localeCompare(b[sortKey]);
 		}
 		return sortAsc ? cmp : -cmp;
-	});
+	}));
 
 	const setSort = (key: SortKey) => {
 		if (sortKey === key) {
@@ -147,8 +184,8 @@
 		return `${Math.floor(days / 30)}mo ago`;
 	};
 
-	let drawerOpen = false;
-	let drawerRow: TableRow | null = null;
+	let drawerOpen = $state(false);
+	let drawerRow: TableRow | null = $state(null);
 
 	const openDrawer = (row: TableRow) => {
 		if (drawerOpen && drawerRow?.repo_id === row.repo_id) {
@@ -271,10 +308,76 @@
 
 	<!-- Data table panel -->
 	<section class="panel-surface flex flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10 h-[calc(100vh-7rem)]">
-		<header>
-			<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
-			<p class="text-sm text-[var(--text-tertiary)]">Per-repository secret findings from the latest scan.</p>
+		<header class="flex items-start justify-between gap-4">
+			<div>
+				<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
+				<p class="text-sm text-[var(--text-tertiary)]">Per-repository secret findings from the latest scan.</p>
+			</div>
+			{#if !loading && !error && tableRows.length > 0}
+				<button
+					type="button"
+					class="filter-toggle"
+					class:active={filterOpen}
+					onclick={() => (filterOpen = !filterOpen)}
+					aria-expanded={filterOpen}
+					aria-label="Toggle filters"
+				>
+					<SlidersHorizontal size={16} />
+					<span>Filters</span>
+					{#if activeFilterCount > 0}
+						<span class="filter-badge">{activeFilterCount}</span>
+					{/if}
+				</button>
+			{/if}
 		</header>
+
+		<!-- Animated filter bar -->
+		{#if filterOpen && !loading && !error}
+			<div
+				transition:slide={{ duration: 220, easing: cubicOut }}
+				class="filter-bar"
+			>
+				<div class="flex flex-wrap items-center gap-4">
+					<Checkbox bind:checked={publicOnly} label="Public repos only" />
+
+					<div class="filter-field">
+						<span class="filter-field-label">Secret types</span>
+						<MultiSelect
+							bind:selected={selectedSecretTypes}
+							options={secretTypeOptions}
+							placeholder="All types"
+							size="sm"
+						/>
+					</div>
+
+					<div class="filter-field">
+						<span class="filter-field-label">Providers</span>
+						<MultiSelect
+							bind:selected={selectedProviders}
+							options={providerOptions}
+							placeholder="All providers"
+							size="sm"
+						/>
+					</div>
+
+					{#if activeFilterCount > 0}
+						<button
+							type="button"
+							class="clear-filters"
+							onclick={clearFilters}
+						>
+							Clear all
+						</button>
+					{/if}
+				</div>
+
+				{#if activeFilterCount > 0}
+					<p class="mt-2 text-xs text-[var(--text-muted)]">
+						Showing {filteredRows.length} of {tableRows.length} results
+					</p>
+				{/if}
+			</div>
+		{/if}
 
 		{#if !loading && !error}
 			{#if tableRows.length === 0}
@@ -365,3 +468,86 @@
 		{/if}
 	</section>
 </div>
+
+<style>
+	.filter-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.4rem 0.85rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+
+	.filter-toggle:hover {
+		color: var(--text-bright);
+		border-color: var(--text-tertiary);
+	}
+
+	.filter-toggle.active {
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+		color: var(--accent);
+	}
+
+	.filter-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 18px;
+		height: 18px;
+		border-radius: 999px;
+		background: var(--accent);
+		color: var(--bg-hard);
+		font-size: 0.65rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0 0.3rem;
+	}
+
+	.filter-bar {
+		padding: 1rem 1.25rem;
+		border-radius: 1rem;
+		border: 1px solid var(--hover-bg);
+		background: var(--main-content-bg);
+		background: color-mix(in srgb, var(--main-content-bg) 88%, transparent);
+	}
+
+	.filter-field {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.filter-field-label {
+		font-size: 0.75rem;
+		font-weight: 600;
+		color: var(--text-tertiary);
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		white-space: nowrap;
+	}
+
+	.clear-filters {
+		padding: 0.3rem 0.7rem;
+		border-radius: 999px;
+		border: none;
+		background: transparent;
+		color: var(--text-muted);
+		font-size: 0.75rem;
+		cursor: pointer;
+		transition: color 120ms ease;
+	}
+
+	.clear-filters:hover {
+		color: var(--red);
+	}
+</style>

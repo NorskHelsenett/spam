@@ -12,6 +12,7 @@ import (
 type SecretTableRow struct {
 	Repo               string    `json:"repo"`
 	RepoID             string    `json:"repo_id"`
+	Provider           string    `json:"provider"`
 	SecretType         string    `json:"secret_type"`
 	UniqueFindingCount int64     `json:"unique_finding_count"`
 	LastScanned        time.Time `json:"last_scanned"`
@@ -78,6 +79,7 @@ SELECT
     '/'
   ) || '/' || r.org || '/' || r.slug || '.git' AS repo,
   r.id AS repo_id,
+  r.provider AS provider,
   df.secret_type,
   COUNT(*) AS unique_finding_count,
   MAX(df.last_scanned) AS last_scanned
@@ -86,7 +88,7 @@ JOIN repos r
   ON r.id = df.repo_id
 LEFT JOIN provider_instances pi
   ON pi.id = r.provider_instance_id
-GROUP BY repo, r.id, df.secret_type
+GROUP BY repo, r.id, r.provider, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
 		var rows []SecretTableRow
