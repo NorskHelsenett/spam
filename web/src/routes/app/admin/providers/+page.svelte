@@ -2162,7 +2162,7 @@
 					bind:value={probePreviewTab}
 				/>
 				<p class="text-center text-xs text-[var(--text-muted)]">
-					{selectedCount} of {totalSecrets} selected · {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
+					{selectedCount.toLocaleString('en-US').replace(/,/g, ' ')} of {totalSecrets.toLocaleString('en-US').replace(/,/g, ' ')} selected · {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
 				</p>
 			</div>
 
