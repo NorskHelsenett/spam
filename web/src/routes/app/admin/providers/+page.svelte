@@ -2168,16 +2168,16 @@
 
 			<!-- Grouped request table -->
 			<div class="max-h-[50vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				<table class="w-full text-xs">
+				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
-							<th class="px-3 py-2 text-left w-8"></th>
-							<th class="px-3 py-2 text-left">Secret</th>
-							<th class="px-3 py-2 text-left">Method</th>
+							<th class="w-8 px-3 py-2 text-left"></th>
+							<th class="w-[20%] px-3 py-2 text-left">Secret</th>
+							<th class="w-[60px] px-3 py-2 text-left">Method</th>
 							<th class="px-3 py-2 text-left">URL</th>
-							<th class="px-3 py-2 text-left">Headers</th>
-							<th class="px-3 py-2 text-left">Status</th>
-							<th class="px-3 py-2 text-left w-8"></th>
+							<th class="w-[20%] px-3 py-2 text-left">Headers</th>
+							<th class="w-[60px] px-3 py-2 text-left">Status</th>
+							<th class="w-8 px-3 py-2 text-left"></th>
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">
@@ -2237,7 +2237,7 @@
 												}}
 											></button>
 										</td>
-										<td class="px-3 py-1.5 font-mono max-w-[200px]">
+										<td class="px-3 py-1.5 font-mono truncate">
 											<span
 												class="block truncate select-all cursor-text"
 												title={item.secret}
@@ -2251,10 +2251,10 @@
 											<td class="px-3 py-1.5">
 												<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px]">{item.requests[0].method}</span>
 											</td>
-											<td class="px-3 py-1.5 font-mono max-w-[250px]">
+											<td class="px-3 py-1.5 font-mono truncate">
 												<span class="block truncate" title={item.requests[0].url}>{item.requests[0].url}</span>
 											</td>
-											<td class="px-3 py-1.5 max-w-[160px]">
+											<td class="px-3 py-1.5 truncate">
 												<span class="block truncate" title={Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ')}>
 													{Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ') || '—'}
 												</span>
