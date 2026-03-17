@@ -106,6 +106,11 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
 				api.Post("/admin/trivy/scan", uiapi.AdminTrivyScanHandler(db, authService))
 				api.Get("/admin/trivy/scan/status", uiapi.AdminTrivyScanStatusHandler(db, authService))
+				api.Post("/admin/secrets/probe", uiapi.AdminSecretProbeScanHandler(db, authService))
+				api.Get("/admin/secrets/probe/status", uiapi.AdminSecretProbeStatusHandler(db, authService))
+				api.Get("/admin/secrets/probe/preview", uiapi.AdminSecretProbePreviewHandler(db, authService))
+				api.Post("/admin/secrets/probe/one", uiapi.AdminSecretProbeOneHandler(db, authService))
+				api.Get("/admin/secrets/probe/audit", uiapi.AdminSecretProbeAuditHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))

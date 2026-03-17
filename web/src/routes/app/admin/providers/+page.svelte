@@ -3,7 +3,7 @@
 	import { tick } from 'svelte';
 	import { slide } from 'svelte/transition';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2 } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
 	import X from 'lucide-svelte/icons/x';
@@ -11,6 +11,8 @@
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
+	import Loading from '$lib/components/Loading.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
@@ -667,6 +669,139 @@
 		}
 	};
 
+	// ── Secret Probe ────────────────────────────────────────────
+	type ProbeStatus = {
+		job?: {
+			id: string;
+			status: string;
+			created_at?: string;
+			finished_at?: string;
+			error?: string;
+			result?: any;
+		};
+		stats: {
+			total: number;
+			valid: number;
+			invalid: number;
+			revoked: number;
+			expired: number;
+			false_positive: number;
+			unknown: number;
+			error: number;
+		};
+		registered_rules: string[];
+	};
+
+	let probeStatus: ProbeStatus = $state({ stats: { total: 0, valid: 0, invalid: 0, revoked: 0, expired: 0, false_positive: 0, unknown: 0, error: 0 }, registered_rules: [] });
+	let probeTriggering = $state(false);
+	let probeError = $state('');
+	let probeSelectedRules: string[] = $state([]);
+	let probeForce = $state(false);
+	let probePreviewOpen = $state(false);
+	let probePreview: any[] = $state([]);
+	let probePreviewLoading = $state(false);
+	let probePollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const buildCurl = (req: any, secret: string) => {
+		if (!req) return '';
+		// Replace [REDACTED] with actual secret in headers
+		const headers = Object.entries(req.headers || {})
+			.map(([k, v]: [string, any]) => {
+				const val = typeof v === 'string' ? v.replace('[REDACTED]', secret) : v;
+				return `-H '${k}: ${val}'`;
+			})
+			.join(' ');
+		const body = req.body ? `-d '${req.body}'` : '';
+		// For webhook URLs, the URL itself is the secret
+		const url = req.url === secret ? req.url : req.url;
+		return `curl -s ${req.method === 'POST' ? '-X POST ' : ''}${headers} ${body} '${url}'`.replace(/\s+/g, ' ').trim();
+	};
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	const loadProbePreview = async () => {
+		probePreviewLoading = true;
+		probePreview = [];
+		try {
+			const res = await fetch('/api/admin/secrets/probe/preview', { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				probePreview = Array.isArray(data) ? data : [];
+			}
+		} catch { /* ignore */ }
+		finally { probePreviewLoading = false; }
+	};
+
+	const loadProbeStatus = async () => {
+		try {
+			const response = await fetch('/api/admin/secrets/probe/status', { credentials: 'include' });
+			if (response.ok) probeStatus = await response.json();
+		} catch { /* ignore */ }
+	};
+
+	const triggerProbe = async () => {
+		probeTriggering = true;
+		probeError = '';
+		try {
+			const body: any = {};
+			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
+			if (probeForce) body.force = true;
+			const response = await fetch('/api/admin/secrets/probe', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			if (response.status === 409) {
+				probeError = 'A probe job is already queued or running.';
+				return;
+			}
+			if (!response.ok) {
+				probeError = 'Failed to start probe.';
+				return;
+			}
+			await loadProbeStatus();
+			pollProbeStatus();
+		} catch {
+			probeError = 'Failed to start probe.';
+		} finally {
+			probeTriggering = false;
+		}
+	};
+
+	const pollProbeStatus = () => {
+		if (probePollTimer) clearTimeout(probePollTimer);
+		probePollTimer = setTimeout(async () => {
+			await loadProbeStatus();
+			const active = probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY';
+			if (active) pollProbeStatus();
+		}, 3000);
+	};
+
+	const probeJobLabel = (status?: string) => {
+		switch (status) {
+			case 'QUEUED': return 'Queued';
+			case 'RUNNING': return 'Running…';
+			case 'RETRY': return 'Retrying';
+			case 'SUCCEEDED': return 'Complete';
+			case 'FAILED': return 'Failed';
+			default: return 'Never triggered';
+		}
+	};
+
+	const probeJobClass = (status?: string) => {
+		switch (status) {
+			case 'RUNNING':
+			case 'QUEUED':
+			case 'RETRY': return 'text-amber-400 border-amber-400/40';
+			case 'SUCCEEDED': return 'text-green-400 border-green-400/40';
+			case 'FAILED': return 'text-[var(--error)] border-[var(--error)]/40';
+			default: return 'text-[var(--text-tertiary)] border-[var(--border-color)]';
+		}
+	};
+
 	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
 
 	const refreshSyncStatuses = async () => {
@@ -879,6 +1014,10 @@
 					trivyStatus.job_status === 'RETRY' ||
 					!trivyStatus.scan_complete;
 				if (active) pollTrivyStatus();
+			});
+			loadProbeStatus().then(() => {
+				const active = probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY';
+				if (active) pollProbeStatus();
 			});
 			updatePreview();
 
@@ -1508,6 +1647,271 @@
 		</div>
 	{/if}
 </section>
+
+<!-- Secret Probe -->
+<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">Validate discovered secrets to check if they are still live, expired, or revoked.</p>
+		</div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm font-semibold text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+			onclick={() => { probePreviewOpen = true; loadProbePreview(); }}
+			disabled={probeTriggering || probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY'}
+		>
+			<Eye size={14} />
+			Preview Secret Probe
+		</button>
+	</header>
+
+	{#if probeError}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
+			{probeError}
+		</div>
+	{/if}
+
+	{#if probeStatus.job?.error}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Error</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{probeStatus.job.error}</p>
+		</div>
+	{/if}
+
+	<!-- Stats cards -->
+	<div class="grid gap-3 grid-cols-5">
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Status</span>
+			</div>
+			{#if probeStatus.job}
+				<p class="mt-2 text-sm font-semibold">
+					<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {probeJobClass(probeStatus.job.status)}">
+						{probeJobLabel(probeStatus.job.status)}
+					</span>
+				</p>
+				{#if probeStatus.job.created_at}
+					<p class="mt-1 flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+						<Clock size={10} /> Started {new Date(probeStatus.job.created_at).toLocaleString()}
+					</p>
+				{/if}
+				{#if probeStatus.job.finished_at}
+					<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">Finished {new Date(probeStatus.job.finished_at).toLocaleString()}</p>
+				{/if}
+			{:else}
+				<p class="mt-2 text-sm text-[var(--text-muted)]">Never triggered</p>
+			{/if}
+		</div>
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<KeyRound size={16} />
+				<span>Secrets probed</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">
+				{#if probeStatus.job?.status === 'RUNNING' && probeStatus.job?.result?.probed != null}
+					{probeStatus.job.result.probed} <span class="text-sm font-normal text-[var(--text-muted)]">/ {probeStatus.job.result.total}</span>
+				{:else}
+					{probeStatus.stats.total}
+				{/if}
+			</p>
+			{#if probeStatus.job?.status === 'RUNNING' && probeStatus.job?.result?.total > 0}
+				{@const pct = Math.round((probeStatus.job.result.probed / probeStatus.job.result.total) * 100)}
+				<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--border-color)]">
+					<div class="h-full rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
+				</div>
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{pct}% probed</p>
+			{/if}
+		</div>
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldAlert size={16} />
+				<span>Live secrets</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-red-400">{probeStatus.stats.valid}</p>
+			{#if probeStatus.stats.valid > 0}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">Require immediate rotation</p>
+			{/if}
+		</div>
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Rotated / Safe</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-green-400">{probeStatus.stats.revoked + probeStatus.stats.expired + probeStatus.stats.invalid}</p>
+			{#if probeStatus.stats.unknown > 0}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{probeStatus.stats.unknown} unknown</p>
+			{/if}
+		</div>
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<span>False positives</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">{probeStatus.stats.false_positive}</p>
+			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Placeholder or test values</p>
+		</div>
+	</div>
+
+</section>
+
+<!-- Secret Probe Preview Dialog -->
+<Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-4xl">
+	<div class="p-6 sm:p-8 space-y-5">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
+			<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+				Review every secret that will be probed, grouped by type.
+			</p>
+		</div>
+
+		{#if probePreviewLoading}
+			<Loading message="Loading probe preview" variant="bar" size="sm" />
+		{:else if probePreview.length === 0}
+			<p class="py-6 text-center text-sm text-[var(--text-muted)]">No probeable secrets found.</p>
+		{:else}
+			<!-- Summary -->
+			{@const totalSecrets = probePreview.reduce((s, g) => s + g.count, 0)}
+			{@const selectedGroups = probeSelectedRules.length === 0 ? probePreview : probePreview.filter(g => probeSelectedRules.includes(g.rule_id))}
+			{@const selectedCount = selectedGroups.reduce((s, g) => s + g.count, 0)}
+			<p class="text-xs text-[var(--text-muted)]">
+				{selectedCount} of {totalSecrets} secrets selected across {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
+			</p>
+
+			<!-- Grouped request table -->
+			<div class="max-h-[50vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<table class="w-full text-xs">
+					<thead class="sticky top-0 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-3 py-2 text-left w-8"></th>
+							<th class="px-3 py-2 text-left">Secret</th>
+							<th class="px-3 py-2 text-left">Method</th>
+							<th class="px-3 py-2 text-left">URL</th>
+							<th class="px-3 py-2 text-left">Headers</th>
+							<th class="px-3 py-2 text-left">Status</th>
+							<th class="px-3 py-2 text-left w-8"></th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/30">
+						{#each [...probePreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
+							{@const isSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
+							<!-- Group header row -->
+							<tr class="bg-[var(--hover-bg-subtle)]/50">
+								<td class="px-3 py-2">
+									<input
+										type="checkbox"
+										class="accent-[var(--accent)]"
+										checked={isSelected}
+										onchange={() => {
+											if (probeSelectedRules.length === 0) {
+												probeSelectedRules = probePreview.map(g => g.rule_id).filter(r => r !== group.rule_id);
+											} else if (probeSelectedRules.includes(group.rule_id)) {
+												probeSelectedRules = probeSelectedRules.filter(r => r !== group.rule_id);
+											} else {
+												probeSelectedRules = [...probeSelectedRules, group.rule_id];
+											}
+										}}
+									/>
+								</td>
+								<td class="px-3 py-2 font-semibold text-[var(--text-bright)]" colspan="5">
+									{group.rule_id}
+									<span class="ml-2 font-normal text-[var(--text-muted)]">{group.count} secret{group.count !== 1 ? 's' : ''}</span>
+								</td>
+								<td class="px-3 py-2" colspan="2">
+									<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">{group.kind}</span>
+								</td>
+							</tr>
+							<!-- Item rows -->
+							{#if isSelected && group.items}
+								{#each group.items as item}
+									<tr class="text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]">
+										<td class="px-3 py-1.5">
+											{#if item.already_probed}
+												<span class="inline-block h-2 w-2 rounded-full {item.previous_status === 'valid' ? 'bg-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' || item.previous_status === 'invalid' ? 'bg-green-400' : item.previous_status === 'false_positive' ? 'bg-[var(--text-muted)]' : 'bg-[var(--border-color)]'}"></span>
+											{:else}
+												<span class="inline-block h-2 w-2 rounded-full bg-[var(--border-color)]"></span>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5 font-mono text-[var(--text-muted)] max-w-[200px]">
+											<span class="block truncate" title={item.secret}>{item.secret}</span>
+											{#if item.is_falsy}
+												<span class="text-[9px] italic text-[var(--text-muted)]">({item.falsy_reason})</span>
+											{/if}
+										</td>
+										{#if item.requests && item.requests.length > 0}
+											<td class="px-3 py-1.5">
+												<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px]">{item.requests[0].method}</span>
+											</td>
+											<td class="px-3 py-1.5 font-mono text-[var(--text-muted)] max-w-[250px]">
+												<span class="block truncate" title={item.requests[0].url}>{item.requests[0].url}</span>
+											</td>
+											<td class="px-3 py-1.5 text-[var(--text-muted)] max-w-[160px]">
+												<span class="block truncate" title={Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ')}>
+													{Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ') || '—'}
+												</span>
+											</td>
+										{:else}
+											<td class="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+											<td class="px-3 py-1.5 text-[var(--text-muted)]">local check</td>
+											<td class="px-3 py-1.5">—</td>
+										{/if}
+										<td class="px-3 py-1.5">
+											{#if item.is_falsy}
+												<span class="text-[var(--text-muted)]">skip</span>
+											{:else if item.already_probed}
+												<span class="{item.previous_status === 'valid' ? 'text-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.previous_status}</span>
+											{:else}
+												<span class="text-[var(--text-tertiary)]">pending</span>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5">
+											{#if item.requests && item.requests.length > 0}
+												<button
+													type="button"
+													class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+													title="Copy as curl"
+													onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
+												>
+													<Copy size={12} />
+												</button>
+											{/if}
+										</td>
+									</tr>
+								{/each}
+							{/if}
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+
+		{#if probeError}
+			<p class="text-sm text-[var(--error)]">{probeError}</p>
+		{/if}
+
+		<!-- Footer -->
+		<div class="flex items-center justify-between pt-2">
+			<Toggle bind:checked={probeForce} label="Force re-probe all" />
+			<div class="flex items-center gap-3">
+				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-5 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+					disabled={probeTriggering || probePreviewLoading}
+					onclick={async () => {
+						await triggerProbe();
+						if (!probeError) probePreviewOpen = false;
+					}}
+				>
+					<Play size={14} />
+					{probeTriggering ? 'Starting…' : 'Start Probe'}
+				</button>
+			</div>
+		</div>
+	</div>
+</Dialog>
 
 {#if healthTooltip}
 	<div

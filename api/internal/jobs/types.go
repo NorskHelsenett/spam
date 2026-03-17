@@ -8,6 +8,7 @@ const (
 	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
 	JobTypeOSVScan          JobType = "OSV_SCAN"
 	JobTypeTrivyAdhocScan   JobType = "TRIVY_ADHOC_SCAN"
+	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
 )
 
 // TrivyAdhocPayload is the payload for TRIVY_ADHOC_SCAN jobs.

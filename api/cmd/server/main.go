@@ -21,6 +21,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
@@ -77,6 +78,8 @@ func run() error {
 		&vulnerabilities.ComponentVEX{},
 		&vulnerabilities.TrivyScanLease{},
 		&vulnerabilities.TrivyScanResult{},
+		&secretprobe.SecretProbe{},
+		&secretprobe.ProbeAuditLog{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}

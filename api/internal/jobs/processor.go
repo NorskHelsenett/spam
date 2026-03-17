@@ -10,6 +10,7 @@ import (
 	"time"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
@@ -56,6 +57,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processOSVScan(ctx, db, job.ID)
 	case JobTypeTrivyAdhocScan:
 		return processTrivyAdhocScan(ctx, job, runExecutor)
+	case JobTypeProbeSecrets:
+		return processProbeSecrets(ctx, db, job)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -116,6 +119,32 @@ func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecuto
 	}
 
 	return map[string]string{"status": "created", "cronjob": cronJobName}, nil
+}
+
+func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {
+	// Parse optional rule_ids filter from payload.
+	var opts secretprobe.RunOptions
+	if len(job.Payload) > 0 {
+		var payload struct {
+			RuleIDs []string `json:"rule_ids"`
+			Force   bool     `json:"force"`
+		}
+		if json.Unmarshal(job.Payload, &payload) == nil {
+			opts.RuleIDs = payload.RuleIDs
+			opts.Force = payload.Force
+		}
+	}
+
+	runner := secretprobe.NewRunner(db)
+	result, err := runner.Run(ctx, opts, func(probed, total int) {
+		if data, jsonErr := json.Marshal(map[string]int{"probed": probed, "total": total}); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", job.ID).Update("result", data)
+		}
+	})
+	if err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func isAlreadyRunning(err error) bool {
