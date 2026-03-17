@@ -141,11 +141,23 @@
 
 	const hasMore = $derived(findings.length < total);
 
-	const toggleFilter = (ruleId: string) => {
-		if (activeFilters.has(ruleId)) {
-			activeFilters.delete(ruleId);
+	const handleFilter = (ruleId: string, e: MouseEvent) => {
+		if (e.metaKey || e.ctrlKey) {
+			// Multi-select: toggle this one
+			if (activeFilters.has(ruleId)) {
+				activeFilters.delete(ruleId);
+			} else {
+				activeFilters.add(ruleId);
+			}
 		} else {
-			activeFilters.add(ruleId);
+			// Single click on active pill: deselect it
+			if (activeFilters.has(ruleId)) {
+				activeFilters.delete(ruleId);
+			} else {
+				// Single click on inactive pill: select only this one
+				activeFilters.clear();
+				activeFilters.add(ruleId);
+			}
 		}
 	};
 
@@ -256,7 +268,7 @@
 						{#each grouped as [ruleId, group] (ruleId)}
 							<button
 								type="button"
-								onclick={() => toggleFilter(ruleId)}
+								onclick={(e: MouseEvent) => handleFilter(ruleId, e)}
 								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilters.has(ruleId) ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilters.size > 0 ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
 							>
 								<FileWarning class="h-3 w-3 shrink-0" />
