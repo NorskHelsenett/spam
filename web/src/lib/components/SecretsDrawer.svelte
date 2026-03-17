@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { FileWarning, X, KeyRound } from 'lucide-svelte';
+	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Tag, Users } from 'lucide-svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 	type Finding = {
@@ -13,6 +13,29 @@
 	type FindingsPage = {
 		items: Finding[];
 		total: number;
+	};
+
+	type RepoDetails = {
+		description: string;
+		is_private: boolean;
+		updated_at: string;
+		stats: {
+			stars: number;
+			forks: number;
+			watchers: number;
+			commits: number;
+			branches: number;
+			releases: number;
+			contributors: number;
+		};
+	};
+
+	type ContributorInfo = {
+		login?: string;
+		name?: string;
+		avatar_url?: string;
+		profile_url?: string;
+		contributions: number;
 	};
 
 	const PAGE_SIZE = 100;
@@ -138,6 +161,8 @@
 	let loadingMore = $state(false);
 	let activeFilters = new SvelteSet<string>();
 	let sentinelEl: HTMLDivElement | undefined = $state();
+	let repoDetails: RepoDetails | null = $state(null);
+	let contributors: ContributorInfo[] = $state([]);
 
 	const hasMore = $derived(findings.length < total);
 
@@ -205,13 +230,39 @@
 		loading = true;
 		findings = [];
 		total = 0;
+		repoDetails = null;
+		contributors = [];
 		try {
 			const params = new URLSearchParams({ repo_id: repoId, limit: String(PAGE_SIZE), offset: '0' });
-			const res = await fetch(`/api/secrets/findings?${params}`, { credentials: 'include' });
-			if (res.ok) {
-				const page: FindingsPage = await res.json();
+			const [findingsRes, detailsRes] = await Promise.all([
+				fetch(`/api/secrets/findings?${params}`, { credentials: 'include' }),
+				fetch(`/api/providers/details?repo_id=${encodeURIComponent(repoId)}`, { credentials: 'include' }).catch(() => null)
+			]);
+			if (findingsRes.ok) {
+				const page: FindingsPage = await findingsRes.json();
 				findings = page.items;
 				total = page.total;
+			}
+			if (detailsRes?.ok) {
+				const data = await detailsRes.json();
+				repoDetails = data.details ?? null;
+				contributors = data.contributors ?? [];
+			} else {
+				// Fallback to metadata endpoint for basic info
+				try {
+					const metaRes = await fetch(`/api/repos/metadata?repo_id=${encodeURIComponent(repoId)}`, { credentials: 'include' });
+					if (metaRes.ok) {
+						const meta = await metaRes.json();
+						if (meta.repo) {
+							repoDetails = {
+								description: '',
+								is_private: meta.repo.is_private ?? false,
+								updated_at: meta.repo.updated_at ?? '',
+								stats: { stars: 0, forks: 0, watchers: 0, commits: 0, branches: 0, releases: 0, contributors: 0 }
+							};
+						}
+					}
+				} catch { /* ignore */ }
 			}
 		} catch {
 			// ignore
@@ -256,27 +307,28 @@
 					>
 						{repoName}
 					</a>
+					{#if repoDetails}
+						{#if repoDetails.is_private}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--orange)]/10 px-2 py-0.5 text-[10px] text-[var(--orange)]">
+								<Lock class="h-2.5 w-2.5" /> Private
+							</span>
+						{:else}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-[10px] text-[var(--success)]">
+								<Globe class="h-2.5 w-2.5" /> Public
+							</span>
+						{/if}
+					{/if}
 				</div>
+				{#if repoDetails?.description}
+					<p class="mt-1 text-xs text-[var(--text-secondary)]">{repoDetails.description}</p>
+				{/if}
 				{#if !loading && total > 0}
-					<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
+					<p class="mt-1 text-[11px] text-[var(--text-muted)]">
 						{total.toLocaleString()} finding{total !== 1 ? 's' : ''}
 						{#if findings.length < total}
 							<span class="text-[var(--text-muted)]">({findings.length.toLocaleString()} loaded)</span>
 						{/if}
 					</p>
-					<div class="mt-2 flex flex-wrap gap-1.5">
-						{#each grouped as [ruleId, group] (ruleId)}
-							<button
-								type="button"
-								onclick={(e: MouseEvent) => handleFilter(ruleId, e)}
-								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilters.has(ruleId) ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilters.size > 0 ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
-							>
-								<FileWarning class="h-3 w-3 shrink-0" />
-								{ruleId}
-								<span class="ml-0.5 font-semibold">{group.length}{#if hasMore}+{/if}</span>
-							</button>
-						{/each}
-					</div>
 				{/if}
 			</div>
 			<button
@@ -289,6 +341,85 @@
 			</button>
 		</div>
 	</div>
+
+	<!-- Repo metadata -->
+	{#if repoDetails?.stats}
+		<div class="shrink-0 px-7 pb-4">
+			<div class="metric-card rounded-xl p-3">
+				<h3 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Repository</h3>
+				<div class="mt-2 grid grid-cols-4 gap-2">
+					<div>
+						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.commits.toLocaleString()}</p>
+						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+							<GitCommitHorizontal class="h-2.5 w-2.5" /> Commits
+						</p>
+					</div>
+					<div>
+						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.branches.toLocaleString()}</p>
+						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+							<GitBranch class="h-2.5 w-2.5" /> Branches
+						</p>
+					</div>
+					<div>
+						<p class="text-lg font-bold text-[var(--text-bright)]">{repoDetails.stats.releases.toLocaleString()}</p>
+						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+							<Tag class="h-2.5 w-2.5" /> Releases
+						</p>
+					</div>
+					<div>
+						<p class="text-lg font-bold text-[var(--text-bright)]">{Math.max(repoDetails.stats.contributors, contributors.length).toLocaleString()}</p>
+						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
+							<Users class="h-2.5 w-2.5" /> Contributors
+						</p>
+					</div>
+				</div>
+				{#if contributors.length > 0}
+					<div class="mt-2.5 flex items-center gap-2">
+						<div class="flex -space-x-1.5">
+							{#each contributors.slice(0, 8) as c, ci (ci)}
+								{#if c.avatar_url}
+									<img
+										class="h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]"
+										src={c.avatar_url}
+										alt={c.login || c.name || ''}
+										title={c.login || c.name || ''}
+									/>
+								{:else}
+									<div class="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[8px] font-semibold text-[var(--text-muted)] ring-1 ring-[var(--bg-soft)]">
+										{(c.login || c.name || '?')[0].toUpperCase()}
+									</div>
+								{/if}
+							{/each}
+						</div>
+						{#if contributors.length <= 3}
+							<span class="text-[10px] text-[var(--text-muted)]">{contributors.map(c => c.login || c.name).join(', ')}</span>
+						{:else if contributors.length > 8}
+							<span class="text-[10px] text-[var(--text-muted)]">+{contributors.length - 8} more</span>
+						{/if}
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	<!-- Type filters -->
+	{#if !loading && total > 0 && grouped.length > 0}
+		<div class="shrink-0 px-7 pb-4">
+			<div class="flex flex-wrap gap-1.5">
+				{#each grouped as [ruleId, group] (ruleId)}
+					<button
+						type="button"
+						onclick={(e: MouseEvent) => handleFilter(ruleId, e)}
+						class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilters.has(ruleId) ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilters.size > 0 ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
+					>
+						<FileWarning class="h-3 w-3 shrink-0" />
+						{ruleId}
+						<span class="ml-0.5 font-semibold">{group.length}{#if hasMore}+{/if}</span>
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
 
 	<!-- Body -->
 	{#if loading}
