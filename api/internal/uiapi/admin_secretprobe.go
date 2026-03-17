@@ -176,13 +176,48 @@ func AdminSecretProbePreviewHandler(db *gorm.DB, authService *auth.Service) http
 			return
 		}
 
+		includeProbed := r.URL.Query().Get("include_probed") == "true"
 		runner := secretprobe.NewRunner(db)
-		preview, err := runner.Preview(r.Context())
+		preview, err := runner.Preview(r.Context(), secretprobe.PreviewOptions{
+			IncludeProbed: includeProbed,
+		})
 		if err != nil {
 			http.Error(w, "failed to build preview", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, preview)
+	}
+}
+
+// AdminSecretProbeListHandler returns probed secrets filtered by status.
+//
+// GET /api/admin/secrets/probe/list?status=valid&status=revoked
+func AdminSecretProbeListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		statuses := r.URL.Query()["status"]
+
+		q := db.WithContext(r.Context()).
+			Model(&secretprobe.SecretProbe{}).
+			Order("CASE status WHEN 'valid' THEN 0 WHEN 'revoked' THEN 1 WHEN 'expired' THEN 2 WHEN 'invalid' THEN 3 WHEN 'false_positive' THEN 4 WHEN 'unknown' THEN 5 WHEN 'error' THEN 6 ELSE 7 END, probed_at DESC").
+			Limit(200)
+
+		if len(statuses) > 0 {
+			q = q.Where("status IN ?", statuses)
+		}
+
+		var probes []secretprobe.SecretProbe
+		if err := q.Find(&probes).Error; err != nil {
+			http.Error(w, "failed to load probes", http.StatusInternalServerError)
+			return
+		}
+		if probes == nil {
+			probes = []secretprobe.SecretProbe{}
+		}
+		writeJSON(w, http.StatusOK, probes)
 	}
 }
 

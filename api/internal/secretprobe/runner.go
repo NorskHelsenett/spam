@@ -302,8 +302,13 @@ type PreviewGroup struct {
 	Items  []PreviewItem `json:"items"`
 }
 
+// PreviewOptions controls what the preview returns.
+type PreviewOptions struct {
+	IncludeProbed bool // if false, exclude already-probed secrets
+}
+
 // Preview returns what would be probed without actually probing anything.
-func (r *Runner) Preview(ctx context.Context) ([]PreviewGroup, error) {
+func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGroup, error) {
 
 	type row struct {
 		RepoID          string
@@ -380,17 +385,22 @@ func (r *Runner) Preview(ctx context.Context) ([]PreviewGroup, error) {
 		if p != nil && p.Kind() == ProbeKindOffline {
 			kind = "offline"
 		}
-		group := PreviewGroup{RuleID: ruleID, Kind: kind, Count: groupCounts[ruleID], Items: []PreviewItem{}}
+		group := PreviewGroup{RuleID: ruleID, Kind: kind, Items: []PreviewItem{}}
 		for _, e := range entries {
+			_, alreadyProbed := existing[e.hash]
+			if alreadyProbed && !opts.IncludeProbed {
+				continue
+			}
+
 			item := PreviewItem{
 				SecretHash: e.hash,
 				Secret:     e.secret,
 				RuleID:     ruleID,
 				Kind:       kind,
 			}
-			if prev, ok := existing[e.hash]; ok {
+			if alreadyProbed {
 				item.AlreadyProbed = true
-				item.PreviousStatus = prev.Status
+				item.PreviousStatus = existing[e.hash].Status
 			}
 			if falsy, reason := IsFalsy(e.secret); falsy {
 				item.IsFalsy = true
@@ -406,7 +416,10 @@ func (r *Runner) Preview(ctx context.Context) ([]PreviewGroup, error) {
 			}
 			group.Items = append(group.Items, item)
 		}
-		result = append(result, group)
+		group.Count = len(group.Items)
+		if group.Count > 0 {
+			result = append(result, group)
+		}
 	}
 
 	return result, nil

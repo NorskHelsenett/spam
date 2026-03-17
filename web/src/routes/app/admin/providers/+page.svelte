@@ -13,6 +13,7 @@
 	import Toggle from '$lib/components/Toggle.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 	import Checkbox from '$lib/components/Checkbox.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
@@ -701,6 +702,27 @@
 	let probePreviewOpen = $state(false);
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
+	let probePreviewTab = $state('all');
+	let probeListOpen = $state(false);
+	let probeListTitle = $state('');
+	let probeListItems: any[] = $state([]);
+	let probeListLoading = $state(false);
+
+	const openProbeList = async (title: string, statuses: string[]) => {
+		probeListTitle = title;
+		probeListOpen = true;
+		probeListLoading = true;
+		probeListItems = [];
+		try {
+			const params = statuses.map(s => `status=${s}`).join('&');
+			const res = await fetch(`/api/admin/secrets/probe/list?${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				probeListItems = Array.isArray(data) ? data : [];
+			}
+		} catch { /* ignore */ }
+		finally { probeListLoading = false; }
+	};
 	let probeExcludedHashes: Set<string> = $state(new Set());
 	let probePollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -728,7 +750,8 @@
 		probePreview = [];
 		probeExcludedHashes = new Set();
 		try {
-			const res = await fetch('/api/admin/secrets/probe/preview', { credentials: 'include' });
+			const params = probeForce ? '?include_probed=true' : '';
+			const res = await fetch(`/api/admin/secrets/probe/preview${params}`, { credentials: 'include' });
 			if (res.ok) {
 				const data = await res.json();
 				probePreview = Array.isArray(data) ? data : [];
@@ -1707,7 +1730,11 @@
 				<p class="mt-2 text-sm text-[var(--text-muted)]">Never triggered</p>
 			{/if}
 		</div>
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-[var(--accent)]/40 {probeStatus.stats.total === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Secrets probed', ['valid', 'invalid', 'revoked', 'expired', 'unknown', 'error', 'false_positive'])}
+		>
 			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 				<KeyRound size={16} />
 				<span>Secrets probed</span>
@@ -1726,8 +1753,12 @@
 				</div>
 				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{pct}% probed</p>
 			{/if}
-		</div>
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-red-400/40 {probeStatus.stats.valid === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Live secrets', ['valid'])}
+		>
 			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 				<ShieldAlert size={16} />
 				<span>Live secrets</span>
@@ -1736,8 +1767,12 @@
 			{#if probeStatus.stats.valid > 0}
 				<p class="mt-1 text-[11px] text-[var(--text-muted)]">Require immediate rotation</p>
 			{/if}
-		</div>
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-green-400/40 {(probeStatus.stats.revoked + probeStatus.stats.expired + probeStatus.stats.invalid) === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Rotated / Safe', ['revoked', 'expired', 'invalid'])}
+		>
 			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 				<ShieldCheck size={16} />
 				<span>Rotated / Safe</span>
@@ -1746,40 +1781,149 @@
 			{#if probeStatus.stats.unknown > 0}
 				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{probeStatus.stats.unknown} unknown</p>
 			{/if}
-		</div>
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-[var(--border-color)] {probeStatus.stats.false_positive === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('False positives', ['false_positive'])}
+		>
 			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
 				<span>False positives</span>
 			</div>
 			<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">{probeStatus.stats.false_positive}</p>
 			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Placeholder or test values</p>
-		</div>
+		</button>
 	</div>
 
 </section>
 
+<!-- Secret Probe List Dialog -->
+<Dialog bind:open={probeListOpen} showCloseButton={false} maxWidth="max-w-4xl">
+	<div class="p-6 sm:p-8 space-y-5">
+		<div class="flex items-start justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">{probeListTitle}</h2>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">{probeListItems.length} secret{probeListItems.length !== 1 ? 's' : ''}</p>
+			</div>
+			<button
+				type="button"
+				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => (probeListOpen = false)}
+				aria-label="Close"
+			>
+				<X size={18} />
+			</button>
+		</div>
+
+		{#if probeListLoading}
+			<Loading message="Loading secrets" variant="bar" size="sm" />
+		{:else if probeListItems.length === 0}
+			<p class="py-6 text-center text-sm text-[var(--text-muted)]">No secrets found.</p>
+		{:else}
+			<div class="max-h-[60vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<table class="w-full text-xs">
+					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-3 py-2 text-left">Status</th>
+							<th class="px-3 py-2 text-left">Rule</th>
+							<th class="px-3 py-2 text-left">Reason</th>
+							<th class="px-3 py-2 text-left">Hash</th>
+							<th class="px-3 py-2 text-left">Probed</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/30">
+						{#each probeListItems as probe}
+							<tr class="text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]">
+								<td class="px-3 py-2">
+									<span class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-medium
+										{probe.status === 'valid' ? 'border-red-500/40 bg-red-500/10 text-red-400' :
+										 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'border-green-500/40 bg-green-500/10 text-green-400' :
+										 probe.status === 'false_positive' ? 'border-[var(--border-color)] text-[var(--text-muted)]' :
+										 'border-[var(--border-color)] text-[var(--text-tertiary)]'}">
+										<span class="h-1.5 w-1.5 rounded-full
+											{probe.status === 'valid' ? 'bg-red-400' :
+											 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'bg-green-400' :
+											 'bg-[var(--text-muted)]'}"></span>
+										{probe.status}
+									</span>
+								</td>
+								<td class="px-3 py-2 font-mono">{probe.rule_id}</td>
+								<td class="px-3 py-2 text-[var(--text-muted)] max-w-[200px]">
+									<span class="block truncate" title={probe.reason}>{probe.reason || '—'}</span>
+								</td>
+								<td class="px-3 py-2 font-mono text-[var(--text-muted)]">
+									<span class="select-all cursor-text" title={probe.secret_hash}>{probe.secret_hash.slice(0, 12)}…</span>
+								</td>
+								<td class="px-3 py-2 text-[var(--text-muted)]">
+									{new Date(probe.probed_at).toLocaleString()}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
+	</div>
+</Dialog>
+
 <!-- Secret Probe Preview Dialog -->
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
 	<div class="p-6 sm:p-8 space-y-5">
-		<div>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
-			<p class="mt-1 text-sm text-[var(--text-tertiary)]">
-				Review every secret that will be probed, grouped by type.
-			</p>
+		<div class="flex items-start justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+					Review every secret that will be probed, grouped by type.
+				</p>
+			</div>
+			<button
+				type="button"
+				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => (probePreviewOpen = false)}
+				aria-label="Close"
+			>
+				<X size={18} />
+			</button>
 		</div>
 
 		{#if probePreviewLoading}
 			<Loading message="Loading probe preview" variant="bar" size="sm" />
 		{:else if probePreview.length === 0}
-			<p class="py-6 text-center text-sm text-[var(--text-muted)]">No probeable secrets found.</p>
+			<div class="flex flex-col items-center gap-3 py-10 text-center">
+				<ShieldCheck class="h-12 w-12 text-green-400" />
+				<div>
+					<p class="text-lg font-semibold text-[var(--text-bright)]">All clear</p>
+					<p class="mt-1 text-sm text-[var(--text-muted)]">
+						{#if probeForce}
+							No secrets found to probe. Run a scan first to discover secrets.
+						{:else}
+							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Force re-probe all</span> to re-check them.
+						{/if}
+					</p>
+				</div>
+			</div>
 		{:else}
-			<!-- Summary -->
 			{@const totalSecrets = probePreview.reduce((s, g) => s + g.count, 0)}
-			{@const selectedGroups = probeSelectedRules.length === 0 ? probePreview : probePreview.filter(g => probeSelectedRules.includes(g.rule_id))}
+			{@const offlineCount = probePreview.filter(g => g.kind === 'offline').reduce((s, g) => s + g.count, 0)}
+			{@const networkCount = probePreview.filter(g => g.kind === 'network').reduce((s, g) => s + g.count, 0)}
+			{@const filteredPreview = probePreviewTab === 'all' ? probePreview : probePreview.filter(g => g.kind === probePreviewTab)}
+			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter(g => probeSelectedRules.includes(g.rule_id))}
 			{@const selectedCount = selectedGroups.reduce((s, g) => s + g.count, 0)}
-			<p class="text-xs text-[var(--text-muted)]">
-				{selectedCount} of {totalSecrets} secrets selected across {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
-			</p>
+
+			<!-- Tab selector + summary -->
+			<div class="space-y-2">
+				<TabSelector
+					options={[
+						{ value: 'all', label: 'All' },
+						{ value: 'network', label: 'External' },
+						{ value: 'offline', label: 'Local' }
+					]}
+					bind:value={probePreviewTab}
+				/>
+				<p class="text-center text-xs text-[var(--text-muted)]">
+					{selectedCount} of {totalSecrets} selected · {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
+				</p>
+			</div>
 
 			<!-- Grouped request table -->
 			<div class="max-h-[50vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
@@ -1796,7 +1940,7 @@
 						</tr>
 					</thead>
 					<tbody class="divide-y divide-[var(--border-color)]/30">
-						{#each [...probePreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
+						{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
 							{@const isGroupSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
 							<!-- Group header row -->
 							<tr class="bg-[var(--hover-bg-subtle)]/50">
@@ -1915,7 +2059,7 @@
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between pt-2">
-			<Toggle bind:checked={probeForce} label="Force re-probe all" />
+			<Toggle bind:checked={probeForce} label="Force re-probe all" onchange={() => loadProbePreview()} />
 			<div class="flex items-center gap-3">
 				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
 					Cancel
