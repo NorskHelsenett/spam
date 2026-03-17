@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { FileWarning, X, KeyRound, Globe, Lock, GitCommitHorizontal, GitBranch, Clock, Users, Copy } from 'lucide-svelte';
+	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 	import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 
 	type Finding = {
@@ -33,6 +34,7 @@
 	type ContributorInfo = {
 		login?: string;
 		name?: string;
+		email?: string;
 		avatar_url?: string;
 		profile_url?: string;
 		contributions: number;
@@ -313,8 +315,19 @@
 		}
 	};
 
+	function portal(node: HTMLElement) {
+		document.body.appendChild(node);
+		return { destroy() { node.remove(); } };
+	}
+
 	// Selection toolbar
 	let selToolbar: { top: number; left: number; text: string; range: Range } | null = $state(null);
+
+	let lastMousePos = { x: 0, y: 0 };
+
+	const trackMouse = (e: MouseEvent) => {
+		lastMousePos = { x: e.clientX, y: e.clientY };
+	};
 
 	const handleDrawerSelect = () => {
 		setTimeout(() => {
@@ -325,10 +338,9 @@
 			}
 			const text = sel.toString().trim();
 			const range = sel.getRangeAt(0);
-			const rect = range.getBoundingClientRect();
 			selToolbar = {
-				top: Math.max(4, rect.top - 36),
-				left: Math.min(Math.max(80, rect.left + rect.width / 2), window.innerWidth - 80),
+				top: lastMousePos.y - 32,
+				left: lastMousePos.x,
 				text,
 				range: range.cloneRange()
 			};
@@ -486,28 +498,8 @@
 					</div>
 				</div>
 				{#if contributors.length > 0}
-					<div class="mt-2.5 flex items-center gap-2">
-						<div class="flex -space-x-1.5">
-							{#each contributors.slice(0, 8) as c, ci (ci)}
-								{#if c.avatar_url}
-									<img
-										class="h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]"
-										src={c.avatar_url}
-										alt={c.login || c.name || ''}
-										title={c.login || c.name || ''}
-									/>
-								{:else}
-									<div class="flex h-5 w-5 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[8px] font-semibold text-[var(--text-muted)] ring-1 ring-[var(--bg-soft)]">
-										{(c.login || c.name || '?')[0].toUpperCase()}
-									</div>
-								{/if}
-							{/each}
-						</div>
-						{#if contributors.length <= 3}
-							<span class="text-[10px] text-[var(--text-muted)]">{contributors.map(c => c.login || c.name).join(', ')}</span>
-						{:else if contributors.length > 8}
-							<span class="text-[10px] text-[var(--text-muted)]">+{contributors.length - 8} more</span>
-						{/if}
+					<div class="mt-2.5">
+						<ContributorAvatars {contributors} />
 					</div>
 				{/if}
 			</div>
@@ -544,7 +536,7 @@
 		</div>
 	{:else}
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
-		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]" onmouseup={handleDrawerSelect}>
+		<div class="flex-1 overflow-y-auto bg-[var(--bg-soft)]" onmouseup={handleDrawerSelect} onmousemove={trackMouse}>
 			{#each visibleGroups as [ruleId, group] (ruleId)}
 				<div>
 					<!-- Group header -->
@@ -579,7 +571,17 @@
 											{@const pemKey = extractPemKey(raw)}
 											{@const base64Matches = findAllBase64(raw)}
 
-											<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
+											<div
+												class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] cursor-text"
+												onclick={(e) => {
+													const sel = window.getSelection();
+													if (sel && sel.toString().length > 0) return;
+													const range = document.createRange();
+													range.selectNodeContents(e.currentTarget as Node);
+													sel?.removeAllRanges();
+													sel?.addRange(range);
+												}}
+											>{raw}</div>
 
 											{#if pemKey}
 												<div class="whitespace-pre-wrap block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{pemKey}</div>
@@ -613,6 +615,7 @@
 
 {#if selToolbar}
 	<div
+		use:portal
 		class="fixed z-[300] flex items-center gap-0.5 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-1 py-0.5 shadow-xl"
 		style="top: {selToolbar.top}px; left: {selToolbar.left}px; transform: translateX(-50%);"
 	>

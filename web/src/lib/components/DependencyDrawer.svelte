@@ -2,6 +2,7 @@
 	import { browser } from '$app/environment';
 	import { X, Package, GitBranch, Container, CheckCircle, Microscope, FileCode, Scale, ExternalLink, Github, Gitlab, Download, ShieldAlert, ShieldCheck, ShieldQuestion } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
+	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 
 	type ComponentVersion = {
 		id: string;
@@ -143,11 +144,6 @@
 	let providerInstances: ProviderInstance[] = $state([]);
 	let providerInstancesLoaded = false;
 	let drawerShellEl: HTMLDivElement | undefined = $state();
-	let hoveredContributor: Contributor | null = $state(null);
-	let contributorTipPos = $state({ x: 0, y: 0 });
-	let hideTipTimer: ReturnType<typeof setTimeout> | null = null;
-	let copiedEmail = $state('');
-	let copiedEmailTimer: ReturnType<typeof setTimeout> | null = null;
 
 	type Vulnerability = {
 		vuln_id: string;
@@ -179,12 +175,6 @@
 		}
 	});
 
-	$effect(() => {
-		return () => {
-			if (hideTipTimer) clearTimeout(hideTipTimer);
-			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
-		};
-	});
 
 	$effect(() => {
 		const purl = componentDetail?.purl;
@@ -405,47 +395,6 @@
 			})
 			.sort((a, b) => b.score - a.score || a.idx - b.idx)
 			.map((item) => item.contributor);
-	};
-
-	const clearHideTipTimer = () => {
-		if (!hideTipTimer) return;
-		clearTimeout(hideTipTimer);
-		hideTipTimer = null;
-	};
-
-	const showContributorTip = (e: MouseEvent, contributor: Contributor) => {
-		clearHideTipTimer();
-		const target = e.currentTarget as HTMLElement | null;
-		if (!target || !drawerShellEl) return;
-		const anchor = target.querySelector<HTMLElement>('.contributor-avatar') ?? target;
-		const rect = anchor.getBoundingClientRect();
-		const shellRect = drawerShellEl.getBoundingClientRect();
-		contributorTipPos = {
-			x: rect.left + rect.width / 2 - shellRect.left,
-			y: rect.top - shellRect.top - 10,
-		};
-		hoveredContributor = contributor;
-	};
-
-	const scheduleHideContributorTip = () => {
-		clearHideTipTimer();
-		hideTipTimer = setTimeout(() => {
-			hoveredContributor = null;
-		}, 120);
-	};
-
-	const copyEmail = async (contributor: Contributor) => {
-		if (!contributor.email || !browser) return;
-		try {
-			await navigator.clipboard.writeText(contributor.email);
-			copiedEmail = contributor.email;
-			if (copiedEmailTimer) clearTimeout(copiedEmailTimer);
-			copiedEmailTimer = setTimeout(() => {
-				copiedEmail = '';
-			}, 1400);
-		} catch {
-			// Ignore clipboard errors
-		}
 	};
 
 	const spamRepoUrl = (repo: UniqueRepo): string | null => {
@@ -742,27 +691,8 @@
 													{/each}
 												</div>
 											{:else if contributors.length > 0}
-												<div class="mt-2 flex items-center gap-2">
-													<div class="flex -space-x-1.5">
-														{#each contributors as c}
-															<div
-																class="contributor-wrap"
-																onmouseenter={(e) => showContributorTip(e, c)}
-																onmouseleave={scheduleHideContributorTip}
-															>
-																{#if c.avatar_url}
-																	<img src={c.avatar_url} alt={c.login || c.name || ''} class="contributor-avatar h-5 w-5 rounded-full ring-1 ring-[var(--bg-soft)]" />
-																{:else}
-																	<div class="contributor-avatar flex h-5 w-5 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[8px] font-semibold text-[var(--text-muted)] ring-1 ring-[var(--bg-soft)]">
-																		{(c.login || c.name || '?')[0].toUpperCase()}
-																	</div>
-																{/if}
-															</div>
-														{/each}
-													</div>
-													<span class="text-[10px] text-[var(--text-muted)]">
-														{contributors[0].login || contributors[0].name}{contributors.length > 1 ? ` +${contributors.length - 1}` : ''}
-													</span>
+												<div class="mt-2">
+													<ContributorAvatars {contributors} max={5} />
 												</div>
 											{/if}
 										</div>
@@ -813,84 +743,5 @@
 	{/if}
 </div>
 
-{#if hoveredContributor}
-	{#key `${hoveredContributor.login || hoveredContributor.name || ''}:${hoveredContributor.email || ''}`}
-		<div
-			class="contributor-tip-layer"
-			style={`left:${contributorTipPos.x}px;top:${contributorTipPos.y}px;`}
-			onmouseenter={clearHideTipTimer}
-			onmouseleave={scheduleHideContributorTip}
-		>
-			<button
-				type="button"
-				class="tip-card"
-				onclick={() => copyEmail(hoveredContributor!)}
-				disabled={!hoveredContributor.email}
-				title={hoveredContributor.email ? 'Click to copy email' : 'No email available'}
-			>
-				{#if hoveredContributor.avatar_url}
-					<img src={hoveredContributor.avatar_url} alt={hoveredContributor.login || hoveredContributor.name || ''} class="mb-2 h-12 w-12 rounded-full" />
-				{:else}
-					<div class="mb-2 flex h-12 w-12 items-center justify-center rounded-full bg-[var(--hover-bg)] text-base font-semibold text-[var(--text-secondary)]">
-						{(hoveredContributor.login || hoveredContributor.name || '?')[0].toUpperCase()}
-					</div>
-				{/if}
-				<p class="text-[12px] font-semibold text-[var(--text-bright)]">{hoveredContributor.login || hoveredContributor.name || '—'}</p>
-				{#if hoveredContributor.email}
-					<p class="mt-0.5 w-full break-all text-[11px] text-[var(--text-muted)]">{hoveredContributor.email}</p>
-					<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">{copiedEmail === hoveredContributor.email ? 'Copied' : 'Click to copy email'}</p>
-				{:else}
-					<p class="mt-1 text-[10px] text-[var(--text-tertiary)]">No email available</p>
-				{/if}
-			</button>
-		</div>
-	{/key}
-{/if}
 </div>
 
-<style>
-	.contributor-wrap {
-		position: relative;
-		cursor: default;
-	}
-
-	.contributor-tip-layer {
-		position: absolute;
-		z-index: 1200;
-		transform: translate(-50%, calc(-100% + 6px)) scale(0.9) rotate(5deg);
-		pointer-events: auto;
-		opacity: 0;
-		animation: contributor-tip-in 180ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-		transform-origin: bottom center;
-		will-change: transform, opacity;
-	}
-
-	.tip-card {
-		width: 14rem;
-		background: var(--bg-soft);
-		border: 1px solid var(--border-color);
-		border-radius: 0.75rem;
-		padding: 0.75rem;
-		box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-		text-align: center;
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		cursor: pointer;
-	}
-
-	.tip-card:disabled {
-		cursor: default;
-	}
-
-	@keyframes contributor-tip-in {
-		from {
-			opacity: 0;
-			transform: translate(-50%, calc(-100% + 6px)) scale(0.9) rotate(5deg);
-		}
-		to {
-			opacity: 1;
-			transform: translate(-50%, -100%) scale(1) rotate(-2deg);
-		}
-	}
-</style>
