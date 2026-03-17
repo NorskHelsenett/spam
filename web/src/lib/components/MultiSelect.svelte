@@ -1,7 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import ChevronDown from 'lucide-svelte/icons/chevron-down';
-	import Check from 'lucide-svelte/icons/check';
 	import X from 'lucide-svelte/icons/x';
 
 	export type MultiSelectOption = {
@@ -70,8 +69,7 @@
 
 	function toggleOption(option: MultiSelectOption) {
 		if (disabled || option.disabled) return;
-		const idx = selected.indexOf(option.value);
-		if (idx >= 0) {
+		if (selected.includes(option.value)) {
 			selected = selected.filter((v) => v !== option.value);
 		} else {
 			selected = [...selected, option.value];
@@ -163,7 +161,6 @@
 
 {#if open}
 	<div bind:this={menuEl} use:portal class="ms-menu {sizeClass}" role="listbox" aria-multiselectable="true">
-		<!-- Select all -->
 		<button
 			type="button"
 			class="ms-option ms-option-all"
@@ -171,30 +168,27 @@
 			aria-selected={allSelected}
 			onclick={toggleAll}
 		>
-			<span class="ms-check" class:checked={allSelected}>
-				{#if allSelected}
-					<Check size={12} strokeWidth={3} />
-				{/if}
-			</span>
-			<span class="ms-option-label">Select all</span>
+			<span>Select all</span>
+			{#if allSelected}
+				<span class="ms-dot" aria-hidden="true">●</span>
+			{/if}
 		</button>
 		<div class="ms-divider"></div>
 		{#each options as option}
 			<button
 				type="button"
 				class="ms-option"
+				class:is-active={selected.includes(option.value)}
 				class:is-disabled={option.disabled}
 				disabled={option.disabled}
 				role="option"
 				aria-selected={selected.includes(option.value)}
 				onclick={() => toggleOption(option)}
 			>
-				<span class="ms-check" class:checked={selected.includes(option.value)}>
-					{#if selected.includes(option.value)}
-						<Check size={12} strokeWidth={3} />
-					{/if}
-				</span>
-				<span class="ms-option-label">{option.label}</span>
+				<span>{option.label}</span>
+				{#if selected.includes(option.value)}
+					<span class="ms-dot" aria-hidden="true">●</span>
+				{/if}
 			</button>
 		{/each}
 	</div>
@@ -312,8 +306,9 @@
 		width: 100%;
 		display: flex;
 		align-items: center;
-		gap: 0.55rem;
-		padding: 0.5rem 0.7rem;
+		justify-content: space-between;
+		gap: 0.5rem;
+		padding: 0.55rem 0.8rem;
 		border-radius: 0.75rem;
 		font-size: 0.85rem;
 		color: var(--text-secondary);
@@ -326,6 +321,11 @@
 
 	:global(.ms-option:hover) {
 		background: var(--hover-bg-subtle);
+		color: var(--text-bright);
+	}
+
+	:global(.ms-option.is-active) {
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
 		color: var(--text-bright);
 	}
 
@@ -349,28 +349,9 @@
 		opacity: 0.5;
 	}
 
-	:global(.ms-check) {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-		border: 1.5px solid var(--border-color);
-		background: var(--card-bg);
-		flex-shrink: 0;
-		transition: background 150ms ease, border-color 150ms ease;
-		color: var(--bg-hard);
-	}
-
-	:global(.ms-check.checked) {
-		background: var(--accent);
-		border-color: var(--accent);
-	}
-
-	:global(.ms-option-label) {
-		overflow: hidden;
-		text-overflow: ellipsis;
+	:global(.ms-dot) {
+		color: var(--accent);
+		font-size: 0.7rem;
 	}
 
 	/* Small variant */
@@ -386,7 +367,7 @@
 	}
 
 	:global(.ms-sm.ms-menu .ms-option) {
-		padding: 0.35rem 0.55rem;
+		padding: 0.4rem 0.6rem;
 		font-size: 0.75rem;
 	}
 

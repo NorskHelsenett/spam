@@ -3,12 +3,12 @@
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
 	import SecretsDrawer from '$lib/components/SecretsDrawer.svelte';
-	import Checkbox from '$lib/components/Checkbox.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
 
@@ -107,6 +107,7 @@
 	let publicOnly = $state(false);
 	let selectedSecretTypes: string[] = $state([]);
 	let selectedProviders: string[] = $state([]);
+	let searchQuery = $state('');
 
 	// Derive available options from loaded data
 	const secretTypeOptions: MultiSelectOption[] = $derived(
@@ -117,7 +118,7 @@
 	);
 
 	const activeFilterCount = $derived(
-		(publicOnly ? 1 : 0) + (selectedSecretTypes.length > 0 ? 1 : 0) + (selectedProviders.length > 0 ? 1 : 0)
+		(publicOnly ? 1 : 0) + (selectedSecretTypes.length > 0 ? 1 : 0) + (selectedProviders.length > 0 ? 1 : 0) + (searchQuery.trim() ? 1 : 0)
 	);
 
 	// Filtered rows (before sorting)
@@ -125,6 +126,15 @@
 		tableRows.filter((row) => {
 			if (selectedSecretTypes.length > 0 && !selectedSecretTypes.includes(row.secret_type)) return false;
 			if (selectedProviders.length > 0 && !selectedProviders.includes(row.provider)) return false;
+			if (searchQuery.trim()) {
+				const q = searchQuery.trim().toLowerCase();
+				if (
+					!row.repo.toLowerCase().includes(q) &&
+					!row.secret_type.toLowerCase().includes(q) &&
+					!row.provider.toLowerCase().includes(q) &&
+					!repoShortName(row.repo).toLowerCase().includes(q)
+				) return false;
+			}
 			return true;
 		})
 	);
@@ -133,6 +143,7 @@
 		publicOnly = false;
 		selectedSecretTypes = [];
 		selectedProviders = [];
+		searchQuery = '';
 	};
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
@@ -337,8 +348,13 @@
 				transition:slide={{ duration: 220, easing: cubicOut }}
 				class="filter-bar"
 			>
-				<div class="flex flex-wrap items-center gap-4">
-					<Checkbox bind:checked={publicOnly} label="Public repos only" />
+				<div class="flex flex-wrap items-start gap-6">
+					<div class="filter-field">
+						<span class="filter-field-label">Visibility</span>
+						<div class="flex items-center h-[28px]">
+							<Toggle bind:checked={publicOnly} label="Public only" />
+						</div>
+					</div>
 
 					<div class="filter-field">
 						<span class="filter-field-label">Secret types</span>
@@ -360,22 +376,34 @@
 						/>
 					</div>
 
+					<div class="filter-field filter-field-search w-[35em]">
+						<span class="filter-field-label">Search</span>
+						<div class="search-input-wrap">
+							<Search size={13} class="search-icon" />
+							<input
+								type="text"
+								class="search-input"
+								placeholder="Repo, type, provider…"
+								bind:value={searchQuery}
+							/>
+						</div>
+					</div>
+
 					{#if activeFilterCount > 0}
-						<button
-							type="button"
-							class="clear-filters"
-							onclick={clearFilters}
-						>
-							Clear all
-						</button>
+						<div class="filter-actions">
+							<span class="text-xs text-[var(--text-muted)]">
+								{filteredRows.length} of {tableRows.length}
+							</span>
+							<button
+								type="button"
+								class="clear-filters"
+								onclick={clearFilters}
+							>
+								Clear all
+							</button>
+						</div>
 					{/if}
 				</div>
-
-				{#if activeFilterCount > 0}
-					<p class="mt-2 text-xs text-[var(--text-muted)]">
-						Showing {filteredRows.length} of {tableRows.length} results
-					</p>
-				{/if}
 			</div>
 		{/if}
 
@@ -514,40 +542,89 @@
 	}
 
 	.filter-bar {
-		padding: 1rem 1.25rem;
-		border-radius: 1rem;
-		border: 1px solid var(--hover-bg);
-		background: var(--main-content-bg);
-		background: color-mix(in srgb, var(--main-content-bg) 88%, transparent);
+		padding: 0.75rem 0;
 	}
 
 	.filter-field {
 		display: flex;
-		align-items: center;
-		gap: 0.45rem;
+		flex-direction: column;
+		gap: 0.35rem;
 	}
 
 	.filter-field-label {
-		font-size: 0.75rem;
+		font-size: 0.65rem;
 		font-weight: 600;
 		color: var(--text-tertiary);
 		text-transform: uppercase;
-		letter-spacing: 0.06em;
+		letter-spacing: 0.12em;
 		white-space: nowrap;
+		padding-left: 0.15rem;
+	}
+
+	.filter-field-search {
+		min-width: 220px;
+		max-width: 280px;
+	}
+
+	.search-input-wrap {
+		position: relative;
+		display: flex;
+		align-items: center;
+	}
+
+	.search-input-wrap :global(.search-icon) {
+		position: absolute;
+		left: 0.55rem;
+		color: var(--text-muted);
+		pointer-events: none;
+	}
+
+	.search-input {
+		height: 28px;
+		width: 100%;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		padding: 0 0.6rem 0 1.7rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		transition: border-color 150ms ease, box-shadow 150ms ease;
+	}
+
+	.search-input::placeholder {
+		color: var(--text-muted);
+	}
+
+	.search-input:focus {
+		outline: none;
+		border-color: var(--accent);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+	}
+
+	.filter-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		margin-left: auto;
+		/* align with controls row: label line-height + gap */
+		padding-top: calc(0.65rem * 1.2 + 0.35rem);
 	}
 
 	.clear-filters {
-		padding: 0.3rem 0.7rem;
+		padding: 0.3rem 0.75rem;
 		border-radius: 999px;
-		border: none;
+		border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
 		background: transparent;
-		color: var(--text-muted);
+		color: var(--accent);
 		font-size: 0.75rem;
+		font-weight: 500;
 		cursor: pointer;
-		transition: color 120ms ease;
+		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
 	}
 
 	.clear-filters:hover {
+		background: color-mix(in srgb, var(--red) 14%, transparent);
+		border-color: color-mix(in srgb, var(--red) 50%, transparent);
 		color: var(--red);
 	}
 </style>
