@@ -105,6 +105,7 @@ func run() error {
 		"migrations/20260310_fix_component_vulnerabilities_purl_column.sql",
 		"migrations/20260311_create_view_unified_repositories_vulnerabilities.sql",
 		"migrations/20260311_fix_sbom_component_view_implicit_root.sql",
+		"migrations/20260317_add_repos_is_private.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

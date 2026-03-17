@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -16,6 +16,7 @@
 		repo: string;
 		repo_id: string;
 		provider: string;
+		is_private: boolean;
 		secret_type: string;
 		unique_finding_count: number;
 		last_scanned: string;
@@ -124,6 +125,7 @@
 	// Filtered rows (before sorting)
 	const filteredRows = $derived(
 		tableRows.filter((row) => {
+			if (publicOnly && row.is_private) return false;
 			if (selectedSecretTypes.length > 0 && !selectedSecretTypes.includes(row.secret_type)) return false;
 			if (selectedProviders.length > 0 && !selectedProviders.includes(row.provider)) return false;
 			if (searchQuery.trim()) {
@@ -459,7 +461,10 @@
 												<GitBranch class="h-4 w-4 shrink-0 text-[var(--accent)]" />
 												<span class="font-semibold text-[var(--text-bright)]">{repoShortName(row.repo)}</span>
 											</div>
-											<p class="mt-0.5 truncate text-xs text-[var(--text-muted)]" title={row.repo}>{row.repo}</p>
+											<p class="mt-0.5 flex items-center gap-2.5 truncate text-xs text-[var(--text-muted)]" title={row.repo}>
+												{row.repo}
+												{#if row.is_private}<Lock class="h-3 w-3 shrink-0 text-[var(--text-muted)]" />{/if}
+											</p>
 										</td>
 										<td class="px-5 py-3">
 											<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">

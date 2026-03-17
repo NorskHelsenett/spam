@@ -31,6 +31,7 @@ type Repo struct {
 	Slug               string     `gorm:"size:255;not null"`
 	ExternalID         string     `gorm:"size:255;not null;default:''"`
 	ProviderInstanceID string     `gorm:"size:36;not null;index"`
+	IsPrivate          bool       `gorm:"not null;default:false"`
 	CreatedAt          time.Time
 	CreatedByUserID    string     `gorm:"size:36"`
 	ProviderUpdatedAt  *time.Time `gorm:"column:provider_updated_at;autoUpdateTime:false"`

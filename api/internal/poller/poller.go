@@ -187,6 +187,7 @@ func (p *Poller) syncProvider(ctx context.Context, provider providerconfig.Provi
 			Org:                org,
 			Slug:               slug,
 			ExternalID:         repo.ExternalID,
+			IsPrivate:          repo.IsPrivate,
 		})
 		if err != nil {
 			log.Printf("poller: upsert repo %s: %v", repo.FullPath, err)
