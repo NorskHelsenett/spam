@@ -1370,11 +1370,7 @@
 			</div>
 			<button
 				type="button"
-				class={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
-					showAddProvider
-						? 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]'
-						: 'border-amber-300 bg-amber-300 text-amber-950 hover:bg-amber-200'
-				}`}
+				class={`btn ${showAddProvider ? 'btn-ghost' : 'btn-primary'} inline-flex items-center gap-2`}
 				onclick={toggleAddProvider}
 			>
 				{showAddProvider ? 'Close' : 'Add Provider'}
@@ -1475,7 +1471,7 @@
 					</div>
 					<button
 						type="button"
-						class="w-full rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200"
+						class="btn btn-primary w-full"
 						onclick={addProvider}
 					>
 						Add Provider
@@ -1630,7 +1626,7 @@
 			</button>
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+				class="btn btn-primary inline-flex items-center gap-2"
 				onclick={triggerOSVScan}
 				disabled={osvTriggering || osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY'}
 			>
@@ -1752,7 +1748,7 @@
 		<div class="flex flex-wrap items-center gap-2">
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+				class="btn btn-primary inline-flex items-center gap-2"
 				onclick={triggerTrivyScan}
 				disabled={trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
 			>
@@ -1976,7 +1972,7 @@
 			<Loading message="Loading secrets" variant="bar" size="sm" />
 		{:else if probeListItems.length === 0}
 			<div class="flex flex-col items-center gap-3 py-10 text-center">
-				<ShieldCheck class="h-12 w-12 text-green-400" />
+				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
 				<div>
 					<p class="text-lg font-semibold text-[var(--text-bright)]">No secrets found</p>
 					<p class="mt-1 text-sm text-[var(--text-muted)]">No probed secrets match this filter.</p>
@@ -2112,11 +2108,14 @@
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
 	<div class="p-6 sm:p-8 space-y-5">
 		<div class="flex items-start justify-between">
-			<div>
-				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
-				<p class="mt-1 text-sm text-[var(--text-tertiary)]">
-					Review every secret that will be probed, grouped by type.
-				</p>
+			<div class="flex items-center gap-3">
+				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
+				<div>
+					<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
+					<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+						Review every secret that will be probed, grouped by type.
+					</p>
+				</div>
 			</div>
 			<button
 				type="button"
@@ -2132,7 +2131,7 @@
 			<Loading message="Loading probe preview" variant="bar" size="sm" />
 		{:else if probePreview.length === 0}
 			<div class="flex flex-col items-center gap-3 py-10 text-center">
-				<ShieldCheck class="h-12 w-12 text-green-400" />
+				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
 				<div>
 					<p class="text-lg font-semibold text-[var(--text-bright)]">All clear</p>
 					<p class="mt-1 text-sm text-[var(--text-muted)]">
@@ -2308,7 +2307,7 @@
 				</button>
 				<button
 					type="button"
-					class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-5 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+					class="btn btn-primary inline-flex items-center gap-2"
 					disabled={probeTriggering || probePreviewLoading}
 					onclick={async () => {
 						await triggerProbe();
@@ -2393,7 +2392,7 @@
 					<div class="flex gap-2">
 						<button
 							type="button"
-							class="rounded-full border border-amber-300 bg-amber-300 px-5 py-2.5 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+							class="btn btn-primary"
 							onclick={submitRotateToken}
 							disabled={saving || !rotatePat.trim()}
 						>
