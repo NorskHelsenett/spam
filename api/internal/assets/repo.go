@@ -21,7 +21,7 @@ type RepoInput struct {
 	Org                string
 	Slug               string
 	ExternalID         string
-	IsPrivate          bool
+	IsPrivate          *bool
 	CreatedByUserID    string
 	ProviderUpdatedAt  *time.Time
 }
@@ -65,8 +65,8 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 				updates["org"] = org
 				updates["slug"] = slug
 			}
-			if repo.IsPrivate != input.IsPrivate {
-				updates["is_private"] = input.IsPrivate
+			if input.IsPrivate != nil && repo.IsPrivate != *input.IsPrivate {
+				updates["is_private"] = *input.IsPrivate
 			}
 			if input.ProviderUpdatedAt != nil && !input.ProviderUpdatedAt.IsZero() {
 				updates["provider_updated_at"] = input.ProviderUpdatedAt
@@ -75,7 +75,9 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 				db.WithContext(ctx).Model(&repo).Updates(updates)
 				repo.Org = org
 				repo.Slug = slug
-				repo.IsPrivate = input.IsPrivate
+				if input.IsPrivate != nil {
+					repo.IsPrivate = *input.IsPrivate
+				}
 			}
 			return &repo, nil
 		}
@@ -89,7 +91,7 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 			Org:                org,
 			Slug:               slug,
 			ExternalID:         externalID,
-			IsPrivate:          input.IsPrivate,
+			IsPrivate:          input.IsPrivate != nil && *input.IsPrivate,
 			ProviderInstanceID: providerInstanceID,
 			CreatedByUserID:    input.CreatedByUserID,
 		}).FirstOrCreate(&repo)
@@ -113,8 +115,8 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	if externalID != "" && repo.ExternalID != externalID {
 		updates["external_id"] = externalID
 	}
-	if repo.IsPrivate != input.IsPrivate {
-		updates["is_private"] = input.IsPrivate
+	if input.IsPrivate != nil && repo.IsPrivate != *input.IsPrivate {
+		updates["is_private"] = *input.IsPrivate
 	}
 	if len(updates) > 0 {
 		db.WithContext(ctx).Model(&repo).Updates(updates)
