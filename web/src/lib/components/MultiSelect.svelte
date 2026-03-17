@@ -300,6 +300,9 @@
 		z-index: 9999;
 		max-height: 280px;
 		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
 	}
 
 	:global(.ms-option) {

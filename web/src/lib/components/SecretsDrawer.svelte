@@ -123,10 +123,12 @@
 	let {
 		repoId,
 		repoName,
+		initialFilters = [],
 		onClose = () => {}
 	}: {
 		repoId: string;
 		repoName: string;
+		initialFilters?: string[];
 		onClose?: () => void;
 	} = $props();
 
@@ -134,10 +136,18 @@
 	let total = $state(0);
 	let loading = $state(false);
 	let loadingMore = $state(false);
-	let activeFilter: string | null = $state(null);
+	let activeFilters = new SvelteSet<string>();
 	let sentinelEl: HTMLDivElement | undefined = $state();
 
 	const hasMore = $derived(findings.length < total);
+
+	const toggleFilter = (ruleId: string) => {
+		if (activeFilters.has(ruleId)) {
+			activeFilters.delete(ruleId);
+		} else {
+			activeFilters.add(ruleId);
+		}
+	};
 
 	const grouped = $derived.by(() => {
 		const map = new SvelteMap<string, Finding[]>();
@@ -150,7 +160,7 @@
 	});
 
 	const visibleGroups = $derived(
-		activeFilter ? grouped.filter(([ruleId]) => ruleId === activeFilter) : grouped
+		activeFilters.size > 0 ? grouped.filter(([ruleId]) => activeFilters.has(ruleId)) : grouped
 	);
 
 	let prevRepoId = '';
@@ -158,7 +168,8 @@
 		const id = repoId;
 		if (id && id !== prevRepoId) {
 			prevRepoId = id;
-			activeFilter = null;
+			activeFilters.clear();
+			for (const f of initialFilters) activeFilters.add(f);
 			load();
 		}
 	});
@@ -245,8 +256,8 @@
 						{#each grouped as [ruleId, group] (ruleId)}
 							<button
 								type="button"
-								onclick={() => activeFilter = activeFilter === ruleId ? null : ruleId}
-								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilter === ruleId ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilter ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
+								onclick={() => toggleFilter(ruleId)}
+								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition {activeFilters.has(ruleId) ? 'border-red-500/70 bg-red-500/20 text-red-300' : activeFilters.size > 0 ? 'border-red-500/20 bg-red-500/5 text-red-400/40' : 'border-red-500/40 bg-red-500/10 text-red-400 hover:border-red-500/60 hover:bg-red-500/15'}"
 							>
 								<FileWarning class="h-3 w-3 shrink-0" />
 								{ruleId}

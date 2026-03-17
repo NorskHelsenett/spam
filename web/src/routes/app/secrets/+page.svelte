@@ -487,6 +487,7 @@
 							<SecretsDrawer
 								repoId={drawerRow.repo_id}
 								repoName={repoShortName(drawerRow.repo)}
+								initialFilters={selectedSecretTypes.length > 0 ? selectedSecretTypes : []}
 								onClose={() => { drawerOpen = false; drawerRow = null; }}
 							/>
 						</div>

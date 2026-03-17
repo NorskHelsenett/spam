@@ -4,6 +4,7 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -78,6 +79,24 @@
 	let rangeValue = $state(42);
 	let checkboxValue = $state(true);
 	let toggleValue = $state(true);
+	let multiSelectValue: string[] = $state(['github']);
+	let multiSelectEmptyValue: string[] = $state([]);
+	const multiSelectOptions = [
+		{ value: 'github', label: 'GitHub' },
+		{ value: 'gitlab', label: 'GitLab' },
+		{ value: 'gitea', label: 'Gitea' },
+		{ value: 'bitbucket', label: 'Bitbucket' },
+		{ value: 'azure', label: 'Azure DevOps', disabled: true }
+	];
+	const multiSelectSecretTypes = [
+		{ value: 'generic-api-key', label: 'generic-api-key' },
+		{ value: 'private-key', label: 'private-key' },
+		{ value: 'jwt', label: 'jwt' },
+		{ value: 'aws-access-key', label: 'aws-access-key' },
+		{ value: 'github-pat', label: 'github-pat' },
+		{ value: 'slack-token', label: 'slack-token' }
+	];
+	let multiSelectTypesValue: string[] = $state(['jwt', 'private-key']);
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
@@ -381,6 +400,21 @@
 				<div class="flex items-center gap-3">
 					<Select options={selectOptions} bind:value={selectValue} />
 					<Select options={selectOptions} bind:value={selectValue} class="w-full" />
+				</div>
+
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Multi Select</span>
+				<div class="space-y-3">
+					<div class="flex items-center gap-3">
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectValue} placeholder="Providers" />
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectEmptyValue} placeholder="None selected" />
+					</div>
+					<div class="flex items-center gap-3">
+						<MultiSelect options={multiSelectSecretTypes} bind:selected={multiSelectTypesValue} placeholder="Secret types" size="sm" />
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectValue} placeholder="Providers" size="sm" class="w-full" />
+					</div>
+					<p class="text-xs text-[var(--text-tertiary)]">
+						Providers: {multiSelectValue.length ? multiSelectValue.join(', ') : 'none'} · Types: {multiSelectTypesValue.length ? multiSelectTypesValue.join(', ') : 'none'}
+					</p>
 				</div>
 
 				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Radio</span>
