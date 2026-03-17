@@ -10,6 +10,13 @@
 		match: string;
 	};
 
+	type FindingsPage = {
+		items: Finding[];
+		total: number;
+	};
+
+	const PAGE_SIZE = 100;
+
 	const cleanMatch = (s: string) =>
 		s.endsWith('"') && !s.slice(0, -1).includes('"') ? s.slice(0, -1) : s;
 
@@ -21,7 +28,7 @@
 	const findAllBase64 = (s: string): Array<{value: string, decoded: string}> => {
 		const results: Array<{value: string, decoded: string}> = [];
 		const seen = new SvelteSet<string>();
-		
+
 		// First, specifically find JWT tokens (always start with eyJ)
 		const jwtPattern = /eyJ[A-Za-z0-9+/\-_]+={0,2}/g;
 		let jwtMatch;
@@ -29,13 +36,13 @@
 			const candidate = jwtMatch[0];
 			if (seen.has(candidate)) continue;
 			seen.add(candidate);
-			
+
 			const decoded = tryDecodeBase64(candidate);
 			if (decoded && decoded !== candidate) {
 				results.push({ value: candidate, decoded });
 			}
 		}
-		
+
 		// Then find other base64 patterns
 		const b64Pattern = /(?:^|[:\s=])([A-Za-z0-9+/\-_]{16,}={0,2})(?:[\s"']|$)/g;
 		let match;
@@ -43,10 +50,10 @@
 			const candidate = match[1];
 			if (candidate.length < 16 || seen.has(candidate)) continue;
 			seen.add(candidate);
-			
+
 			// Skip URLs and hex-only strings
 			if (/^[0-9a-fA-F]+$/.test(candidate)) continue;
-			
+
 			const decoded = tryDecodeBase64(candidate);
 			if (decoded && decoded !== candidate) {
 				results.push({ value: candidate, decoded });
@@ -73,7 +80,7 @@
 				if (printable / decoded.length < 0.7) return null;
 				// Reject very short decoded strings unless they look like structured data
 				if (decoded.length < 10 && !/[{[\n:]/.test(decoded)) return null;
-				
+
 				try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
 				return decoded;
 			} catch {
@@ -124,8 +131,13 @@
 	} = $props();
 
 	let findings: Finding[] = $state([]);
+	let total = $state(0);
 	let loading = $state(false);
+	let loadingMore = $state(false);
 	let activeFilter: string | null = $state(null);
+	let sentinelEl: HTMLDivElement | undefined = $state();
+
+	const hasMore = $derived(findings.length < total);
 
 	const grouped = $derived.by(() => {
 		const map = new SvelteMap<string, Finding[]>();
@@ -141,21 +153,69 @@
 		activeFilter ? grouped.filter(([ruleId]) => ruleId === activeFilter) : grouped
 	);
 
+	let prevRepoId = '';
 	$effect(() => {
-		if (repoId) { activeFilter = null; load(); }
+		const id = repoId;
+		if (id && id !== prevRepoId) {
+			prevRepoId = id;
+			activeFilter = null;
+			load();
+		}
+	});
+
+	// Intersection observer for infinite scroll
+	$effect(() => {
+		if (!sentinelEl) return;
+		const observer = new IntersectionObserver(
+			(entries) => {
+				if (entries[0].isIntersecting && hasMore && !loadingMore && !loading) {
+					loadMore();
+				}
+			},
+			{ rootMargin: '200px' }
+		);
+		observer.observe(sentinelEl);
+		return () => observer.disconnect();
 	});
 
 	const load = async () => {
 		loading = true;
 		findings = [];
+		total = 0;
 		try {
-			const params = new URLSearchParams({ repo_id: repoId });
+			const params = new URLSearchParams({ repo_id: repoId, limit: String(PAGE_SIZE), offset: '0' });
 			const res = await fetch(`/api/secrets/findings?${params}`, { credentials: 'include' });
-			if (res.ok) findings = await res.json();
+			if (res.ok) {
+				const page: FindingsPage = await res.json();
+				findings = page.items;
+				total = page.total;
+			}
 		} catch {
 			// ignore
 		} finally {
 			loading = false;
+		}
+	};
+
+	const loadMore = async () => {
+		if (loadingMore || !hasMore) return;
+		loadingMore = true;
+		try {
+			const params = new URLSearchParams({
+				repo_id: repoId,
+				limit: String(PAGE_SIZE),
+				offset: String(findings.length)
+			});
+			const res = await fetch(`/api/secrets/findings?${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const page: FindingsPage = await res.json();
+				findings = [...findings, ...page.items];
+				total = page.total;
+			}
+		} catch {
+			// ignore
+		} finally {
+			loadingMore = false;
 		}
 	};
 </script>
@@ -174,9 +234,12 @@
 						{repoName}
 					</a>
 				</div>
-				{#if !loading && findings.length > 0}
+				{#if !loading && total > 0}
 					<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">
-						{findings.length} finding{findings.length !== 1 ? 's' : ''}
+						{total.toLocaleString()} finding{total !== 1 ? 's' : ''}
+						{#if findings.length < total}
+							<span class="text-[var(--text-muted)]">({findings.length.toLocaleString()} loaded)</span>
+						{/if}
 					</p>
 					<div class="mt-2 flex flex-wrap gap-1.5">
 						{#each grouped as [ruleId, group] (ruleId)}
@@ -187,7 +250,7 @@
 							>
 								<FileWarning class="h-3 w-3 shrink-0" />
 								{ruleId}
-								<span class="ml-0.5 font-semibold">{group.length}</span>
+								<span class="ml-0.5 font-semibold">{group.length}{#if hasMore}+{/if}</span>
 							</button>
 						{/each}
 					</div>
@@ -228,7 +291,7 @@
 					</div>
 					<!-- Findings -->
 					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
-						{#each group as f (`${f.file}-${f.start_line}-${f.match}`)}
+						{#each group as f, idx (`${idx}-${f.file}-${f.start_line}`)}
 							<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
 								<div class="flex items-start gap-4">
 									<div class="w-40 shrink-0 pt-0.5">
@@ -248,14 +311,14 @@
 											{@const raw = cleanMatch(f.match)}
 											{@const pemKey = extractPemKey(raw)}
 											{@const base64Matches = findAllBase64(raw)}
-											
+
 											<div class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)]">{raw}</div>
-											
+
 											{#if pemKey}
 												<div class="whitespace-pre-wrap block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{pemKey}</div>
 											{/if}
-											
-											{#each base64Matches as { decoded } (decoded)}
+
+											{#each base64Matches as { decoded }, di (di)}
 												<div class="whitespace-pre-wrap block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{decoded}</div>
 											{/each}
 										{/if}
@@ -266,6 +329,17 @@
 					</div>
 				</div>
 			{/each}
+
+			<!-- Infinite scroll sentinel -->
+			{#if hasMore}
+				<div bind:this={sentinelEl} class="flex items-center justify-center py-6">
+					{#if loadingMore}
+						<div class="h-5 w-5 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+					{:else}
+						<span class="text-xs text-[var(--text-muted)]">Scroll for more…</span>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </div>

@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -289,10 +290,16 @@ type SecretFindingRow struct {
 	Match       string `json:"match"`
 }
 
+// SecretFindingsPage wraps paginated findings with a total count.
+type SecretFindingsPage struct {
+	Items []SecretFindingRow `json:"items"`
+	Total int64              `json:"total"`
+}
+
 // SecretsFindingsHandler returns deduplicated individual findings for a given
-// repo + secret type, sourced from the latest run only.
+// repo, sourced from the latest run only. Supports pagination via limit/offset.
 //
-// GET /api/secrets/findings?repo_id=...&secret_type=...
+// GET /api/secrets/findings?repo_id=...&limit=100&offset=0
 func SecretsFindingsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
@@ -305,11 +312,24 @@ func SecretsFindingsHandler(db *gorm.DB, authService *auth.Service) http.Handler
 			return
 		}
 
-		query := `
+		limit := 100
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		const cte = `
 WITH latest AS (
   SELECT findings
   FROM run_secrets
-  WHERE repo_id = ?
+  WHERE repo_id = @repo_id
   ORDER BY created_at DESC
   LIMIT 1
 ),
@@ -333,19 +353,33 @@ exploded AS (
     ) AS dedupe_key
   FROM latest
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(findings, '[]'::jsonb)) AS finding
-)
-SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match
-FROM exploded
-ORDER BY dedupe_key, rule_id, file, start_line`
+),
+deduped AS (
+  SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match
+  FROM exploded
+  ORDER BY dedupe_key, rule_id, file, start_line
+)`
 
+		var total int64
+		countQuery := cte + "\nSELECT COUNT(*) FROM deduped"
+		if err := db.WithContext(r.Context()).Raw(countQuery, map[string]interface{}{"repo_id": repoID}).Scan(&total).Error; err != nil {
+			http.Error(w, "failed to count secret findings", http.StatusInternalServerError)
+			return
+		}
+
+		dataQuery := cte + "\nSELECT rule_id, description, file, start_line, match FROM deduped ORDER BY rule_id, file, start_line LIMIT @limit OFFSET @offset"
 		var rows []SecretFindingRow
-		if err := db.WithContext(r.Context()).Raw(query, repoID).Scan(&rows).Error; err != nil {
+		if err := db.WithContext(r.Context()).Raw(dataQuery, map[string]interface{}{
+			"repo_id": repoID,
+			"limit":   limit,
+			"offset":  offset,
+		}).Scan(&rows).Error; err != nil {
 			http.Error(w, "failed to load secret findings", http.StatusInternalServerError)
 			return
 		}
 		if rows == nil {
 			rows = []SecretFindingRow{}
 		}
-		writeJSON(w, http.StatusOK, rows)
+		writeJSON(w, http.StatusOK, SecretFindingsPage{Items: rows, Total: total})
 	}
 }
