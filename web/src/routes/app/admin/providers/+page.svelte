@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
-	import { slide } from 'svelte/transition';
+	import { slide, fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -705,6 +706,14 @@
 	let probePreviewLoading = $state(false);
 	let probePreviewTab = $state('all');
 	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
+
+	// Dismiss inspect drawer when tab or loading state changes
+	$effect(() => {
+		probePreviewTab;
+		probePreviewLoading;
+		inspectItem = null;
+	});
+
 	const tryDecodeJWT = (s: string): { header: Record<string, unknown>; payload: Record<string, unknown>; expired: boolean | null; expiresAt: string | null; issuedAt: string | null; issuer: string | null; subject: string | null } | null => {
 		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
 		if (!jwtMatch) return null;
@@ -2209,7 +2218,7 @@
 
 <!-- Secret Probe Preview Dialog -->
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
-	<div class="p-6 sm:p-8 space-y-5">
+	<div class="flex min-h-0 flex-1 flex-col p-6 sm:p-8 space-y-5">
 		<div class="flex items-start justify-between">
 			<div class="flex items-center gap-3">
 				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
@@ -2281,7 +2290,8 @@
 			</div>
 
 			<!-- Grouped request table -->
-			<div class="relative max-h-[50vh] overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="h-full overflow-y-auto overflow-x-hidden">
 				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
@@ -2326,12 +2336,17 @@
 							{#if isGroupSelected && group.items}
 								{#each group.items as item}
 									{@const isItemChecked = !probeExcludedHashes.has(item.secret_hash)}
+									{@const isInspected = inspectItem?.hash === item.secret_hash}
 									<tr
-										class="cursor-pointer transition-opacity {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
+										class="cursor-pointer transition-opacity {isInspected ? 'bg-[var(--hover-bg)]' : ''} {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
 										onclick={(e) => {
 											const target = e.target as HTMLElement;
 											if (target.closest('button, a, input') || window.getSelection()?.toString()) return;
-											toggleDismiss(item.secret_hash);
+											if (inspectItem) {
+												inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' };
+											} else {
+												toggleDismiss(item.secret_hash);
+											}
 										}}
 									>
 										<td class="px-3 py-1.5">
@@ -2411,17 +2426,22 @@
 				</table>
 			</div>
 
-			<!-- Inspect drawer -->
-			{#if inspectItem}
-				<div class="absolute inset-y-0 right-0 z-20 w-[480px]">
-					<SecretInspectDrawer
-						secretHash={inspectItem.hash}
-						secret={inspectItem.secret}
-						ruleId={inspectItem.ruleId}
-						onClose={() => { inspectItem = null; }}
-					/>
-				</div>
-			{/if}
+				<!-- Inspect drawer -->
+				{#if inspectItem}
+					<div
+						class="absolute inset-y-0 right-0 z-20 w-[480px] border-l border-[var(--border-color)] rounded-r-xl"
+						in:fly={{ x: 480, duration: 240, easing: cubicOut, opacity: 1 }}
+						out:fly={{ x: 480, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<SecretInspectDrawer
+							secretHash={inspectItem.hash}
+							secret={inspectItem.secret}
+							ruleId={inspectItem.ruleId}
+							onClose={() => { inspectItem = null; }}
+						/>
+					</div>
+				{/if}
+			</div>
 		{/if}
 
 		{#if probeError}

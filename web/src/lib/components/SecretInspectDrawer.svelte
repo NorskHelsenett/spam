@@ -158,7 +158,7 @@
 
 <div class="flex h-full flex-col overflow-hidden bg-[var(--bg-soft)] border-l border-[var(--border-color)]">
 	<!-- Header -->
-	<div class="shrink-0 px-6 pt-6 pb-4 border-b border-[var(--border-color)]/40">
+	<div class="shrink-0 px-6 pt-6 pb-4">
 		<div class="flex items-start gap-3">
 			<Eye class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
 			<div class="min-w-0 flex-1">
