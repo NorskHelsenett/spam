@@ -2290,7 +2290,7 @@
 			</div>
 
 			<!-- Grouped request table -->
-			<div class="relative min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="relative min-h-0 flex-1 overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 			<div class="h-full overflow-y-auto overflow-x-hidden">
 				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">

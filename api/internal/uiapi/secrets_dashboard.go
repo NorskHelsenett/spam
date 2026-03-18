@@ -113,8 +113,11 @@ WITH latest_repo_secrets AS (
     rs.findings,
     rs.created_at
   FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
   WHERE rs.repo_id IS NOT NULL
     AND rs.repo_id <> ''
+    AND (pi.id IS NULL OR pi.enabled = true)
   ORDER BY rs.repo_id, rs.created_at DESC
 ),
 deduped_findings AS (
@@ -238,14 +241,17 @@ WITH date_series AS (
 ),
 all_repo_scans AS (
   -- Latest scan per repo per day (all time, needed for carry-forward)
-  SELECT DISTINCT ON (repo_id, date_trunc('day', created_at)::date)
-    repo_id,
-    findings,
-    date_trunc('day', created_at)::date AS scan_day
-  FROM run_secrets
-  WHERE repo_id IS NOT NULL AND repo_id <> ''
-    AND created_at < date_trunc('day', NOW())
-  ORDER BY repo_id, date_trunc('day', created_at)::date, created_at DESC
+  SELECT DISTINCT ON (rs.repo_id, date_trunc('day', rs.created_at)::date)
+    rs.repo_id,
+    rs.findings,
+    date_trunc('day', rs.created_at)::date AS scan_day
+  FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+  WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
+    AND rs.created_at < date_trunc('day', NOW())
+    AND (pi.id IS NULL OR pi.enabled = true)
+  ORDER BY rs.repo_id, date_trunc('day', rs.created_at)::date, rs.created_at DESC
 ),
 repos AS (
   -- Only repos with at least one scan within the 30-day window
@@ -359,12 +365,15 @@ func SecretsDashboardDistributionHandler(db *gorm.DB, authService *auth.Service,
 func computeSecretsDistribution(ctx context.Context, db *gorm.DB) ([]SecretDistributionRow, error) {
 	query := `
 WITH latest_repo_secrets AS (
-  SELECT DISTINCT ON (repo_id)
-    repo_id,
-    findings
-  FROM run_secrets
-  WHERE repo_id IS NOT NULL AND repo_id <> ''
-  ORDER BY repo_id, created_at DESC
+  SELECT DISTINCT ON (rs.repo_id)
+    rs.repo_id,
+    rs.findings
+  FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+  WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
+    AND (pi.id IS NULL OR pi.enabled = true)
+  ORDER BY rs.repo_id, rs.created_at DESC
 ),
 deduped_findings AS (
   SELECT DISTINCT
