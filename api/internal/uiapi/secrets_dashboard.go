@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -125,6 +126,8 @@ deduped_findings AS (
     lrs.repo_id,
     lrs.created_at AS last_scanned,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    COALESCE(finding->>'Match', '') AS match,
+    COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(
@@ -159,23 +162,101 @@ SELECT
   COALESCE(pi.display_name, r.provider) AS provider_name,
   r.is_private AS is_private,
   df.secret_type,
-  COUNT(*) AS unique_finding_count,
-  MAX(df.last_scanned) AS last_scanned
+  df.match,
+  df.secret,
+  df.last_scanned
 FROM deduped_findings df
 JOIN repos r
   ON r.id = df.repo_id
 LEFT JOIN provider_instances pi
   ON pi.id = r.provider_instance_id
-GROUP BY repo, r.id, r.provider, pi.display_name, r.is_private, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
-	var rows []SecretTableRow
-	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+	type rawRow struct {
+		Repo         string    `gorm:"column:repo"`
+		RepoID       string    `gorm:"column:repo_id"`
+		Provider     string    `gorm:"column:provider"`
+		ProviderName string    `gorm:"column:provider_name"`
+		IsPrivate    bool      `gorm:"column:is_private"`
+		SecretType   string    `gorm:"column:secret_type"`
+		Match        string    `gorm:"column:match"`
+		Secret       string    `gorm:"column:secret"`
+		LastScanned  time.Time `gorm:"column:last_scanned"`
+	}
+	var raw []rawRow
+	if err := db.WithContext(ctx).Raw(query).Scan(&raw).Error; err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []SecretTableRow{}
+
+	// Compute hashes and look up dismissed secrets.
+	hashes := make([]string, len(raw))
+	for i, r := range raw {
+		s := secretprobe.ExtractSecret(r.Match)
+		if r.Secret != "" {
+			s = secretprobe.ExtractSecret(r.Secret)
+		}
+		hashes[i] = secretprobe.SecretHash(s)
 	}
+	dismissed := map[string]bool{}
+	if len(hashes) > 0 {
+		var dismissedHashes []string
+		db.WithContext(ctx).
+			Model(&secretprobe.SecretDismissal{}).
+			Where("secret_hash IN ?", hashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	// Aggregate per repo+type, excluding dismissed.
+	type groupKey struct {
+		Repo         string
+		RepoID       string
+		Provider     string
+		ProviderName string
+		IsPrivate    bool
+		SecretType   string
+	}
+	type groupVal struct {
+		Count       int64
+		LastScanned time.Time
+	}
+	groups := map[groupKey]*groupVal{}
+	for i, r := range raw {
+		if dismissed[hashes[i]] {
+			continue
+		}
+		k := groupKey{r.Repo, r.RepoID, r.Provider, r.ProviderName, r.IsPrivate, r.SecretType}
+		if g, ok := groups[k]; ok {
+			g.Count++
+			if r.LastScanned.After(g.LastScanned) {
+				g.LastScanned = r.LastScanned
+			}
+		} else {
+			groups[k] = &groupVal{Count: 1, LastScanned: r.LastScanned}
+		}
+	}
+
+	rows := make([]SecretTableRow, 0, len(groups))
+	for k, v := range groups {
+		rows = append(rows, SecretTableRow{
+			Repo:               k.Repo,
+			RepoID:             k.RepoID,
+			Provider:           k.Provider,
+			ProviderName:       k.ProviderName,
+			IsPrivate:          k.IsPrivate,
+			SecretType:         k.SecretType,
+			UniqueFindingCount: v.Count,
+			LastScanned:        v.LastScanned,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Repo != rows[j].Repo {
+			return rows[i].Repo < rows[j].Repo
+		}
+		return rows[i].SecretType < rows[j].SecretType
+	})
 	return rows, nil
 }
 
@@ -378,6 +459,8 @@ WITH latest_repo_secrets AS (
 deduped_findings AS (
   SELECT DISTINCT
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    COALESCE(finding->>'Match', '') AS match,
+    COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(
@@ -394,36 +477,74 @@ deduped_findings AS (
     ) AS dedupe_key
   FROM latest_repo_secrets rs
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
-),
-counts AS (
-  SELECT
-    secret_type,
-    COUNT(*) AS finding_count
-  FROM deduped_findings
-  GROUP BY secret_type
-),
-ranked AS (
-  SELECT
-    secret_type,
-    finding_count,
-    ROW_NUMBER() OVER (ORDER BY finding_count DESC, secret_type ASC) AS rn
-  FROM counts
 )
-SELECT
-  CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END AS secret_type,
-  SUM(finding_count) AS finding_count
-FROM ranked
-GROUP BY CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END
-ORDER BY
-  CASE WHEN (CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END) = 'other' THEN 1 ELSE 0 END,
-  SUM(finding_count) DESC`
+SELECT secret_type, match, secret FROM deduped_findings`
 
-	var rows []SecretDistributionRow
-	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+	var findings []struct {
+		SecretType string `gorm:"column:secret_type"`
+		Match      string `gorm:"column:match"`
+		Secret     string `gorm:"column:secret"`
+	}
+	if err := db.WithContext(ctx).Raw(query).Scan(&findings).Error; err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []SecretDistributionRow{}
+
+	// Compute hashes and look up dismissed secrets.
+	hashes := make([]string, len(findings))
+	for i, f := range findings {
+		s := secretprobe.ExtractSecret(f.Match)
+		if f.Secret != "" {
+			s = secretprobe.ExtractSecret(f.Secret)
+		}
+		hashes[i] = secretprobe.SecretHash(s)
+	}
+	dismissed := map[string]bool{}
+	if len(hashes) > 0 {
+		var dismissedHashes []string
+		db.WithContext(ctx).
+			Model(&secretprobe.SecretDismissal{}).
+			Where("secret_hash IN ?", hashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	// Aggregate counts excluding dismissed, then rank top 6 + other.
+	counts := map[string]int64{}
+	for i, f := range findings {
+		if dismissed[hashes[i]] {
+			continue
+		}
+		counts[f.SecretType]++
+	}
+
+	type ranked struct {
+		secretType string
+		count      int64
+	}
+	var sorted []ranked
+	for st, c := range counts {
+		sorted = append(sorted, ranked{st, c})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].count != sorted[j].count {
+			return sorted[i].count > sorted[j].count
+		}
+		return sorted[i].secretType < sorted[j].secretType
+	})
+
+	rows := []SecretDistributionRow{}
+	var otherCount int64
+	for i, r := range sorted {
+		if i < 6 {
+			rows = append(rows, SecretDistributionRow{SecretType: r.secretType, FindingCount: r.count})
+		} else {
+			otherCount += r.count
+		}
+	}
+	if otherCount > 0 {
+		rows = append(rows, SecretDistributionRow{SecretType: "other", FindingCount: otherCount})
 	}
 	return rows, nil
 }
