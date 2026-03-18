@@ -237,6 +237,9 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 					log.Printf("failed to store secrets: %v", err)
 				} else {
 					log.Printf("stored %d secret findings for run %s", len(findings), runID)
+					if s.cache != nil && payload.RepoID != "" {
+						_ = s.cache.Delete(r.Context(), "repo:metadata:"+payload.RepoID)
+					}
 				}
 			}
 		}
