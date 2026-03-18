@@ -296,6 +296,7 @@ type PreviewItem struct {
 	ProbeStatus     Status           `json:"probe_status,omitempty"`  // result of offline classification
 	ProbeReason     string           `json:"probe_reason,omitempty"`  // explanation
 	Reclassified    bool             `json:"reclassified,omitempty"`  // true if effective differs from original
+	Dismissed       bool             `json:"dismissed"`               // user-dismissed
 	Requests        []RequestPreview `json:"requests,omitempty"`
 }
 
@@ -369,13 +370,23 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 		}
 	}
 
-	// Look up existing probe results in one query.
+	// Look up existing probe results and dismissals in parallel.
 	existing := map[string]SecretProbe{}
+	dismissed := map[string]bool{}
 	if len(allHashes) > 0 {
 		var probes []SecretProbe
 		r.db.WithContext(ctx).Where("secret_hash IN ?", allHashes).Find(&probes)
 		for _, p := range probes {
 			existing[p.SecretHash] = p
+		}
+
+		var dismissedHashes []string
+		r.db.WithContext(ctx).
+			Model(&SecretDismissal{}).
+			Where("secret_hash IN ?", allHashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
 		}
 	}
 
@@ -450,6 +461,7 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 			item.ProbeStatus = ce.classification.ProbeOutput.Status
 			item.ProbeReason = ce.classification.ProbeOutput.Reason
 		}
+		item.Dismissed = dismissed[ce.hash]
 		// Get request preview from the prober.
 		if p != nil {
 			item.Requests = p.Describe(ProbeContext{

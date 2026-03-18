@@ -937,9 +937,43 @@
 			if (res.ok) {
 				const data = await res.json();
 				probePreview = Array.isArray(data) ? data : [];
+				// Pre-exclude dismissed and inactive (expired/invalid/false_positive) items.
+				const excluded = new Set<string>();
+				for (const group of probePreview) {
+					for (const item of group.items ?? []) {
+						if (item.dismissed || item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive') {
+							excluded.add(item.secret_hash);
+						}
+					}
+				}
+				probeExcludedHashes = excluded;
 			}
 		} catch { /* ignore */ }
 		finally { probePreviewLoading = false; }
+	};
+
+	const persistDismissals = async () => {
+		// Compare current excluded hashes with server-side dismissed state.
+		// Newly excluded → dismiss; previously dismissed but now included → undismiss.
+		const toProcess: Array<{ secret_hash: string; dismiss: boolean }> = [];
+		for (const group of probePreview) {
+			for (const item of group.items ?? []) {
+				const isExcluded = probeExcludedHashes.has(item.secret_hash);
+				if (isExcluded && !item.dismissed) {
+					toProcess.push({ secret_hash: item.secret_hash, dismiss: true });
+				} else if (!isExcluded && item.dismissed) {
+					toProcess.push({ secret_hash: item.secret_hash, dismiss: false });
+				}
+			}
+		}
+		await Promise.all(toProcess.map(body =>
+			fetch('/api/secrets/dismiss', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			}).catch(() => {})
+		));
 	};
 
 	const loadProbeStatus = async () => {
@@ -953,6 +987,8 @@
 		probeTriggering = true;
 		probeError = '';
 		try {
+			// Persist any dismiss/undismiss changes first.
+			await persistDismissals();
 			const body: any = {};
 			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
 			if (probeForce) body.force = true;
@@ -2212,11 +2248,21 @@
 			</div>
 		{:else}
 			{@const totalSecrets = probePreview.reduce((s, g) => s + g.count, 0)}
-			{@const offlineCount = probePreview.filter(g => g.kind === 'offline').reduce((s, g) => s + g.count, 0)}
-			{@const networkCount = probePreview.filter(g => g.kind === 'network').reduce((s, g) => s + g.count, 0)}
-			{@const filteredPreview = probePreviewTab === 'all' ? probePreview : probePreview.filter(g => g.kind === probePreviewTab)}
-			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter(g => probeSelectedRules.includes(g.rule_id))}
-			{@const selectedCount = selectedGroups.reduce((s, g) => s + g.count, 0)}
+			{@const dismissedCount = probePreview.reduce((s, g) => s + (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length, 0)}
+			{@const filteredPreview = (() => {
+				if (probePreviewTab === 'dismissed') {
+					// Show only groups that have dismissed items, filtered to those items.
+					return probePreview.map((g: any) => ({
+						...g,
+						items: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)),
+						count: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length
+					})).filter((g: any) => g.count > 0);
+				}
+				const kindFilter = probePreviewTab === 'all' ? null : probePreviewTab;
+				return kindFilter ? probePreview.filter((g: any) => g.kind === kindFilter) : probePreview;
+			})()}
+			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter((g: any) => probeSelectedRules.includes(g.rule_id))}
+			{@const selectedCount = selectedGroups.reduce((s: number, g: any) => s + g.count, 0)}
 
 			<!-- Tab selector + summary -->
 			<div class="space-y-2">
@@ -2224,7 +2270,8 @@
 					options={[
 						{ value: 'all', label: 'All' },
 						{ value: 'network', label: 'External' },
-						{ value: 'offline', label: 'Local' }
+						{ value: 'offline', label: 'Local' },
+						{ value: 'dismissed', label: `Dismissed (${dismissedCount})` }
 					]}
 					bind:value={probePreviewTab}
 				/>
@@ -2333,8 +2380,12 @@
 											<td class="px-3 py-1.5">—</td>
 										{/if}
 										<td class="px-3 py-1.5">
-											{#if item.is_falsy}
+											{#if item.dismissed}
+												<span class="text-[var(--text-muted)]">dismissed</span>
+											{:else if item.is_falsy}
 												<span class="text-[var(--text-muted)]">skip</span>
+											{:else if item.probe_status && item.probe_status !== 'unknown'}
+												<span class="{item.probe_status === 'valid' ? 'text-red-400' : item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.probe_status}</span>
 											{:else if item.already_probed}
 												<span class="{item.previous_status === 'valid' ? 'text-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.previous_status}</span>
 											{:else}

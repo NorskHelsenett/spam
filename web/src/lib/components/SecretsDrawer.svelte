@@ -241,24 +241,6 @@
 
 	const hasMore = $derived(findings.length < total);
 
-	const toggleDismiss = async (f: Finding) => {
-		if (!f.secret_hash) return;
-		const newState = !f.dismissed;
-		try {
-			await fetch('/api/secrets/dismiss', {
-				method: 'POST',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ secret_hash: f.secret_hash, dismiss: newState })
-			});
-			// Update all findings with the same hash (shared secret across files).
-			for (const item of findings) {
-				if (item.secret_hash === f.secret_hash) {
-					item.dismissed = newState;
-				}
-			}
-		} catch { /* ignore */ }
-	};
 
 	const handleFilter = (ruleId: string, e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey) {
@@ -641,7 +623,7 @@
 					<!-- Findings -->
 					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
 						{#each group as f, idx (`${idx}-${f.file}-${f.start_line}`)}
-							<article class="group/finding rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)] {f.dismissed ? 'opacity-40' : ''}">
+							<article class="finding rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)] {f.dismissed ? 'opacity-40' : ''}">
 								<div class="flex items-start gap-4">
 									<div class="w-40 shrink-0 pt-0.5 space-y-1">
 										<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
@@ -661,13 +643,6 @@
 												entropy {f.entropy.toFixed(1)}
 											</p>
 										{/if}
-										<button
-											type="button"
-											class="mt-1 text-[10px] text-[var(--text-muted)] opacity-0 group-hover/finding:opacity-100 transition hover:text-[var(--text-secondary)]"
-											onclick={() => toggleDismiss(f)}
-										>
-											{f.dismissed ? 'Restore' : 'Dismiss'}
-										</button>
 									</div>
 									<div class="min-w-0 flex-1 space-y-1.5">
 										{#if f.description}
