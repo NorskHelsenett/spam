@@ -81,6 +81,10 @@ func (p *PostgresStore) Delete(ctx context.Context, key string) error {
 	return p.db.WithContext(ctx).Exec("DELETE FROM kv_store WHERE key = ?", key).Error
 }
 
+func (p *PostgresStore) DeleteByPrefix(ctx context.Context, prefix string) error {
+	return p.db.WithContext(ctx).Exec("DELETE FROM kv_store WHERE key LIKE ?", prefix+"%").Error
+}
+
 // Evict deletes all expired entries. Call this periodically (e.g. once per hour
 // from a background goroutine or a worker job) to reclaim space.
 func (p *PostgresStore) Evict(ctx context.Context) (int64, error) {

@@ -53,10 +53,7 @@
 </script>
 
 <div class="rounded-2xl bg-[var(--card-bg)]/20">
-	<div class="flex items-center justify-between">
-		<p class="text-sm uppercase tracking-[0.22em] text-[var(--text-muted)]">{title}</p>
-		<p class="text-xs text-[var(--text-tertiary)]">{total.toLocaleString()} components</p>
-	</div>
+	<p class="text-sm uppercase tracking-[0.22em] text-[var(--text-muted)]">{title}</p>
 	<div class="mt-3 flex flex-col gap-4 sm:flex-row sm:items-center">
 		<div class="relative h-44 w-44 shrink-0">
 			<svg
