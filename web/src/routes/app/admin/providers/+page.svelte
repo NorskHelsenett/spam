@@ -952,28 +952,28 @@
 		finally { probePreviewLoading = false; }
 	};
 
-	const persistDismissals = async () => {
-		// Compare current excluded hashes with server-side dismissed state.
-		// Newly excluded → dismiss; previously dismissed but now included → undismiss.
-		const toProcess: Array<{ secret_hash: string; dismiss: boolean }> = [];
+	const toggleDismiss = (secretHash: string) => {
+		const isDismissed = probeExcludedHashes.has(secretHash);
+		const next = new Set(probeExcludedHashes);
+		if (isDismissed) { next.delete(secretHash); } else { next.add(secretHash); }
+		probeExcludedHashes = next;
+
+		// Update the item's dismissed state in probePreview so the status column reflects it.
 		for (const group of probePreview) {
 			for (const item of group.items ?? []) {
-				const isExcluded = probeExcludedHashes.has(item.secret_hash);
-				if (isExcluded && !item.dismissed) {
-					toProcess.push({ secret_hash: item.secret_hash, dismiss: true });
-				} else if (!isExcluded && item.dismissed) {
-					toProcess.push({ secret_hash: item.secret_hash, dismiss: false });
+				if (item.secret_hash === secretHash) {
+					item.dismissed = !isDismissed;
 				}
 			}
 		}
-		await Promise.all(toProcess.map(body =>
-			fetch('/api/secrets/dismiss', {
-				method: 'POST',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(body)
-			}).catch(() => {})
-		));
+
+		// Persist immediately — fire and forget.
+		fetch('/api/secrets/dismiss', {
+			method: 'POST',
+			credentials: 'include',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ secret_hash: secretHash, dismiss: !isDismissed })
+		}).catch(() => {});
 	};
 
 	const loadProbeStatus = async () => {
@@ -987,8 +987,6 @@
 		probeTriggering = true;
 		probeError = '';
 		try {
-			// Persist any dismiss/undismiss changes first.
-			await persistDismissals();
 			const body: any = {};
 			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
 			if (probeForce) body.force = true;
@@ -2330,26 +2328,15 @@
 										class="cursor-pointer transition-opacity {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
 										onclick={(e) => {
 											const target = e.target as HTMLElement;
-											// Don't toggle when clicking on text content, buttons, or inputs
 											if (target.closest('button, a, input') || window.getSelection()?.toString()) return;
-											const next = new Set(probeExcludedHashes);
-											if (isItemChecked) { next.add(item.secret_hash); } else { next.delete(item.secret_hash); }
-											probeExcludedHashes = next;
+											toggleDismiss(item.secret_hash);
 										}}
 									>
 										<td class="px-3 py-1.5">
 											<button
 												type="button"
 												class="mx-auto block h-2 w-2 rounded-full transition {isItemChecked ? 'bg-[var(--accent)]' : 'bg-[var(--border-color)]'}"
-												onclick={() => {
-													const next = new Set(probeExcludedHashes);
-													if (isItemChecked) {
-														next.add(item.secret_hash);
-													} else {
-														next.delete(item.secret_hash);
-													}
-													probeExcludedHashes = next;
-												}}
+												onclick={() => toggleDismiss(item.secret_hash)}
 											></button>
 										</td>
 										<td class="px-3 py-1.5 font-mono overflow-hidden">
