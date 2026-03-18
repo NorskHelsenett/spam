@@ -49,14 +49,6 @@ func Classify(secret, ruleID string) Classification {
 
 	// 2. For jwt-base64: if it didn't pass the JWT check above, it's not a JWT.
 	if ruleID == "jwt-base64" {
-		// Try the decoded value as well.
-		if decoded != "" && looksLikeJWT(decoded) {
-			c.ProbeOutput = probeJWT(context.Background(), ProbeContext{
-				Secret: decoded,
-				RuleID: ruleID,
-			})
-			return c
-		}
 		c.ProbeOutput = ProbeOutput{
 			Status: StatusInvalid,
 			Reason: "not a valid JWT",

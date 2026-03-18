@@ -2,9 +2,11 @@ package uiapi
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -431,14 +433,19 @@ func maybeStoreSecretsCache[T any](ctx context.Context, c cache.Store, key strin
 
 // SecretFindingRow is a single deduplicated finding returned for the drawer.
 type SecretFindingRow struct {
-	RuleID      string  `json:"rule_id"`
-	Description string  `json:"description"`
-	File        string  `json:"file"`
-	StartLine   int     `json:"start_line"`
-	Match       string  `json:"match"`
-	Secret      string  `json:"secret,omitempty"`
-	Entropy     float64 `json:"entropy,omitempty"`
-	SubType     string  `json:"sub_type,omitempty"`
+	RuleID          string  `json:"rule_id"`
+	EffectiveRuleID string  `json:"effective_rule_id,omitempty"`
+	Description     string  `json:"description"`
+	File            string  `json:"file"`
+	StartLine       int     `json:"start_line"`
+	Match           string  `json:"match"`
+	Secret          string  `json:"secret,omitempty"`
+	Entropy         float64 `json:"entropy,omitempty"`
+	SubType         string  `json:"sub_type,omitempty"`
+	ProbeStatus     string  `json:"probe_status,omitempty"`
+	ProbeReason     string  `json:"probe_reason,omitempty"`
+	Dismissed       bool    `json:"dismissed"`
+	SecretHash      string  `json:"secret_hash,omitempty"`
 }
 
 // SecretFindingsPage wraps paginated findings with a total count.
@@ -533,9 +540,110 @@ deduped AS (
 		if rows == nil {
 			rows = []SecretFindingRow{}
 		}
-		for i := range rows {
-			rows[i].SubType = secretprobe.ExtractKeyName(rows[i].Match)
+
+		// Classify all findings concurrently and compute secret hashes.
+		type classResult struct {
+			index    int
+			subType  string
+			hash     string
+			classify secretprobe.Classification
 		}
+		results := make([]classResult, len(rows))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 64)
+		for i := range rows {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				row := &rows[i]
+				secret := secretprobe.ExtractSecret(row.Match)
+				if row.Secret != "" {
+					secret = secretprobe.ExtractSecret(row.Secret)
+				}
+				results[i] = classResult{
+					index:    i,
+					subType:  secretprobe.ExtractKeyName(row.Match),
+					hash:     secretprobe.SecretHash(secret),
+					classify: secretprobe.Classify(secret, row.RuleID),
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// Collect hashes to check for dismissals.
+		hashes := make([]string, len(results))
+		for i, cr := range results {
+			hashes[i] = cr.hash
+		}
+
+		// Look up dismissed hashes.
+		dismissed := map[string]bool{}
+		if len(hashes) > 0 {
+			var dismissedHashes []string
+			db.WithContext(r.Context()).
+				Model(&secretprobe.SecretDismissal{}).
+				Where("secret_hash IN ?", hashes).
+				Pluck("secret_hash", &dismissedHashes)
+			for _, h := range dismissedHashes {
+				dismissed[h] = true
+			}
+		}
+
+		// Apply results to rows.
+		for _, cr := range results {
+			row := &rows[cr.index]
+			row.SubType = cr.subType
+			row.SecretHash = cr.hash
+			row.ProbeStatus = string(cr.classify.ProbeOutput.Status)
+			row.ProbeReason = cr.classify.ProbeOutput.Reason
+			if cr.classify.Reclassified {
+				row.EffectiveRuleID = cr.classify.EffectiveRuleID
+			}
+			row.Dismissed = dismissed[cr.hash]
+		}
+
 		writeJSON(w, http.StatusOK, SecretFindingsPage{Items: rows, Total: total})
+	}
+}
+
+// SecretDismissHandler toggles the dismissed state of a secret finding.
+//
+// POST /api/secrets/dismiss
+// Body: {"secret_hash": "...", "dismiss": true}
+func SecretDismissHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := requireAuth(w, r, authService)
+		if user == nil {
+			return
+		}
+
+		var body struct {
+			SecretHash string `json:"secret_hash"`
+			Dismiss    bool   `json:"dismiss"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SecretHash == "" {
+			http.Error(w, "secret_hash is required", http.StatusBadRequest)
+			return
+		}
+
+		if body.Dismiss {
+			d := secretprobe.SecretDismissal{
+				SecretHash:  body.SecretHash,
+				DismissedBy: user.Email,
+				DismissedAt: time.Now(),
+			}
+			db.WithContext(r.Context()).
+				Where("secret_hash = ?", body.SecretHash).
+				FirstOrCreate(&d)
+		} else {
+			db.WithContext(r.Context()).
+				Where("secret_hash = ?", body.SecretHash).
+				Delete(&secretprobe.SecretDismissal{})
+		}
+
+		writeJSON(w, http.StatusOK, map[string]bool{"dismissed": body.Dismiss})
 	}
 }
