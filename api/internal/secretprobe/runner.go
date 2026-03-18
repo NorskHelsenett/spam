@@ -318,17 +318,17 @@ func (r *Runner) store(ctx context.Context, hash, ruleID string, output ProbeOut
 type PreviewItem struct {
 	SecretHash      string           `json:"secret_hash"`
 	Secret          string           `json:"secret"`
-	RuleID          string           `json:"rule_id"`
+	RuleID          string           `json:"rule_id,omitempty"`
 	EffectiveRuleID string           `json:"effective_rule_id,omitempty"` // after reclassification
 	Kind            string           `json:"kind"`                       // "offline" or "network"
-	AlreadyProbed   bool             `json:"already_probed"`
+	AlreadyProbed   bool             `json:"already_probed,omitempty"`
 	PreviousStatus  Status           `json:"previous_status,omitempty"`
-	IsFalsy         bool             `json:"is_falsy"`
+	IsFalsy         bool             `json:"is_falsy,omitempty"`
 	FalsyReason     string           `json:"falsy_reason,omitempty"`
 	ProbeStatus     Status           `json:"probe_status,omitempty"`  // result of offline classification
 	ProbeReason     string           `json:"probe_reason,omitempty"`  // explanation
 	Reclassified    bool             `json:"reclassified,omitempty"`  // true if effective differs from original
-	Dismissed       bool             `json:"dismissed"`               // user-dismissed
+	Dismissed       bool             `json:"dismissed,omitempty"`     // user-dismissed
 	Requests        []RequestPreview `json:"requests,omitempty"`
 }
 
@@ -473,9 +473,15 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 			kind = "network"
 		}
 
+		// Truncate secret for preview — full value is available via inspect endpoint.
+		truncated := ce.secret
+		if len(truncated) > 80 {
+			truncated = truncated[:40] + "…" + truncated[len(truncated)-20:]
+		}
+
 		item := PreviewItem{
 			SecretHash:      ce.hash,
-			Secret:          ce.secret,
+			Secret:          truncated,
 			RuleID:          ce.ruleID,
 			EffectiveRuleID: effectiveRule,
 			Kind:            kind,
