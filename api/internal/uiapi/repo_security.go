@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"gorm.io/gorm"
 )
 
@@ -178,14 +179,39 @@ func RepoSecretsListHandler(db *gorm.DB, authService *auth.Service) http.Handler
 			File        string `json:"File"`
 			StartLine   int    `json:"StartLine"`
 			Match       string `json:"Match"`
+			Secret      string `json:"Secret"`
 		}
 		if err := json.Unmarshal([]byte(rawFindings), &raw); err != nil {
 			writeJSON(w, http.StatusOK, []SecretFinding{})
 			return
 		}
 
+		// Compute hashes and look up dismissed secrets.
+		hashes := make([]string, len(raw))
+		for i, f := range raw {
+			s := secretprobe.ExtractSecret(f.Match)
+			if f.Secret != "" {
+				s = secretprobe.ExtractSecret(f.Secret)
+			}
+			hashes[i] = secretprobe.SecretHash(s)
+		}
+		dismissed := map[string]bool{}
+		if len(hashes) > 0 {
+			var dismissedHashes []string
+			db.WithContext(r.Context()).
+				Model(&secretprobe.SecretDismissal{}).
+				Where("secret_hash IN ?", hashes).
+				Pluck("secret_hash", &dismissedHashes)
+			for _, h := range dismissedHashes {
+				dismissed[h] = true
+			}
+		}
+
 		out := make([]SecretFinding, 0, len(raw))
-		for _, f := range raw {
+		for i, f := range raw {
+			if dismissed[hashes[i]] {
+				continue
+			}
 			out = append(out, SecretFinding{
 				RuleID:      f.RuleID,
 				Description: f.Description,
