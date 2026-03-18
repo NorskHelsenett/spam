@@ -180,7 +180,7 @@
 							class="ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-medium transition {dismissed ? 'bg-[var(--hover-bg)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]' : 'bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/20'}"
 							onclick={() => onDismiss(secretHash)}
 						>
-							{dismissed ? 'Restore' : 'Dismiss'}
+							{dismissed ? 'Excluded' : 'Exclude'}
 						</button>
 					{/if}
 				</div>

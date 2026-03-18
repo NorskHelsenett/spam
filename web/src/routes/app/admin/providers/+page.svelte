@@ -2218,7 +2218,7 @@
 
 <!-- Secret Probe Preview Dialog -->
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
-	<div class="flex min-h-0 flex-1 flex-col p-6 sm:p-8 space-y-5">
+	<div class="flex min-h-[80vh] min-h-0 flex-1 flex-col p-6 sm:p-8 space-y-5">
 		<div class="flex items-start justify-between">
 			<div class="flex items-center gap-3">
 				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
