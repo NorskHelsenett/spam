@@ -214,6 +214,8 @@
 						{#each data.locations as loc}
 							<a
 								href="/app/providers/repo/{loc.repo_id}"
+								target="_blank"
+								rel="noopener"
 								class="flex items-start gap-2 rounded-lg px-3 py-2 text-xs transition hover:bg-[var(--hover-bg-subtle)]"
 							>
 								<GitBranch class="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />

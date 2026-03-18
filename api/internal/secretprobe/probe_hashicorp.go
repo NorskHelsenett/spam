@@ -12,20 +12,8 @@ func init() {
 	}
 	RegisterNetwork("hashicorp-tf-api-token", probeHashiCorpTF, desc)
 	RegisterNetwork("hashicorp-tf-password", probeHashiCorpTF, desc)
-	RegisterNetwork("vault-batch-token", probeVaultToken, func(pc ProbeContext) []RequestPreview {
-		return []RequestPreview{{
-			Method:  "GET",
-			URL:     "https://vault.example.com/v1/auth/token/lookup-self",
-			Headers: map[string]string{"X-Vault-Token": "[REDACTED]"},
-		}}
-	})
-	RegisterNetwork("vault-service-token", probeVaultToken, func(pc ProbeContext) []RequestPreview {
-		return []RequestPreview{{
-			Method:  "GET",
-			URL:     "https://vault.example.com/v1/auth/token/lookup-self",
-			Headers: map[string]string{"X-Vault-Token": "[REDACTED]"},
-		}}
-	})
+	RegisterOffline("vault-batch-token", probeVaultToken)
+	RegisterOffline("vault-service-token", probeVaultToken)
 }
 
 func probeHashiCorpTF(ctx context.Context, pc ProbeContext) ProbeOutput {

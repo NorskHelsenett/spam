@@ -2413,7 +2413,7 @@
 
 			<!-- Inspect drawer -->
 			{#if inspectItem}
-				<div class="absolute inset-y-0 right-0 z-20 w-[380px]">
+				<div class="absolute inset-y-0 right-0 z-20 w-[480px]">
 					<SecretInspectDrawer
 						secretHash={inspectItem.hash}
 						secret={inspectItem.secret}
