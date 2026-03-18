@@ -22,13 +22,16 @@ func init() {
 			Body:    "{}",
 		}}
 	})
-	RegisterNetwork("slack-bot-token", probeSlackBotToken, func(pc ProbeContext) []RequestPreview {
+
+	authTestDesc := func(pc ProbeContext) []RequestPreview {
 		return []RequestPreview{{
 			Method:  "POST",
 			URL:     "https://slack.com/api/auth.test",
 			Headers: map[string]string{"Authorization": "Bearer [REDACTED]", "Content-Type": "application/json"},
 		}}
-	})
+	}
+	RegisterNetwork("slack-bot-token", probeSlackBotToken, authTestDesc)
+	RegisterNetwork("slack-app-token", probeSlackBotToken, authTestDesc)
 }
 
 func probeSlackWebhook(ctx context.Context, pc ProbeContext) ProbeOutput {
