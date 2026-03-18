@@ -436,9 +436,9 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 		}
 
 		p := Lookup(ce.ruleID)
-		kind := "network"
-		if p != nil && p.Kind() == ProbeKindOffline {
-			kind = "offline"
+		kind := "offline" // default to offline (local classification only)
+		if p != nil && p.Kind() == ProbeKindNetwork {
+			kind = "network"
 		}
 
 		item := PreviewItem{
@@ -477,9 +477,9 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 	result := []PreviewGroup{}
 	for ruleID, items := range groupItemsMap {
 		p := Lookup(ruleID)
-		kind := "network"
-		if p != nil && p.Kind() == ProbeKindOffline {
-			kind = "offline"
+		kind := "offline"
+		if p != nil && p.Kind() == ProbeKindNetwork {
+			kind = "network"
 		}
 		result = append(result, PreviewGroup{
 			RuleID: ruleID,
