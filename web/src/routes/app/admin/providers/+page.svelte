@@ -2382,26 +2382,26 @@
 											{/if}
 										</td>
 										<td class="px-3 py-1.5">
-											<div class="flex items-center gap-0.5">
-												{#if item.requests && item.requests.length > 0}
-													<button
-														type="button"
-														class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
-														title="Copy as curl"
-														onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
-													>
-														<Copy size={12} />
-													</button>
-												{/if}
+											{#if item.requests && item.requests.length > 0}
 												<button
 													type="button"
 													class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
-													title="Inspect secret"
-													onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
+													title="Copy as curl"
+													onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
 												>
-													<Eye size={12} />
+													<Copy size={12} />
 												</button>
-											</div>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5">
+											<button
+												type="button"
+												class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+												title="Inspect secret"
+												onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
+											>
+												<Eye size={12} />
+											</button>
 										</td>
 									</tr>
 								{/each}
