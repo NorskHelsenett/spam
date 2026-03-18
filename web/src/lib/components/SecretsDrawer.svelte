@@ -9,6 +9,9 @@
 		file: string;
 		start_line: number;
 		match: string;
+		secret?: string;
+		entropy?: number;
+		sub_type?: string;
 	};
 
 	type FindingsPage = {
@@ -58,6 +61,50 @@
 	const extractPemKey = (s: string): string | null => {
 		const match = s.match(/-----BEGIN [A-Z0-9 ]+ KEY-----[\s\S]+?-----END [A-Z0-9 ]+ KEY-----/);
 		return match ? match[0] : null;
+	};
+
+	type JWTInfo = {
+		header: Record<string, unknown>;
+		payload: Record<string, unknown>;
+		expired: boolean | null;
+		expiresAt: string | null;
+		issuedAt: string | null;
+		issuer: string | null;
+		subject: string | null;
+	};
+
+	const tryDecodeJWT = (s: string): JWTInfo | null => {
+		// Find JWT in the string (eyJ...something.eyJ...something.signature)
+		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+		if (!jwtMatch) return null;
+		const token = jwtMatch[0];
+		const parts = token.split('.');
+		if (parts.length !== 3) return null;
+
+		const decode = (part: string): Record<string, unknown> | null => {
+			try {
+				const norm = part.replace(/-/g, '+').replace(/_/g, '/');
+				const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+				return JSON.parse(atob(padded));
+			} catch { return null; }
+		};
+
+		const header = decode(parts[0]);
+		const payload = decode(parts[1]);
+		if (!header || !payload) return null;
+
+		const exp = typeof payload.exp === 'number' ? payload.exp : null;
+		const iat = typeof payload.iat === 'number' ? payload.iat : null;
+
+		return {
+			header,
+			payload,
+			expired: exp != null ? exp * 1000 < Date.now() : null,
+			expiresAt: exp != null ? new Date(exp * 1000).toISOString() : null,
+			issuedAt: iat != null ? new Date(iat * 1000).toISOString() : null,
+			issuer: typeof payload.iss === 'string' ? payload.iss : null,
+			subject: typeof payload.sub === 'string' ? payload.sub : null,
+		};
 	};
 
 	const findAllBase64 = (s: string): Array<{value: string, decoded: string}> => {
@@ -553,11 +600,19 @@
 						{#each group as f, idx (`${idx}-${f.file}-${f.start_line}`)}
 							<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
 								<div class="flex items-start gap-4">
-									<div class="w-40 shrink-0 pt-0.5">
+									<div class="w-40 shrink-0 pt-0.5 space-y-1">
 										<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
 											<FileWarning class="h-3 w-3 shrink-0" />
 											<span class="truncate">{f.rule_id}</span>
 										</span>
+										{#if f.sub_type}
+											<p class="text-[10px] text-[var(--text-muted)] truncate" title={f.sub_type}>{f.sub_type}</p>
+										{/if}
+										{#if f.entropy}
+											<p class="text-[10px] {f.entropy > 4 ? 'text-red-400/70' : f.entropy > 3 ? 'text-[var(--orange)]/70' : 'text-[var(--text-muted)]'}" title="Shannon entropy: {f.entropy.toFixed(2)} bits">
+												entropy {f.entropy.toFixed(1)}
+											</p>
+										{/if}
 									</div>
 									<div class="min-w-0 flex-1 space-y-1.5">
 										{#if f.description}
@@ -568,8 +623,10 @@
 										{/if}
 										{#if f.match}
 											{@const raw = cleanMatch(f.match)}
+											{@const secretVal = f.secret || raw}
 											{@const pemKey = extractPemKey(raw)}
-											{@const base64Matches = findAllBase64(raw)}
+											{@const jwt = tryDecodeJWT(secretVal)}
+											{@const base64Matches = jwt ? [] : findAllBase64(raw)}
 
 											<div
 												class="inline-block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] cursor-text"
@@ -582,6 +639,46 @@
 													sel?.addRange(range);
 												}}
 											>{raw}</div>
+
+											{#if jwt}
+												<div class="mt-1 rounded border border-[var(--border-color)]/40 bg-[var(--card-bg)] px-3 py-2 text-xs space-y-1.5">
+													<div class="flex items-center gap-2">
+														<span class="font-semibold text-[var(--text-secondary)]">JWT</span>
+														{#if jwt.expired === true}
+															<span class="rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400">EXPIRED</span>
+														{:else if jwt.expired === false}
+															<span class="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">ACTIVE</span>
+														{:else}
+															<span class="rounded-full bg-[var(--hover-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">NO EXPIRY</span>
+														{/if}
+														{#if jwt.header.alg}
+															<span class="text-[10px] text-[var(--text-muted)]">{jwt.header.alg}</span>
+														{/if}
+													</div>
+													<div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+														{#if jwt.issuer}
+															<span class="text-[var(--text-muted)]">iss</span>
+															<span class="text-[var(--text-secondary)] break-all">{jwt.issuer}</span>
+														{/if}
+														{#if jwt.subject}
+															<span class="text-[var(--text-muted)]">sub</span>
+															<span class="text-[var(--text-secondary)] break-all">{jwt.subject}</span>
+														{/if}
+														{#if jwt.expiresAt}
+															<span class="text-[var(--text-muted)]">exp</span>
+															<span class="text-[var(--text-secondary)]">{new Date(jwt.expiresAt).toLocaleString()}</span>
+														{/if}
+														{#if jwt.issuedAt}
+															<span class="text-[var(--text-muted)]">iat</span>
+															<span class="text-[var(--text-secondary)]">{new Date(jwt.issuedAt).toLocaleString()}</span>
+														{/if}
+													</div>
+													<details class="group">
+														<summary class="cursor-pointer text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]">payload</summary>
+														<pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[10px] text-[var(--text-muted)]">{JSON.stringify(jwt.payload, null, 2)}</pre>
+													</details>
+												</div>
+											{/if}
 
 											{#if pemKey}
 												<div class="whitespace-pre-wrap block max-w-full break-all rounded bg-[var(--card-bg)] px-2 py-1.5 font-mono text-xs text-[var(--text-muted)] opacity-70">{pemKey}</div>

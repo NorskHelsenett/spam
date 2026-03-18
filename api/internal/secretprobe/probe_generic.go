@@ -20,7 +20,12 @@ func init() {
 	RegisterOffline("curl-auth-header", probeGenericAPIKey)
 }
 
-func probeGenericAPIKey(_ context.Context, pc ProbeContext) ProbeOutput {
+func probeGenericAPIKey(ctx context.Context, pc ProbeContext) ProbeOutput {
+	// If the secret looks like a JWT, delegate to JWT probe for expiry checks.
+	if looksLikeJWT(pc.Secret) {
+		return probeJWT(ctx, pc)
+	}
+
 	// Falsy check already ran in the runner. If we get here, the secret
 	// passed entropy/placeholder checks. We can't validate it without
 	// knowing the target service — mark as unknown for manual review.
@@ -28,6 +33,16 @@ func probeGenericAPIKey(_ context.Context, pc ProbeContext) ProbeOutput {
 		Status: StatusUnknown,
 		Reason: "generic secret — manual review needed",
 	}
+}
+
+// looksLikeJWT returns true if s has the shape of a JWT: three dot-separated
+// parts where the first starts with "eyJ" (base64 for '{"').
+func looksLikeJWT(s string) bool {
+	if !strings.HasPrefix(s, "eyJ") {
+		return false
+	}
+	parts := strings.SplitN(s, ".", 4)
+	return len(parts) == 3 && len(parts[0]) > 3 && len(parts[1]) > 3
 }
 
 func probePrivateKey(_ context.Context, pc ProbeContext) ProbeOutput {
@@ -78,7 +93,12 @@ func probePrivateKey(_ context.Context, pc ProbeContext) ProbeOutput {
 	}
 }
 
-func probeKubernetesSecret(_ context.Context, pc ProbeContext) ProbeOutput {
+func probeKubernetesSecret(ctx context.Context, pc ProbeContext) ProbeOutput {
+	// If the extracted value looks like a JWT, delegate to JWT probe.
+	if looksLikeJWT(pc.Secret) {
+		return probeJWT(ctx, pc)
+	}
+
 	// K8s secret YAML — gitleaks flags the manifest structure, not a
 	// specific credential. The base64 value inside is usually a placeholder
 	// or references a sealed/external secret. Mark as unknown for manual review.

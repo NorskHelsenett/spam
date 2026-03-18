@@ -703,6 +703,33 @@
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
 	let probePreviewTab = $state('all');
+	const tryDecodeJWT = (s: string): { header: Record<string, unknown>; payload: Record<string, unknown>; expired: boolean | null; expiresAt: string | null; issuedAt: string | null; issuer: string | null; subject: string | null } | null => {
+		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+		if (!jwtMatch) return null;
+		const parts = jwtMatch[0].split('.');
+		if (parts.length !== 3) return null;
+		const decode = (part: string) => {
+			try {
+				const norm = part.replace(/-/g, '+').replace(/_/g, '/');
+				const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+				return JSON.parse(atob(padded));
+			} catch { return null; }
+		};
+		const header = decode(parts[0]);
+		const payload = decode(parts[1]);
+		if (!header || !payload) return null;
+		const exp = typeof payload.exp === 'number' ? payload.exp : null;
+		const iat = typeof payload.iat === 'number' ? payload.iat : null;
+		return {
+			header, payload,
+			expired: exp != null ? exp * 1000 < Date.now() : null,
+			expiresAt: exp != null ? new Date(exp * 1000).toISOString() : null,
+			issuedAt: iat != null ? new Date(iat * 1000).toISOString() : null,
+			issuer: typeof payload.iss === 'string' ? payload.iss : null,
+			subject: typeof payload.sub === 'string' ? payload.sub : null,
+		};
+	};
+
 	let probeListOpen = $state(false);
 	let probeListTitle = $state('');
 	let probeListStatuses: string[] = $state([]);
@@ -2016,11 +2043,16 @@
 											<FileWarning class="h-3 w-3 shrink-0" />
 											{probe.rule_id}
 										</span>
+										{#if probe.locations?.[0]?.sub_type}
+											<span class="text-[10px] text-[var(--text-muted)]">{probe.locations[0].sub_type}</span>
+										{/if}
 									</div>
 									{#if probe.reason}
 										<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{probe.reason}</p>
 									{/if}
 									{#if probe.locations.length > 0 && probe.locations[0].secret}
+										{@const secretVal = probe.locations[0].secret}
+										{@const jwt = tryDecodeJWT(secretVal)}
 										<pre
 											class="mt-1.5 inline-block max-w-full rounded bg-[var(--bg-hard)] px-2 py-1 font-mono text-xs text-[var(--text-muted)] whitespace-pre-wrap break-all cursor-text"
 											onclick={(e) => {
@@ -2031,7 +2063,42 @@
 												sel?.removeAllRanges();
 												sel?.addRange(range);
 											}}
-										>{probe.locations[0].secret}</pre>
+										>{secretVal}</pre>
+										{#if jwt}
+											<div class="mt-1 rounded border border-[var(--border-color)]/40 bg-[var(--card-bg)] px-2.5 py-1.5 text-xs space-y-1">
+												<div class="flex items-center gap-2">
+													<span class="font-semibold text-[var(--text-secondary)]">JWT</span>
+													{#if jwt.expired === true}
+														<span class="rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400">EXPIRED</span>
+													{:else if jwt.expired === false}
+														<span class="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">ACTIVE</span>
+													{:else}
+														<span class="rounded-full bg-[var(--hover-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">NO EXPIRY</span>
+													{/if}
+													{#if jwt.header.alg}
+														<span class="text-[10px] text-[var(--text-muted)]">{jwt.header.alg}</span>
+													{/if}
+												</div>
+												<div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+													{#if jwt.issuer}
+														<span class="text-[var(--text-muted)]">iss</span>
+														<span class="text-[var(--text-secondary)] break-all">{jwt.issuer}</span>
+													{/if}
+													{#if jwt.subject}
+														<span class="text-[var(--text-muted)]">sub</span>
+														<span class="text-[var(--text-secondary)] break-all">{jwt.subject}</span>
+													{/if}
+													{#if jwt.expiresAt}
+														<span class="text-[var(--text-muted)]">exp</span>
+														<span class="text-[var(--text-secondary)]">{new Date(jwt.expiresAt).toLocaleString()}</span>
+													{/if}
+												</div>
+												<details class="group">
+													<summary class="cursor-pointer text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]">payload</summary>
+													<pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[10px] text-[var(--text-muted)]">{JSON.stringify(jwt.payload, null, 2)}</pre>
+												</details>
+											</div>
+										{/if}
 									{/if}
 									<p class="mt-1 text-[10px] text-[var(--text-muted)]">
 										Probed {new Date(probe.probed_at).toLocaleString()}

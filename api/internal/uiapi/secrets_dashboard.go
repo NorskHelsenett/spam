@@ -10,6 +10,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"gorm.io/gorm"
 )
 
@@ -428,11 +429,14 @@ func maybeStoreSecretsCache[T any](ctx context.Context, c cache.Store, key strin
 
 // SecretFindingRow is a single deduplicated finding returned for the drawer.
 type SecretFindingRow struct {
-	RuleID      string `json:"rule_id"`
-	Description string `json:"description"`
-	File        string `json:"file"`
-	StartLine   int    `json:"start_line"`
-	Match       string `json:"match"`
+	RuleID      string  `json:"rule_id"`
+	Description string  `json:"description"`
+	File        string  `json:"file"`
+	StartLine   int     `json:"start_line"`
+	Match       string  `json:"match"`
+	Secret      string  `json:"secret,omitempty"`
+	Entropy     float64 `json:"entropy,omitempty"`
+	SubType     string  `json:"sub_type,omitempty"`
 }
 
 // SecretFindingsPage wraps paginated findings with a total count.
@@ -485,6 +489,8 @@ exploded AS (
     COALESCE(finding->>'File', '')            AS file,
     COALESCE((finding->>'StartLine')::int, 0) AS start_line,
     COALESCE(finding->>'Match', '')           AS match,
+    COALESCE(finding->>'Secret', '')          AS secret,
+    COALESCE((finding->>'Entropy')::float, 0) AS entropy,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(concat_ws('|',
@@ -500,7 +506,7 @@ exploded AS (
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(findings, '[]'::jsonb)) AS finding
 ),
 deduped AS (
-  SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match
+  SELECT DISTINCT ON (dedupe_key) rule_id, description, file, start_line, match, secret, entropy
   FROM exploded
   ORDER BY dedupe_key, rule_id, file, start_line
 )`
@@ -512,7 +518,7 @@ deduped AS (
 			return
 		}
 
-		dataQuery := cte + "\nSELECT rule_id, description, file, start_line, match FROM deduped ORDER BY rule_id, file, start_line LIMIT @limit OFFSET @offset"
+		dataQuery := cte + "\nSELECT rule_id, description, file, start_line, match, secret, entropy FROM deduped ORDER BY rule_id, file, start_line LIMIT @limit OFFSET @offset"
 		var rows []SecretFindingRow
 		if err := db.WithContext(r.Context()).Raw(dataQuery, map[string]interface{}{
 			"repo_id": repoID,
@@ -524,6 +530,9 @@ deduped AS (
 		}
 		if rows == nil {
 			rows = []SecretFindingRow{}
+		}
+		for i := range rows {
+			rows[i].SubType = secretprobe.ExtractKeyName(rows[i].Match)
 		}
 		writeJSON(w, http.StatusOK, SecretFindingsPage{Items: rows, Total: total})
 	}

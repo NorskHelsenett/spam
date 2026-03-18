@@ -208,6 +208,7 @@ type ProbeListLocation struct {
 	File     string `json:"file,omitempty"`
 	Line     int    `json:"line,omitempty"`
 	Secret   string `json:"secret,omitempty"`
+	SubType  string `json:"sub_type,omitempty"`
 }
 
 // AdminSecretProbeListHandler returns probed secrets with locations, filtered by status.
@@ -301,6 +302,7 @@ func AdminSecretProbeListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 						File:     f.File,
 						Line:     f.StartLine,
 						Secret:   secret,
+						SubType:  secretprobe.ExtractKeyName(f.Match),
 					})
 				}
 			}
