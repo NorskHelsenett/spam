@@ -666,11 +666,11 @@
 														{/if}
 														{#if jwt.expiresAt}
 															<span class="text-[var(--text-muted)]">exp</span>
-															<span class="text-[var(--text-secondary)]">{new Date(jwt.expiresAt).toLocaleString()}</span>
+															<span class="text-[var(--text-secondary)]">{new Date(jwt.expiresAt).toLocaleString('fr-FR')}</span>
 														{/if}
 														{#if jwt.issuedAt}
 															<span class="text-[var(--text-muted)]">iat</span>
-															<span class="text-[var(--text-secondary)]">{new Date(jwt.issuedAt).toLocaleString()}</span>
+															<span class="text-[var(--text-secondary)]">{new Date(jwt.issuedAt).toLocaleString('fr-FR')}</span>
 														{/if}
 													</div>
 													<details class="group">
