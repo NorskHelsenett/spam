@@ -449,6 +449,7 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 			http.Error(w, "secret_hash is required", http.StatusBadRequest)
 			return
 		}
+		hintRuleID := r.URL.Query().Get("rule_id")
 
 		// Find locations across all repos.
 		type findingRow struct {
@@ -520,8 +521,11 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 		// Look up existing probe result.
 		var probe secretprobe.SecretProbe
 		db.WithContext(r.Context()).Where("secret_hash = ?", hash).First(&probe)
-		if probe.RuleID != "" && ruleID == "" {
+		if ruleID == "" && probe.RuleID != "" {
 			ruleID = probe.RuleID
+		}
+		if ruleID == "" && hintRuleID != "" {
+			ruleID = hintRuleID
 		}
 
 		// Classify.

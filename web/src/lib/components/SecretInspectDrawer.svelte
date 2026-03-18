@@ -108,7 +108,9 @@
 		loading = true;
 		data = null;
 		try {
-			const res = await fetch(`/api/admin/secrets/probe/inspect?secret_hash=${encodeURIComponent(secretHash)}`, { credentials: 'include' });
+			const params = new URLSearchParams({ secret_hash: secretHash });
+			if (ruleId) params.set('rule_id', ruleId);
+			const res = await fetch(`/api/admin/secrets/probe/inspect?${params}`, { credentials: 'include' });
 			if (res.ok) data = await res.json();
 		} catch { /* ignore */ }
 		finally { loading = false; }
@@ -120,7 +122,11 @@
 	const secretValue = $derived(data?.secret || secret);
 	const jwt = $derived(secretValue ? tryDecodeJWT(secretValue) : null);
 	const decoded = $derived(secretValue && !jwt ? tryBase64(secretValue) : null);
-	const effectiveRule = $derived(data?.classification?.reclassified ? data.classification.effective_rule_id : (data?.rule_id || ruleId));
+	const effectiveRule = $derived(
+		data?.classification?.reclassified
+			? data.classification.effective_rule_id
+			: (ruleId || data?.rule_id || 'unknown')
+	);
 	const probeStatus = $derived(probeResult?.status || data?.classification?.probe_output?.status || data?.probe?.status);
 	const probeReason = $derived(probeResult?.reason || data?.classification?.probe_output?.reason || data?.probe?.reason);
 	const requests = $derived(data?.requests ?? []);
