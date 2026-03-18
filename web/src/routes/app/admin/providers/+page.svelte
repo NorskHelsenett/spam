@@ -2250,7 +2250,7 @@
 						{#if probeForce}
 							No secrets found to probe. Run a scan first to discover secrets.
 						{:else}
-							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Force re-probe all</span> to re-check them.
+							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Show all</span> to see them.
 						{/if}
 					</p>
 				</div>
@@ -2452,7 +2452,7 @@
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between pt-2">
-			<Toggle bind:checked={probeForce} label="Force re-probe all" onchange={() => loadProbePreview()} />
+			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview()} />
 			<div class="flex items-center gap-3">
 				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
 					Cancel
