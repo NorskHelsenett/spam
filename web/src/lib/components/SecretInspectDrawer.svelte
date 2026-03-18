@@ -46,12 +46,16 @@
 		secretHash,
 		secret = '',
 		ruleId = '',
-		onClose = () => {}
+		dismissed = false,
+		onClose = () => {},
+		onDismiss
 	}: {
 		secretHash: string;
 		secret?: string;
 		ruleId?: string;
+		dismissed?: boolean;
 		onClose?: () => void;
+		onDismiss?: (secretHash: string) => void;
 	} = $props();
 
 	let data: InspectData | null = $state(null);
@@ -160,15 +164,24 @@
 	<!-- Header -->
 	<div class="shrink-0 px-6 pt-6 pb-4">
 		<div class="flex items-start gap-3">
-			<Eye class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
+			<Eye class="mt-0.5 h-5 w-5 shrink-0 {dismissed ? 'text-[var(--text-muted)]' : 'text-[var(--accent)]'}" />
 			<div class="min-w-0 flex-1">
-				<h3 class="text-sm font-semibold text-[var(--text-bright)]">Secret Inspector</h3>
+				<h3 class="text-sm font-semibold {dismissed ? 'text-[var(--text-muted)]' : 'text-[var(--text-bright)]'}">Secret Inspector</h3>
 				<div class="mt-1 flex items-center gap-2">
-					<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[10px] text-[var(--text-secondary)]">{effectiveRule}</span>
+					<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[10px] {dismissed ? 'text-[var(--text-muted)]' : 'text-[var(--text-secondary)]'}">{effectiveRule}</span>
 					{#if probeStatus && probeStatus !== 'unknown'}
 						<span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {probeStatus === 'valid' ? 'bg-red-500/10 text-red-400' : probeStatus === 'expired' ? 'bg-green-500/10 text-green-400' : probeStatus === 'invalid' || probeStatus === 'false_positive' ? 'bg-[var(--hover-bg)] text-[var(--text-muted)]' : 'bg-[var(--orange)]/10 text-[var(--orange)]'}">
 							{probeStatus.toUpperCase()}
 						</span>
+					{/if}
+					{#if onDismiss}
+						<button
+							type="button"
+							class="ml-auto rounded-full px-2.5 py-0.5 text-[10px] font-medium transition {dismissed ? 'bg-[var(--hover-bg)] text-[var(--text-muted)] hover:text-[var(--text-secondary)]' : 'bg-[var(--accent)]/10 text-[var(--accent)] hover:bg-[var(--accent)]/20'}"
+							onclick={() => onDismiss(secretHash)}
+						>
+							{dismissed ? 'Restore' : 'Dismiss'}
+						</button>
 					{/if}
 				</div>
 				{#if probeReason}

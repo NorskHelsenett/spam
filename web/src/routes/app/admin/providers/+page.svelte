@@ -2437,6 +2437,8 @@
 							secretHash={inspectItem.hash}
 							secret={inspectItem.secret}
 							ruleId={inspectItem.ruleId}
+							dismissed={probeExcludedHashes.has(inspectItem.hash)}
+							onDismiss={(hash) => toggleDismiss(hash)}
 							onClose={() => { inspectItem = null; }}
 						/>
 					</div>
