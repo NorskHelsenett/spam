@@ -129,7 +129,7 @@ LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id`
 
 		secret := ExtractSecret(f.Match)
 		if f.Secret != "" {
-			secret = f.Secret
+			secret = ExtractSecret(f.Secret)
 		}
 		hash := SecretHash(secret)
 
@@ -225,7 +225,7 @@ func (r *Runner) ProbeOne(ctx context.Context, repoID, fingerprint string) (*Sec
 
 	secret := ExtractSecret(target.Match)
 	if target.Secret != "" {
-		secret = target.Secret
+		secret = ExtractSecret(target.Secret)
 	}
 	hash := SecretHash(secret)
 
@@ -352,7 +352,7 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 			}
 			secret := ExtractSecret(f.Match)
 			if f.Secret != "" {
-				secret = f.Secret
+				secret = ExtractSecret(f.Secret)
 			}
 			hash := SecretHash(secret)
 			if seen[hash] {

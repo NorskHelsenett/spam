@@ -288,7 +288,7 @@ func AdminSecretProbeListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 				for _, f := range findings {
 					secret := secretprobe.ExtractSecret(f.Match)
 					if f.Secret != "" {
-						secret = f.Secret
+						secret = secretprobe.ExtractSecret(f.Secret)
 					}
 					hash := secretprobe.SecretHash(secret)
 					if !hashSet[hash] {
@@ -402,7 +402,7 @@ func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.
 				for _, f := range findings {
 					secret := secretprobe.ExtractSecret(f.Match)
 					if f.Secret != "" {
-						secret = f.Secret
+						secret = secretprobe.ExtractSecret(f.Secret)
 					}
 					hash := secretprobe.SecretHash(secret)
 					if !hashSet[hash] {
