@@ -47,6 +47,7 @@ type SecretTableRow struct {
 	Repo               string    `json:"repo"`
 	RepoID             string    `json:"repo_id"`
 	Provider           string    `json:"provider"`
+	ProviderName       string    `json:"provider_name"`
 	IsPrivate          bool      `json:"is_private"`
 	SecretType         string    `json:"secret_type"`
 	UniqueFindingCount int64     `json:"unique_finding_count"`
@@ -150,6 +151,7 @@ SELECT
   ) || '/' || r.org || '/' || r.slug || '.git' AS repo,
   r.id AS repo_id,
   r.provider AS provider,
+  COALESCE(pi.display_name, r.provider) AS provider_name,
   r.is_private AS is_private,
   df.secret_type,
   COUNT(*) AS unique_finding_count,
@@ -159,7 +161,7 @@ JOIN repos r
   ON r.id = df.repo_id
 LEFT JOIN provider_instances pi
   ON pi.id = r.provider_instance_id
-GROUP BY repo, r.id, r.provider, r.is_private, df.secret_type
+GROUP BY repo, r.id, r.provider, pi.display_name, r.is_private, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
 	var rows []SecretTableRow

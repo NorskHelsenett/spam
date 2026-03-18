@@ -16,6 +16,7 @@
 		repo: string;
 		repo_id: string;
 		provider: string;
+		provider_name: string;
 		is_private: boolean;
 		secret_type: string;
 		unique_finding_count: number;
@@ -113,12 +114,12 @@
 	// Derive available options from loaded data, disabling combinations that yield no results
 	const secretTypesForSelectedProviders = $derived(
 		selectedProviders.length > 0
-			? new Set(tableRows.filter((r) => selectedProviders.includes(r.provider)).map((r) => r.secret_type))
+			? new Set(tableRows.filter((r) => selectedProviders.includes(r.provider_name)).map((r) => r.secret_type))
 			: null
 	);
 	const providersForSelectedSecretTypes = $derived(
 		selectedSecretTypes.length > 0
-			? new Set(tableRows.filter((r) => selectedSecretTypes.includes(r.secret_type)).map((r) => r.provider))
+			? new Set(tableRows.filter((r) => selectedSecretTypes.includes(r.secret_type)).map((r) => r.provider_name))
 			: null
 	);
 
@@ -130,7 +131,7 @@
 		})).sort((a, b) => Number(a.disabled) - Number(b.disabled) || a.label.localeCompare(b.label))
 	);
 	const providerOptions: MultiSelectOption[] = $derived(
-		[...new Set(tableRows.map((r) => r.provider).filter(Boolean))].sort().map((p) => ({
+		[...new Set(tableRows.map((r) => r.provider_name).filter(Boolean))].sort().map((p) => ({
 			value: p,
 			label: p,
 			disabled: providersForSelectedSecretTypes != null && !providersForSelectedSecretTypes.has(p)
@@ -146,13 +147,13 @@
 		tableRows.filter((row) => {
 			if (publicOnly && row.is_private) return false;
 			if (selectedSecretTypes.length > 0 && !selectedSecretTypes.includes(row.secret_type)) return false;
-			if (selectedProviders.length > 0 && !selectedProviders.includes(row.provider)) return false;
+			if (selectedProviders.length > 0 && !selectedProviders.includes(row.provider_name)) return false;
 			if (searchQuery.trim()) {
 				const q = searchQuery.trim().toLowerCase();
 				if (
 					!row.repo.toLowerCase().includes(q) &&
 					!row.secret_type.toLowerCase().includes(q) &&
-					!row.provider.toLowerCase().includes(q) &&
+					!row.provider_name.toLowerCase().includes(q) &&
 					!repoShortName(row.repo).toLowerCase().includes(q)
 				) return false;
 			}
