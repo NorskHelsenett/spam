@@ -114,6 +114,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/admin/secrets/probe/one", uiapi.AdminSecretProbeOneHandler(db, authService))
 				api.Get("/admin/secrets/probe/audit", uiapi.AdminSecretProbeAuditHandler(db, authService))
 				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
+				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))

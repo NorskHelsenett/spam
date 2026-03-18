@@ -452,10 +452,11 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 
 		// Find locations across all repos.
 		type findingRow struct {
-			RepoID   string
-			RepoName string
-			RepoURL  string
-			Findings json.RawMessage
+			RepoID          string
+			RepoName        string
+			RepoURL         string
+			ProviderBaseURL string
+			Findings        json.RawMessage
 		}
 		var rows []findingRow
 		db.WithContext(r.Context()).Raw(`
@@ -464,6 +465,7 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 			       RTRIM(COALESCE(pi.base_url,
 			         CASE r.provider WHEN 'github' THEN 'https://github.com' WHEN 'gitlab' THEN 'https://gitlab.com' ELSE '' END
 			       ), '/') || '/' || r.org || '/' || r.slug AS repo_url,
+			       COALESCE(pi.base_url, '') AS provider_base_url,
 			       rs.findings
 			FROM (
 			  SELECT DISTINCT ON (repo_id) repo_id, findings
@@ -475,6 +477,7 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 		`).Scan(&rows)
 
 		var locs []ProbeListLocation
+		var secretValue, ruleID, providerBaseURL string
 		for _, row := range rows {
 			var findings []struct {
 				RuleID    string `json:"RuleID"`
@@ -492,6 +495,11 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 					secret = secretprobe.ExtractSecret(f.Secret)
 				}
 				if secretprobe.SecretHash(secret) == hash {
+					if secretValue == "" {
+						secretValue = secret
+						ruleID = f.RuleID
+						providerBaseURL = row.ProviderBaseURL
+					}
 					locs = append(locs, ProbeListLocation{
 						RepoID:   row.RepoID,
 						RepoName: row.RepoName,
@@ -509,34 +517,88 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 			locs = []ProbeListLocation{}
 		}
 
-		// Classify the secret.
-		var secretValue, ruleID string
-		if len(locs) > 0 {
-			secretValue = locs[0].Secret
-		}
-		// Find original rule from preview data.
+		// Look up existing probe result.
 		var probe secretprobe.SecretProbe
 		db.WithContext(r.Context()).Where("secret_hash = ?", hash).First(&probe)
-		if probe.RuleID != "" {
+		if probe.RuleID != "" && ruleID == "" {
 			ruleID = probe.RuleID
-		} else if len(locs) > 0 {
-			ruleID = "unknown"
 		}
 
+		// Classify.
 		var classification *secretprobe.Classification
 		if secretValue != "" {
 			c := secretprobe.Classify(secretValue, ruleID)
 			classification = &c
 		}
 
+		// Build unredacted request preview for network probes.
+		var requests []secretprobe.RequestPreview
+		if p := secretprobe.Lookup(ruleID); p != nil && p.Kind() == secretprobe.ProbeKindNetwork && secretValue != "" {
+			requests = p.Describe(secretprobe.ProbeContext{
+				Secret:          secretValue,
+				RuleID:          ruleID,
+				ProviderBaseURL: providerBaseURL,
+			})
+			// Replace [REDACTED] with actual values in the preview.
+			for i := range requests {
+				for k, v := range requests[i].Headers {
+					if strings.Contains(v, "[REDACTED]") {
+						lk := strings.ToLower(k)
+						if lk == "authorization" {
+							prefix := strings.SplitN(v, " [REDACTED]", 2)[0]
+							requests[i].Headers[k] = prefix + " " + secretValue
+						} else {
+							requests[i].Headers[k] = strings.ReplaceAll(v, "[REDACTED]", secretValue)
+						}
+					}
+				}
+				if strings.Contains(requests[i].Body, "[REDACTED]") {
+					requests[i].Body = strings.ReplaceAll(requests[i].Body, "[REDACTED]", secretValue)
+				}
+			}
+		}
+
 		writeJSON(w, http.StatusOK, map[string]any{
-			"secret_hash":    hash,
-			"secret":         secretValue,
-			"rule_id":        ruleID,
-			"locations":      locs,
-			"classification": classification,
-			"probe":          probe,
+			"secret_hash":      hash,
+			"secret":           secretValue,
+			"rule_id":          ruleID,
+			"locations":        locs,
+			"classification":   classification,
+			"probe":            probe,
+			"requests":         requests,
+			"provider_base_url": providerBaseURL,
 		})
+	}
+}
+
+// AdminSecretProbeByHashHandler probes a single secret by hash.
+//
+// POST /api/admin/secrets/probe/run?secret_hash=...
+func AdminSecretProbeByHashHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		var body struct {
+			SecretHash      string `json:"secret_hash"`
+			Secret          string `json:"secret"`
+			RuleID          string `json:"rule_id"`
+			ProviderBaseURL string `json:"provider_base_url"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Secret == "" || body.RuleID == "" {
+			http.Error(w, "secret, rule_id are required", http.StatusBadRequest)
+			return
+		}
+
+		runner := secretprobe.NewRunner(db)
+		probe, err := runner.ProbeByHash(r.Context(), body.Secret, body.RuleID, body.ProviderBaseURL)
+		if err != nil {
+			http.Error(w, "probe failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, probe)
 	}
 }
 

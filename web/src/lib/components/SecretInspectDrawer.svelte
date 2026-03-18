@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Eye, GitBranch, FileText } from 'lucide-svelte';
+	import { X, Eye, GitBranch, FileText, Play } from 'lucide-svelte';
 
 	type Location = {
 		repo_id: string;
@@ -11,11 +11,20 @@
 		sub_type: string;
 	};
 
+	type RequestPreview = {
+		method: string;
+		url: string;
+		headers?: Record<string, string>;
+		body?: string;
+	};
+
 	type InspectData = {
 		secret_hash: string;
 		secret: string;
 		rule_id: string;
+		provider_base_url: string;
 		locations: Location[];
+		requests: RequestPreview[] | null;
 		classification: {
 			effective_rule_id: string;
 			original_rule_id: string;
@@ -105,12 +114,40 @@
 		finally { loading = false; }
 	};
 
+	let probing = $state(false);
+	let probeResult: { status: string; reason: string; metadata: string } | null = $state(null);
+
 	const secretValue = $derived(data?.secret || secret);
 	const jwt = $derived(secretValue ? tryDecodeJWT(secretValue) : null);
 	const decoded = $derived(secretValue && !jwt ? tryBase64(secretValue) : null);
 	const effectiveRule = $derived(data?.classification?.reclassified ? data.classification.effective_rule_id : (data?.rule_id || ruleId));
-	const probeStatus = $derived(data?.classification?.probe_output?.status || data?.probe?.status);
-	const probeReason = $derived(data?.classification?.probe_output?.reason || data?.probe?.reason);
+	const probeStatus = $derived(probeResult?.status || data?.classification?.probe_output?.status || data?.probe?.status);
+	const probeReason = $derived(probeResult?.reason || data?.classification?.probe_output?.reason || data?.probe?.reason);
+	const requests = $derived(data?.requests ?? []);
+	const isNetwork = $derived(requests.length > 0);
+
+	const runProbe = async () => {
+		if (!data || !secretValue) return;
+		probing = true;
+		probeResult = null;
+		try {
+			const res = await fetch('/api/admin/secrets/probe/run', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					secret_hash: secretHash,
+					secret: secretValue,
+					rule_id: data.rule_id || ruleId,
+					provider_base_url: data.provider_base_url || ''
+				})
+			});
+			if (res.ok) {
+				probeResult = await res.json();
+			}
+		} catch { /* ignore */ }
+		finally { probing = false; }
+	};
 </script>
 
 <div class="flex h-full flex-col overflow-hidden bg-[var(--bg-soft)] border-l border-[var(--border-color)]">
@@ -201,6 +238,59 @@
 				<div>
 					<h4 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-1">Base64 Decoded</h4>
 					<pre class="rounded bg-[var(--card-bg)] px-3 py-2 font-mono text-xs text-[var(--text-muted)] whitespace-pre-wrap break-all">{decoded}</pre>
+				</div>
+			{/if}
+
+			<!-- HTTP Request Preview -->
+			{#if isNetwork}
+				<div>
+					<div class="flex items-center justify-between mb-1">
+						<h4 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">HTTP Request</h4>
+						<button
+							type="button"
+							class="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-2.5 py-1 text-[10px] font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/20 disabled:opacity-40"
+							disabled={probing}
+							onclick={runProbe}
+						>
+							{#if probing}
+								<div class="h-3 w-3 animate-spin rounded-full border border-[var(--accent)] border-t-transparent"></div>
+								Probing…
+							{:else}
+								<Play class="h-3 w-3" />
+								Run
+							{/if}
+						</button>
+					</div>
+					{#each requests as req}
+						<div class="rounded border border-[var(--border-color)]/40 bg-[var(--card-bg)] px-3 py-2 font-mono text-[11px] space-y-1">
+							<div>
+								<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--text-secondary)]">{req.method}</span>
+								<span class="ml-1.5 text-[var(--text-secondary)] break-all">{req.url}</span>
+							</div>
+							{#if req.headers}
+								{#each Object.entries(req.headers) as [k, v]}
+									<div class="text-[var(--text-muted)]">
+										<span class="text-[var(--text-tertiary)]">{k}:</span> <span class="break-all">{v}</span>
+									</div>
+								{/each}
+							{/if}
+							{#if req.body}
+								<div class="text-[var(--text-muted)] pt-1 border-t border-[var(--border-color)]/20">
+									<pre class="whitespace-pre-wrap break-all">{req.body}</pre>
+								</div>
+							{/if}
+						</div>
+					{/each}
+					{#if probeResult}
+						<div class="mt-2 rounded border border-[var(--border-color)]/40 bg-[var(--card-bg)] px-3 py-2 text-xs">
+							<span class="font-semibold {probeResult.status === 'valid' ? 'text-red-400' : probeResult.status === 'revoked' || probeResult.status === 'expired' ? 'text-green-400' : 'text-[var(--text-secondary)]'}">
+								{probeResult.status.toUpperCase()}
+							</span>
+							{#if probeResult.reason}
+								<span class="ml-2 text-[var(--text-muted)]">{probeResult.reason}</span>
+							{/if}
+						</div>
+					{/if}
 				</div>
 			{/if}
 

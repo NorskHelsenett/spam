@@ -259,6 +259,38 @@ func (r *Runner) ProbeOne(ctx context.Context, repoID, fingerprint string) (*Sec
 	return &probe, nil
 }
 
+// ProbeByHash probes a secret directly by its value and stores the result.
+func (r *Runner) ProbeByHash(ctx context.Context, secret, ruleID, providerBaseURL string) (*SecretProbe, error) {
+	ctx = WithAuditLogger(ctx, r.logger)
+	hash := SecretHash(secret)
+
+	prober := Lookup(ruleID)
+	if prober == nil {
+		r.store(ctx, hash, ruleID, ProbeOutput{
+			Status: StatusUnknown,
+			Reason: "no prober registered for " + ruleID,
+		})
+		probe := &SecretProbe{SecretHash: hash, RuleID: ruleID, Status: StatusUnknown}
+		return probe, nil
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probeCtx = WithProbeIdentity(probeCtx, hash, ruleID)
+
+	output := prober.Probe(probeCtx, ProbeContext{
+		Secret:          secret,
+		RuleID:          ruleID,
+		ProviderBaseURL: providerBaseURL,
+	})
+	cancel()
+
+	r.store(ctx, hash, ruleID, output)
+
+	var probe SecretProbe
+	r.db.WithContext(ctx).Where("secret_hash = ?", hash).First(&probe)
+	return &probe, nil
+}
+
 func (r *Runner) store(ctx context.Context, hash, ruleID string, output ProbeOutput) {
 	meta := "{}"
 	if output.Metadata != nil {
