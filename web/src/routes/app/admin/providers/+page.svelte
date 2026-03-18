@@ -2271,7 +2271,7 @@
 						{ value: 'all', label: 'All' },
 						{ value: 'network', label: 'External' },
 						{ value: 'offline', label: 'Local' },
-						{ value: 'dismissed', label: `Dismissed (${dismissedCount})` }
+						{ value: 'dismissed', label: 'Dismissed' }
 					]}
 					bind:value={probePreviewTab}
 				/>

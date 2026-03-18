@@ -3,13 +3,15 @@ package secretprobe
 import "context"
 
 func init() {
-	RegisterNetwork("nuget-api-key", probeNuGetAPIKey, func(pc ProbeContext) []RequestPreview {
+	desc := func(pc ProbeContext) []RequestPreview {
 		return []RequestPreview{{
 			Method:  "GET",
 			URL:     "https://www.nuget.org/api/v2/verifykey/",
 			Headers: map[string]string{"X-NuGet-ApiKey": "[REDACTED]"},
 		}}
-	})
+	}
+	RegisterNetwork("nuget-api-key", probeNuGetAPIKey, desc)
+	RegisterNetwork("nuget-config-password", probeNuGetAPIKey, desc)
 }
 
 func probeNuGetAPIKey(ctx context.Context, pc ProbeContext) ProbeOutput {
