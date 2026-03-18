@@ -14,6 +14,7 @@
 	import Loading from '$lib/components/Loading.svelte';
 	import Checkbox from '$lib/components/Checkbox.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import SecretInspectDrawer from '$lib/components/SecretInspectDrawer.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
@@ -703,6 +704,7 @@
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
 	let probePreviewTab = $state('all');
+	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
 	const tryDecodeJWT = (s: string): { header: Record<string, unknown>; payload: Record<string, unknown>; expired: boolean | null; expiresAt: string | null; issuedAt: string | null; issuer: string | null; subject: string | null } | null => {
 		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
 		if (!jwtMatch) return null;
@@ -2279,7 +2281,7 @@
 			</div>
 
 			<!-- Grouped request table -->
-			<div class="max-h-[50vh] overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="relative max-h-[50vh] overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
@@ -2380,16 +2382,26 @@
 											{/if}
 										</td>
 										<td class="px-3 py-1.5">
-											{#if item.requests && item.requests.length > 0}
+											<div class="flex items-center gap-0.5">
+												{#if item.requests && item.requests.length > 0}
+													<button
+														type="button"
+														class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+														title="Copy as curl"
+														onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
+													>
+														<Copy size={12} />
+													</button>
+												{/if}
 												<button
 													type="button"
 													class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
-													title="Copy as curl"
-													onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
+													title="Inspect secret"
+													onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
 												>
-													<Copy size={12} />
+													<Eye size={12} />
 												</button>
-											{/if}
+											</div>
 										</td>
 									</tr>
 								{/each}
@@ -2398,6 +2410,18 @@
 					</tbody>
 				</table>
 			</div>
+
+			<!-- Inspect drawer -->
+			{#if inspectItem}
+				<div class="absolute inset-y-0 right-0 z-20 w-[380px]">
+					<SecretInspectDrawer
+						secretHash={inspectItem.hash}
+						secret={inspectItem.secret}
+						ruleId={inspectItem.ruleId}
+						onClose={() => { inspectItem = null; }}
+					/>
+				</div>
+			{/if}
 		{/if}
 
 		{#if probeError}

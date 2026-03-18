@@ -436,6 +436,110 @@ func AdminSecretProbeExportHandler(db *gorm.DB, authService *auth.Service) http.
 	}
 }
 
+// AdminSecretProbeInspectHandler returns details and locations for a single secret.
+//
+// GET /api/admin/secrets/probe/inspect?secret_hash=...
+func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+		hash := r.URL.Query().Get("secret_hash")
+		if hash == "" {
+			http.Error(w, "secret_hash is required", http.StatusBadRequest)
+			return
+		}
+
+		// Find locations across all repos.
+		type findingRow struct {
+			RepoID   string
+			RepoName string
+			RepoURL  string
+			Findings json.RawMessage
+		}
+		var rows []findingRow
+		db.WithContext(r.Context()).Raw(`
+			SELECT rs.repo_id,
+			       r.org || '/' || r.slug AS repo_name,
+			       RTRIM(COALESCE(pi.base_url,
+			         CASE r.provider WHEN 'github' THEN 'https://github.com' WHEN 'gitlab' THEN 'https://gitlab.com' ELSE '' END
+			       ), '/') || '/' || r.org || '/' || r.slug AS repo_url,
+			       rs.findings
+			FROM (
+			  SELECT DISTINCT ON (repo_id) repo_id, findings
+			  FROM run_secrets WHERE repo_id IS NOT NULL AND repo_id <> ''
+			  ORDER BY repo_id, created_at DESC
+			) rs
+			JOIN repos r ON r.id = rs.repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+		`).Scan(&rows)
+
+		var locs []ProbeListLocation
+		for _, row := range rows {
+			var findings []struct {
+				RuleID    string `json:"RuleID"`
+				File      string `json:"File"`
+				StartLine int    `json:"StartLine"`
+				Match     string `json:"Match"`
+				Secret    string `json:"Secret"`
+			}
+			if json.Unmarshal(row.Findings, &findings) != nil {
+				continue
+			}
+			for _, f := range findings {
+				secret := secretprobe.ExtractSecret(f.Match)
+				if f.Secret != "" {
+					secret = secretprobe.ExtractSecret(f.Secret)
+				}
+				if secretprobe.SecretHash(secret) == hash {
+					locs = append(locs, ProbeListLocation{
+						RepoID:   row.RepoID,
+						RepoName: row.RepoName,
+						RepoURL:  row.RepoURL,
+						File:     f.File,
+						Line:     f.StartLine,
+						Secret:   secret,
+						SubType:  secretprobe.ExtractKeyName(f.Match),
+					})
+				}
+			}
+		}
+
+		if locs == nil {
+			locs = []ProbeListLocation{}
+		}
+
+		// Classify the secret.
+		var secretValue, ruleID string
+		if len(locs) > 0 {
+			secretValue = locs[0].Secret
+		}
+		// Find original rule from preview data.
+		var probe secretprobe.SecretProbe
+		db.WithContext(r.Context()).Where("secret_hash = ?", hash).First(&probe)
+		if probe.RuleID != "" {
+			ruleID = probe.RuleID
+		} else if len(locs) > 0 {
+			ruleID = "unknown"
+		}
+
+		var classification *secretprobe.Classification
+		if secretValue != "" {
+			c := secretprobe.Classify(secretValue, ruleID)
+			classification = &c
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"secret_hash":    hash,
+			"secret":         secretValue,
+			"rule_id":        ruleID,
+			"locations":      locs,
+			"classification": classification,
+			"probe":          probe,
+		})
+	}
+}
+
 func csvEscape(s string) string {
 	if strings.ContainsAny(s, ",\"\n\r") {
 		return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
