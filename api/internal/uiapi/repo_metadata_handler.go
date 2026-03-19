@@ -10,6 +10,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"gorm.io/gorm"
 )
 
@@ -40,7 +41,7 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 		runs := loadRepoRuns(r, db, repoDBID)
 		sbom, sbomComponentCount := loadRepoSBOM(r, db, repoDBID)
 		deps := loadRepoDependencies(r, db, repoDBID, sbomComponentCount, runs.Latest)
-		secrets := loadRepoSecrets(r, db, runs.Latest)
+		secrets := loadRepoSecrets(r, db, repoID, runs.Latest)
 		vulnerabilities := loadRepoVulnerabilities(r, db, repoDBID)
 
 		resp := RepoMetadataResponse{
@@ -308,28 +309,78 @@ func loadRepoDependencies(r *http.Request, db *gorm.DB, repoDBID string, sbomCom
 	return deps
 }
 
-func loadRepoSecrets(r *http.Request, db *gorm.DB, latestRun *RepoMetadataRunSummary) RepoMetadataSecrets {
-	if latestRun == nil {
-		return RepoMetadataSecrets{}
+func loadRepoSecrets(r *http.Request, db *gorm.DB, repoID string, latestRun *RepoMetadataRunSummary) RepoMetadataSecrets {
+	runID := ""
+	if latestRun != nil {
+		runID = latestRun.ID
 	}
 
-	var secret struct {
-		Count     int64
+	var row struct {
+		Findings  string
 		CreatedAt time.Time
 	}
-	if err := db.WithContext(r.Context()).Table("run_secrets").
-		Select("finding_count as count, created_at").
-		Where("run_id = ?", latestRun.ID).
+	// Query by repo_id (same as secrets/list) to ensure consistent results.
+	res := db.WithContext(r.Context()).Table("run_secrets").
+		Select("findings::text as findings, created_at").
+		Where("repo_id = ?", repoID).
 		Order("created_at DESC").
 		Limit(1).
-		Scan(&secret).Error; err != nil || secret.CreatedAt.IsZero() {
-		return RepoMetadataSecrets{LatestRunID: latestRun.ID}
+		Scan(&row)
+	if res.Error != nil || res.RowsAffected == 0 || row.CreatedAt.IsZero() {
+		return RepoMetadataSecrets{LatestRunID: runID}
+	}
+
+	if row.Findings == "" {
+		return RepoMetadataSecrets{
+			LatestRunID:   runID,
+			LastScannedAt: row.CreatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	var raw []struct {
+		Match  string `json:"Match"`
+		Secret string `json:"Secret"`
+	}
+	if err := json.Unmarshal([]byte(row.Findings), &raw); err != nil {
+		return RepoMetadataSecrets{
+			LatestRunID:   runID,
+			LatestCount:   int64(len(raw)),
+			LastScannedAt: row.CreatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	// Compute hashes and look up dismissed secrets.
+	hashes := make([]string, len(raw))
+	for i, f := range raw {
+		s := secretprobe.ExtractSecret(f.Match)
+		if f.Secret != "" {
+			s = secretprobe.ExtractSecret(f.Secret)
+		}
+		hashes[i] = secretprobe.SecretHash(s)
+	}
+	dismissed := map[string]bool{}
+	if len(hashes) > 0 {
+		var dismissedHashes []string
+		db.WithContext(r.Context()).
+			Model(&secretprobe.SecretDismissal{}).
+			Where("secret_hash IN ?", hashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	count := int64(0)
+	for _, h := range hashes {
+		if !dismissed[h] {
+			count++
+		}
 	}
 
 	return RepoMetadataSecrets{
-		LatestRunID:   latestRun.ID,
-		LatestCount:   secret.Count,
-		LastScannedAt: secret.CreatedAt.UTC().Format(time.RFC3339),
+		LatestRunID:   runID,
+		LatestCount:   count,
+		LastScannedAt: row.CreatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

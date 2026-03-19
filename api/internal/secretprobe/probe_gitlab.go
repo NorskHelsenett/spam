@@ -34,6 +34,7 @@ func init() {
 		}}
 	}
 	RegisterNetwork("gitlab-runner-registration-token", probeGitLabRunner, runnerDesc)
+	RegisterNetwork("gitlab-runner-authentication-token", probeGitLabRunner, runnerDesc)
 }
 
 // gitlabAPIBase derives the GitLab API v4 base URL from the provider base URL.

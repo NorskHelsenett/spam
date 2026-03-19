@@ -80,6 +80,7 @@ func run() error {
 		&vulnerabilities.TrivyScanResult{},
 		&secretprobe.SecretProbe{},
 		&secretprobe.ProbeAuditLog{},
+		&secretprobe.SecretDismissal{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}

@@ -32,6 +32,7 @@
 	let hoveredIndex: number | null = null;
 	let tooltipX = 0;
 	let tooltipY = 0;
+	let tooltipW = 0;
 
 	$: if (container) {
 		W = Math.max(480, container.clientWidth);
@@ -117,7 +118,7 @@
 			No scan data yet
 		</div>
 	{:else}
-		<div class="relative" bind:this={container}>
+		<div class="relative overflow-visible" bind:this={container}>
 			<svg
 				viewBox="0 0 {W} {H}"
 				width="100%"
@@ -207,9 +208,15 @@
 			<!-- Tooltip -->
 			{#if hoveredIndex !== null}
 				{@const d = data[hoveredIndex]}
+				{@const offset = 12}
+				{@const margin = 16}
+				{@const chartRightEdge = PAD.left + chartW}
+				{@const idealLeft = tooltipX + offset}
+				{@const constrainedLeft = Math.max(PAD.left + margin, Math.min(idealLeft, chartRightEdge - tooltipW - margin))}
 				<div
-					class="pointer-events-none absolute z-20 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl space-y-1"
-					style="left: {tooltipX + 12}px; top: {Math.max(0, tooltipY - 80)}px;"
+					bind:clientWidth={tooltipW}
+					class="pointer-events-none absolute z-20 whitespace-nowrap rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl space-y-1"
+					style="left: {constrainedLeft}px; top: {Math.max(0, tooltipY - 80)}px;"
 				>
 					{#each series as s (s.key)}
 						<div class="flex items-center gap-2 justify-between">

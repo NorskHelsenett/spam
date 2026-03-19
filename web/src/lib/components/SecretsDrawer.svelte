@@ -5,6 +5,7 @@
 
 	type Finding = {
 		rule_id: string;
+		effective_rule_id?: string;
 		description: string;
 		file: string;
 		start_line: number;
@@ -12,6 +13,10 @@
 		secret?: string;
 		entropy?: number;
 		sub_type?: string;
+		probe_status?: string;
+		probe_reason?: string;
+		dismissed: boolean;
+		secret_hash?: string;
 	};
 
 	type FindingsPage = {
@@ -223,8 +228,19 @@
 	let repoDetails: RepoDetails | null = $state(null);
 	let contributors: ContributorInfo[] = $state([]);
 	let detailsError: string | null = $state(null);
+	let showInactive = $state(false);
+
+	const isInactive = (f: Finding) =>
+		f.dismissed || f.probe_status === 'expired' || f.probe_status === 'invalid' || f.probe_status === 'false_positive';
+
+	const activeFindings = $derived(
+		showInactive ? findings : findings.filter((f) => !isInactive(f))
+	);
+
+	const inactiveCount = $derived(findings.filter(isInactive).length);
 
 	const hasMore = $derived(findings.length < total);
+
 
 	const handleFilter = (ruleId: string, e: MouseEvent) => {
 		if (e.metaKey || e.ctrlKey) {
@@ -248,8 +264,8 @@
 
 	const grouped = $derived.by(() => {
 		const map = new SvelteMap<string, Finding[]>();
-		for (const f of findings) {
-			const key = f.rule_id || 'unknown';
+		for (const f of activeFindings) {
+			const key = f.effective_rule_id || f.rule_id || 'unknown';
 			if (!map.has(key)) map.set(key, []);
 			map.get(key)!.push(f);
 		}
@@ -556,6 +572,15 @@
 	<!-- Type filters -->
 	{#if !loading && total > 0 && grouped.length > 0}
 		<div class="shrink-0 px-7 pb-4">
+			{#if inactiveCount > 0}
+				<button
+					type="button"
+					class="mb-2 inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium transition {showInactive ? 'border-[var(--accent)]/40 bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-tertiary)] hover:text-[var(--text-secondary)]'}"
+					onclick={() => (showInactive = !showInactive)}
+				>
+					{showInactive ? 'Hiding' : 'Show'} {inactiveCount} expired/dismissed
+				</button>
+			{/if}
 			<div class="flex flex-wrap gap-1.5">
 				{#each grouped as [ruleId, group] (ruleId)}
 					<button
@@ -598,13 +623,18 @@
 					<!-- Findings -->
 					<div class="space-y-1 px-4 py-2 bg-[var(--bg-soft)]">
 						{#each group as f, idx (`${idx}-${f.file}-${f.start_line}`)}
-							<article class="rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)]">
+							<article class="finding rounded-xl px-5 py-4 transition-colors hover:bg-[var(--hover-bg-subtle)] {f.dismissed ? 'opacity-40' : ''}">
 								<div class="flex items-start gap-4">
 									<div class="w-40 shrink-0 pt-0.5 space-y-1">
 										<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
 											<FileWarning class="h-3 w-3 shrink-0" />
-											<span class="truncate">{f.rule_id}</span>
+											<span class="truncate">{f.effective_rule_id || f.rule_id}</span>
 										</span>
+										{#if f.probe_status && f.probe_status !== 'unknown'}
+											<span class="inline-flex rounded-full px-1.5 py-0.5 text-[10px] font-medium {f.probe_status === 'valid' ? 'bg-red-500/10 text-red-400' : f.probe_status === 'expired' ? 'bg-green-500/10 text-green-400' : f.probe_status === 'invalid' || f.probe_status === 'false_positive' ? 'bg-[var(--hover-bg)] text-[var(--text-muted)]' : 'bg-[var(--orange)]/10 text-[var(--orange)]'}">
+												{f.probe_status.toUpperCase()}
+											</span>
+										{/if}
 										{#if f.sub_type}
 											<p class="text-[10px] text-[var(--text-muted)] truncate" title={f.sub_type}>{f.sub_type}</p>
 										{/if}

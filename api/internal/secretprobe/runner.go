@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
 	"gorm.io/gorm"
@@ -34,7 +35,7 @@ type Finding struct {
 type RunOptions struct {
 	RepoID      string   // empty = all repos
 	RuleIDs     []string // empty = all registered rule IDs
-	Force       bool     // re-probe even if already probed
+	Hashes      []string // if set, only probe these specific hashes
 	OnlyOffline bool     // only run offline probes (JWT, key parsing — no network)
 }
 
@@ -122,6 +123,12 @@ LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id`
 	result := &RunResult{Total: len(all)}
 	seen := map[string]bool{}
 
+	// Build allow set from client-supplied hashes (if any).
+	allowSet := map[string]bool{}
+	for _, h := range opts.Hashes {
+		allowSet[h] = true
+	}
+
 	for i, f := range all {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -139,8 +146,14 @@ LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id`
 		}
 		seen[hash] = true
 
-		// Skip if already probed (unless forced).
-		if !opts.Force {
+		// If caller supplied an explicit hash list, only probe those.
+		if len(allowSet) > 0 && !allowSet[hash] {
+			result.Skipped++
+			continue
+		}
+
+		// Skip if already probed.
+		{
 			var count int64
 			r.db.WithContext(ctx).Model(&SecretProbe{}).Where("secret_hash = ?", hash).Count(&count)
 			if count > 0 {
@@ -258,6 +271,38 @@ func (r *Runner) ProbeOne(ctx context.Context, repoID, fingerprint string) (*Sec
 	return &probe, nil
 }
 
+// ProbeByHash probes a secret directly by its value and stores the result.
+func (r *Runner) ProbeByHash(ctx context.Context, secret, ruleID, providerBaseURL string) (*SecretProbe, error) {
+	ctx = WithAuditLogger(ctx, r.logger)
+	hash := SecretHash(secret)
+
+	prober := Lookup(ruleID)
+	if prober == nil {
+		r.store(ctx, hash, ruleID, ProbeOutput{
+			Status: StatusUnknown,
+			Reason: "no prober registered for " + ruleID,
+		})
+		probe := &SecretProbe{SecretHash: hash, RuleID: ruleID, Status: StatusUnknown}
+		return probe, nil
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	probeCtx = WithProbeIdentity(probeCtx, hash, ruleID)
+
+	output := prober.Probe(probeCtx, ProbeContext{
+		Secret:          secret,
+		RuleID:          ruleID,
+		ProviderBaseURL: providerBaseURL,
+	})
+	cancel()
+
+	r.store(ctx, hash, ruleID, output)
+
+	var probe SecretProbe
+	r.db.WithContext(ctx).Where("secret_hash = ?", hash).First(&probe)
+	return &probe, nil
+}
+
 func (r *Runner) store(ctx context.Context, hash, ruleID string, output ProbeOutput) {
 	meta := "{}"
 	if output.Metadata != nil {
@@ -283,15 +328,20 @@ func (r *Runner) store(ctx context.Context, hash, ruleID string, output ProbeOut
 
 // PreviewItem represents a single secret that would be probed.
 type PreviewItem struct {
-	SecretHash     string           `json:"secret_hash"`
-	Secret         string           `json:"secret"`
-	RuleID         string           `json:"rule_id"`
-	Kind           string           `json:"kind"` // "offline" or "network"
-	AlreadyProbed  bool             `json:"already_probed"`
-	PreviousStatus Status           `json:"previous_status,omitempty"`
-	IsFalsy        bool             `json:"is_falsy"`
-	FalsyReason    string           `json:"falsy_reason,omitempty"`
-	Requests       []RequestPreview `json:"requests,omitempty"`
+	SecretHash      string           `json:"secret_hash"`
+	Secret          string           `json:"secret"`
+	RuleID          string           `json:"rule_id,omitempty"`
+	EffectiveRuleID string           `json:"effective_rule_id,omitempty"` // after reclassification
+	Kind            string           `json:"kind"`                        // "offline" or "network"
+	AlreadyProbed   bool             `json:"already_probed,omitempty"`
+	PreviousStatus  Status           `json:"previous_status,omitempty"`
+	IsFalsy         bool             `json:"is_falsy,omitempty"`
+	FalsyReason     string           `json:"falsy_reason,omitempty"`
+	ProbeStatus     Status           `json:"probe_status,omitempty"` // result of offline classification
+	ProbeReason     string           `json:"probe_reason,omitempty"` // explanation
+	Reclassified    bool             `json:"reclassified,omitempty"` // true if effective differs from original
+	Dismissed       bool             `json:"dismissed,omitempty"`    // user-dismissed
+	Requests        []RequestPreview `json:"requests,omitempty"`
 }
 
 // PreviewGroup groups preview items by rule ID.
@@ -308,6 +358,7 @@ type PreviewOptions struct {
 }
 
 // Preview returns what would be probed without actually probing anything.
+// It runs offline classification concurrently for speed.
 func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGroup, error) {
 
 	type row struct {
@@ -331,13 +382,13 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 		LEFT JOIN provider_instances pi ON pi.id = repo.provider_instance_id
 	`).Scan(&rows)
 
-	type entry struct {
+	type flatEntry struct {
 		hash            string
 		secret          string
+		ruleID          string
 		providerBaseURL string
 	}
-	groupItems := map[string][]entry{}
-	groupCounts := map[string]int{}
+	var allEntries []flatEntry
 	seen := map[string]bool{}
 	var allHashes []string
 
@@ -347,9 +398,6 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 			continue
 		}
 		for _, f := range findings {
-			if Lookup(f.RuleID) == nil {
-				continue
-			}
 			secret := ExtractSecret(f.Match)
 			if f.Secret != "" {
 				secret = ExtractSecret(f.Secret)
@@ -360,66 +408,135 @@ func (r *Runner) Preview(ctx context.Context, opts PreviewOptions) ([]PreviewGro
 			}
 			seen[hash] = true
 			allHashes = append(allHashes, hash)
-			groupCounts[f.RuleID]++
-			groupItems[f.RuleID] = append(groupItems[f.RuleID], entry{
-				hash: hash, secret: secret, providerBaseURL: row.ProviderBaseURL,
+			allEntries = append(allEntries, flatEntry{
+				hash: hash, secret: secret, ruleID: f.RuleID, providerBaseURL: row.ProviderBaseURL,
 			})
 		}
 	}
 
-	// Look up existing probe results in one query.
+	// Look up existing probe results and dismissals in parallel.
 	existing := map[string]SecretProbe{}
+	dismissed := map[string]bool{}
 	if len(allHashes) > 0 {
 		var probes []SecretProbe
 		r.db.WithContext(ctx).Where("secret_hash IN ?", allHashes).Find(&probes)
 		for _, p := range probes {
 			existing[p.SecretHash] = p
 		}
+
+		var dismissedHashes []string
+		r.db.WithContext(ctx).
+			Model(&SecretDismissal{}).
+			Where("secret_hash IN ?", allHashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	// Run classification concurrently for all entries.
+	type classifiedEntry struct {
+		flatEntry
+		classification Classification
+		isFalsy        bool
+		falsyReason    string
+	}
+	classified := make([]classifiedEntry, len(allEntries))
+
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 64) // limit concurrency
+	for i, e := range allEntries {
+		wg.Add(1)
+		go func(i int, e flatEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			ce := classifiedEntry{flatEntry: e}
+			if falsy, reason := IsFalsy(e.secret); falsy {
+				ce.isFalsy = true
+				ce.falsyReason = reason
+			} else {
+				ce.classification = Classify(e.secret, e.ruleID)
+			}
+			classified[i] = ce
+		}(i, e)
+	}
+	wg.Wait()
+
+	// Group by effective rule ID.
+	type groupKey = string
+	groupItemsMap := map[groupKey][]PreviewItem{}
+
+	for _, ce := range classified {
+		_, alreadyProbed := existing[ce.hash]
+		if alreadyProbed && !opts.IncludeProbed {
+			continue
+		}
+
+		effectiveRule := ce.ruleID
+		if ce.classification.Reclassified {
+			effectiveRule = ce.classification.EffectiveRuleID
+		}
+
+		p := Lookup(ce.ruleID)
+		kind := "offline" // default to offline (local classification only)
+		if p != nil && p.Kind() == ProbeKindNetwork {
+			kind = "network"
+		}
+
+		// Truncate secret for preview — full value is available via inspect endpoint.
+		truncated := ce.secret
+		if len(truncated) > 80 {
+			truncated = truncated[:40] + "…" + truncated[len(truncated)-20:]
+		}
+
+		item := PreviewItem{
+			SecretHash:      ce.hash,
+			Secret:          truncated,
+			RuleID:          ce.ruleID,
+			EffectiveRuleID: effectiveRule,
+			Kind:            kind,
+			Reclassified:    ce.classification.Reclassified,
+		}
+		if alreadyProbed {
+			item.AlreadyProbed = true
+			item.PreviousStatus = existing[ce.hash].Status
+		}
+		if ce.isFalsy {
+			item.IsFalsy = true
+			item.FalsyReason = ce.falsyReason
+			item.ProbeStatus = StatusFalsePositive
+		} else {
+			item.ProbeStatus = ce.classification.ProbeOutput.Status
+			item.ProbeReason = ce.classification.ProbeOutput.Reason
+		}
+		item.Dismissed = dismissed[ce.hash]
+		// Get request preview from the prober.
+		if p != nil {
+			item.Requests = p.Describe(ProbeContext{
+				Secret:          ce.secret,
+				RuleID:          ce.ruleID,
+				ProviderBaseURL: ce.providerBaseURL,
+			})
+		}
+		groupItemsMap[effectiveRule] = append(groupItemsMap[effectiveRule], item)
 	}
 
 	// Build grouped output.
 	result := []PreviewGroup{}
-	for ruleID, entries := range groupItems {
+	for ruleID, items := range groupItemsMap {
 		p := Lookup(ruleID)
-		kind := "network"
-		if p != nil && p.Kind() == ProbeKindOffline {
-			kind = "offline"
+		kind := "offline"
+		if p != nil && p.Kind() == ProbeKindNetwork {
+			kind = "network"
 		}
-		group := PreviewGroup{RuleID: ruleID, Kind: kind, Items: []PreviewItem{}}
-		for _, e := range entries {
-			_, alreadyProbed := existing[e.hash]
-			if alreadyProbed && !opts.IncludeProbed {
-				continue
-			}
-
-			item := PreviewItem{
-				SecretHash: e.hash,
-				Secret:     e.secret,
-				RuleID:     ruleID,
-				Kind:       kind,
-			}
-			if alreadyProbed {
-				item.AlreadyProbed = true
-				item.PreviousStatus = existing[e.hash].Status
-			}
-			if falsy, reason := IsFalsy(e.secret); falsy {
-				item.IsFalsy = true
-				item.FalsyReason = reason
-			}
-			// Get request preview from the prober.
-			if p != nil {
-				item.Requests = p.Describe(ProbeContext{
-					Secret:          e.secret,
-					RuleID:          ruleID,
-					ProviderBaseURL: e.providerBaseURL,
-				})
-			}
-			group.Items = append(group.Items, item)
-		}
-		group.Count = len(group.Items)
-		if group.Count > 0 {
-			result = append(result, group)
-		}
+		result = append(result, PreviewGroup{
+			RuleID: ruleID,
+			Kind:   kind,
+			Count:  len(items),
+			Items:  items,
+		})
 	}
 
 	return result, nil

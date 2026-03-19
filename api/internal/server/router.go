@@ -113,6 +113,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/secrets/probe/export", uiapi.AdminSecretProbeExportHandler(db, authService))
 				api.Post("/admin/secrets/probe/one", uiapi.AdminSecretProbeOneHandler(db, authService))
 				api.Get("/admin/secrets/probe/audit", uiapi.AdminSecretProbeAuditHandler(db, authService))
+				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
+				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
@@ -188,9 +190,10 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			})
 			r.Route("/api/secrets", func(s chi.Router) {
 				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
-				s.Get("/distribution", uiapi.SecretsDashboardDistributionHandler(db, authService, appCache))
+				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
 				s.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
+				s.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
 			})
 		}
 

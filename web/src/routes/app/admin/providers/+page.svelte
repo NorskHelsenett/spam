@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
-	import { slide } from 'svelte/transition';
+	import { slide, fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -14,6 +15,7 @@
 	import Loading from '$lib/components/Loading.svelte';
 	import Checkbox from '$lib/components/Checkbox.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import SecretInspectDrawer from '$lib/components/SecretInspectDrawer.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
@@ -703,6 +705,15 @@
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
 	let probePreviewTab = $state('all');
+	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
+
+	// Dismiss inspect drawer when tab or loading state changes
+	$effect(() => {
+		probePreviewTab;
+		probePreviewLoading;
+		inspectItem = null;
+	});
+
 	const tryDecodeJWT = (s: string): { header: Record<string, unknown>; payload: Record<string, unknown>; expired: boolean | null; expiresAt: string | null; issuedAt: string | null; issuer: string | null; subject: string | null } | null => {
 		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
 		if (!jwtMatch) return null;
@@ -937,9 +948,43 @@
 			if (res.ok) {
 				const data = await res.json();
 				probePreview = Array.isArray(data) ? data : [];
+				// Pre-exclude dismissed and inactive (expired/invalid/false_positive) items.
+				const excluded = new Set<string>();
+				for (const group of probePreview) {
+					for (const item of group.items ?? []) {
+						if (item.dismissed || item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive') {
+							excluded.add(item.secret_hash);
+						}
+					}
+				}
+				probeExcludedHashes = excluded;
 			}
 		} catch { /* ignore */ }
 		finally { probePreviewLoading = false; }
+	};
+
+	const toggleDismiss = (secretHash: string) => {
+		const isDismissed = probeExcludedHashes.has(secretHash);
+		const next = new Set(probeExcludedHashes);
+		if (isDismissed) { next.delete(secretHash); } else { next.add(secretHash); }
+		probeExcludedHashes = next;
+
+		// Update the item's dismissed state in probePreview so the status column reflects it.
+		for (const group of probePreview) {
+			for (const item of group.items ?? []) {
+				if (item.secret_hash === secretHash) {
+					item.dismissed = !isDismissed;
+				}
+			}
+		}
+
+		// Persist immediately — fire and forget.
+		fetch('/api/secrets/dismiss', {
+			method: 'POST',
+			credentials: 'include',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ secret_hash: secretHash, dismiss: !isDismissed })
+		}).catch(() => {});
 	};
 
 	const loadProbeStatus = async () => {
@@ -955,7 +1000,15 @@
 		try {
 			const body: any = {};
 			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
-			if (probeForce) body.force = true;
+			// Send only the hashes the user has not excluded.
+			const hashes: string[] = [];
+			for (const group of probePreview) {
+				if (probeSelectedRules.length > 0 && !probeSelectedRules.includes(group.rule_id)) continue;
+				for (const item of group.items ?? []) {
+					if (!probeExcludedHashes.has(item.secret_hash)) hashes.push(item.secret_hash);
+				}
+			}
+			if (hashes.length > 0) body.hashes = hashes;
 			const response = await fetch('/api/admin/secrets/probe', {
 				method: 'POST',
 				credentials: 'include',
@@ -2173,7 +2226,7 @@
 
 <!-- Secret Probe Preview Dialog -->
 <Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
-	<div class="p-6 sm:p-8 space-y-5">
+	<div class="flex h-[80vh] flex-col p-6 sm:p-8 space-y-5">
 		<div class="flex items-start justify-between">
 			<div class="flex items-center gap-3">
 				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
@@ -2195,9 +2248,11 @@
 		</div>
 
 		{#if probePreviewLoading}
-			<Loading message="Loading probe preview" variant="bar" size="sm" />
+			<div class="flex flex-1 items-center justify-center">
+				<Loading message="Loading probe preview" variant="bar" size="sm" />
+			</div>
 		{:else if probePreview.length === 0}
-			<div class="flex flex-col items-center gap-3 py-10 text-center">
+			<div class="flex flex-1 flex-col items-center justify-center gap-3 py-10 text-center">
 				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
 				<div>
 					<p class="text-lg font-semibold text-[var(--text-bright)]">All clear</p>
@@ -2205,18 +2260,28 @@
 						{#if probeForce}
 							No secrets found to probe. Run a scan first to discover secrets.
 						{:else}
-							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Force re-probe all</span> to re-check them.
+							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Show all</span> to see them.
 						{/if}
 					</p>
 				</div>
 			</div>
 		{:else}
 			{@const totalSecrets = probePreview.reduce((s, g) => s + g.count, 0)}
-			{@const offlineCount = probePreview.filter(g => g.kind === 'offline').reduce((s, g) => s + g.count, 0)}
-			{@const networkCount = probePreview.filter(g => g.kind === 'network').reduce((s, g) => s + g.count, 0)}
-			{@const filteredPreview = probePreviewTab === 'all' ? probePreview : probePreview.filter(g => g.kind === probePreviewTab)}
-			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter(g => probeSelectedRules.includes(g.rule_id))}
-			{@const selectedCount = selectedGroups.reduce((s, g) => s + g.count, 0)}
+			{@const dismissedCount = probePreview.reduce((s, g) => s + (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length, 0)}
+			{@const filteredPreview = (() => {
+				if (probePreviewTab === 'dismissed') {
+					// Show only groups that have dismissed items, filtered to those items.
+					return probePreview.map((g: any) => ({
+						...g,
+						items: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)),
+						count: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length
+					})).filter((g: any) => g.count > 0);
+				}
+				const kindFilter = probePreviewTab === 'all' ? null : probePreviewTab;
+				return kindFilter ? probePreview.filter((g: any) => g.kind === kindFilter) : probePreview;
+			})()}
+			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter((g: any) => probeSelectedRules.includes(g.rule_id))}
+			{@const selectedCount = selectedGroups.reduce((s: number, g: any) => s + g.count, 0)}
 
 			<!-- Tab selector + summary -->
 			<div class="space-y-2">
@@ -2224,7 +2289,8 @@
 					options={[
 						{ value: 'all', label: 'All' },
 						{ value: 'network', label: 'External' },
-						{ value: 'offline', label: 'Local' }
+						{ value: 'offline', label: 'Local' },
+						{ value: 'dismissed', label: 'Dismissed' }
 					]}
 					bind:value={probePreviewTab}
 				/>
@@ -2234,7 +2300,8 @@
 			</div>
 
 			<!-- Grouped request table -->
-			<div class="max-h-[50vh] overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="relative min-h-0 flex-1 overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="h-full overflow-y-auto overflow-x-hidden">
 				<table class="w-full table-fixed text-xs">
 					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
 						<tr>
@@ -2279,30 +2346,24 @@
 							{#if isGroupSelected && group.items}
 								{#each group.items as item}
 									{@const isItemChecked = !probeExcludedHashes.has(item.secret_hash)}
+									{@const isInspected = inspectItem?.hash === item.secret_hash}
 									<tr
-										class="cursor-pointer transition-opacity {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
+										class="cursor-pointer transition-opacity {isInspected ? 'bg-[var(--hover-bg)]' : ''} {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
 										onclick={(e) => {
 											const target = e.target as HTMLElement;
-											// Don't toggle when clicking on text content, buttons, or inputs
 											if (target.closest('button, a, input') || window.getSelection()?.toString()) return;
-											const next = new Set(probeExcludedHashes);
-											if (isItemChecked) { next.add(item.secret_hash); } else { next.delete(item.secret_hash); }
-											probeExcludedHashes = next;
+											if (inspectItem) {
+												inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' };
+											} else {
+												toggleDismiss(item.secret_hash);
+											}
 										}}
 									>
 										<td class="px-3 py-1.5">
 											<button
 												type="button"
 												class="mx-auto block h-2 w-2 rounded-full transition {isItemChecked ? 'bg-[var(--accent)]' : 'bg-[var(--border-color)]'}"
-												onclick={() => {
-													const next = new Set(probeExcludedHashes);
-													if (isItemChecked) {
-														next.add(item.secret_hash);
-													} else {
-														next.delete(item.secret_hash);
-													}
-													probeExcludedHashes = next;
-												}}
+												onclick={() => toggleDismiss(item.secret_hash)}
 											></button>
 										</td>
 										<td class="px-3 py-1.5 font-mono overflow-hidden">
@@ -2333,8 +2394,12 @@
 											<td class="px-3 py-1.5">—</td>
 										{/if}
 										<td class="px-3 py-1.5">
-											{#if item.is_falsy}
+											{#if item.dismissed}
+												<span class="text-[var(--text-muted)]">dismissed</span>
+											{:else if item.is_falsy}
 												<span class="text-[var(--text-muted)]">skip</span>
+											{:else if item.probe_status && item.probe_status !== 'unknown'}
+												<span class="{item.probe_status === 'valid' ? 'text-red-400' : item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.probe_status}</span>
 											{:else if item.already_probed}
 												<span class="{item.previous_status === 'valid' ? 'text-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.previous_status}</span>
 											{:else}
@@ -2353,12 +2418,38 @@
 												</button>
 											{/if}
 										</td>
+										<td
+											class="px-3 py-1.5 cursor-pointer text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+											title="Inspect secret"
+											onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
+										>
+											<Eye size={12} />
+										</td>
 									</tr>
 								{/each}
 							{/if}
 						{/each}
 					</tbody>
 				</table>
+			</div>
+
+				<!-- Inspect drawer -->
+				{#if inspectItem}
+					<div
+						class="absolute inset-y-0 right-0 z-20 w-[480px] overflow-hidden"
+						in:fly={{ x: 480, duration: 240, easing: cubicOut, opacity: 1 }}
+						out:fly={{ x: 480, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<SecretInspectDrawer
+							secretHash={inspectItem.hash}
+							secret={inspectItem.secret}
+							ruleId={inspectItem.ruleId}
+							dismissed={probeExcludedHashes.has(inspectItem.hash)}
+							onDismiss={(hash) => toggleDismiss(hash)}
+							onClose={() => { inspectItem = null; }}
+						/>
+					</div>
+				{/if}
 			</div>
 		{/if}
 
@@ -2368,7 +2459,7 @@
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between pt-2">
-			<Toggle bind:checked={probeForce} label="Force re-probe all" onchange={() => loadProbePreview()} />
+			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview()} />
 			<div class="flex items-center gap-3">
 				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
 					Cancel

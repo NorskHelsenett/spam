@@ -2,9 +2,12 @@ package uiapi
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,7 +21,7 @@ const (
 	secretsCacheTTL      = 24 * time.Hour
 	secretsTableCacheKey = "secrets:dashboard:table"
 	secretsTrendCacheKey = "secrets:dashboard:trend"
-	secretsDistCacheKey  = "secrets:dashboard:distribution"
+	secretsStatsCacheKey = "secrets:dashboard:stats"
 )
 
 // secretsCacheEntry wraps a cached response with the run_secrets watermark
@@ -30,7 +33,7 @@ type secretsCacheEntry[T any] struct {
 
 var secretsTableRefreshing atomic.Bool
 var secretsTrendRefreshing atomic.Bool
-var secretsDistRefreshing atomic.Bool
+var secretsStatsRefreshing atomic.Bool
 
 // secretsWatermark returns the latest run_secrets created_at timestamp,
 // used to invalidate cached dashboard data when new scans complete.
@@ -111,8 +114,11 @@ WITH latest_repo_secrets AS (
     rs.findings,
     rs.created_at
   FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
   WHERE rs.repo_id IS NOT NULL
     AND rs.repo_id <> ''
+    AND (pi.id IS NULL OR pi.enabled = true)
   ORDER BY rs.repo_id, rs.created_at DESC
 ),
 deduped_findings AS (
@@ -120,6 +126,8 @@ deduped_findings AS (
     lrs.repo_id,
     lrs.created_at AS last_scanned,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    COALESCE(finding->>'Match', '') AS match,
+    COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(
@@ -154,23 +162,101 @@ SELECT
   COALESCE(pi.display_name, r.provider) AS provider_name,
   r.is_private AS is_private,
   df.secret_type,
-  COUNT(*) AS unique_finding_count,
-  MAX(df.last_scanned) AS last_scanned
+  df.match,
+  df.secret,
+  df.last_scanned
 FROM deduped_findings df
 JOIN repos r
   ON r.id = df.repo_id
 LEFT JOIN provider_instances pi
   ON pi.id = r.provider_instance_id
-GROUP BY repo, r.id, r.provider, pi.display_name, r.is_private, df.secret_type
 ORDER BY repo ASC, df.secret_type ASC`
 
-	var rows []SecretTableRow
-	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+	type rawRow struct {
+		Repo         string    `gorm:"column:repo"`
+		RepoID       string    `gorm:"column:repo_id"`
+		Provider     string    `gorm:"column:provider"`
+		ProviderName string    `gorm:"column:provider_name"`
+		IsPrivate    bool      `gorm:"column:is_private"`
+		SecretType   string    `gorm:"column:secret_type"`
+		Match        string    `gorm:"column:match"`
+		Secret       string    `gorm:"column:secret"`
+		LastScanned  time.Time `gorm:"column:last_scanned"`
+	}
+	var raw []rawRow
+	if err := db.WithContext(ctx).Raw(query).Scan(&raw).Error; err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []SecretTableRow{}
+
+	// Compute hashes and look up dismissed secrets.
+	hashes := make([]string, len(raw))
+	for i, r := range raw {
+		s := secretprobe.ExtractSecret(r.Match)
+		if r.Secret != "" {
+			s = secretprobe.ExtractSecret(r.Secret)
+		}
+		hashes[i] = secretprobe.SecretHash(s)
 	}
+	dismissed := map[string]bool{}
+	if len(hashes) > 0 {
+		var dismissedHashes []string
+		db.WithContext(ctx).
+			Model(&secretprobe.SecretDismissal{}).
+			Where("secret_hash IN ?", hashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	// Aggregate per repo+type, excluding dismissed.
+	type groupKey struct {
+		Repo         string
+		RepoID       string
+		Provider     string
+		ProviderName string
+		IsPrivate    bool
+		SecretType   string
+	}
+	type groupVal struct {
+		Count       int64
+		LastScanned time.Time
+	}
+	groups := map[groupKey]*groupVal{}
+	for i, r := range raw {
+		if dismissed[hashes[i]] {
+			continue
+		}
+		k := groupKey{r.Repo, r.RepoID, r.Provider, r.ProviderName, r.IsPrivate, r.SecretType}
+		if g, ok := groups[k]; ok {
+			g.Count++
+			if r.LastScanned.After(g.LastScanned) {
+				g.LastScanned = r.LastScanned
+			}
+		} else {
+			groups[k] = &groupVal{Count: 1, LastScanned: r.LastScanned}
+		}
+	}
+
+	rows := make([]SecretTableRow, 0, len(groups))
+	for k, v := range groups {
+		rows = append(rows, SecretTableRow{
+			Repo:               k.Repo,
+			RepoID:             k.RepoID,
+			Provider:           k.Provider,
+			ProviderName:       k.ProviderName,
+			IsPrivate:          k.IsPrivate,
+			SecretType:         k.SecretType,
+			UniqueFindingCount: v.Count,
+			LastScanned:        v.LastScanned,
+		})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Repo != rows[j].Repo {
+			return rows[i].Repo < rows[j].Repo
+		}
+		return rows[i].SecretType < rows[j].SecretType
+	})
 	return rows, nil
 }
 
@@ -226,32 +312,32 @@ func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service, c cach
 }
 
 func computeSecretsTrend(ctx context.Context, db *gorm.DB) ([]SecretTrendRow, error) {
+	// Fetch individual deduplicated findings per day so we can exclude dismissed secrets in Go.
 	query := `
 WITH date_series AS (
   SELECT generate_series(
     date_trunc('day', NOW() - INTERVAL '30 days')::date,
-    date_trunc('day', NOW() - INTERVAL '1 day')::date,
+    date_trunc('day', NOW())::date,
     '1 day'::interval
   )::date AS day
 ),
 all_repo_scans AS (
-  -- Latest scan per repo per day (all time, needed for carry-forward)
-  SELECT DISTINCT ON (repo_id, date_trunc('day', created_at)::date)
-    repo_id,
-    findings,
-    date_trunc('day', created_at)::date AS scan_day
-  FROM run_secrets
-  WHERE repo_id IS NOT NULL AND repo_id <> ''
-    AND created_at < date_trunc('day', NOW())
-  ORDER BY repo_id, date_trunc('day', created_at)::date, created_at DESC
+  SELECT DISTINCT ON (rs.repo_id, date_trunc('day', rs.created_at)::date)
+    rs.repo_id,
+    rs.findings,
+    date_trunc('day', rs.created_at)::date AS scan_day
+  FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+  WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
+    AND (pi.id IS NULL OR pi.enabled = true)
+  ORDER BY rs.repo_id, date_trunc('day', rs.created_at)::date, rs.created_at DESC
 ),
 repos AS (
-  -- Only repos with at least one scan within the 30-day window
   SELECT DISTINCT repo_id FROM all_repo_scans
   WHERE scan_day >= date_trunc('day', NOW()) - INTERVAL '30 days'
 ),
 filled AS (
-  -- For each repo+day, carry forward the most recent scan on or before that day
   SELECT DISTINCT ON (r.repo_id, ds.day)
     r.repo_id,
     ds.day,
@@ -265,7 +351,8 @@ deduped_findings AS (
   SELECT DISTINCT
     f.day,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
-    f.repo_id,
+    COALESCE(finding->>'Match', '') AS match,
+    COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(concat_ws('|',
@@ -279,94 +366,209 @@ deduped_findings AS (
     ) AS dedupe_key
   FROM filled f
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(f.findings, '[]'::jsonb)) AS finding
-),
-top_types AS (
-  SELECT secret_type
-  FROM deduped_findings
-  GROUP BY secret_type
-  ORDER BY COUNT(*) DESC
-  LIMIT 5
-),
-daily AS (
-  SELECT day, secret_type, COUNT(*) AS cnt
-  FROM deduped_findings
-  GROUP BY day, secret_type
 )
-SELECT
-  d.day::text AS date,
-  CASE WHEN tt.secret_type IS NOT NULL THEN d.secret_type ELSE 'other' END AS secret_type,
-  SUM(d.cnt) AS count
-FROM daily d
-LEFT JOIN top_types tt ON tt.secret_type = d.secret_type
-GROUP BY d.day, CASE WHEN tt.secret_type IS NOT NULL THEN d.secret_type ELSE 'other' END
-ORDER BY d.day ASC, count DESC`
+SELECT day::text AS date, secret_type, match, secret FROM deduped_findings`
 
-	var rows []SecretTrendRow
-	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+	type finding struct {
+		Date       string `gorm:"column:date"`
+		SecretType string `gorm:"column:secret_type"`
+		Match      string `gorm:"column:match"`
+		Secret     string `gorm:"column:secret"`
+	}
+	var findings []finding
+	if err := db.WithContext(ctx).Raw(query).Scan(&findings).Error; err != nil {
 		return nil, err
 	}
+
+	// Compute hashes and look up dismissed secrets (with timestamps).
+	hashes := make([]string, len(findings))
+	hashSet := map[string]bool{}
+	for i, f := range findings {
+		s := secretprobe.ExtractSecret(f.Match)
+		if f.Secret != "" {
+			s = secretprobe.ExtractSecret(f.Secret)
+		}
+		h := secretprobe.SecretHash(s)
+		hashes[i] = h
+		hashSet[h] = true
+	}
+	dismissedAt := map[string]time.Time{}
+	if len(hashSet) > 0 {
+		uniqueHashes := make([]string, 0, len(hashSet))
+		for h := range hashSet {
+			uniqueHashes = append(uniqueHashes, h)
+		}
+		var dismissals []secretprobe.SecretDismissal
+		db.WithContext(ctx).
+			Where("secret_hash IN ?", uniqueHashes).
+			Find(&dismissals)
+		for _, d := range dismissals {
+			dismissedAt[d.SecretHash] = d.DismissedAt
+		}
+	}
+
+	// Aggregate counts per day+type, excluding secrets dismissed on or before that day.
+	type dayType struct {
+		date       string
+		secretType string
+	}
+	counts := map[dayType]int64{}
+	globalTypeCounts := map[string]int64{}
+	for i, f := range findings {
+		if t, ok := dismissedAt[hashes[i]]; ok {
+			// Parse the finding's day and skip if dismissed on or before that day.
+			dismissDay := t.Truncate(24 * time.Hour)
+			if day, err := time.Parse("2006-01-02", f.Date); err == nil && !day.Before(dismissDay) {
+				continue
+			}
+		}
+		key := dayType{date: f.Date, secretType: f.SecretType}
+		counts[key]++
+		globalTypeCounts[f.SecretType]++
+	}
+
+	// Determine top-5 types globally.
+	type ranked struct {
+		secretType string
+		count      int64
+	}
+	var sorted []ranked
+	for st, c := range globalTypeCounts {
+		sorted = append(sorted, ranked{st, c})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].count != sorted[j].count {
+			return sorted[i].count > sorted[j].count
+		}
+		return sorted[i].secretType < sorted[j].secretType
+	})
+	topTypes := map[string]bool{}
+	for i, r := range sorted {
+		if i >= 5 {
+			break
+		}
+		topTypes[r.secretType] = true
+	}
+
+	// Build final rows, collapsing non-top types into "other".
+	merged := map[dayType]int64{}
+	for key, cnt := range counts {
+		effectiveType := key.secretType
+		if !topTypes[effectiveType] {
+			effectiveType = "other"
+		}
+		merged[dayType{date: key.date, secretType: effectiveType}] += cnt
+	}
+
+	rows := make([]SecretTrendRow, 0, len(merged))
+	for key, cnt := range merged {
+		rows = append(rows, SecretTrendRow{Date: key.date, SecretType: key.secretType, Count: cnt})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Date != rows[j].Date {
+			return rows[i].Date < rows[j].Date
+		}
+		return rows[i].Count > rows[j].Count
+	})
 	if rows == nil {
 		rows = []SecretTrendRow{}
 	}
 	return rows, nil
 }
 
-// SecretsDashboardDistributionHandler returns secret type counts for the donut chart.
+// SecretsDashboardStatsResponse is the combined response for /api/secrets/stats.
+type SecretsDashboardStatsResponse struct {
+	Distribution []SecretDistributionRow `json:"distribution"`
+	Probe        ProbeStatsResponse      `json:"probe"`
+}
+
+// SecretsDashboardStatsHandler returns distribution + probe stats in one response.
 //
-// GET /api/secrets/distribution
-func SecretsDashboardDistributionHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
+// GET /api/secrets/stats
+func SecretsDashboardStatsHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		watermark := secretsWatermark(r.Context(), db)
+		watermark := secretsStatsWatermark(r.Context(), db)
 
-		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[[]SecretDistributionRow]](r.Context(), c, secretsDistCacheKey); ok {
+		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[SecretsDashboardStatsResponse]](r.Context(), c, secretsStatsCacheKey); ok {
 			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
 				writeJSON(w, http.StatusOK, entry.Response)
 				return
 			}
 			writeJSON(w, http.StatusOK, entry.Response)
 			go func() {
-				if !secretsDistRefreshing.CompareAndSwap(false, true) {
+				if !secretsStatsRefreshing.CompareAndSwap(false, true) {
 					return
 				}
-				defer secretsDistRefreshing.Store(false)
+				defer secretsStatsRefreshing.Store(false)
 				ctx := context.Background()
-				rows, err := computeSecretsDistribution(ctx, db)
+				resp, err := computeSecretsDashboardStats(ctx, db)
 				if err != nil {
-					log.Printf("secrets distribution background refresh: %v", err)
+					log.Printf("secrets stats background refresh: %v", err)
 					return
 				}
-				_ = maybeStoreSecretsCache(ctx, c, secretsDistCacheKey, watermark, rows)
+				_ = maybeStoreSecretsCache(ctx, c, secretsStatsCacheKey, watermark, resp)
 			}()
 			return
 		}
 
-		rows, err := computeSecretsDistribution(r.Context(), db)
+		resp, err := computeSecretsDashboardStats(r.Context(), db)
 		if err != nil {
-			http.Error(w, "failed to load secrets distribution", http.StatusInternalServerError)
+			http.Error(w, "failed to load secrets stats", http.StatusInternalServerError)
 			return
 		}
-		_ = maybeStoreSecretsCache(r.Context(), c, secretsDistCacheKey, watermark, rows)
-		writeJSON(w, http.StatusOK, rows)
+		_ = maybeStoreSecretsCache(r.Context(), c, secretsStatsCacheKey, watermark, resp)
+		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+func computeSecretsDashboardStats(ctx context.Context, db *gorm.DB) (SecretsDashboardStatsResponse, error) {
+	dist, err := computeSecretsDistribution(ctx, db)
+	if err != nil {
+		return SecretsDashboardStatsResponse{}, err
+	}
+	probe, err := computeProbeStats(ctx, db)
+	if err != nil {
+		return SecretsDashboardStatsResponse{}, err
+	}
+	return SecretsDashboardStatsResponse{
+		Distribution: dist,
+		Probe:        probe,
+	}, nil
+}
+
+// secretsStatsWatermark returns the latest of the run_secrets and secret_probes
+// watermarks so the cache invalidates when either data source changes.
+func secretsStatsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	w1 := secretsWatermark(ctx, db)
+	w2 := probeStatsWatermark(ctx, db)
+	if w2.After(w1) {
+		return w2
+	}
+	return w1
 }
 
 func computeSecretsDistribution(ctx context.Context, db *gorm.DB) ([]SecretDistributionRow, error) {
 	query := `
 WITH latest_repo_secrets AS (
-  SELECT DISTINCT ON (repo_id)
-    repo_id,
-    findings
-  FROM run_secrets
-  WHERE repo_id IS NOT NULL AND repo_id <> ''
-  ORDER BY repo_id, created_at DESC
+  SELECT DISTINCT ON (rs.repo_id)
+    rs.repo_id,
+    rs.findings
+  FROM run_secrets rs
+  JOIN repos r ON r.id = rs.repo_id
+  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+  WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
+    AND (pi.id IS NULL OR pi.enabled = true)
+  ORDER BY rs.repo_id, rs.created_at DESC
 ),
 deduped_findings AS (
   SELECT DISTINCT
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
+    COALESCE(finding->>'Match', '') AS match,
+    COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
       NULLIF(finding->>'Fingerprint', ''),
       md5(
@@ -383,36 +585,74 @@ deduped_findings AS (
     ) AS dedupe_key
   FROM latest_repo_secrets rs
   CROSS JOIN LATERAL jsonb_array_elements(COALESCE(rs.findings, '[]'::jsonb)) AS finding
-),
-counts AS (
-  SELECT
-    secret_type,
-    COUNT(*) AS finding_count
-  FROM deduped_findings
-  GROUP BY secret_type
-),
-ranked AS (
-  SELECT
-    secret_type,
-    finding_count,
-    ROW_NUMBER() OVER (ORDER BY finding_count DESC, secret_type ASC) AS rn
-  FROM counts
 )
-SELECT
-  CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END AS secret_type,
-  SUM(finding_count) AS finding_count
-FROM ranked
-GROUP BY CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END
-ORDER BY
-  CASE WHEN (CASE WHEN rn <= 6 THEN secret_type ELSE 'other' END) = 'other' THEN 1 ELSE 0 END,
-  SUM(finding_count) DESC`
+SELECT secret_type, match, secret FROM deduped_findings`
 
-	var rows []SecretDistributionRow
-	if err := db.WithContext(ctx).Raw(query).Scan(&rows).Error; err != nil {
+	var findings []struct {
+		SecretType string `gorm:"column:secret_type"`
+		Match      string `gorm:"column:match"`
+		Secret     string `gorm:"column:secret"`
+	}
+	if err := db.WithContext(ctx).Raw(query).Scan(&findings).Error; err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []SecretDistributionRow{}
+
+	// Compute hashes and look up dismissed secrets.
+	hashes := make([]string, len(findings))
+	for i, f := range findings {
+		s := secretprobe.ExtractSecret(f.Match)
+		if f.Secret != "" {
+			s = secretprobe.ExtractSecret(f.Secret)
+		}
+		hashes[i] = secretprobe.SecretHash(s)
+	}
+	dismissed := map[string]bool{}
+	if len(hashes) > 0 {
+		var dismissedHashes []string
+		db.WithContext(ctx).
+			Model(&secretprobe.SecretDismissal{}).
+			Where("secret_hash IN ?", hashes).
+			Pluck("secret_hash", &dismissedHashes)
+		for _, h := range dismissedHashes {
+			dismissed[h] = true
+		}
+	}
+
+	// Aggregate counts excluding dismissed, then rank top 6 + other.
+	counts := map[string]int64{}
+	for i, f := range findings {
+		if dismissed[hashes[i]] {
+			continue
+		}
+		counts[f.SecretType]++
+	}
+
+	type ranked struct {
+		secretType string
+		count      int64
+	}
+	var sorted []ranked
+	for st, c := range counts {
+		sorted = append(sorted, ranked{st, c})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].count != sorted[j].count {
+			return sorted[i].count > sorted[j].count
+		}
+		return sorted[i].secretType < sorted[j].secretType
+	})
+
+	rows := []SecretDistributionRow{}
+	var otherCount int64
+	for i, r := range sorted {
+		if i < 6 {
+			rows = append(rows, SecretDistributionRow{SecretType: r.secretType, FindingCount: r.count})
+		} else {
+			otherCount += r.count
+		}
+	}
+	if otherCount > 0 {
+		rows = append(rows, SecretDistributionRow{SecretType: "other", FindingCount: otherCount})
 	}
 	return rows, nil
 }
@@ -429,16 +669,59 @@ func maybeStoreSecretsCache[T any](ctx context.Context, c cache.Store, key strin
 	}, secretsCacheTTL)
 }
 
+// ProbeStatsResponse is the cached view of secret probe statistics.
+type ProbeStatsResponse struct {
+	Total         int64 `json:"total"`
+	Valid         int64 `json:"valid"`
+	Invalid       int64 `json:"invalid"`
+	Revoked       int64 `json:"revoked"`
+	Expired       int64 `json:"expired"`
+	FalsePositive int64 `json:"false_positive"`
+	Unknown       int64 `json:"unknown"`
+	Error         int64 `json:"error"`
+}
+
+// probeStatsWatermark returns the latest probed_at timestamp from secret_probes.
+func probeStatsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var t time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(probed_at), TIMESTAMPTZ 'epoch') FROM secret_probes",
+	).Scan(&t)
+	return t
+}
+
+func computeProbeStats(ctx context.Context, db *gorm.DB) (ProbeStatsResponse, error) {
+	counts, total, err := secretprobe.Stats(ctx, db)
+	if err != nil {
+		return ProbeStatsResponse{}, err
+	}
+	return ProbeStatsResponse{
+		Total:         total,
+		Valid:         counts[secretprobe.StatusValid],
+		Invalid:       counts[secretprobe.StatusInvalid],
+		Revoked:       counts[secretprobe.StatusRevoked],
+		Expired:       counts[secretprobe.StatusExpired],
+		FalsePositive: counts[secretprobe.StatusFalsePositive],
+		Unknown:       counts[secretprobe.StatusUnknown],
+		Error:         counts[secretprobe.StatusError],
+	}, nil
+}
+
 // SecretFindingRow is a single deduplicated finding returned for the drawer.
 type SecretFindingRow struct {
-	RuleID      string  `json:"rule_id"`
-	Description string  `json:"description"`
-	File        string  `json:"file"`
-	StartLine   int     `json:"start_line"`
-	Match       string  `json:"match"`
-	Secret      string  `json:"secret,omitempty"`
-	Entropy     float64 `json:"entropy,omitempty"`
-	SubType     string  `json:"sub_type,omitempty"`
+	RuleID          string  `json:"rule_id"`
+	EffectiveRuleID string  `json:"effective_rule_id,omitempty"`
+	Description     string  `json:"description"`
+	File            string  `json:"file"`
+	StartLine       int     `json:"start_line"`
+	Match           string  `json:"match"`
+	Secret          string  `json:"secret,omitempty"`
+	Entropy         float64 `json:"entropy,omitempty"`
+	SubType         string  `json:"sub_type,omitempty"`
+	ProbeStatus     string  `json:"probe_status,omitempty"`
+	ProbeReason     string  `json:"probe_reason,omitempty"`
+	Dismissed       bool    `json:"dismissed"`
+	SecretHash      string  `json:"secret_hash,omitempty"`
 }
 
 // SecretFindingsPage wraps paginated findings with a total count.
@@ -533,9 +816,115 @@ deduped AS (
 		if rows == nil {
 			rows = []SecretFindingRow{}
 		}
-		for i := range rows {
-			rows[i].SubType = secretprobe.ExtractKeyName(rows[i].Match)
+
+		// Classify all findings concurrently and compute secret hashes.
+		type classResult struct {
+			index    int
+			subType  string
+			hash     string
+			classify secretprobe.Classification
 		}
+		results := make([]classResult, len(rows))
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 64)
+		for i := range rows {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				row := &rows[i]
+				secret := secretprobe.ExtractSecret(row.Match)
+				if row.Secret != "" {
+					secret = secretprobe.ExtractSecret(row.Secret)
+				}
+				results[i] = classResult{
+					index:    i,
+					subType:  secretprobe.ExtractKeyName(row.Match),
+					hash:     secretprobe.SecretHash(secret),
+					classify: secretprobe.Classify(secret, row.RuleID),
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		// Collect hashes to check for dismissals.
+		hashes := make([]string, len(results))
+		for i, cr := range results {
+			hashes[i] = cr.hash
+		}
+
+		// Look up dismissed hashes.
+		dismissed := map[string]bool{}
+		if len(hashes) > 0 {
+			var dismissedHashes []string
+			db.WithContext(r.Context()).
+				Model(&secretprobe.SecretDismissal{}).
+				Where("secret_hash IN ?", hashes).
+				Pluck("secret_hash", &dismissedHashes)
+			for _, h := range dismissedHashes {
+				dismissed[h] = true
+			}
+		}
+
+		// Apply results to rows.
+		for _, cr := range results {
+			row := &rows[cr.index]
+			row.SubType = cr.subType
+			row.SecretHash = cr.hash
+			row.ProbeStatus = string(cr.classify.ProbeOutput.Status)
+			row.ProbeReason = cr.classify.ProbeOutput.Reason
+			if cr.classify.Reclassified {
+				row.EffectiveRuleID = cr.classify.EffectiveRuleID
+			}
+			row.Dismissed = dismissed[cr.hash]
+		}
+
 		writeJSON(w, http.StatusOK, SecretFindingsPage{Items: rows, Total: total})
+	}
+}
+
+// SecretDismissHandler toggles the dismissed state of a secret finding.
+//
+// POST /api/secrets/dismiss
+// Body: {"secret_hash": "...", "dismiss": true}
+func SecretDismissHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user := requireAuth(w, r, authService)
+		if user == nil {
+			return
+		}
+
+		var body struct {
+			SecretHash string `json:"secret_hash"`
+			Dismiss    bool   `json:"dismiss"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SecretHash == "" {
+			http.Error(w, "secret_hash is required", http.StatusBadRequest)
+			return
+		}
+
+		if body.Dismiss {
+			d := secretprobe.SecretDismissal{
+				SecretHash:  body.SecretHash,
+				DismissedBy: user.Email,
+				DismissedAt: time.Now(),
+			}
+			db.WithContext(r.Context()).
+				Where("secret_hash = ?", body.SecretHash).
+				FirstOrCreate(&d)
+		} else {
+			db.WithContext(r.Context()).
+				Where("secret_hash = ?", body.SecretHash).
+				Delete(&secretprobe.SecretDismissal{})
+		}
+
+		// Invalidate secrets dashboard caches so trend/table/distribution reflect the change.
+		_ = cache.Delete(r.Context(), c, secretsTableCacheKey)
+		_ = cache.Delete(r.Context(), c, secretsTrendCacheKey)
+		_ = cache.Delete(r.Context(), c, secretsStatsCacheKey)
+
+		writeJSON(w, http.StatusOK, map[string]bool{"dismissed": body.Dismiss})
 	}
 }
