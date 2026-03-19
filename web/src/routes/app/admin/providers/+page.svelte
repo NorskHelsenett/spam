@@ -704,13 +704,13 @@
 	let probePreviewOpen = $state(false);
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
+	let probePreviewRefreshing = $state(false);
 	let probePreviewTab = $state('all');
 	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
 
-	// Dismiss inspect drawer when tab or loading state changes
+	// Dismiss inspect drawer when switching tabs
 	$effect(() => {
 		probePreviewTab;
-		probePreviewLoading;
 		inspectItem = null;
 	});
 
@@ -938,10 +938,14 @@
 		navigator.clipboard.writeText(text);
 	};
 
-	const loadProbePreview = async () => {
-		probePreviewLoading = true;
-		probePreview = [];
-		probeExcludedHashes = new Set();
+	const loadProbePreview = async ({ preserveRows = false }: { preserveRows?: boolean } = {}) => {
+		const hasExistingRows = probePreview.length > 0;
+		probePreviewLoading = !preserveRows || !hasExistingRows;
+		probePreviewRefreshing = preserveRows && hasExistingRows;
+		if (!preserveRows || !hasExistingRows) {
+			probePreview = [];
+			probeExcludedHashes = new Set();
+		}
 		try {
 			const params = probeForce ? '?include_probed=true' : '';
 			const res = await fetch(`/api/admin/secrets/probe/preview${params}`, { credentials: 'include' });
@@ -960,7 +964,10 @@
 				probeExcludedHashes = excluded;
 			}
 		} catch { /* ignore */ }
-		finally { probePreviewLoading = false; }
+		finally {
+			probePreviewLoading = false;
+			probePreviewRefreshing = false;
+		}
 	};
 
 	const toggleDismiss = (secretHash: string) => {
@@ -992,6 +999,26 @@
 			const response = await fetch('/api/admin/secrets/probe/status', { credentials: 'include' });
 			if (response.ok) probeStatus = await response.json();
 		} catch { /* ignore */ }
+	};
+
+	const applyProbeRunResult = async (result: { secretHash: string; status: string; reason: string; metadata?: string }) => {
+		let matched = false;
+		for (const group of probePreview) {
+			for (const item of group.items ?? []) {
+				if (item.secret_hash !== result.secretHash) continue;
+				item.probe_status = result.status;
+				item.previous_status = result.status;
+				item.already_probed = true;
+				item.reason = result.reason;
+				matched = true;
+			}
+		}
+
+		if (matched) {
+			probePreview = [...probePreview];
+		}
+
+		await loadProbeStatus();
 	};
 
 	const triggerProbe = async () => {
@@ -2301,22 +2328,29 @@
 
 			<!-- Grouped request table -->
 			<div class="relative min-h-0 flex-1 overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-			<div class="h-full overflow-y-auto overflow-x-hidden">
-				<table class="w-full table-fixed text-xs">
-					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
-						<tr>
-							<th class="w-[3%] px-3 py-2 text-left"></th>
-							<th class="w-[25%] px-3 py-2 text-left">Secret</th>
-							<th class="w-[7%] px-3 py-2 text-left">Method</th>
-							<th class="w-[30%] px-3 py-2 text-left">URL</th>
-							<th class="w-[20%] px-3 py-2 text-left">Headers</th>
-							<th class="w-[8%] px-3 py-2 text-left">Status</th>
-							<th class="w-[3%] px-3 py-2 text-left"></th>
-							<th class="px-3 py-2 text-left"></th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[var(--border-color)]/30">
-						{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
+				{#if probePreviewRefreshing}
+					<div class="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center p-3">
+						<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/95 px-3 py-1 text-[11px] text-[var(--text-muted)] shadow-lg backdrop-blur">
+							Refreshing preview…
+						</div>
+					</div>
+				{/if}
+				<div class="h-full overflow-y-auto overflow-x-hidden">
+					<table class="w-full table-fixed text-xs">
+						<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+							<tr>
+								<th class="w-[3%] px-3 py-2 text-left"></th>
+								<th class="w-[25%] px-3 py-2 text-left">Secret</th>
+								<th class="w-[7%] px-3 py-2 text-left">Method</th>
+								<th class="w-[30%] px-3 py-2 text-left">URL</th>
+								<th class="w-[20%] px-3 py-2 text-left">Headers</th>
+								<th class="w-[8%] px-3 py-2 text-left">Status</th>
+								<th class="w-[3%] px-3 py-2 text-left"></th>
+								<th class="px-3 py-2 text-left"></th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-[var(--border-color)]/30">
+							{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
 							{@const isGroupSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
 							<!-- Group header row -->
 							<tr class="bg-[var(--hover-bg-subtle)]/50">
@@ -2429,9 +2463,9 @@
 								{/each}
 							{/if}
 						{/each}
-					</tbody>
-				</table>
-			</div>
+						</tbody>
+					</table>
+				</div>
 
 				<!-- Inspect drawer -->
 				{#if inspectItem}
@@ -2446,6 +2480,7 @@
 							ruleId={inspectItem.ruleId}
 							dismissed={probeExcludedHashes.has(inspectItem.hash)}
 							onDismiss={(hash) => toggleDismiss(hash)}
+							onProbeRun={applyProbeRunResult}
 							onClose={() => { inspectItem = null; }}
 						/>
 					</div>
@@ -2459,7 +2494,7 @@
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between pt-2">
-			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview()} />
+			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview({ preserveRows: true })} />
 			<div class="flex items-center gap-3">
 				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
 					Cancel
