@@ -20,6 +20,7 @@
 	let hoveredIndex: number | null = null;
 	let tooltipX = 0;
 	let tooltipY = 0;
+	let tooltipW = 0;
 
 	$: if (container) {
 		W = Math.max(480, container.clientWidth);
@@ -200,9 +201,15 @@
 			<!-- Tooltip -->
 			{#if hoveredIndex !== null}
 				{@const d = data[hoveredIndex]}
+				{@const offset = 12}
+				{@const margin = 16}
+				{@const chartRightEdge = PAD.left + chartW}
+				{@const idealLeft = tooltipX + offset}
+				{@const constrainedLeft = Math.max(PAD.left + margin, Math.min(idealLeft, chartRightEdge - tooltipW - margin))}
 				<div
-					class="pointer-events-none absolute z-20 space-y-1 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl"
-					style="left: {tooltipX + 12}px; top: {Math.max(0, tooltipY - 80)}px;"
+					bind:clientWidth={tooltipW}
+					class="pointer-events-none absolute z-20 whitespace-nowrap space-y-1 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-[10px] shadow-xl"
+					style="left: {constrainedLeft}px; top: {Math.max(0, tooltipY - 80)}px;"
 				>
 					{#each series as s (s.key)}
 						<div class="flex items-center justify-between gap-2">
