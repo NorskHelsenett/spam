@@ -48,7 +48,8 @@
 		ruleId = '',
 		dismissed = false,
 		onClose = () => {},
-		onDismiss
+		onDismiss,
+		onProbeRun
 	}: {
 		secretHash: string;
 		secret?: string;
@@ -56,6 +57,7 @@
 		dismissed?: boolean;
 		onClose?: () => void;
 		onDismiss?: (secretHash: string) => void;
+		onProbeRun?: (result: { secretHash: string; status: string; reason: string; metadata?: string }) => void;
 	} = $props();
 
 	let data: InspectData | null = $state(null);
@@ -154,6 +156,14 @@
 			});
 			if (res.ok) {
 				probeResult = await res.json();
+				if (probeResult) {
+					onProbeRun?.({
+						secretHash,
+						status: probeResult.status,
+						reason: probeResult.reason,
+						metadata: probeResult.metadata
+					});
+				}
 			}
 		} catch { /* ignore */ }
 		finally { probing = false; }
