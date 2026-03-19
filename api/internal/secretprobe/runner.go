@@ -35,7 +35,7 @@ type Finding struct {
 type RunOptions struct {
 	RepoID      string   // empty = all repos
 	RuleIDs     []string // empty = all registered rule IDs
-	Force       bool     // re-probe even if already probed
+	Hashes      []string // if set, only probe these specific hashes
 	OnlyOffline bool     // only run offline probes (JWT, key parsing — no network)
 }
 
@@ -123,6 +123,12 @@ LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id`
 	result := &RunResult{Total: len(all)}
 	seen := map[string]bool{}
 
+	// Build allow set from client-supplied hashes (if any).
+	allowSet := map[string]bool{}
+	for _, h := range opts.Hashes {
+		allowSet[h] = true
+	}
+
 	for i, f := range all {
 		if ctx.Err() != nil {
 			return result, ctx.Err()
@@ -140,8 +146,14 @@ LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id`
 		}
 		seen[hash] = true
 
-		// Skip if already probed (unless forced).
-		if !opts.Force {
+		// If caller supplied an explicit hash list, only probe those.
+		if len(allowSet) > 0 && !allowSet[hash] {
+			result.Skipped++
+			continue
+		}
+
+		// Skip if already probed.
+		{
 			var count int64
 			r.db.WithContext(ctx).Model(&SecretProbe{}).Where("secret_hash = ?", hash).Count(&count)
 			if count > 0 {
@@ -320,15 +332,15 @@ type PreviewItem struct {
 	Secret          string           `json:"secret"`
 	RuleID          string           `json:"rule_id,omitempty"`
 	EffectiveRuleID string           `json:"effective_rule_id,omitempty"` // after reclassification
-	Kind            string           `json:"kind"`                       // "offline" or "network"
+	Kind            string           `json:"kind"`                        // "offline" or "network"
 	AlreadyProbed   bool             `json:"already_probed,omitempty"`
 	PreviousStatus  Status           `json:"previous_status,omitempty"`
 	IsFalsy         bool             `json:"is_falsy,omitempty"`
 	FalsyReason     string           `json:"falsy_reason,omitempty"`
-	ProbeStatus     Status           `json:"probe_status,omitempty"`  // result of offline classification
-	ProbeReason     string           `json:"probe_reason,omitempty"`  // explanation
-	Reclassified    bool             `json:"reclassified,omitempty"`  // true if effective differs from original
-	Dismissed       bool             `json:"dismissed,omitempty"`     // user-dismissed
+	ProbeStatus     Status           `json:"probe_status,omitempty"` // result of offline classification
+	ProbeReason     string           `json:"probe_reason,omitempty"` // explanation
+	Reclassified    bool             `json:"reclassified,omitempty"` // true if effective differs from original
+	Dismissed       bool             `json:"dismissed,omitempty"`    // user-dismissed
 	Requests        []RequestPreview `json:"requests,omitempty"`
 }
 

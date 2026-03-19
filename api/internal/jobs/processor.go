@@ -127,11 +127,11 @@ func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{
 	if len(job.Payload) > 0 {
 		var payload struct {
 			RuleIDs []string `json:"rule_ids"`
-			Force   bool     `json:"force"`
+			Hashes  []string `json:"hashes"`
 		}
 		if json.Unmarshal(job.Payload, &payload) == nil {
 			opts.RuleIDs = payload.RuleIDs
-			opts.Force = payload.Force
+			opts.Hashes = payload.Hashes
 		}
 	}
 

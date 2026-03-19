@@ -25,7 +25,7 @@ func AdminSecretProbeScanHandler(db *gorm.DB, authService *auth.Service) http.Ha
 		// Parse optional filter.
 		var body struct {
 			RuleIDs []string `json:"rule_ids"`
-			Force   bool     `json:"force"`
+			Hashes  []string `json:"hashes"`
 		}
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -47,8 +47,8 @@ func AdminSecretProbeScanHandler(db *gorm.DB, authService *auth.Service) http.Ha
 
 		// Store options in job payload.
 		var payload json.RawMessage
-		if len(body.RuleIDs) > 0 || body.Force {
-			payload, _ = json.Marshal(map[string]any{"rule_ids": body.RuleIDs, "force": body.Force})
+		if len(body.RuleIDs) > 0 || len(body.Hashes) > 0 {
+			payload, _ = json.Marshal(map[string]any{"rule_ids": body.RuleIDs, "hashes": body.Hashes})
 		}
 
 		job, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
@@ -99,9 +99,9 @@ func AdminSecretProbeStatusHandler(db *gorm.DB, authService *auth.Service) http.
 		}
 
 		resp := struct {
-			Job            *jobInfo       `json:"job,omitempty"`
-			Stats          map[string]any `json:"stats"`
-			RegisteredRules []string      `json:"registered_rules"`
+			Job             *jobInfo       `json:"job,omitempty"`
+			Stats           map[string]any `json:"stats"`
+			RegisteredRules []string       `json:"registered_rules"`
 		}{
 			Stats: map[string]any{
 				"total":          total,
@@ -192,13 +192,13 @@ func AdminSecretProbePreviewHandler(db *gorm.DB, authService *auth.Service) http
 
 // ProbeListItem is a rich view of a probed secret including where it was found.
 type ProbeListItem struct {
-	SecretHash string               `json:"secret_hash"`
-	RuleID     string               `json:"rule_id"`
-	Status     secretprobe.Status   `json:"status"`
-	Reason     string               `json:"reason,omitempty"`
-	Metadata   string               `json:"metadata,omitempty"`
-	ProbedAt   string               `json:"probed_at"`
-	Locations  []ProbeListLocation  `json:"locations"`
+	SecretHash string              `json:"secret_hash"`
+	RuleID     string              `json:"rule_id"`
+	Status     secretprobe.Status  `json:"status"`
+	Reason     string              `json:"reason,omitempty"`
+	Metadata   string              `json:"metadata,omitempty"`
+	ProbedAt   string              `json:"probed_at"`
+	Locations  []ProbeListLocation `json:"locations"`
 }
 
 type ProbeListLocation struct {
@@ -563,13 +563,13 @@ func AdminSecretProbeInspectHandler(db *gorm.DB, authService *auth.Service) http
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"secret_hash":      hash,
-			"secret":           secretValue,
-			"rule_id":          ruleID,
-			"locations":        locs,
-			"classification":   classification,
-			"probe":            probe,
-			"requests":         requests,
+			"secret_hash":       hash,
+			"secret":            secretValue,
+			"rule_id":           ruleID,
+			"locations":         locs,
+			"classification":    classification,
+			"probe":             probe,
+			"requests":          requests,
 			"provider_base_url": providerBaseURL,
 		})
 	}

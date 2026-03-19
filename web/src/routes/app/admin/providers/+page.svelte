@@ -1000,7 +1000,15 @@
 		try {
 			const body: any = {};
 			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
-			if (probeForce) body.force = true;
+			// Send only the hashes the user has not excluded.
+			const hashes: string[] = [];
+			for (const group of probePreview) {
+				if (probeSelectedRules.length > 0 && !probeSelectedRules.includes(group.rule_id)) continue;
+				for (const item of group.items ?? []) {
+					if (!probeExcludedHashes.has(item.secret_hash)) hashes.push(item.secret_hash);
+				}
+			}
+			if (hashes.length > 0) body.hashes = hashes;
 			const response = await fetch('/api/admin/secrets/probe', {
 				method: 'POST',
 				credentials: 'include',
