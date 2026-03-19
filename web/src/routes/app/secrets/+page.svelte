@@ -3,7 +3,7 @@
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -39,6 +39,19 @@
 	let trendRaw: TrendRaw[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+
+	type ProbeStats = {
+		total: number;
+		valid: number;
+		invalid: number;
+		revoked: number;
+		expired: number;
+		false_positive: number;
+		unknown: number;
+		error: number;
+	};
+
+	let probeStats: ProbeStats | null = $state(null);
 
 	const COLORS = [
 		'var(--red)',
@@ -234,19 +247,21 @@
 
 	onMount(async () => {
 		try {
-			const [tableRes, distRes, trendRes] = await Promise.all([
+			const [tableRes, statsRes, trendRes] = await Promise.all([
 				fetch('/api/secrets/table', { credentials: 'include' }),
-				fetch('/api/secrets/distribution', { credentials: 'include' }),
+				fetch('/api/secrets/stats', { credentials: 'include' }),
 				fetch('/api/secrets/trend', { credentials: 'include' })
 			]);
 
-			if (!tableRes.ok || !distRes.ok || !trendRes.ok) {
+			if (!tableRes.ok || !statsRes.ok || !trendRes.ok) {
 				error = 'Failed to load secrets data';
 				return;
 			}
 
 			tableRows = await tableRes.json();
-			distribution = await distRes.json();
+			const stats = await statsRes.json();
+			distribution = stats.distribution ?? [];
+			probeStats = stats.probe ?? null;
 			trendRaw = await trendRes.json();
 		} catch {
 			error = 'Failed to fetch data';
@@ -296,11 +311,16 @@
 			</div>
 		{:else}
 			<!-- Metric cards -->
-			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Total Findings</h3>
 					<p class="text-3xl font-bold text-[var(--text-bright)]">{fmt(donutTotal)}</p>
 					<p class="text-xs text-[var(--text-muted)]">across {groupedByRepo.length} repos</p>
+				</div>
+				<div class="metric-card space-y-1 rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Verified Live</h3>
+					<p class="text-3xl font-bold {probeStats && probeStats.valid > 0 ? 'text-red-400' : 'text-[var(--text-bright)]'}">{probeStats ? probeStats.valid : '—'}</p>
+					<p class="text-xs text-[var(--text-muted)]">{probeStats ? `${probeStats.total} probed` : 'not yet probed'}</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Secret Types</h3>

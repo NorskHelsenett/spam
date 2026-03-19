@@ -190,7 +190,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			})
 			r.Route("/api/secrets", func(s chi.Router) {
 				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
-				s.Get("/distribution", uiapi.SecretsDashboardDistributionHandler(db, authService, appCache))
+				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
 				s.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
 				s.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))

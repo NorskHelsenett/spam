@@ -21,7 +21,7 @@ const (
 	secretsCacheTTL      = 24 * time.Hour
 	secretsTableCacheKey = "secrets:dashboard:table"
 	secretsTrendCacheKey = "secrets:dashboard:trend"
-	secretsDistCacheKey  = "secrets:dashboard:distribution"
+	secretsStatsCacheKey = "secrets:dashboard:stats"
 )
 
 // secretsCacheEntry wraps a cached response with the run_secrets watermark
@@ -33,7 +33,7 @@ type secretsCacheEntry[T any] struct {
 
 var secretsTableRefreshing atomic.Bool
 var secretsTrendRefreshing atomic.Bool
-var secretsDistRefreshing atomic.Bool
+var secretsStatsRefreshing atomic.Bool
 
 // secretsWatermark returns the latest run_secrets created_at timestamp,
 // used to invalidate cached dashboard data when new scans complete.
@@ -476,47 +476,79 @@ SELECT day::text AS date, secret_type, match, secret FROM deduped_findings`
 	return rows, nil
 }
 
-// SecretsDashboardDistributionHandler returns secret type counts for the donut chart.
+// SecretsDashboardStatsResponse is the combined response for /api/secrets/stats.
+type SecretsDashboardStatsResponse struct {
+	Distribution []SecretDistributionRow `json:"distribution"`
+	Probe        ProbeStatsResponse      `json:"probe"`
+}
+
+// SecretsDashboardStatsHandler returns distribution + probe stats in one response.
 //
-// GET /api/secrets/distribution
-func SecretsDashboardDistributionHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
+// GET /api/secrets/stats
+func SecretsDashboardStatsHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		watermark := secretsWatermark(r.Context(), db)
+		watermark := secretsStatsWatermark(r.Context(), db)
 
-		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[[]SecretDistributionRow]](r.Context(), c, secretsDistCacheKey); ok {
+		if entry, ok, _ := cache.GetJSON[secretsCacheEntry[SecretsDashboardStatsResponse]](r.Context(), c, secretsStatsCacheKey); ok {
 			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
 				writeJSON(w, http.StatusOK, entry.Response)
 				return
 			}
 			writeJSON(w, http.StatusOK, entry.Response)
 			go func() {
-				if !secretsDistRefreshing.CompareAndSwap(false, true) {
+				if !secretsStatsRefreshing.CompareAndSwap(false, true) {
 					return
 				}
-				defer secretsDistRefreshing.Store(false)
+				defer secretsStatsRefreshing.Store(false)
 				ctx := context.Background()
-				rows, err := computeSecretsDistribution(ctx, db)
+				resp, err := computeSecretsDashboardStats(ctx, db)
 				if err != nil {
-					log.Printf("secrets distribution background refresh: %v", err)
+					log.Printf("secrets stats background refresh: %v", err)
 					return
 				}
-				_ = maybeStoreSecretsCache(ctx, c, secretsDistCacheKey, watermark, rows)
+				_ = maybeStoreSecretsCache(ctx, c, secretsStatsCacheKey, watermark, resp)
 			}()
 			return
 		}
 
-		rows, err := computeSecretsDistribution(r.Context(), db)
+		resp, err := computeSecretsDashboardStats(r.Context(), db)
 		if err != nil {
-			http.Error(w, "failed to load secrets distribution", http.StatusInternalServerError)
+			http.Error(w, "failed to load secrets stats", http.StatusInternalServerError)
 			return
 		}
-		_ = maybeStoreSecretsCache(r.Context(), c, secretsDistCacheKey, watermark, rows)
-		writeJSON(w, http.StatusOK, rows)
+		_ = maybeStoreSecretsCache(r.Context(), c, secretsStatsCacheKey, watermark, resp)
+		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+func computeSecretsDashboardStats(ctx context.Context, db *gorm.DB) (SecretsDashboardStatsResponse, error) {
+	dist, err := computeSecretsDistribution(ctx, db)
+	if err != nil {
+		return SecretsDashboardStatsResponse{}, err
+	}
+	probe, err := computeProbeStats(ctx, db)
+	if err != nil {
+		return SecretsDashboardStatsResponse{}, err
+	}
+	return SecretsDashboardStatsResponse{
+		Distribution: dist,
+		Probe:        probe,
+	}, nil
+}
+
+// secretsStatsWatermark returns the latest of the run_secrets and secret_probes
+// watermarks so the cache invalidates when either data source changes.
+func secretsStatsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	w1 := secretsWatermark(ctx, db)
+	w2 := probeStatsWatermark(ctx, db)
+	if w2.After(w1) {
+		return w2
+	}
+	return w1
 }
 
 func computeSecretsDistribution(ctx context.Context, db *gorm.DB) ([]SecretDistributionRow, error) {
@@ -635,6 +667,44 @@ func maybeStoreSecretsCache[T any](ctx context.Context, c cache.Store, key strin
 		Watermark: watermark,
 		Response:  response,
 	}, secretsCacheTTL)
+}
+
+// ProbeStatsResponse is the cached view of secret probe statistics.
+type ProbeStatsResponse struct {
+	Total         int64 `json:"total"`
+	Valid         int64 `json:"valid"`
+	Invalid       int64 `json:"invalid"`
+	Revoked       int64 `json:"revoked"`
+	Expired       int64 `json:"expired"`
+	FalsePositive int64 `json:"false_positive"`
+	Unknown       int64 `json:"unknown"`
+	Error         int64 `json:"error"`
+}
+
+// probeStatsWatermark returns the latest probed_at timestamp from secret_probes.
+func probeStatsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var t time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(probed_at), TIMESTAMPTZ 'epoch') FROM secret_probes",
+	).Scan(&t)
+	return t
+}
+
+func computeProbeStats(ctx context.Context, db *gorm.DB) (ProbeStatsResponse, error) {
+	counts, total, err := secretprobe.Stats(ctx, db)
+	if err != nil {
+		return ProbeStatsResponse{}, err
+	}
+	return ProbeStatsResponse{
+		Total:         total,
+		Valid:         counts[secretprobe.StatusValid],
+		Invalid:       counts[secretprobe.StatusInvalid],
+		Revoked:       counts[secretprobe.StatusRevoked],
+		Expired:       counts[secretprobe.StatusExpired],
+		FalsePositive: counts[secretprobe.StatusFalsePositive],
+		Unknown:       counts[secretprobe.StatusUnknown],
+		Error:         counts[secretprobe.StatusError],
+	}, nil
 }
 
 // SecretFindingRow is a single deduplicated finding returned for the drawer.
@@ -853,7 +923,7 @@ func SecretDismissHandler(db *gorm.DB, authService *auth.Service, c cache.Store)
 		// Invalidate secrets dashboard caches so trend/table/distribution reflect the change.
 		_ = cache.Delete(r.Context(), c, secretsTableCacheKey)
 		_ = cache.Delete(r.Context(), c, secretsTrendCacheKey)
-		_ = cache.Delete(r.Context(), c, secretsDistCacheKey)
+		_ = cache.Delete(r.Context(), c, secretsStatsCacheKey)
 
 		writeJSON(w, http.StatusOK, map[string]bool{"dismissed": body.Dismiss})
 	}
