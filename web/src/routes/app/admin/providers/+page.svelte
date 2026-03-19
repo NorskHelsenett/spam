@@ -2248,9 +2248,11 @@
 		</div>
 
 		{#if probePreviewLoading}
-			<Loading message="Loading probe preview" variant="bar" size="sm" />
+			<div class="flex flex-1 items-center justify-center">
+				<Loading message="Loading probe preview" variant="bar" size="sm" />
+			</div>
 		{:else if probePreview.length === 0}
-			<div class="flex flex-col items-center gap-3 py-10 text-center">
+			<div class="flex flex-1 flex-col items-center justify-center gap-3 py-10 text-center">
 				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
 				<div>
 					<p class="text-lg font-semibold text-[var(--text-bright)]">All clear</p>
