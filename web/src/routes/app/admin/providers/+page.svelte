@@ -2416,15 +2416,12 @@
 												</button>
 											{/if}
 										</td>
-										<td class="px-3 py-1.5">
-											<button
-												type="button"
-												class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
-												title="Inspect secret"
-												onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
-											>
-												<Eye size={12} />
-											</button>
+										<td
+											class="px-3 py-1.5 cursor-pointer text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+											title="Inspect secret"
+											onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
+										>
+											<Eye size={12} />
 										</td>
 									</tr>
 								{/each}
