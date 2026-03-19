@@ -547,7 +547,7 @@
 							<GitBranch class="h-2.5 w-2.5" /> Branches
 						</p>
 					</div>
-					<div class="flex flex-col justify-end">
+					<div class="flex flex-col justify-end" data-no-format>
 						<p class="text-lg font-bold leading-tight text-[var(--text-bright)]">{repoDetails.updated_at ? fmtRelative(repoDetails.updated_at) : '—'}</p>
 						<p class="flex items-center gap-1 text-[10px] text-[var(--text-muted)]">
 							<Clock class="h-2.5 w-2.5" /> Last activity
