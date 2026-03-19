@@ -202,6 +202,9 @@
 		padding: 0.4rem;
 		box-shadow: 0 16px 40px rgba(0, 0, 0, 0.25);
 		z-index: 9999;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
 	}
 
 	:global(.select-option) {

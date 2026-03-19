@@ -60,7 +60,7 @@
 	>
 		<!-- Dialog Container -->
 		<div
-			class="fixed left-1/2 top-1/2 z-50 flex h-auto max-h-[90vh] w-[95vw] {maxWidth} flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl"
+			class="fixed left-1/2 top-1/2 z-50 flex h-auto max-h-[95vh] w-[95vw] {maxWidth} flex-col overflow-hidden rounded-2xl border border-[var(--hover-bg)] bg-[var(--main-content-bg)] shadow-2xl"
 			style="transform: translate(-50%, -50%);"
 			role="dialog"
 			aria-modal="true"

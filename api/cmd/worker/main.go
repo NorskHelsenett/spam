@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/jobs"
@@ -143,7 +144,11 @@ func run() error {
 			return fmt.Errorf("create k8s client: %w", err)
 		}
 
-		runnerServer := runner.NewServer(cfg.Runner, gormDB, k8sClient)
+		if err := cache.EnsureTable(ctx, gormDB); err != nil {
+			return fmt.Errorf("ensure kv_store table: %w", err)
+		}
+		cacheStore := cache.NewPostgresStore(gormDB)
+		runnerServer := runner.NewServer(cfg.Runner, gormDB, k8sClient, cacheStore)
 
 		// Create run executor
 		runExecutor, err = runner.NewRunExecutor(cfg.Runner, runnerServer)

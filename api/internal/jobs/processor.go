@@ -5,13 +5,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
+
+// TrivyJobCreator is implemented by the runner when K8s is available.
+// It allows the worker to create an ad-hoc trivy scanner K8s job.
+type TrivyJobCreator interface {
+	CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error
+}
 
 // retryableError wraps an error to signal the worker to retry without counting
 // the attempt against the job's max attempts.
@@ -46,6 +55,10 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processRefreshSBOMViews(ctx, db)
 	case JobTypeOSVScan:
 		return processOSVScan(ctx, db, job.ID)
+	case JobTypeTrivyAdhocScan:
+		return processTrivyAdhocScan(ctx, job, runExecutor)
+	case JobTypeProbeSecrets:
+		return processProbeSecrets(ctx, db, job)
 	default:
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
@@ -76,6 +89,66 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 		return result, fmt.Errorf("refresh vulnerability dashboard metrics: %w", err)
 	}
 	return result, nil
+}
+
+func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecutor) (interface{}, error) {
+	creator, ok := runExecutor.(TrivyJobCreator)
+	if !ok {
+		return nil, NonRetryable(errors.New("trivy job creation not available: runner not enabled"))
+	}
+
+	// CronJob name comes from the worker's own environment — the worker owns K8s config.
+	cronJobName := strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME"))
+	if cronJobName == "" {
+		// Fall back to payload for backwards compatibility.
+		var payload TrivyAdhocPayload
+		if len(job.Payload) > 0 {
+			_ = json.Unmarshal(job.Payload, &payload)
+		}
+		cronJobName = payload.CronJobName
+	}
+	if cronJobName == "" {
+		return nil, NonRetryable(errors.New("TRIVY_SCANNER_CRONJOB_NAME not configured on worker"))
+	}
+
+	if err := creator.CreateTrivyAdhocJob(ctx, cronJobName); err != nil {
+		if isAlreadyRunning(err) {
+			return nil, NonRetryable(err)
+		}
+		return nil, err
+	}
+
+	return map[string]string{"status": "created", "cronjob": cronJobName}, nil
+}
+
+func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {
+	// Parse optional rule_ids filter from payload.
+	var opts secretprobe.RunOptions
+	if len(job.Payload) > 0 {
+		var payload struct {
+			RuleIDs []string `json:"rule_ids"`
+			Hashes  []string `json:"hashes"`
+		}
+		if json.Unmarshal(job.Payload, &payload) == nil {
+			opts.RuleIDs = payload.RuleIDs
+			opts.Hashes = payload.Hashes
+		}
+	}
+
+	runner := secretprobe.NewRunner(db)
+	result, err := runner.Run(ctx, opts, func(probed, total int) {
+		if data, jsonErr := json.Marshal(map[string]int{"probed": probed, "total": total}); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", job.ID).Update("result", data)
+		}
+	})
+	if err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func isAlreadyRunning(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "already running") || strings.Contains(err.Error(), "AlreadyExists"))
 }
 
 func processCreateRun(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecutor) (interface{}, error) {

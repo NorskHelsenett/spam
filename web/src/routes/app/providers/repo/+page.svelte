@@ -11,6 +11,7 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import SecretsDialog from '$lib/components/SecretsDialog.svelte';
 	import DependenciesDialog from '$lib/components/DependenciesDialog.svelte';
+	import ErrorState from '$lib/components/ErrorState.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import EmptyCommits from '$lib/components/icons/EmptyCommits.svelte';
 	import EmptyContributors from '$lib/components/icons/EmptyContributors.svelte';
@@ -234,8 +235,15 @@
 			}
 
 			if (!response.ok) {
-				if (response.status === 404) {
-					error = 'Repository not found. Private instances may require authentication.';
+				if (response.status === 403) {
+					try {
+						const body = await response.json();
+						error = body.error === 'provider_token_required' ? 'no-token' : 'access-denied';
+					} catch {
+						error = 'access-denied';
+					}
+				} else if (response.status === 404) {
+					error = 'Repository not found.';
 				} else if (response.status === 401) {
 					error = 'Authentication required. This instance requires a token to access project details.';
 				} else if (response.status === 429) {
@@ -606,9 +614,9 @@
 			<ArrowLeft class="h-4 w-4" />
 			Back to providers
 		</button>
-		{#if details}
+		{#if details?.html_url || (resolvedPath && (resolvedBaseUrl || resolvedProvider))}
 			<a
-				href={details.html_url}
+				href={details?.html_url || (resolvedBaseUrl ? `${resolvedBaseUrl}/${resolvedPath}` : resolvedProvider === 'gitlab' ? `https://gitlab.com/${resolvedPath}` : resolvedProvider === 'gitea' || resolvedProvider === 'forgejo' ? '' : `https://github.com/${resolvedPath}`)}
 				target="_blank"
 				rel="noopener noreferrer"
 				class="flex mr-[2em] pr-2 items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
@@ -625,16 +633,21 @@
 			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
 		</div>
 	{:else if error === 'rate_limited'}
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
-			<Clock class="mx-auto h-12 w-12 text-yellow-500" />
-			<p class="mt-4 text-lg font-semibold text-[var(--text-bright)]">Rate Limited</p>
-			<p class="mt-2 text-sm text-[var(--text-secondary)]">API rate limit reached. Please try again later.</p>
-		</div>
+		<ErrorState title="Rate Limited" subtitle="API rate limit reached. Please try again later." color="rgb(234, 179, 8)">
+			{#snippet icon()}<Clock class="h-10 w-10 text-yellow-500" />{/snippet}
+		</ErrorState>
+	{:else if error === 'no-token'}
+		<ErrorState title="Provider token required" subtitle="This repository was discovered during sync but the provider has no API token configured. An API token is needed to fetch full repository details." color="var(--orange)">
+			{#snippet icon()}<Lock class="h-10 w-10 text-[var(--orange)]" />{/snippet}
+		</ErrorState>
+	{:else if error === 'access-denied'}
+		<ErrorState title="Access denied" subtitle="This repository is tracked but the provider API denied access. The configured token may lack permission for this repository." color="var(--orange)">
+			{#snippet icon()}<Lock class="h-10 w-10 text-[var(--orange)]" />{/snippet}
+		</ErrorState>
 	{:else if error}
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
-			<AlertCircle class="mx-auto h-12 w-12 text-[var(--error)]" />
-			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
-		</div>
+		<ErrorState title="Something went wrong" subtitle={error}>
+			{#snippet icon()}<AlertCircle class="h-10 w-10 text-[var(--error)]" />{/snippet}
+		</ErrorState>
 	{:else if details}
 		<!-- Header + Stats -->
 		<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
@@ -692,7 +705,7 @@
 			</div>
 
 			{#if scanError}
-				<div class="rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-2 text-sm text-[var(--error)]">
+				<div class="rounded-xl border border-[var(--error)]/30 px-4 py-2 text-sm text-[var(--error)]">
 					{scanError}
 				</div>
 			{/if}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -21,6 +22,7 @@ type Server struct {
 	db         *gorm.DB
 	httpServer *http.Server
 	k8sClient  *K8sClient
+	cache      cache.Store
 
 	// WebSocket connections for active runs (runID -> connection)
 	wsConnsMu sync.RWMutex
@@ -28,11 +30,12 @@ type Server struct {
 }
 
 // NewServer creates a new runner server.
-func NewServer(cfg config.RunnerConfig, db *gorm.DB, k8sClient *K8sClient) *Server {
+func NewServer(cfg config.RunnerConfig, db *gorm.DB, k8sClient *K8sClient, cacheStore cache.Store) *Server {
 	return &Server{
 		cfg:       cfg,
 		db:        db,
 		k8sClient: k8sClient,
+		cache:     cacheStore,
 		wsConns:   make(map[string]*WSConn),
 	}
 }

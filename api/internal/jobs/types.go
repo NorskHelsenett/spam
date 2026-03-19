@@ -7,7 +7,14 @@ const (
 	JobTypeCreateRun        JobType = "CREATE_RUN"
 	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
 	JobTypeOSVScan          JobType = "OSV_SCAN"
+	JobTypeTrivyAdhocScan   JobType = "TRIVY_ADHOC_SCAN"
+	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
 )
+
+// TrivyAdhocPayload is the payload for TRIVY_ADHOC_SCAN jobs.
+type TrivyAdhocPayload struct {
+	CronJobName string `json:"cronjob_name"`
+}
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.
 // This is the canonical definition - do not duplicate elsewhere.

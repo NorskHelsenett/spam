@@ -11,7 +11,10 @@ import (
 	"github.com/NorskHelsenett/spam/internal/providers"
 )
 
-func githubAPIBaseURL(baseURL string) string {
+// GitHubAPIBaseURL returns the GitHub API base URL for use with NewGitHubClient.
+// For github.com it returns "" (the client defaults to the public API).
+// For GitHub Enterprise instances it appends /api/v3.
+func GitHubAPIBaseURL(baseURL string) string {
 	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	if trimmed == "" || strings.EqualFold(trimmed, "https://github.com") {
 		return ""
@@ -23,7 +26,7 @@ func githubAPIBaseURL(baseURL string) string {
 func NewProviderClient(providerType, baseURL, token string) providers.Client {
 	switch providerType {
 	case ProviderGitHub:
-		return providers.NewGitHubClient(githubAPIBaseURL(baseURL), token)
+		return providers.NewGitHubClient(GitHubAPIBaseURL(baseURL), token)
 	case ProviderGitLab:
 		return providers.NewGitLabClient(baseURL, token)
 	case ProviderGitea, ProviderForgejo:
@@ -90,7 +93,7 @@ func CheckProviderHealth(ctx context.Context, providerType, baseURL, ownerPath, 
 func providerHealthProbe(providerType, baseURL, token string) (url, authHeader string, err error) {
 	switch providerType {
 	case ProviderGitHub:
-		apiBase := githubAPIBaseURL(baseURL)
+		apiBase := GitHubAPIBaseURL(baseURL)
 		if apiBase == "" {
 			apiBase = "https://api.github.com"
 		}

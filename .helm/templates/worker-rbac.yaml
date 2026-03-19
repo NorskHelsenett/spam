@@ -24,6 +24,11 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "delete", "get", "list", "watch"]
+  {{- if .Values.trivyScanner.enabled }}
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get"]
+  {{- end }}
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]

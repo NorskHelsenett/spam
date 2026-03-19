@@ -26,6 +26,7 @@ type Store interface {
 	Get(ctx context.Context, key string) ([]byte, bool, error)
 	Set(ctx context.Context, key string, value []byte, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
+	DeleteByPrefix(ctx context.Context, prefix string) error
 }
 
 // GetJSON retrieves a cached value and unmarshals it into T.
@@ -63,6 +64,11 @@ func SetJSON[T any](ctx context.Context, s Store, key string, value T, ttl time.
 // package.
 func Delete(ctx context.Context, s Store, key string) error {
 	return s.Delete(ctx, key)
+}
+
+// DeleteByPrefix removes all cache entries whose key starts with prefix.
+func DeleteByPrefix(ctx context.Context, s Store, prefix string) error {
+	return s.DeleteByPrefix(ctx, prefix)
 }
 
 // Memory is an in-process TTL cache backed by sync.RWMutex + map.
@@ -103,6 +109,17 @@ func (m *Memory) Set(_ context.Context, key string, value []byte, ttl time.Durat
 func (m *Memory) Delete(_ context.Context, key string) error {
 	m.mu.Lock()
 	delete(m.items, key)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *Memory) DeleteByPrefix(_ context.Context, prefix string) error {
+	m.mu.Lock()
+	for k := range m.items {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			delete(m.items, k)
+		}
+	}
 	m.mu.Unlock()
 	return nil
 }

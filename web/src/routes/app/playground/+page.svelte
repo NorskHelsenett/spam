@@ -4,6 +4,7 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -13,6 +14,7 @@
 	import Checkbox from '$lib/components/Checkbox.svelte';
 	import Radio from '$lib/components/Radio.svelte';
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
+	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -78,6 +80,30 @@
 	let rangeValue = $state(42);
 	let checkboxValue = $state(true);
 	let toggleValue = $state(true);
+	let multiSelectValue: string[] = $state(['github']);
+	let multiSelectEmptyValue: string[] = $state([]);
+	const multiSelectOptions = [
+		{ value: 'github', label: 'GitHub' },
+		{ value: 'gitlab', label: 'GitLab' },
+		{ value: 'gitea', label: 'Gitea' },
+		{ value: 'bitbucket', label: 'Bitbucket' },
+		{ value: 'azure', label: 'Azure DevOps', disabled: true }
+	];
+	const multiSelectSecretTypes = [
+		{ value: 'generic-api-key', label: 'generic-api-key' },
+		{ value: 'private-key', label: 'private-key' },
+		{ value: 'jwt', label: 'jwt' },
+		{ value: 'aws-access-key', label: 'aws-access-key' },
+		{ value: 'github-pat', label: 'github-pat' },
+		{ value: 'slack-token', label: 'slack-token' }
+	];
+	let multiSelectTypesValue: string[] = $state(['jwt', 'private-key']);
+	const mockContributors = [
+		{ login: 'jonasbg', name: 'Jonas', email: 'jonas@example.com', avatar_url: 'https://avatars.githubusercontent.com/u/1508560?v=4', contributions: 142 },
+		{ login: 'dependabot[bot]', name: 'Dependabot', avatar_url: 'https://avatars.githubusercontent.com/in/29110?v=4', contributions: 87 },
+		{ login: 'alice', name: 'Alice Smith', email: 'alice@example.com', contributions: 34 },
+		{ login: 'bob', name: 'Bob', contributions: 12 },
+	];
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
@@ -383,6 +409,21 @@
 					<Select options={selectOptions} bind:value={selectValue} class="w-full" />
 				</div>
 
+				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Multi Select</span>
+				<div class="space-y-3">
+					<div class="flex items-center gap-3">
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectValue} placeholder="Providers" />
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectEmptyValue} placeholder="None selected" />
+					</div>
+					<div class="flex items-center gap-3">
+						<MultiSelect options={multiSelectSecretTypes} bind:selected={multiSelectTypesValue} placeholder="Secret types" size="sm" />
+						<MultiSelect options={multiSelectOptions} bind:selected={multiSelectValue} placeholder="Providers" size="sm" class="w-full" />
+					</div>
+					<p class="text-xs text-[var(--text-tertiary)]">
+						Providers: {multiSelectValue.length ? multiSelectValue.join(', ') : 'none'} · Types: {multiSelectTypesValue.length ? multiSelectTypesValue.join(', ') : 'none'}
+					</p>
+				</div>
+
 				<span class="block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Radio</span>
 				<div class="flex flex-wrap gap-4">
 					<Radio name="phase" value="alpha" bind:group={radioValue} label="Alpha" />
@@ -474,6 +515,31 @@
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Health status</p>
 				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Calls /api/healthz on mount.</p>
 				<HealthStatus />
+			</div>
+		</div>
+
+		<div class="grid gap-6 lg:grid-cols-2">
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Contributor Avatars</p>
+				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Hover for tooltip with email copy. Reusable across drawers.</p>
+				<div class="space-y-4">
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">4 contributors</p>
+						<ContributorAvatars contributors={mockContributors} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Max 2</p>
+						<ContributorAvatars contributors={mockContributors} max={2} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Single contributor</p>
+						<ContributorAvatars contributors={[mockContributors[0]]} />
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">No avatar (fallback initials)</p>
+						<ContributorAvatars contributors={[mockContributors[2], mockContributors[3]]} />
+					</div>
+				</div>
 			</div>
 		</div>
 

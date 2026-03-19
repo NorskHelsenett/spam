@@ -267,10 +267,23 @@ func discoverRepos(ctx context.Context, db *gorm.DB, c cache.Store, p providerco
 			Org:                org,
 			Slug:               slug,
 			ExternalID:         repo.ExternalID,
+			IsPrivate:          &repo.IsPrivate,
 			ProviderUpdatedAt:  providerUpdatedAtPtr,
 		}); err != nil {
 			log.Printf("cache warmer: %s upsert %s: %v", p.DisplayName, path, err)
 		}
+	}
+
+	// Invalidate paginated endpoint caches so the UI reflects fresh data
+	// (e.g. visibility changes). These caches are keyed per page/sort
+	// combination, so a prefix delete is the only practical approach.
+	switch p.Type {
+	case providerconfig.ProviderGitHub:
+		_ = cache.DeleteByPrefix(ctx, c, fmt.Sprintf("github:repos:%s:", p.OwnerPath))
+	case providerconfig.ProviderGitLab:
+		_ = cache.DeleteByPrefix(ctx, c, fmt.Sprintf("gitlab:projects:%s:%s:", p.BaseURL, p.OwnerPath))
+	case providerconfig.ProviderGitea, providerconfig.ProviderForgejo:
+		_ = cache.DeleteByPrefix(ctx, c, fmt.Sprintf("gitea:repos:%s:%s:", p.BaseURL, p.OwnerPath))
 	}
 
 	log.Printf("cache warmer: %s discovered %d repos", p.DisplayName, len(allRepos))

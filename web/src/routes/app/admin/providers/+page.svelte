@@ -1,14 +1,24 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
-	import { slide } from 'svelte/transition';
+	import { slide, fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2 } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
+	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
+	import X from 'lucide-svelte/icons/x';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
+	import Loading from '$lib/components/Loading.svelte';
+	import Checkbox from '$lib/components/Checkbox.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
+	import SecretInspectDrawer from '$lib/components/SecretInspectDrawer.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
+	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -565,6 +575,494 @@
 		}
 	};
 
+	// ── Trivy scanner ──────────────────────────────────────────────────────
+	type TrivyRun = {
+		started_at: string;
+		finished_at: string;
+		sbom_count: number;
+		critical_count: number;
+		high_count: number;
+	};
+
+	type TrivyScanStatus = {
+		job_id?: string;
+		job_status?: string;
+		created_at?: string;
+		finished_at?: string;
+		error?: string;
+		pending_count?: number;
+		scanned_count?: number;
+		last_scanned_at?: string;
+		scan_complete?: boolean;
+		recent_runs?: TrivyRun[];
+	};
+
+	let trivyStatus: TrivyScanStatus = $state({});
+	let trivyTriggering = $state(false);
+	let trivyError = $state('');
+	let trivyPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const loadTrivyStatus = async () => {
+		try {
+			const response = await fetch('/api/admin/trivy/scan/status', { credentials: 'include' });
+			if (response.ok) trivyStatus = await response.json();
+		} catch { /* ignore */ }
+	};
+
+	const triggerTrivyScan = async () => {
+		trivyTriggering = true;
+		trivyError = '';
+		try {
+			const response = await fetch('/api/admin/trivy/scan', {
+				method: 'POST',
+				credentials: 'include'
+			});
+			if (response.status === 409) {
+				trivyError = 'A scan job is already queued or running.';
+				return;
+			}
+			if (response.status === 503) {
+				// Should not reach here since button is disabled when not configured.
+				return;
+			}
+			if (!response.ok) {
+				trivyError = 'Failed to start scan.';
+				return;
+			}
+			await loadTrivyStatus();
+			pollTrivyStatus();
+		} catch {
+			trivyError = 'Failed to start scan.';
+		} finally {
+			trivyTriggering = false;
+		}
+	};
+
+	const pollTrivyStatus = () => {
+		if (trivyPollTimer) clearTimeout(trivyPollTimer);
+		trivyPollTimer = setTimeout(async () => {
+			await loadTrivyStatus();
+			const active =
+				trivyStatus.job_status === 'QUEUED' ||
+				trivyStatus.job_status === 'RUNNING' ||
+				trivyStatus.job_status === 'RETRY' ||
+				!trivyStatus.scan_complete;
+			if (active) pollTrivyStatus();
+		}, 3000);
+	};
+
+	const trivyJobStatusLabel = (status?: string) => {
+		switch (status) {
+			case 'QUEUED': return 'Queued';
+			case 'RUNNING': return 'Running…';
+			case 'RETRY': return 'Retrying';
+			case 'SUCCEEDED': return 'Job created';
+			case 'FAILED': return 'Failed';
+			default: return 'Never triggered';
+		}
+	};
+
+	const trivyJobStatusClass = (status?: string) => {
+		switch (status) {
+			case 'RUNNING':
+			case 'QUEUED':
+			case 'RETRY': return 'text-amber-400 border-amber-400/40';
+			case 'SUCCEEDED': return 'text-green-400 border-green-400/40';
+			case 'FAILED': return 'text-[var(--error)] border-[var(--error)]/40';
+			default: return 'text-[var(--text-tertiary)] border-[var(--border-color)]';
+		}
+	};
+
+	// ── Secret Probe ────────────────────────────────────────────
+	type ProbeStatus = {
+		job?: {
+			id: string;
+			status: string;
+			created_at?: string;
+			finished_at?: string;
+			error?: string;
+			result?: any;
+		};
+		stats: {
+			total: number;
+			valid: number;
+			invalid: number;
+			revoked: number;
+			expired: number;
+			false_positive: number;
+			unknown: number;
+			error: number;
+		};
+		registered_rules: string[];
+	};
+
+	let probeStatus: ProbeStatus = $state({ stats: { total: 0, valid: 0, invalid: 0, revoked: 0, expired: 0, false_positive: 0, unknown: 0, error: 0 }, registered_rules: [] });
+	let probeTriggering = $state(false);
+	let probeError = $state('');
+	let probeSelectedRules: string[] = $state([]);
+	let probeForce = $state(false);
+	let probePreviewOpen = $state(false);
+	let probePreview: any[] = $state([]);
+	let probePreviewLoading = $state(false);
+	let probePreviewTab = $state('all');
+	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
+
+	// Dismiss inspect drawer when tab or loading state changes
+	$effect(() => {
+		probePreviewTab;
+		probePreviewLoading;
+		inspectItem = null;
+	});
+
+	const tryDecodeJWT = (s: string): { header: Record<string, unknown>; payload: Record<string, unknown>; expired: boolean | null; expiresAt: string | null; issuedAt: string | null; issuer: string | null; subject: string | null } | null => {
+		const jwtMatch = s.match(/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/);
+		if (!jwtMatch) return null;
+		const parts = jwtMatch[0].split('.');
+		if (parts.length !== 3) return null;
+		const decode = (part: string) => {
+			try {
+				const norm = part.replace(/-/g, '+').replace(/_/g, '/');
+				const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+				return JSON.parse(atob(padded));
+			} catch { return null; }
+		};
+		const header = decode(parts[0]);
+		const payload = decode(parts[1]);
+		if (!header || !payload) return null;
+		const exp = typeof payload.exp === 'number' ? payload.exp : null;
+		const iat = typeof payload.iat === 'number' ? payload.iat : null;
+		return {
+			header, payload,
+			expired: exp != null ? exp * 1000 < Date.now() : null,
+			expiresAt: exp != null ? new Date(exp * 1000).toISOString() : null,
+			issuedAt: iat != null ? new Date(iat * 1000).toISOString() : null,
+			issuer: typeof payload.iss === 'string' ? payload.iss : null,
+			subject: typeof payload.sub === 'string' ? payload.sub : null,
+		};
+	};
+
+	let probeListOpen = $state(false);
+	let probeListTitle = $state('');
+	let probeListStatuses: string[] = $state([]);
+	let probeListItems: any[] = $state([]);
+	let probeListLoading = $state(false);
+
+	const openProbeList = async (title: string, statuses: string[]) => {
+		probeListTitle = title;
+		probeListStatuses = statuses;
+		probeListOpen = true;
+		probeListLoading = true;
+		probeListItems = [];
+		try {
+			const params = statuses.map(s => `status=${s}`).join('&');
+			const res = await fetch(`/api/admin/secrets/probe/list?${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				probeListItems = Array.isArray(data) ? data : [];
+			}
+		} catch { /* ignore */ }
+		finally { probeListLoading = false; }
+	};
+
+	// Selection toolbar for secrets
+	let selectionToolbar: { top: number; left: number; text: string; range: Range } | null = $state(null);
+
+	$effect(() => {
+		if (!probeListOpen) selectionToolbar = null;
+	});
+
+	const handleSecretSelect = () => {
+		// Small delay to let click-to-select-all finish first
+		setTimeout(() => {
+			const sel = window.getSelection();
+			if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+				selectionToolbar = null;
+				return;
+			}
+			const text = sel.toString().trim();
+			const range = sel.getRangeAt(0);
+			const rect = range.getBoundingClientRect();
+			selectionToolbar = {
+				top: Math.max(4, rect.top - 36),
+				left: Math.min(Math.max(80, rect.left + rect.width / 2), window.innerWidth - 80),
+				text,
+				range: range.cloneRange()
+			};
+		}, 10);
+	};
+
+	const tryBase64Decode = (s: string): string | null => {
+		try {
+			const norm = s.replace(/-/g, '+').replace(/_/g, '/');
+			const padded = norm + '=='.slice(0, (4 - (norm.length % 4)) % 4);
+			const decoded = atob(padded);
+			// Reject control characters
+			if (/[\x00-\x08\x0e-\x1f\x7f]/.test(decoded)) return null;
+			// Reject if less than 80% printable ASCII / common UTF-8
+			const printable = [...decoded].filter(c => {
+				const code = c.charCodeAt(0);
+				return (code >= 32 && code <= 126) || code === 9 || code === 10 || code === 13;
+			}).length;
+			if (printable / decoded.length < 0.8) return null;
+			// Reject very short or same as input
+			if (decoded.length < 2 || decoded === s) return null;
+			try { return JSON.stringify(JSON.parse(decoded), null, 2); } catch { /* not json */ }
+			return decoded;
+		} catch {
+			return null;
+		}
+	};
+
+	const copySelection = () => {
+		if (!selectionToolbar) return;
+		navigator.clipboard.writeText(selectionToolbar.text);
+		selectionToolbar = null;
+	};
+
+	const decodeSelection = () => {
+		if (!selectionToolbar) return;
+		const range = selectionToolbar.range;
+		const text = selectionToolbar.text;
+
+		// Try each whitespace-separated token for base64
+		const tokens = text.split(/(\s+)/);
+		let anyDecoded = false;
+		const frag = document.createDocumentFragment();
+
+		for (const token of tokens) {
+			if (/^\s+$/.test(token)) {
+				frag.appendChild(document.createTextNode(token));
+				continue;
+			}
+			// Strip common wrappers: quotes, trailing punctuation
+			const stripped = token.replace(/^["'`]+|["'`,:;]+$/g, '');
+			const decoded = stripped.length >= 4 ? tryBase64Decode(stripped) : null;
+			if (decoded) {
+				// Keep prefix/suffix that was stripped
+				const prefix = token.slice(0, token.indexOf(stripped));
+				const suffix = token.slice(token.indexOf(stripped) + stripped.length);
+				if (prefix) frag.appendChild(document.createTextNode(prefix));
+				const span = document.createElement('span');
+				span.textContent = decoded;
+				span.style.color = 'var(--accent)';
+				span.style.whiteSpace = 'pre-wrap';
+				span.title = `Original: ${stripped}`;
+				frag.appendChild(span);
+				if (suffix) frag.appendChild(document.createTextNode(suffix));
+				anyDecoded = true;
+			} else {
+				frag.appendChild(document.createTextNode(token));
+			}
+		}
+
+		if (anyDecoded) {
+			range.deleteContents();
+			range.insertNode(frag);
+		}
+
+		window.getSelection()?.removeAllRanges();
+		selectionToolbar = null;
+	};
+
+	// Auto-decode: find all base64 values in a secret element and replace inline
+	const autoDecodeElement = (el: HTMLElement) => {
+		const text = el.textContent || '';
+		// Match base64 patterns: JWT parts (eyJ...), long base64 strings, key=value base64
+		const b64Pattern = /(?:eyJ[A-Za-z0-9+/\-_]{10,}={0,2})|(?:[A-Za-z0-9+/\-_]{20,}={0,2})/g;
+		let match;
+		const replacements: { start: number; end: number; original: string; decoded: string }[] = [];
+
+		while ((match = b64Pattern.exec(text)) !== null) {
+			const candidate = match[0];
+			// Skip if it looks like a URL path or hex-only
+			if (/^[0-9a-fA-F]+$/.test(candidate)) continue;
+			if (candidate.includes('://')) continue;
+			const decoded = tryBase64Decode(candidate);
+			if (decoded && decoded !== candidate && decoded.length > 3) {
+				replacements.push({
+					start: match.index,
+					end: match.index + candidate.length,
+					original: candidate,
+					decoded
+				});
+			}
+		}
+
+		if (replacements.length === 0) return;
+
+		// Build new content with decoded spans
+		const frag = document.createDocumentFragment();
+		let cursor = 0;
+		for (const r of replacements) {
+			if (r.start > cursor) {
+				frag.appendChild(document.createTextNode(text.slice(cursor, r.start)));
+			}
+			const span = document.createElement('span');
+			span.style.color = 'var(--accent)';
+			span.style.whiteSpace = 'pre-wrap';
+			span.textContent = r.decoded;
+			span.title = `Original: ${r.original}`;
+			frag.appendChild(span);
+			cursor = r.end;
+		}
+		if (cursor < text.length) {
+			frag.appendChild(document.createTextNode(text.slice(cursor)));
+		}
+		el.textContent = '';
+		el.appendChild(frag);
+	};
+
+	const exportProbeCSV = () => {
+		const params = probeListStatuses.map(s => `status=${s}`).join('&');
+		window.open(`/api/admin/secrets/probe/export?${params}`, '_blank');
+	};
+	let probeExcludedHashes: Set<string> = $state(new Set());
+	let probePollTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const buildCurl = (req: any, secret: string) => {
+		if (!req) return '';
+		// Replace [REDACTED] with actual secret in headers
+		const headers = Object.entries(req.headers || {})
+			.map(([k, v]: [string, any]) => {
+				const val = typeof v === 'string' ? v.replace('[REDACTED]', secret) : v;
+				return `-H '${k}: ${val}'`;
+			})
+			.join(' ');
+		const body = req.body ? `-d '${req.body}'` : '';
+		// For webhook URLs, the URL itself is the secret
+		const url = req.url === secret ? req.url : req.url;
+		return `curl -s ${req.method === 'POST' ? '-X POST ' : ''}${headers} ${body} '${url}'`.replace(/\s+/g, ' ').trim();
+	};
+
+	const copyToClipboard = (text: string) => {
+		navigator.clipboard.writeText(text);
+	};
+
+	const loadProbePreview = async () => {
+		probePreviewLoading = true;
+		probePreview = [];
+		probeExcludedHashes = new Set();
+		try {
+			const params = probeForce ? '?include_probed=true' : '';
+			const res = await fetch(`/api/admin/secrets/probe/preview${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const data = await res.json();
+				probePreview = Array.isArray(data) ? data : [];
+				// Pre-exclude dismissed and inactive (expired/invalid/false_positive) items.
+				const excluded = new Set<string>();
+				for (const group of probePreview) {
+					for (const item of group.items ?? []) {
+						if (item.dismissed || item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive') {
+							excluded.add(item.secret_hash);
+						}
+					}
+				}
+				probeExcludedHashes = excluded;
+			}
+		} catch { /* ignore */ }
+		finally { probePreviewLoading = false; }
+	};
+
+	const toggleDismiss = (secretHash: string) => {
+		const isDismissed = probeExcludedHashes.has(secretHash);
+		const next = new Set(probeExcludedHashes);
+		if (isDismissed) { next.delete(secretHash); } else { next.add(secretHash); }
+		probeExcludedHashes = next;
+
+		// Update the item's dismissed state in probePreview so the status column reflects it.
+		for (const group of probePreview) {
+			for (const item of group.items ?? []) {
+				if (item.secret_hash === secretHash) {
+					item.dismissed = !isDismissed;
+				}
+			}
+		}
+
+		// Persist immediately — fire and forget.
+		fetch('/api/secrets/dismiss', {
+			method: 'POST',
+			credentials: 'include',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ secret_hash: secretHash, dismiss: !isDismissed })
+		}).catch(() => {});
+	};
+
+	const loadProbeStatus = async () => {
+		try {
+			const response = await fetch('/api/admin/secrets/probe/status', { credentials: 'include' });
+			if (response.ok) probeStatus = await response.json();
+		} catch { /* ignore */ }
+	};
+
+	const triggerProbe = async () => {
+		probeTriggering = true;
+		probeError = '';
+		try {
+			const body: any = {};
+			if (probeSelectedRules.length > 0) body.rule_ids = probeSelectedRules;
+			// Send only the hashes the user has not excluded.
+			const hashes: string[] = [];
+			for (const group of probePreview) {
+				if (probeSelectedRules.length > 0 && !probeSelectedRules.includes(group.rule_id)) continue;
+				for (const item of group.items ?? []) {
+					if (!probeExcludedHashes.has(item.secret_hash)) hashes.push(item.secret_hash);
+				}
+			}
+			if (hashes.length > 0) body.hashes = hashes;
+			const response = await fetch('/api/admin/secrets/probe', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body)
+			});
+			if (response.status === 409) {
+				probeError = 'A probe job is already queued or running.';
+				return;
+			}
+			if (!response.ok) {
+				probeError = 'Failed to start probe.';
+				return;
+			}
+			await loadProbeStatus();
+			pollProbeStatus();
+		} catch {
+			probeError = 'Failed to start probe.';
+		} finally {
+			probeTriggering = false;
+		}
+	};
+
+	const pollProbeStatus = () => {
+		if (probePollTimer) clearTimeout(probePollTimer);
+		probePollTimer = setTimeout(async () => {
+			await loadProbeStatus();
+			const active = probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY';
+			if (active) pollProbeStatus();
+		}, 3000);
+	};
+
+	const probeJobLabel = (status?: string) => {
+		switch (status) {
+			case 'QUEUED': return 'Queued';
+			case 'RUNNING': return 'Running…';
+			case 'RETRY': return 'Retrying';
+			case 'SUCCEEDED': return 'Complete';
+			case 'FAILED': return 'Failed';
+			default: return 'Never triggered';
+		}
+	};
+
+	const probeJobClass = (status?: string) => {
+		switch (status) {
+			case 'RUNNING':
+			case 'QUEUED':
+			case 'RETRY': return 'text-amber-400 border-amber-400/40';
+			case 'SUCCEEDED': return 'text-green-400 border-green-400/40';
+			case 'FAILED': return 'text-[var(--error)] border-[var(--error)]/40';
+			default: return 'text-[var(--text-tertiary)] border-[var(--border-color)]';
+		}
+	};
+
 	const isSyncing = (id: string) => $syncStates[id]?.status === 'running';
 
 	const refreshSyncStatuses = async () => {
@@ -663,12 +1161,124 @@
 		}
 	};
 
+	// ── Users ──────────────────────────────────────────────────────────────
+	type UserSummary = {
+		id: string;
+		subject: string;
+		email?: string;
+		name?: string;
+		approved: boolean;
+		hidden: boolean;
+		role: string;
+		groups: string[];
+		last_login_at?: string;
+		created_at: string;
+	};
+
+	const roleOptions = [
+		{ value: 'pending', label: 'Pending' },
+		{ value: 'default', label: 'Default' },
+		{ value: 'global_reader', label: 'Global reader' },
+		{ value: 'admin', label: 'Admin' }
+	];
+
+	let users: UserSummary[] = $state([]);
+	const approvedUsers = $derived(users.filter(u => u.approved && !u.hidden));
+	const adminCount = $derived(approvedUsers.filter(u => u.role === 'admin').length);
+	const readerCount = $derived(approvedUsers.filter(u => u.role === 'global_reader').length);
+	const defaultCount = $derived(approvedUsers.filter(u => u.role === 'default').length);
+	const pendingUsers = $derived(users.filter(u => !u.approved && !u.hidden));
+	let usersLoading = $state(true);
+	let usersError = $state('');
+	let savingUser = $state<string | null>(null);
+	let usersRefreshing = $state(false);
+	let showHidden = $state(false);
+
+	const visibleUsers = $derived(showHidden ? users : users.filter((u) => !u.hidden));
+
+	const loadUsers = async () => {
+		usersLoading = true;
+		usersRefreshing = true;
+		usersError = '';
+		try {
+			const response = await fetch('/api/admin/users', { credentials: 'include' });
+			if (!response.ok) {
+				usersError = response.status === 403 ? 'Admin access required.' : 'Failed to load users.';
+				users = [];
+				return;
+			}
+			users = await response.json();
+		} catch {
+			usersError = 'Failed to load users.';
+		} finally {
+			usersLoading = false;
+			setTimeout(() => { usersRefreshing = false; }, 1000);
+		}
+	};
+
+	const setHidden = async (user: UserSummary, hidden: boolean) => {
+		try {
+			const response = await fetch(`/api/admin/users/${user.id}/hidden`, {
+				method: 'PATCH',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ hidden })
+			});
+			if (!response.ok) return;
+			const updated = await response.json();
+			users = users.map((u) => (u.id === updated.id ? updated : u));
+		} catch { /* ignore */ }
+	};
+
+	const updateRole = async (user: UserSummary, role: string) => {
+		savingUser = user.id;
+		try {
+			const response = await fetch(`/api/admin/users/${user.id}`, {
+				method: 'PATCH',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ role })
+			});
+			if (!response.ok) { usersError = 'Failed to update role.'; return; }
+			const updated = await response.json();
+			users = users.map((entry) => (entry.id === updated.id ? updated : entry));
+		} catch {
+			usersError = 'Failed to update role.';
+		} finally {
+			savingUser = null;
+		}
+	};
+
+	$effect(() => {
+		const incoming = $newUserEvent;
+		if (!incoming) return;
+		newUserEvent.set(null);
+		newUserCount.update((n) => Math.max(0, n - 1));
+		if (!users.some((u) => u.id === incoming.id)) {
+			users = [...users, incoming];
+		}
+	});
+
 	onMount(() => {
 		if (browser) {
 			loadProviders();
+			loadUsers();
+			newUserCount.set(0);
 			loadOSVStatus().then(() => {
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
+			});
+			loadTrivyStatus().then(() => {
+				const active =
+					trivyStatus.job_status === 'QUEUED' ||
+					trivyStatus.job_status === 'RUNNING' ||
+					trivyStatus.job_status === 'RETRY' ||
+					!trivyStatus.scan_complete;
+				if (active) pollTrivyStatus();
+			});
+			loadProbeStatus().then(() => {
+				const active = probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY';
+				if (active) pollProbeStatus();
 			});
 			updatePreview();
 
@@ -685,6 +1295,7 @@
 				window.removeEventListener('scroll', closeTooltip, true);
 				window.removeEventListener('resize', closeTooltip);
 				if (osvPollTimer) clearTimeout(osvPollTimer);
+				if (trivyPollTimer) clearTimeout(trivyPollTimer);
 			};
 		}
 	});
@@ -692,62 +1303,143 @@
 </script>
 
 <svelte:head>
-	<title>Admin Providers - Spam Monitor</title>
+	<title>Settings - Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+		<header class="flex items-baseline gap-3">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Admin Providers</h1>
-				<p class="text-sm text-[var(--text-tertiary)]">
-					Configure provider tokens that power the Git providers view.
-				</p>
-			</div>
-			<div class="flex flex-wrap items-center gap-2">
-			<button
-				type="button"
-				class="btn btn-ghost"
-				onclick={loadProviders}
-				disabled={refreshing}
-			>
-				<span class="inline-flex h-[14px] w-[14px] items-center justify-center {refreshing ? 'animate-spin' : ''}">
-					<RotateCw size={14} />
-				</span>
-				Refresh
-			</button>
+				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Settings</h1>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">Manage providers, users, and scanner configuration.</p>
 			</div>
 		</header>
 
-		<div class="grid gap-4 lg:grid-cols-3">
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-					<ShieldCheck size={16} />
-					<span>Write-only tokens</span>
-				</div>
-				<p class="mt-2 text-xs text-[var(--text-tertiary)]">
-					PATs are masked immediately after creation and never shown again.
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+			<!-- Users with access + role breakdown as subtitles -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Users</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{usersLoading ? '—' : approvedUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">
+					{usersLoading ? '' : `${adminCount} admin · ${readerCount} reader · ${defaultCount} default`}
 				</p>
 			</div>
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
-					<KeyRound size={16} />
-					<span>Admin-only control</span>
-				</div>
-				<p class="mt-2 text-xs text-[var(--text-tertiary)]">
-					Providers added here are the only ones visible to end users.
-				</p>
+			<!-- Pending users -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Pending</h3>
+				<p class="text-3xl font-bold {!usersLoading && pendingUsers.length > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">{usersLoading ? '—' : pendingUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">awaiting approval</p>
 			</div>
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-				<p class="text-xs text-[var(--text-tertiary)]">
-					{#if providers.length === 0}
-						Default GitHub + GitLab tabs would appear for users.
-					{:else}
-						Only these configured providers would appear for users.
-					{/if}
-				</p>
+			<!-- Providers -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Providers</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{refreshing ? '—' : providers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">configured sources</p>
+			</div>
+			<!-- OSV -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">OSV</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{osvStatus.result?.scanned ?? '—'}</p>
+				<p class="text-xs text-[var(--text-muted)]">{osvStatus.result?.vulns_found != null ? `${osvStatus.result.vulns_found} vulns found` : 'components scanned'}</p>
+			</div>
+			<!-- Trivy -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Trivy</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{trivyStatus.scanned_count ?? '—'}</p>
+				<p class="text-xs text-[var(--text-muted)]">{trivyStatus.pending_count != null ? `${trivyStatus.pending_count} pending` : 'SBOMs scanned'}</p>
 			</div>
 		</div>
+	</section>
+
+	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Users</h2>
+				<p class="text-sm text-[var(--text-tertiary)]">Approve new access requests and adjust roles.</p>
+			</div>
+			<div class="flex items-center gap-4">
+				<Toggle bind:checked={showHidden} label="Show hidden" />
+				<button type="button" class="btn btn-ghost" onclick={loadUsers} disabled={usersRefreshing}>
+					<span class="inline-flex h-[14px] w-[14px] items-center justify-center {usersRefreshing ? 'animate-spin' : ''}">
+						<RotateCw size={14} />
+					</span>
+					Refresh
+				</button>
+			</div>
+		</header>
+
+		{#if usersError}
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{usersError}</div>
+		{/if}
+
+		{#if usersLoading}
+			<p class="text-sm text-[var(--text-secondary)]">Loading users…</p>
+		{:else if visibleUsers.length === 0}
+			<p class="text-sm text-[var(--text-secondary)]">No users found.</p>
+		{:else}
+			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-5 py-3 text-left">Name</th>
+							<th class="px-5 py-3 text-left">Email</th>
+							<th class="px-5 py-3 text-left">Subject</th>
+							<th class="px-5 py-3 text-left">Status</th>
+							<th class="px-5 py-3 text-left">Role</th>
+							<th class="px-5 py-3 text-left">Created</th>
+							<th class="px-5 py-3"></th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+						{#each visibleUsers as user (user.id)}
+							<tr transition:slide={{ duration: 200 }} class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{user.name ?? '—'}</td>
+								<td class="px-5 py-3">{user.email ?? '—'}</td>
+								<td class="px-5 py-3 text-xs">{user.subject}</td>
+								<td class="px-5 py-3">
+									<span class="badge">{user.approved ? 'Approved' : 'Pending'}</span>
+								</td>
+								<td class="px-5 py-3">
+									<Select
+										value={user.role}
+										options={roleOptions}
+										disabled={savingUser === user.id}
+										size="sm"
+										onchange={(value) => updateRole(user, value)}
+									/>
+								</td>
+								<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+									{user.created_at}
+								</td>
+								<td class="px-5 py-3">
+									{#if user.hidden}
+										<button
+											type="button"
+											class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
+											onclick={() => setHidden(user, false)}
+											aria-label="Restore user"
+											title="Restore"
+										>
+											<RotateCcw size={14} />
+										</button>
+									{:else}
+										<button
+											type="button"
+											class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
+											onclick={() => setHidden(user, true)}
+											aria-label="Hide user"
+											title="Hide"
+										>
+											<X size={14} />
+										</button>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+		{/if}
 	</section>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
@@ -758,11 +1450,7 @@
 			</div>
 			<button
 				type="button"
-				class={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold transition ${
-					showAddProvider
-						? 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]'
-						: 'border-amber-300 bg-amber-300 text-amber-950 hover:bg-amber-200'
-				}`}
+				class={`btn ${showAddProvider ? 'btn-ghost' : 'btn-primary'} inline-flex items-center gap-2`}
 				onclick={toggleAddProvider}
 			>
 				{showAddProvider ? 'Close' : 'Add Provider'}
@@ -863,7 +1551,7 @@
 					</div>
 					<button
 						type="button"
-						class="w-full rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200"
+						class="btn btn-primary w-full"
 						onclick={addProvider}
 					>
 						Add Provider
@@ -1018,7 +1706,7 @@
 			</button>
 			<button
 				type="button"
-				class="inline-flex items-center gap-2 rounded-full border border-amber-300 bg-amber-300 px-4 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+				class="btn btn-primary inline-flex items-center gap-2"
 				onclick={triggerOSVScan}
 				disabled={osvTriggering || osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY'}
 			>
@@ -1129,6 +1817,670 @@
 	{/if}
 </section>
 
+<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Trivy Scanner</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">
+				Runs as a scheduled K8s CronJob. Trigger an ad-hoc scan to pick up new SBOMs immediately.
+			</p>
+		</div>
+		<div class="flex flex-wrap items-center gap-2">
+			<button
+				type="button"
+				class="btn btn-primary inline-flex items-center gap-2"
+				onclick={triggerTrivyScan}
+				disabled={trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
+			>
+				<Play size={14} />
+				{trivyTriggering ? 'Starting…' : 'Run Trivy Scan'}
+			</button>
+		</div>
+	</header>
+
+	{#if trivyError}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
+			{trivyError}
+		</div>
+	{/if}
+
+	{#if trivyStatus.job_id}
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 space-y-3">
+			<div class="flex items-center justify-between">
+				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {trivyJobStatusClass(trivyStatus.job_status)}">
+					{trivyStatus.scan_complete ? 'Scan complete' : trivyJobStatusLabel(trivyStatus.job_status)}
+				</span>
+				<span class="text-xs text-[var(--text-muted)]">
+					{trivyStatus.scanned_count ?? 0} / {(trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)} SBOMs scanned
+				</span>
+			</div>
+			{#if (trivyStatus.pending_count ?? 0) > 0}
+				{@const total = (trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)}
+				{@const pct = total > 0 ? Math.round(((trivyStatus.scanned_count ?? 0) / total) * 100) : 0}
+				<div class="h-1.5 w-full rounded-full bg-[var(--border-color)]/40">
+					<div class="h-1.5 rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
+				</div>
+			{/if}
+			<div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--text-muted)]">
+				{#if trivyStatus.created_at}
+					<span class="flex items-center gap-1"><Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}</span>
+				{/if}
+				{#if trivyStatus.last_scanned_at}
+					<span>Last scan {new Date(trivyStatus.last_scanned_at).toLocaleString()}</span>
+				{/if}
+			</div>
+		</div>
+	{/if}
+
+	{#if trivyStatus.error}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{trivyStatus.error}</p>
+		</div>
+	{/if}
+
+	{#if trivyStatus.recent_runs && trivyStatus.recent_runs.length > 0}
+		<div class="space-y-1">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent runs</p>
+			<div class="divide-y divide-[var(--border-color)]/40 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				{#each trivyStatus.recent_runs as run}
+					<div class="flex items-center justify-between px-4 py-2.5 text-xs">
+						<div class="flex items-center gap-3">
+							<span class="text-[var(--text-secondary)]">{new Date(run.started_at).toLocaleDateString()}</span>
+							<span class="text-[var(--text-muted)]">{new Date(run.started_at).toLocaleTimeString()} – {new Date(run.finished_at).toLocaleTimeString()}</span>
+						</div>
+						<div class="flex items-center gap-4">
+							<span class="text-[var(--text-muted)]">{run.sbom_count} SBOMs</span>
+							{#if run.critical_count > 0}
+								<span class="text-red-400">{run.critical_count} critical</span>
+							{/if}
+							{#if run.high_count > 0}
+								<span class="text-orange-400">{run.high_count} high</span>
+							{/if}
+						</div>
+					</div>
+				{/each}
+			</div>
+		</div>
+	{/if}
+</section>
+
+<!-- Secret Probe -->
+<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+	<header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+		<div>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">Validate discovered secrets to check if they are still live, expired, or revoked.</p>
+		</div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 rounded-full border border-[var(--border-color)] px-4 py-2 text-sm font-semibold text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
+			onclick={() => { probePreviewOpen = true; loadProbePreview(); }}
+			disabled={probeTriggering || probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY'}
+		>
+			<Eye size={14} />
+			Preview Secret Probe
+		</button>
+	</header>
+
+	{#if probeError}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
+			{probeError}
+		</div>
+	{/if}
+
+	{#if probeStatus.job?.error}
+		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
+			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Error</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{probeStatus.job.error}</p>
+		</div>
+	{/if}
+
+	<!-- Stats cards -->
+	<div class="grid gap-3 grid-cols-5">
+		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Status</span>
+			</div>
+			{#if probeStatus.job}
+				<p class="mt-2 text-sm font-semibold">
+					<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {probeJobClass(probeStatus.job.status)}">
+						{probeJobLabel(probeStatus.job.status)}
+					</span>
+				</p>
+				{#if probeStatus.job.created_at}
+					<p class="mt-1 flex items-center gap-1 text-[11px] text-[var(--text-muted)]">
+						<Clock size={10} /> Started {new Date(probeStatus.job.created_at).toLocaleString()}
+					</p>
+				{/if}
+				{#if probeStatus.job.finished_at}
+					<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">Finished {new Date(probeStatus.job.finished_at).toLocaleString()}</p>
+				{/if}
+			{:else}
+				<p class="mt-2 text-sm text-[var(--text-muted)]">Never triggered</p>
+			{/if}
+		</div>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-[var(--accent)]/40 {probeStatus.stats.total === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Secrets probed', ['valid', 'invalid', 'revoked', 'expired', 'unknown', 'error', 'false_positive'])}
+		>
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<KeyRound size={16} />
+				<span>Secrets probed</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">
+				{#if probeStatus.job?.status === 'RUNNING' && probeStatus.job?.result?.probed != null}
+					{probeStatus.job.result.probed} <span class="text-sm font-normal text-[var(--text-muted)]">/ {probeStatus.job.result.total}</span>
+				{:else}
+					{probeStatus.stats.total}
+				{/if}
+			</p>
+			{#if probeStatus.job?.status === 'RUNNING' && probeStatus.job?.result?.total > 0}
+				{@const pct = Math.round((probeStatus.job.result.probed / probeStatus.job.result.total) * 100)}
+				<div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-[var(--border-color)]">
+					<div class="h-full rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
+				</div>
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{pct}% probed</p>
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-red-400/40 {probeStatus.stats.valid === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Live secrets', ['valid'])}
+		>
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldAlert size={16} />
+				<span>Live secrets</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-red-400">{probeStatus.stats.valid}</p>
+			{#if probeStatus.stats.valid > 0}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">Require immediate rotation</p>
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-green-400/40 {(probeStatus.stats.revoked + probeStatus.stats.expired + probeStatus.stats.invalid) === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('Rotated / Safe', ['revoked', 'expired', 'invalid'])}
+		>
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<ShieldCheck size={16} />
+				<span>Rotated / Safe</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-green-400">{probeStatus.stats.revoked + probeStatus.stats.expired + probeStatus.stats.invalid}</p>
+			{#if probeStatus.stats.unknown > 0}
+				<p class="mt-1 text-[11px] text-[var(--text-muted)]">{probeStatus.stats.unknown} unknown</p>
+			{/if}
+		</button>
+		<button
+			type="button"
+			class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-left transition hover:border-[var(--border-color)] {probeStatus.stats.false_positive === 0 ? 'opacity-50 pointer-events-none' : 'cursor-pointer'}"
+			onclick={() => openProbeList('False positives', ['false_positive'])}
+		>
+			<div class="flex items-center gap-2 text-sm text-[var(--text-secondary)]">
+				<span>False positives</span>
+			</div>
+			<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">{probeStatus.stats.false_positive}</p>
+			<p class="mt-1 text-[11px] text-[var(--text-muted)]">Placeholder or test values</p>
+		</button>
+	</div>
+
+</section>
+
+<!-- Secret Probe List Dialog -->
+<Dialog bind:open={probeListOpen} showCloseButton={false} maxWidth="max-w-6xl">
+	<div class="p-6 sm:p-8 space-y-5">
+		<div class="flex items-start justify-between">
+			<div>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">{probeListTitle}</h2>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">{probeListItems.length} secret{probeListItems.length !== 1 ? 's' : ''}</p>
+			</div>
+			<div class="flex items-center gap-2">
+				<button
+					type="button"
+					class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+					onclick={() => (probeListOpen = false)}
+					aria-label="Close"
+				>
+					<X size={18} />
+				</button>
+			</div>
+		</div>
+
+		{#if probeListLoading}
+			<Loading message="Loading secrets" variant="bar" size="sm" />
+		{:else if probeListItems.length === 0}
+			<div class="flex flex-col items-center gap-3 py-10 text-center">
+				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
+				<div>
+					<p class="text-lg font-semibold text-[var(--text-bright)]">No secrets found</p>
+					<p class="mt-1 text-sm text-[var(--text-muted)]">No probed secrets match this filter.</p>
+				</div>
+			</div>
+		{:else}
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div
+				class="max-h-[60vh] overflow-y-auto rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40"
+				onmouseup={handleSecretSelect}
+			>
+				<table class="w-full text-sm">
+					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-5 py-2.5 text-left w-[100px]">Status</th>
+							<th class="px-5 py-2.5 text-left">Secret</th>
+							<th class="px-5 py-2.5 text-left w-[28%]">Found in</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/30">
+						{#each probeListItems as probe}
+							<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]">
+								<!-- Status badge -->
+								<td class="px-5 py-3 whitespace-nowrap">
+									<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium
+										{probe.status === 'valid' ? 'border-red-500/30 bg-red-500/5 text-red-400' :
+										 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'border-green-500/30 bg-green-500/5 text-green-400' :
+										 probe.status === 'false_positive' ? 'border-[var(--border-color)] bg-[var(--hover-bg)] text-[var(--text-muted)]' :
+										 'border-[var(--border-color)] text-[var(--text-tertiary)]'}">
+										<span class="h-1.5 w-1.5 rounded-full
+											{probe.status === 'valid' ? 'bg-red-400' :
+											 probe.status === 'revoked' || probe.status === 'expired' || probe.status === 'invalid' ? 'bg-green-400' :
+											 'bg-[var(--text-muted)]'}"></span>
+										{probe.status.toUpperCase()}
+									</span>
+								</td>
+								<!-- Secret + rule + reason -->
+								<td class="px-5 py-3">
+									<div class="flex flex-wrap items-center gap-2">
+										<span class="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">
+											<FileWarning class="h-3 w-3 shrink-0" />
+											{probe.rule_id}
+										</span>
+										{#if probe.locations?.[0]?.sub_type}
+											<span class="text-[10px] text-[var(--text-muted)]">{probe.locations[0].sub_type}</span>
+										{/if}
+									</div>
+									{#if probe.reason}
+										<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{probe.reason}</p>
+									{/if}
+									{#if probe.locations.length > 0 && probe.locations[0].secret}
+										{@const secretVal = probe.locations[0].secret}
+										{@const jwt = tryDecodeJWT(secretVal)}
+										<pre
+											class="mt-1.5 inline-block max-w-full rounded bg-[var(--bg-hard)] px-2 py-1 font-mono text-xs text-[var(--text-muted)] whitespace-pre-wrap break-all cursor-text"
+											onclick={(e) => {
+												const sel = window.getSelection();
+												if (sel && sel.toString().length > 0) return;
+												const range = document.createRange();
+												range.selectNodeContents(e.currentTarget as Node);
+												sel?.removeAllRanges();
+												sel?.addRange(range);
+											}}
+										>{secretVal}</pre>
+										{#if jwt}
+											<div class="mt-1 rounded border border-[var(--border-color)]/40 bg-[var(--card-bg)] px-2.5 py-1.5 text-xs space-y-1">
+												<div class="flex items-center gap-2">
+													<span class="font-semibold text-[var(--text-secondary)]">JWT</span>
+													{#if jwt.expired === true}
+														<span class="rounded-full bg-green-500/10 px-1.5 py-0.5 text-[10px] font-medium text-green-400">EXPIRED</span>
+													{:else if jwt.expired === false}
+														<span class="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">ACTIVE</span>
+													{:else}
+														<span class="rounded-full bg-[var(--hover-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-muted)]">NO EXPIRY</span>
+													{/if}
+													{#if jwt.header.alg}
+														<span class="text-[10px] text-[var(--text-muted)]">{jwt.header.alg}</span>
+													{/if}
+												</div>
+												<div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+													{#if jwt.issuer}
+														<span class="text-[var(--text-muted)]">iss</span>
+														<span class="text-[var(--text-secondary)] break-all">{jwt.issuer}</span>
+													{/if}
+													{#if jwt.subject}
+														<span class="text-[var(--text-muted)]">sub</span>
+														<span class="text-[var(--text-secondary)] break-all">{jwt.subject}</span>
+													{/if}
+													{#if jwt.expiresAt}
+														<span class="text-[var(--text-muted)]">exp</span>
+														<span class="text-[var(--text-secondary)]">{new Date(jwt.expiresAt).toLocaleString()}</span>
+													{/if}
+												</div>
+												<details class="group">
+													<summary class="cursor-pointer text-[10px] text-[var(--text-muted)] hover:text-[var(--text-secondary)]">payload</summary>
+													<pre class="mt-1 whitespace-pre-wrap break-all font-mono text-[10px] text-[var(--text-muted)]">{JSON.stringify(jwt.payload, null, 2)}</pre>
+												</details>
+											</div>
+										{/if}
+									{/if}
+									<p class="mt-1 text-[10px] text-[var(--text-muted)]">
+										Probed {new Date(probe.probed_at).toLocaleString()}
+									</p>
+								</td>
+								<!-- Locations -->
+								<td class="px-5 py-3">
+									{#if probe.locations.length > 0}
+										<div class="flex flex-col gap-1">
+											{#each probe.locations as loc}
+												<div>
+													<a
+														href="/app/providers/repo/{loc.repo_id}"
+														class="text-xs text-[var(--accent)] hover:underline break-all"
+													>
+														{loc.repo_name}
+													</a>
+													{#if loc.file}
+														<p class="font-mono text-[10px] text-[var(--text-muted)]">{loc.file}{loc.line ? `:${loc.line}` : ''}</p>
+													{/if}
+												</div>
+											{/each}
+										</div>
+									{:else}
+										<span class="text-xs text-[var(--text-muted)]">—</span>
+									{/if}
+								</td>
+							</tr>
+						{/each}
+					</tbody>
+				</table>
+			</div>
+
+			<!-- Footer -->
+			<div class="flex justify-end pt-2">
+				<button
+					type="button"
+					class="inline-flex items-center gap-1 text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+					onclick={exportProbeCSV}
+				>
+					<Download size={11} />
+					Export CSV
+				</button>
+			</div>
+		{/if}
+	</div>
+</Dialog>
+
+<!-- Selection toolbar -->
+{#if selectionToolbar}
+	<div
+		class="fixed z-[300] flex items-center gap-0.5 rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-1 py-0.5 shadow-xl"
+		style="top: {selectionToolbar.top}px; left: {selectionToolbar.left}px; transform: translateX(-50%);"
+	>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+			onclick={copySelection}
+		>
+			<Copy size={11} /> Copy
+		</button>
+		<div class="h-4 w-px bg-[var(--border-color)]"></div>
+		<button
+			type="button"
+			class="inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--accent)]"
+			onclick={decodeSelection}
+		>
+			B64
+		</button>
+	</div>
+{/if}
+
+<!-- Secret Probe Preview Dialog -->
+<Dialog bind:open={probePreviewOpen} showCloseButton={false} maxWidth="max-w-6xl">
+	<div class="flex h-[80vh] flex-col p-6 sm:p-8 space-y-5">
+		<div class="flex items-start justify-between">
+			<div class="flex items-center gap-3">
+				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
+				<div>
+					<h2 class="text-xl font-semibold text-[var(--text-bright)]">Secret Probe Preview</h2>
+					<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+						Review every secret that will be probed, grouped by type.
+					</p>
+				</div>
+			</div>
+			<button
+				type="button"
+				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--text-muted)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				onclick={() => (probePreviewOpen = false)}
+				aria-label="Close"
+			>
+				<X size={18} />
+			</button>
+		</div>
+
+		{#if probePreviewLoading}
+			<div class="flex flex-1 items-center justify-center">
+				<Loading message="Loading probe preview" variant="bar" size="sm" />
+			</div>
+		{:else if probePreview.length === 0}
+			<div class="flex flex-1 flex-col items-center justify-center gap-3 py-10 text-center">
+				<ShieldCheck class="h-12 w-12 text-[var(--accent)]" />
+				<div>
+					<p class="text-lg font-semibold text-[var(--text-bright)]">All clear</p>
+					<p class="mt-1 text-sm text-[var(--text-muted)]">
+						{#if probeForce}
+							No secrets found to probe. Run a scan first to discover secrets.
+						{:else}
+							All discovered secrets have already been probed. Toggle <span class="font-medium text-[var(--text-secondary)]">Show all</span> to see them.
+						{/if}
+					</p>
+				</div>
+			</div>
+		{:else}
+			{@const totalSecrets = probePreview.reduce((s, g) => s + g.count, 0)}
+			{@const dismissedCount = probePreview.reduce((s, g) => s + (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length, 0)}
+			{@const filteredPreview = (() => {
+				if (probePreviewTab === 'dismissed') {
+					// Show only groups that have dismissed items, filtered to those items.
+					return probePreview.map((g: any) => ({
+						...g,
+						items: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)),
+						count: (g.items ?? []).filter((i: any) => probeExcludedHashes.has(i.secret_hash)).length
+					})).filter((g: any) => g.count > 0);
+				}
+				const kindFilter = probePreviewTab === 'all' ? null : probePreviewTab;
+				return kindFilter ? probePreview.filter((g: any) => g.kind === kindFilter) : probePreview;
+			})()}
+			{@const selectedGroups = probeSelectedRules.length === 0 ? filteredPreview : filteredPreview.filter((g: any) => probeSelectedRules.includes(g.rule_id))}
+			{@const selectedCount = selectedGroups.reduce((s: number, g: any) => s + g.count, 0)}
+
+			<!-- Tab selector + summary -->
+			<div class="space-y-2">
+				<TabSelector
+					options={[
+						{ value: 'all', label: 'All' },
+						{ value: 'network', label: 'External' },
+						{ value: 'offline', label: 'Local' },
+						{ value: 'dismissed', label: 'Dismissed' }
+					]}
+					bind:value={probePreviewTab}
+				/>
+				<p class="text-center text-xs text-[var(--text-muted)]">
+					{selectedCount.toLocaleString('en-US').replace(/,/g, ' ')} of {totalSecrets.toLocaleString('en-US').replace(/,/g, ' ')} selected · {selectedGroups.length} type{selectedGroups.length !== 1 ? 's' : ''}
+				</p>
+			</div>
+
+			<!-- Grouped request table -->
+			<div class="relative min-h-0 flex-1 overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<div class="h-full overflow-y-auto overflow-x-hidden">
+				<table class="w-full table-fixed text-xs">
+					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+						<tr>
+							<th class="w-[3%] px-3 py-2 text-left"></th>
+							<th class="w-[25%] px-3 py-2 text-left">Secret</th>
+							<th class="w-[7%] px-3 py-2 text-left">Method</th>
+							<th class="w-[30%] px-3 py-2 text-left">URL</th>
+							<th class="w-[20%] px-3 py-2 text-left">Headers</th>
+							<th class="w-[8%] px-3 py-2 text-left">Status</th>
+							<th class="w-[3%] px-3 py-2 text-left"></th>
+							<th class="px-3 py-2 text-left"></th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/30">
+						{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
+							{@const isGroupSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
+							<!-- Group header row -->
+							<tr class="bg-[var(--hover-bg-subtle)]/50">
+								<td class="px-3 py-2 text-center">
+									<Checkbox
+										checked={isGroupSelected}
+										onchange={() => {
+											if (probeSelectedRules.length === 0) {
+												probeSelectedRules = probePreview.map(g => g.rule_id).filter(r => r !== group.rule_id);
+											} else if (probeSelectedRules.includes(group.rule_id)) {
+												probeSelectedRules = probeSelectedRules.filter(r => r !== group.rule_id);
+											} else {
+												probeSelectedRules = [...probeSelectedRules, group.rule_id];
+											}
+										}}
+									/>
+								</td>
+								<td class="px-3 py-2 font-semibold text-[var(--text-bright)]" colspan="5">
+									{group.rule_id}
+									<span class="ml-2 font-normal text-[var(--text-muted)]">{group.count} secret{group.count !== 1 ? 's' : ''}</span>
+								</td>
+								<td class="px-3 py-2" colspan="2">
+									<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[10px] text-[var(--text-muted)]">{group.kind}</span>
+								</td>
+							</tr>
+							<!-- Item rows -->
+							{#if isGroupSelected && group.items}
+								{#each group.items as item}
+									{@const isItemChecked = !probeExcludedHashes.has(item.secret_hash)}
+									{@const isInspected = inspectItem?.hash === item.secret_hash}
+									<tr
+										class="cursor-pointer transition-opacity {isInspected ? 'bg-[var(--hover-bg)]' : ''} {isItemChecked ? 'text-[var(--text-secondary)]' : 'text-[var(--text-muted)] opacity-40'} hover:bg-[var(--hover-bg-subtle)]"
+										onclick={(e) => {
+											const target = e.target as HTMLElement;
+											if (target.closest('button, a, input') || window.getSelection()?.toString()) return;
+											if (inspectItem) {
+												inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' };
+											} else {
+												toggleDismiss(item.secret_hash);
+											}
+										}}
+									>
+										<td class="px-3 py-1.5">
+											<button
+												type="button"
+												class="mx-auto block h-2 w-2 rounded-full transition {isItemChecked ? 'bg-[var(--accent)]' : 'bg-[var(--border-color)]'}"
+												onclick={() => toggleDismiss(item.secret_hash)}
+											></button>
+										</td>
+										<td class="px-3 py-1.5 font-mono overflow-hidden">
+											<span
+												class="block truncate select-all cursor-text"
+												title={item.secret}
+												ondblclick={(e) => { const sel = window.getSelection(); const range = document.createRange(); range.selectNodeContents(e.currentTarget); sel?.removeAllRanges(); sel?.addRange(range); }}
+											>{item.secret}</span>
+											{#if item.is_falsy}
+												<span class="text-[9px] italic text-[var(--text-muted)]">({item.falsy_reason})</span>
+											{/if}
+										</td>
+										{#if item.requests && item.requests.length > 0}
+											<td class="px-3 py-1.5">
+												<span class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px]">{item.requests[0].method}</span>
+											</td>
+											<td class="px-3 py-1.5 font-mono truncate">
+												<span class="block truncate" title={item.requests[0].url}>{item.requests[0].url}</span>
+											</td>
+											<td class="px-3 py-1.5 truncate">
+												<span class="block truncate" title={Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ')}>
+													{Object.entries(item.requests[0].headers || {}).map(([k,v]) => `${k}: ${v}`).join(', ') || '—'}
+												</span>
+											</td>
+										{:else}
+											<td class="px-3 py-1.5 text-[var(--text-muted)]">—</td>
+											<td class="px-3 py-1.5 text-[var(--text-muted)]">local check</td>
+											<td class="px-3 py-1.5">—</td>
+										{/if}
+										<td class="px-3 py-1.5">
+											{#if item.dismissed}
+												<span class="text-[var(--text-muted)]">dismissed</span>
+											{:else if item.is_falsy}
+												<span class="text-[var(--text-muted)]">skip</span>
+											{:else if item.probe_status && item.probe_status !== 'unknown'}
+												<span class="{item.probe_status === 'valid' ? 'text-red-400' : item.probe_status === 'expired' || item.probe_status === 'invalid' || item.probe_status === 'false_positive' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.probe_status}</span>
+											{:else if item.already_probed}
+												<span class="{item.previous_status === 'valid' ? 'text-red-400' : item.previous_status === 'revoked' || item.previous_status === 'expired' ? 'text-green-400' : 'text-[var(--text-tertiary)]'}">{item.previous_status}</span>
+											{:else}
+												<span class="text-[var(--text-tertiary)]">pending</span>
+											{/if}
+										</td>
+										<td class="px-3 py-1.5">
+											{#if item.requests && item.requests.length > 0}
+												<button
+													type="button"
+													class="p-1 text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+													title="Copy as curl"
+													onclick={() => copyToClipboard(buildCurl(item.requests[0], item.secret))}
+												>
+													<Copy size={12} />
+												</button>
+											{/if}
+										</td>
+										<td
+											class="px-3 py-1.5 cursor-pointer text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+											title="Inspect secret"
+											onclick={() => { inspectItem = { hash: item.secret_hash, secret: item.secret, ruleId: item.effective_rule_id || item.rule_id || '' }; }}
+										>
+											<Eye size={12} />
+										</td>
+									</tr>
+								{/each}
+							{/if}
+						{/each}
+					</tbody>
+				</table>
+			</div>
+
+				<!-- Inspect drawer -->
+				{#if inspectItem}
+					<div
+						class="absolute inset-y-0 right-0 z-20 w-[480px] overflow-hidden"
+						in:fly={{ x: 480, duration: 240, easing: cubicOut, opacity: 1 }}
+						out:fly={{ x: 480, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<SecretInspectDrawer
+							secretHash={inspectItem.hash}
+							secret={inspectItem.secret}
+							ruleId={inspectItem.ruleId}
+							dismissed={probeExcludedHashes.has(inspectItem.hash)}
+							onDismiss={(hash) => toggleDismiss(hash)}
+							onClose={() => { inspectItem = null; }}
+						/>
+					</div>
+				{/if}
+			</div>
+		{/if}
+
+		{#if probeError}
+			<p class="text-sm text-[var(--error)]">{probeError}</p>
+		{/if}
+
+		<!-- Footer -->
+		<div class="flex items-center justify-between pt-2">
+			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview()} />
+			<div class="flex items-center gap-3">
+				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
+					Cancel
+				</button>
+				<button
+					type="button"
+					class="btn btn-primary inline-flex items-center gap-2"
+					disabled={probeTriggering || probePreviewLoading}
+					onclick={async () => {
+						await triggerProbe();
+						if (!probeError) probePreviewOpen = false;
+					}}
+				>
+					<Play size={14} />
+					{probeTriggering ? 'Starting…' : 'Start Probe'}
+				</button>
+			</div>
+		</div>
+	</div>
+</Dialog>
+
 {#if healthTooltip}
 	<div
 		bind:this={healthTooltipEl}
@@ -1199,7 +2551,7 @@
 					<div class="flex gap-2">
 						<button
 							type="button"
-							class="rounded-full border border-amber-300 bg-amber-300 px-5 py-2.5 text-sm font-semibold text-amber-950 transition hover:bg-amber-200 disabled:opacity-50"
+							class="btn btn-primary"
 							onclick={submitRotateToken}
 							disabled={saving || !rotatePat.trim()}
 						>

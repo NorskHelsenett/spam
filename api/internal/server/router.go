@@ -104,6 +104,17 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
 				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
+				api.Post("/admin/trivy/scan", uiapi.AdminTrivyScanHandler(db, authService))
+				api.Get("/admin/trivy/scan/status", uiapi.AdminTrivyScanStatusHandler(db, authService))
+				api.Post("/admin/secrets/probe", uiapi.AdminSecretProbeScanHandler(db, authService))
+				api.Get("/admin/secrets/probe/status", uiapi.AdminSecretProbeStatusHandler(db, authService))
+				api.Get("/admin/secrets/probe/preview", uiapi.AdminSecretProbePreviewHandler(db, authService))
+				api.Get("/admin/secrets/probe/list", uiapi.AdminSecretProbeListHandler(db, authService))
+				api.Get("/admin/secrets/probe/export", uiapi.AdminSecretProbeExportHandler(db, authService))
+				api.Post("/admin/secrets/probe/one", uiapi.AdminSecretProbeOneHandler(db, authService))
+				api.Get("/admin/secrets/probe/audit", uiapi.AdminSecretProbeAuditHandler(db, authService))
+				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
+				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
@@ -176,6 +187,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
+			})
+			r.Route("/api/secrets", func(s chi.Router) {
+				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
+				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
+				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
+				s.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
+				s.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
 			})
 		}
 
