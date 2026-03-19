@@ -208,7 +208,7 @@
 			sortAsc = !sortAsc;
 		} else {
 			sortKey = key;
-			sortAsc = true;
+			sortAsc = key === 'unique_finding_count' ? false : true;
 		}
 	};
 
