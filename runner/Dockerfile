@@ -13,7 +13,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o runner ./cmd/main.go &
 FROM ghcr.io/anchore/syft:latest AS syft
 
 # Get trivy binary
-FROM aquasec/trivy:latest AS trivy
+FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
 
 # Get betterleaks binary
 FROM ghcr.io/betterleaks/betterleaks:latest AS betterleaks
