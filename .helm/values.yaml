@@ -374,22 +374,10 @@ networkPolicy:
   runner:
     # Set to false to disable the runner network policy entirely.
     enabled: true
-    # Additional egress rules for runner pods (e.g., to allow git clone).
-    # Without these, runner jobs cannot reach external git providers.
-    # Example — allow HTTPS to GitHub:
-    #   additionalEgressRules:
-    #     - to:
-    #         - ipBlock:
-    #             cidr: 140.82.112.0/20  # github.com
-    #       ports:
-    #         - protocol: TCP
-    #           port: 443
-    #     - to:
-    #         - ipBlock:
-    #             cidr: 192.30.252.0/22  # github.com
-    #       ports:
-    #         - protocol: TCP
-    #           port: 443
+    # Additional egress rules for runner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for git clone
+    # from GitHub, GitLab, Gitea, etc.) are allowed. All RFC 1918 private
+    # ranges are blocked — runners cannot reach internal cluster services.
     additionalEgressRules: []
 
   trivyScanner:
