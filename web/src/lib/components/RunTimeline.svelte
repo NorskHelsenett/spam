@@ -53,9 +53,11 @@
 			phase: string;
 			reason?: string;
 			message?: string;
+			container_status?: string;
 			waiting_reason?: string;
 			waiting_message?: string;
 			is_error?: boolean;
+			init_container_status?: string;
 		};
 		secretCount?: number;
 		sbomComponentCount?: number;
@@ -86,15 +88,18 @@
 		icon: any;
 		category: 'k8s' | 'run';
 	}> = [
-		// K8s - just show container started
-		{ id: 'k8s-started', title: 'Container Started', defaultDescription: 'Pod running on cluster', icon: Play, category: 'k8s' },
+		// K8s - clone runs as init container, then main container starts
+		{ id: 'k8s-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'k8s' },
+		{ id: 'k8s-started', title: 'Runner Started', defaultDescription: 'Scanner container running', icon: Play, category: 'k8s' },
 		// Run steps
-		{ id: 'run-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'run' },
 		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
 		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
 		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running BetterLeaks scan', icon: Shield, category: 'run' },
 		{ id: 'run-upload', title: 'Uploading Results', defaultDescription: 'Sending data to server', icon: Upload, category: 'run' },
 	];
+
+	// Strip ANSI escape codes (colors, bold, etc.) from log lines
+	const stripAnsi = (str: string) => str.replace(/\x1b\[[0-9;]*m/g, '');
 
 	// Track completed step data from logs/events
 	type CompletedStepData = {
@@ -109,18 +114,11 @@
 		const completed = new Map<string, CompletedStepData>();
 
 		for (const log of logs) {
-			const line = log.line.trim();
+			const line = stripAnsi(log.line).trim();
 
-			if (line.includes('Cloning')) {
-				const match = line.match(/Cloning (https?:\/\/[^\s]+)/);
-				completed.set('run-clone', {
-					timestamp: log.ts,
-					description: match ? match[1].replace('.git...', '').replace(/^https?:\/\/[^/]+\//, '') : 'Repository cloned',
-					status: 'completed'
-				});
-			} else if (line.includes('Commit hash:')) {
+			if (line.includes('Commit hash:')) {
 				const hash = line.match(/Commit hash:\s*([a-f0-9]+)/)?.[1];
-				const existing = completed.get('run-clone');
+				const existing = completed.get('k8s-clone');
 				if (existing && hash) {
 					existing.details = [`Commit: ${hash.substring(0, 7)}`];
 				}
@@ -191,6 +189,23 @@
 		return completed;
 	};
 
+	// Derive clone step status from pod's init container status
+	const parseInitContainerStatus = (): CompletedStepData | null => {
+		if (!podStatus?.init_container_status) return null;
+		switch (podStatus.init_container_status) {
+			case 'running':
+				return { description: 'Fetching source code', status: 'running' };
+			case 'completed':
+				return { description: 'Source code fetched', status: 'completed' };
+			case 'failed':
+				return { description: podStatus.message || 'Clone failed', status: 'error' };
+			case 'waiting':
+				return { description: 'Waiting to start', status: 'running' };
+			default:
+				return null;
+		}
+	};
+
 	// Parse K8s events to extract completed step data
 	const parseEventsToCompletedSteps = (events: K8sEvent[]): Map<string, CompletedStepData> => {
 		const completed = new Map<string, CompletedStepData>();
@@ -198,15 +213,18 @@
 		for (const event of events) {
 			switch (event.reason) {
 				case 'Started':
-					completed.set('k8s-started', {
-						timestamp: event.first_timestamp,
-						description: 'Container running',
-						status: 'completed'
-					});
+					// The 'Started' event fires for both init and main containers.
+					// If we see it and init container is already completed, this is the main container.
+					if (podStatus?.init_container_status === 'completed') {
+						completed.set('k8s-started', {
+							timestamp: event.first_timestamp,
+							description: 'Scanner container running',
+							status: 'completed'
+						});
+					}
 					break;
 				case 'Failed':
 				case 'BackOff':
-					// Mark container start as failed
 					completed.set('k8s-started', {
 						timestamp: event.first_timestamp,
 						description: event.message.substring(0, 60),
@@ -286,13 +304,19 @@
 		const logSteps = parseLogsToCompletedSteps(logs || []);
 		const eventSteps = parseEventsToCompletedSteps(events || []);
 
-		// Merge completed steps
+		// Merge completed steps (log steps override event steps)
 		const completedSteps = new Map([...eventSteps, ...logSteps]);
+
+		// Add init container (clone) status
+		const initStatus = parseInitContainerStatus();
+		if (initStatus) {
+			completedSteps.set('k8s-clone', initStatus);
+		}
 
 		// Determine current running step based on status
 		let currentRunningStep: string | null = null;
 		if (status === 'QUEUED') {
-			currentRunningStep = 'k8s-started';
+			currentRunningStep = 'k8s-clone';
 		} else if (status === 'RUNNING') {
 			// Find the first incomplete step
 			for (const step of ALL_STEPS) {
@@ -329,8 +353,10 @@
 				stepStatus = completed.status;
 			} else if (stepDef.id === currentRunningStep) {
 				stepStatus = 'running';
+			} else if (stepDef.id === 'k8s-clone' && status === 'SUCCEEDED') {
+				stepStatus = 'completed';
 			} else if (stepDef.id === 'k8s-started' && podStatus) {
-				if (podStatus.phase === 'Running' || podStatus.phase === 'Succeeded') {
+				if (podStatus.container_status === 'running' || podStatus.phase === 'Succeeded') {
 					stepStatus = 'completed';
 				} else if (podStatus.phase === 'Failed' || podStatus.is_error) {
 					stepStatus = 'error';
@@ -361,23 +387,29 @@
 				}
 			}
 
-			// For k8s-started, use context-aware title/description
+			// Context-aware title/description for K8s steps
 			let title = stepDef.title;
 			let description = completed?.description || stepDef.defaultDescription;
 
-			if (stepDef.id === 'k8s-started' && !completed) {
+			if (stepDef.id === 'k8s-clone' && !completed) {
 				if (stepStatus === 'running') {
-					// Pod hasn't started yet — show what's actually happening
 					if (podStatus?.waiting_reason) {
 						title = podStatus.waiting_reason;
 						description = podStatus.waiting_message || 'Waiting...';
 					} else if (podStatus?.phase === 'Pending') {
 						title = 'Scheduling Pod';
 						description = 'Waiting for pod to be scheduled';
-					} else {
-						title = 'Starting Container';
-						description = 'Waiting for pod to start';
 					}
+				} else if (stepStatus === 'error') {
+					title = podStatus?.reason || 'Clone Failed';
+					description = podStatus?.message || 'Init container failed';
+				}
+			}
+
+			if (stepDef.id === 'k8s-started' && !completed) {
+				if (stepStatus === 'running') {
+					title = 'Starting Scanner';
+					description = 'Waiting for scanner container to start';
 				} else if (stepStatus === 'error') {
 					title = podStatus?.waiting_reason || podStatus?.reason || 'Container Failed';
 					description = podStatus?.waiting_message || podStatus?.message || 'Pod failed to start';
@@ -443,7 +475,7 @@
 	};
 
 	// Format raw logs for display
-	const rawLogsText = $derived(logs.map(l => `[${formatTimestamp(l.ts)}] ${l.line}`).join('\n'));
+	const rawLogsText = $derived(logs.map(l => `[${formatTimestamp(l.ts)}] ${stripAnsi(l.line)}`).join('\n'));
 </script>
 
 <div class="timeline-container">
@@ -456,7 +488,7 @@
 		<!-- Main Timeline -->
 		<div class="timeline">
 			{#each timeline as step, index (step.id)}
-				{@const Icon = step.icon || Clock}
+				{@const Icon = step.icon || Server}
 				{@const isLast = index === timeline.length - 1}
 				{@const isPending = step.status === 'pending'}
 				<div class="timeline-item" style="opacity: {getStatusOpacity(step.status)}">

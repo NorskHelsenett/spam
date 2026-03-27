@@ -393,13 +393,14 @@ func (k *K8sClient) GetJobStatus(ctx context.Context, jobName, namespace string)
 
 // PodStatus contains the status of a pod including any waiting/error states.
 type PodStatus struct {
-	Phase           string `json:"phase"`
-	Reason          string `json:"reason,omitempty"`
-	Message         string `json:"message,omitempty"`
-	ContainerStatus string `json:"container_status,omitempty"`
-	WaitingReason   string `json:"waiting_reason,omitempty"`
-	WaitingMessage  string `json:"waiting_message,omitempty"`
-	IsError         bool   `json:"is_error"`
+	Phase               string `json:"phase"`
+	Reason              string `json:"reason,omitempty"`
+	Message             string `json:"message,omitempty"`
+	ContainerStatus     string `json:"container_status,omitempty"`
+	WaitingReason       string `json:"waiting_reason,omitempty"`
+	WaitingMessage      string `json:"waiting_message,omitempty"`
+	IsError             bool   `json:"is_error"`
+	InitContainerStatus string `json:"init_container_status,omitempty"` // "waiting", "running", "completed", "failed"
 }
 
 // GetPodStatus retrieves the status of the pod associated with a job.
@@ -479,16 +480,30 @@ func (k *K8sClient) GetPodStatus(ctx context.Context, jobName, namespace string)
 		}
 	}
 
-	// Also check init container statuses
+	// Check init container statuses (clone init container)
 	for _, cs := range pod.Status.InitContainerStatuses {
-		if cs.State.Waiting != nil {
-			switch cs.State.Waiting.Reason {
-			case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
-				status.IsError = true
-				status.Reason = cs.State.Waiting.Reason
-				status.Message = cs.State.Waiting.Message
-				status.WaitingReason = cs.State.Waiting.Reason
-				status.WaitingMessage = cs.State.Waiting.Message
+		if cs.Name == "clone" {
+			if cs.State.Running != nil {
+				status.InitContainerStatus = "running"
+			} else if cs.State.Terminated != nil {
+				if cs.State.Terminated.ExitCode == 0 {
+					status.InitContainerStatus = "completed"
+				} else {
+					status.InitContainerStatus = "failed"
+					status.IsError = true
+					status.Reason = cs.State.Terminated.Reason
+					status.Message = cs.State.Terminated.Message
+				}
+			} else if cs.State.Waiting != nil {
+				status.InitContainerStatus = "waiting"
+				switch cs.State.Waiting.Reason {
+				case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
+					status.IsError = true
+					status.Reason = cs.State.Waiting.Reason
+					status.Message = cs.State.Waiting.Message
+					status.WaitingReason = cs.State.Waiting.Reason
+					status.WaitingMessage = cs.State.Waiting.Message
+				}
 			}
 		}
 	}
