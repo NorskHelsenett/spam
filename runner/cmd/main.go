@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,12 +24,19 @@ import (
 	"nhooyr.io/websocket"
 )
 
+type ToolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
+}
+
 type LogMessage struct {
-	Type       string `json:"type"`
-	Line       string `json:"line,omitempty"`
-	Ts         string `json:"ts,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
-	CommitHash string `json:"commit_hash,omitempty"`
+	Type         string        `json:"type"`
+	Line         string        `json:"line,omitempty"`
+	Ts           string        `json:"ts,omitempty"`
+	ExitCode     int           `json:"exit_code,omitempty"`
+	CommitHash   string        `json:"commit_hash,omitempty"`
+	ToolVersions []ToolVersion `json:"tool_versions,omitempty"`
 }
 
 type TokenResponse struct {
@@ -228,6 +237,9 @@ func (r *Runner) sendDone(exitCode int) {
 }
 
 func (r *Runner) runPipeline() int {
+	// Log tool versions and binary digests for auditability
+	r.logToolVersions()
+
 	// Prepare artifacts directory (on /tmp tmpfs, always writable)
 	if err := os.RemoveAll(r.artifactDir); err != nil {
 		r.log(fmt.Sprintf("Failed to clean artifact dir: %v", err))
@@ -364,6 +376,58 @@ func (r *Runner) runPipeline() int {
 
 	r.log("Run completed successfully")
 	return 0
+}
+
+// binaryDigest returns the SHA-256 digest of a file, or "unknown" on error.
+func binaryDigest(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "unknown"
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "unknown"
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// logToolVersions logs the version and binary digest of each tool and sends
+// structured tool_versions message via websocket for the API to serve.
+func (r *Runner) logToolVersions() {
+	tools := []struct {
+		name        string
+		path        string
+		versionArgs []string
+	}{
+		{"syft", "/usr/local/bin/syft", []string{"version", "-o", "text"}},
+		{"trivy", "/usr/local/bin/trivy", []string{"--version"}},
+		{"betterleaks", "/usr/local/bin/betterleaks", []string{"version"}},
+		{"git", "/usr/bin/git", []string{"--version"}},
+	}
+
+	var versions []ToolVersion
+	for _, t := range tools {
+		digest := binaryDigest(t.path)
+		version := "unknown"
+		if out, err := exec.CommandContext(r.ctx, t.path, t.versionArgs...).Output(); err == nil {
+			if idx := strings.IndexByte(string(out), '\n'); idx > 0 {
+				version = strings.TrimSpace(string(out[:idx]))
+			} else {
+				version = strings.TrimSpace(string(out))
+			}
+		}
+		versions = append(versions, ToolVersion{Name: t.name, Version: version, BinaryDigest: digest})
+		r.log(fmt.Sprintf("Tool: %s | %s | %s", t.name, version, digest))
+	}
+
+	// Send structured tool versions via websocket
+	if !r.localMode && r.wsConn != nil {
+		msg := LogMessage{Type: "tool_versions", ToolVersions: versions}
+		if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
+			r.log(fmt.Sprintf("Failed to send tool versions: %v", err))
+		}
+	}
 }
 
 // cleanEnv returns a minimal environment for running external tools.

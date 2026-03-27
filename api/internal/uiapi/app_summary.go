@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"sync/atomic"
@@ -65,12 +66,19 @@ type AppSummaryLicense struct {
 	Count   int64  `json:"count"`
 }
 
+type AppSummaryToolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
+}
+
 type AppSummaryResponse struct {
-	Counts        AppSummaryCounts      `json:"counts"`
-	Scanners      []AppSummaryScanner   `json:"scanners"`
-	RecentSBOMs   []AppSummarySBOM      `json:"recent_sboms"`
-	TopComponents []AppSummaryComponent `json:"top_components"`
-	TopLicenses   []AppSummaryLicense   `json:"top_licenses"`
+	Counts        AppSummaryCounts        `json:"counts"`
+	Scanners      []AppSummaryScanner     `json:"scanners"`
+	RecentSBOMs   []AppSummarySBOM        `json:"recent_sboms"`
+	TopComponents []AppSummaryComponent   `json:"top_components"`
+	TopLicenses   []AppSummaryLicense     `json:"top_licenses"`
+	ToolVersions  []AppSummaryToolVersion `json:"tool_versions,omitempty"`
 }
 
 // appSummaryCacheEntry wraps the response with the materialized view version
@@ -298,6 +306,25 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		LIMIT 10
 	`).Scan(&resp.TopLicenses).Error; err != nil {
 		return resp, err
+	}
+
+	// Tool versions from the most recent completed run
+	var latestResult json.RawMessage
+	if err := db.WithContext(ctx).Table("jobs").
+		Select("result").
+		Where("type = 'CREATE_RUN' AND status = 'SUCCEEDED' AND result IS NOT NULL").
+		Order("finished_at DESC").
+		Limit(1).
+		Scan(&latestResult).Error; err == nil && len(latestResult) > 0 {
+		var resultMap map[string]json.RawMessage
+		if json.Unmarshal(latestResult, &resultMap) == nil {
+			if raw, ok := resultMap["tool_versions"]; ok {
+				var versions []AppSummaryToolVersion
+				if json.Unmarshal(raw, &versions) == nil {
+					resp.ToolVersions = versions
+				}
+			}
+		}
 	}
 
 	return resp, nil
