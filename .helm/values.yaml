@@ -334,11 +334,20 @@ runner:
 
 # Trivy scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
+# Uses a dedicated image (separate from the runner) with minimal attack surface.
 trivyScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
   parallelism: 3               # Number of concurrent scanner pods
   activeDeadlineSeconds: 14400  # 4h max runtime
+
+  # Dedicated trivy-scanner image (built from runner/Dockerfile.trivy-scanner).
+  # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
+  image:
+    repository: spam-trivy-scanner
+    tag: ""
+    pullPolicy: IfNotPresent
+
   resources:
     requests:
       cpu: 200m
@@ -355,3 +364,36 @@ postgresqlConnection:
   host: ""
   port: 5432
   sslmode: disable
+
+# Network Policy configuration
+# Restricts egress from runner and trivy-scanner pods to prevent data exfiltration.
+# When enabled, pods can ONLY reach the worker service and DNS by default.
+# All other outbound traffic (internet) is blocked unless explicitly allowed.
+networkPolicy:
+  enabled: false
+
+  runner:
+    # Additional egress rules for runner pods (e.g., to allow git clone).
+    # Without these, runner jobs cannot reach external git providers.
+    # Example — allow HTTPS to GitHub:
+    #   additionalEgressRules:
+    #     - to:
+    #         - ipBlock:
+    #             cidr: 140.82.112.0/20  # github.com
+    #       ports:
+    #         - protocol: TCP
+    #           port: 443
+    #     - to:
+    #         - ipBlock:
+    #             cidr: 192.30.252.0/22  # github.com
+    #       ports:
+    #         - protocol: TCP
+    #           port: 443
+    additionalEgressRules: []
+
+  trivyScanner:
+    # Additional egress rules for trivy-scanner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for trivy
+    # DB download from ghcr.io) are allowed.  All RFC 1918 private ranges
+    # are blocked — the scanner cannot reach internal cluster services.
+    additionalEgressRules: []

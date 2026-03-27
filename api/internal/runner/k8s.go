@@ -163,11 +163,38 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 					Annotations: k.cfg.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy:      corev1.RestartPolicyNever,
-					ServiceAccountName: k.cfg.ServiceAccount,
+					RestartPolicy:                corev1.RestartPolicyNever,
+					ServiceAccountName:           k.cfg.ServiceAccount,
+					AutomountServiceAccountToken: &[]bool{false}[0],
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: &runAsNonRoot,
 						RunAsUser:    &runAsUser,
+					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "tmp",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{
+									Medium:    corev1.StorageMediumMemory,
+									SizeLimit: resource.NewQuantity(256*1024*1024, resource.BinarySI),
+								},
+							},
+						},
+						{
+							Name: "work",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{},
+							},
+						},
+						{
+							Name: "home",
+							VolumeSource: corev1.VolumeSource{
+								EmptyDir: &corev1.EmptyDirVolumeSource{
+									Medium:    corev1.StorageMediumMemory,
+									SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI),
+								},
+							},
+						},
 					},
 					Containers: []corev1.Container{
 						{
@@ -181,6 +208,11 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 									{Name: "RUN_TOKEN", Value: token},
 									{Name: "REPO_CLONE_URL", Value: cloneURL},
 									{Name: "REPO_REF", Value: ref},
+									// Prevent third-party tools from phoning home
+									{Name: "SYFT_CHECK_FOR_APP_UPDATE", Value: "false"},
+									{Name: "TRIVY_SKIP_DB_UPDATE", Value: "true"},
+									{Name: "TRIVY_SKIP_JAVA_DB_UPDATE", Value: "true"},
+									{Name: "TRIVY_OFFLINE_SCAN", Value: "true"},
 								}
 								if commitSHA != "" {
 									envs = append(envs, corev1.EnvVar{Name: "REPO_COMMIT_SHA", Value: commitSHA})
@@ -197,8 +229,14 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 									corev1.ResourceMemory: resource.MustParse("2Gi"),
 								},
 							},
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tmp", MountPath: "/tmp"},
+								{Name: "work", MountPath: "/work"},
+								{Name: "home", MountPath: "/home/runner"},
+							},
 							SecurityContext: &corev1.SecurityContext{
 								AllowPrivilegeEscalation: &[]bool{false}[0],
+								ReadOnlyRootFilesystem:   &[]bool{true}[0],
 								Capabilities: &corev1.Capabilities{
 									Drop: []corev1.Capability{"ALL"},
 								},
@@ -571,7 +609,7 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 			Name:      jobName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/part-of":  "spam",
+				"app.kubernetes.io/part-of": "spam",
 				"spam.io/adhoc-trivy-scan":  "true",
 			},
 			Annotations: map[string]string{

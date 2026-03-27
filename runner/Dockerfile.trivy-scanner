@@ -1,0 +1,37 @@
+# Trivy vulnerability scanner — minimal, dedicated image.
+# Contains ONLY the trivy binary and the trivy-scanner orchestrator.
+# No git, no syft, no betterleaks — reduced attack surface.
+#
+# The trivy DB is downloaded at container startup so the image stays small
+# and always uses a fresh database.  Egress is restricted via NetworkPolicy
+# to public HTTPS (for ghcr.io DB download) + the worker API only.
+# All private/internal ranges (RFC 1918) are blocked.
+
+# Build the trivy-scanner Go binary
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY cmd/trivy-scanner/ ./cmd/trivy-scanner/
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o trivy-scanner ./cmd/trivy-scanner/main.go
+
+# Get trivy binary (pinned digest for reproducibility)
+FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
+
+# Runtime stage — minimal
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=builder /build/trivy-scanner /usr/local/bin/trivy-scanner
+
+RUN mkdir -p /home/scanner /trivy-cache /tmp && \
+    adduser -D -u 1000 scanner && \
+    chown -R 1000:1000 /home/scanner /trivy-cache
+
+USER 1000:1000
+ENV HOME=/home/scanner
+ENTRYPOINT ["/usr/local/bin/trivy-scanner"]
