@@ -331,6 +331,8 @@ func trivyScanSBOM(cacheDir, sbomPath, resultPath string) error {
 	cmd := exec.Command(
 		"trivy", "sbom", sbomPath,
 		"--skip-db-update",
+		"--skip-java-db-update",
+		"--offline-scan",
 		"--cache-dir", cacheDir,
 		"--format", "json",
 		"--output", resultPath,
@@ -344,6 +346,8 @@ func trivyScanFS(cacheDir, dir, resultPath string) error {
 	cmd := exec.Command(
 		"trivy", "fs", dir,
 		"--skip-db-update",
+		"--skip-java-db-update",
+		"--offline-scan",
 		"--cache-dir", cacheDir,
 		"--format", "json",
 		"--output", resultPath,

@@ -29,23 +29,27 @@ spec:
         spec:
           restartPolicy: OnFailure
           automountServiceAccountToken: false
+          hostNetwork: false
+          hostPID: false
+          hostIPC: false
           securityContext:
             runAsNonRoot: true
             runAsUser: 1000
             runAsGroup: 1000
+            fsGroup: 1000
             seccompProfile:
               type: RuntimeDefault
           containers:
             - name: trivy-scanner
-              image: "{{ .Values.runner.image.repository }}:{{ .Values.runner.image.tag | default "latest" }}"
-              imagePullPolicy: {{ .Values.runner.image.pullPolicy }}
+              image: "{{ .Values.trivyScanner.image.repository }}:{{ .Values.trivyScanner.image.tag | default "latest" }}"
+              imagePullPolicy: {{ .Values.trivyScanner.image.pullPolicy }}
               command: ["/usr/local/bin/trivy-scanner"]
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities:
                   drop:
                     - ALL
-                readOnlyRootFilesystem: false
+                readOnlyRootFilesystem: true
                 runAsNonRoot: true
                 runAsUser: 1000
                 runAsGroup: 1000
@@ -59,9 +63,15 @@ spec:
                       key: RUNNER_HMAC_KEY
                 - name: TRIVY_CACHE_DIR
                   value: /trivy-cache
+                - name: TMPDIR
+                  value: /tmp
               volumeMounts:
                 - name: trivy-cache
                   mountPath: /trivy-cache
+                - name: tmp
+                  mountPath: /tmp
+                - name: home
+                  mountPath: /home/runner
               {{- with .Values.trivyScanner.resources }}
               resources:
                 {{- toYaml . | nindent 16 }}
@@ -69,4 +79,12 @@ spec:
           volumes:
             - name: trivy-cache
               emptyDir: {}
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi
+            - name: home
+              emptyDir:
+                medium: Memory
+                sizeLimit: 10Mi
 {{- end }}
