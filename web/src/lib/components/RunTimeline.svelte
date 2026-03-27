@@ -536,20 +536,29 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	};
 
-	// Format raw logs grouped by container with headers
+	// Format raw logs grouped by container with headers showing container name and job name
 	const rawLogsHtml = $derived(() => {
+		const containerLabels: Record<string, string> = {
+			'clone': 'clone [init]',
+			'runner': `runner [${runId.substring(0, 8)}]`,
+		};
 		const groups = new Map<string, string[]>();
+		const order: string[] = [];
 
 		for (const l of logs) {
 			const container = l.container || 'runner';
+			if (!groups.has(container)) {
+				groups.set(container, []);
+				order.push(container);
+			}
 			const ts = `<span style="color:var(--text-muted)">[${formatTimestamp(l.ts)}]</span>`;
-			if (!groups.has(container)) groups.set(container, []);
-			groups.get(container)!.push(`${ts} ${ansiToHtml(l.line)}`);
+			groups.get(container)!.push(`  ${ts} ${ansiToHtml(l.line)}`);
 		}
 
 		const sections: string[] = [];
-		for (const [container, lines] of groups) {
-			sections.push(`<span style="color:var(--aqua);font-weight:bold">── ${container} ──</span>\n${lines.join('\n')}`);
+		for (const container of order) {
+			const label = containerLabels[container] || container;
+			sections.push(`<span style="color:var(--aqua);font-weight:bold">── ${label} ──</span>\n${groups.get(container)!.join('\n')}`);
 		}
 		return sections.join('\n\n');
 	});
