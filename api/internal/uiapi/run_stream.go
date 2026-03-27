@@ -192,17 +192,13 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 			return
 		}
 
-		// For running jobs, poll for new logs every 2 seconds
+		// Poll for new logs and K8s events every 2 seconds.
+		// Unified tick ensures init container state (cloning) is
+		// surfaced to the UI without waiting for the websocket.
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
-		var k8sTicker *time.Ticker
-		var k8sTick <-chan time.Time
-		if k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != "" {
-			k8sTicker = time.NewTicker(5 * time.Second)
-			defer k8sTicker.Stop()
-			k8sTick = k8sTicker.C
-		}
+		k8sEnabled := k8sClient != nil && run.K8sJobName != "" && run.K8sNamespace != ""
 
 		var lastLogID int64
 		if len(logs) > 0 {
@@ -214,6 +210,29 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 			case <-r.Context().Done():
 				return
 			case <-ticker.C:
+				// Re-check K8s job name if not yet available (race with job creation)
+				if !k8sEnabled && k8sClient != nil {
+					if err := db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err == nil {
+						if run.K8sJobName != "" && run.K8sNamespace != "" {
+							k8sEnabled = true
+						}
+					}
+				}
+
+				// Send K8s snapshot (init container + pod status)
+				if k8sEnabled {
+					if k8sFailed, k8sError := sendK8sSnapshot(); k8sFailed {
+						statusEvent := map[string]interface{}{
+							"status": "FAILED",
+							"error":  k8sError,
+						}
+						data, _ := json.Marshal(statusEvent)
+						fmt.Fprintf(w, "event: status\n")
+						fmt.Fprintf(w, "data: %s\n\n", data)
+						flusher.Flush()
+						return
+					}
+				}
 				// Fetch new logs
 				var newLogs []runner.RunLog
 				if err := db.WithContext(r.Context()).
@@ -294,20 +313,6 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 						flusher.Flush()
 						return
 					}
-				}
-			case <-k8sTick:
-				// Check for K8s errors during polling
-				if k8sFailed, k8sError := sendK8sSnapshot(); k8sFailed {
-					// K8s error detected (e.g., ImagePullBackOff), send failure status and close
-					statusEvent := map[string]interface{}{
-						"status": "FAILED",
-						"error":  k8sError,
-					}
-					data, _ := json.Marshal(statusEvent)
-					fmt.Fprintf(w, "event: status\n")
-					fmt.Fprintf(w, "data: %s\n\n", data)
-					flusher.Flush()
-					return
 				}
 			}
 		}

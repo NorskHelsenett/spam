@@ -88,10 +88,9 @@
 		icon: any;
 		category: 'k8s' | 'run';
 	}> = [
-		// K8s - clone runs as init container, then main container starts
+		{ id: 'k8s-started', title: 'Runner Started', defaultDescription: 'Pod scheduled on cluster', icon: Play, category: 'k8s' },
 		{ id: 'k8s-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'k8s' },
-		{ id: 'k8s-started', title: 'Runner Started', defaultDescription: 'Scanner container running', icon: Play, category: 'k8s' },
-		// Run steps
+		// Run steps (main container)
 		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
 		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
 		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running BetterLeaks scan', icon: Shield, category: 'run' },
@@ -270,13 +269,16 @@
 
 		for (const event of events) {
 			switch (event.reason) {
+				case 'Scheduled':
+				case 'Pulling':
+				case 'Pulled':
+				case 'Created':
 				case 'Started':
-					// The 'Started' event fires for both init and main containers.
-					// If we see it and init container is already completed, this is the main container.
-					if (podStatus?.init_container_status === 'completed') {
+					// Mark runner as started on any pod progress event
+					if (!completed.has('k8s-started')) {
 						completed.set('k8s-started', {
 							timestamp: event.first_timestamp,
-							description: 'Scanner container running',
+							description: 'Pod running on cluster',
 							status: 'completed'
 						});
 					}
@@ -374,7 +376,7 @@
 		// Determine current running step based on status
 		let currentRunningStep: string | null = null;
 		if (status === 'QUEUED') {
-			currentRunningStep = 'k8s-clone';
+			currentRunningStep = 'k8s-started';
 		} else if (status === 'RUNNING') {
 			// Find the first incomplete step
 			for (const step of ALL_STEPS) {
@@ -411,15 +413,16 @@
 				stepStatus = completed.status;
 			} else if (stepDef.id === currentRunningStep) {
 				stepStatus = 'running';
+			} else if (stepDef.id === 'k8s-started' && podStatus) {
+				// Any pod status means the runner has started
+				if (podStatus.is_error) {
+					stepStatus = 'error';
+				} else {
+					stepStatus = 'completed';
+				}
 			} else if (stepDef.id === 'k8s-clone' && status === 'SUCCEEDED') {
 				stepStatus = 'completed';
-			} else if (stepDef.id === 'k8s-started' && podStatus) {
-				if (podStatus.container_status === 'running' || podStatus.phase === 'Succeeded') {
-					stepStatus = 'completed';
-				} else if (podStatus.phase === 'Failed' || podStatus.is_error) {
-					stepStatus = 'error';
-				}
-			} else if (stepDef.id === 'k8s-started' && status === 'SUCCEEDED') {
+			} else if ((stepDef.id === 'k8s-started' || stepDef.id === 'k8s-clone') && status === 'SUCCEEDED') {
 				stepStatus = 'completed';
 			} else if (status === 'FAILED') {
 				// If run failed and step not completed, check if it should be marked as skipped
