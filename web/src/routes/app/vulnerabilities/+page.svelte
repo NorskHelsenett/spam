@@ -207,7 +207,7 @@
 	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header>
 			<div class="flex items-center gap-3">
-				<ShieldX class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
+				<ShieldX class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
 				<div>
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Vulnerabilities</h1>
 					<p class="text-sm text-[var(--text-tertiary)]">Scan results across all SBOMs.</p>
