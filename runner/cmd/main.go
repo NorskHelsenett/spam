@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -229,18 +228,7 @@ func (r *Runner) sendDone(exitCode int) {
 }
 
 func (r *Runner) runPipeline() int {
-	if r.runnerMode != "scan" {
-		// Prepare work directory
-		if err := os.RemoveAll(r.workDir); err != nil {
-			r.log(fmt.Sprintf("Failed to clean work dir: %v", err))
-		}
-		if err := os.MkdirAll(r.workDir, 0755); err != nil {
-			r.log(fmt.Sprintf("Failed to create work dir: %v", err))
-			return 1
-		}
-	}
-
-	// Prepare artifacts directory outside the repository clone.
+	// Prepare artifacts directory (on /tmp tmpfs, always writable)
 	if err := os.RemoveAll(r.artifactDir); err != nil {
 		r.log(fmt.Sprintf("Failed to clean artifact dir: %v", err))
 	}
@@ -249,62 +237,6 @@ func (r *Runner) runPipeline() int {
 		return 1
 	}
 	r.log(fmt.Sprintf("Artifact directory: %s", r.artifactDir))
-
-	if r.runnerMode != "scan" {
-		// Request PAT for private repos
-		pat := ""
-		if !r.localMode {
-			r.log("Requesting access token...")
-			var err error
-			pat, err = r.requestToken()
-			if err != nil {
-				r.log(fmt.Sprintf("Failed to get token: %v", err))
-				// Continue anyway - might be public repo
-			}
-		}
-
-		// Build clone args — pass auth via http.extraHeader so the PAT
-		// never touches .git/config
-		buildArgs := func(depth bool) []string {
-			args := []string{"clone", "-c", "credential.helper="}
-			if pat != "" {
-				basicAuth := base64.StdEncoding.EncodeToString([]byte("token:" + pat))
-				args = append(args, "-c", fmt.Sprintf("http.extraHeader=Authorization: Basic %s", basicAuth))
-			}
-			if depth {
-				args = append(args, "--depth=1")
-			} else {
-				args = append(args, "--no-tags")
-			}
-			if r.repoRef != "" {
-				args = append(args, "--branch", r.repoRef)
-			}
-			args = append(args, r.repoCloneURL, r.workDir)
-			return args
-		}
-
-		// Clone repository
-		r.log(fmt.Sprintf("Cloning %s...", r.repoCloneURL))
-		if r.repoCommitSHA != "" {
-			// Pinned-commit mode: full clone, then checkout exact SHA
-			if err := r.runCommand("git", buildArgs(false)...); err != nil {
-				r.log(fmt.Sprintf("Git clone failed: %v", err))
-				return 1
-			}
-			r.log(fmt.Sprintf("Checking out pinned commit %s...", r.repoCommitSHA))
-			checkoutCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "checkout", r.repoCommitSHA)
-			if out, err := checkoutCmd.CombinedOutput(); err != nil {
-				r.log(fmt.Sprintf("Git checkout failed: %v\n%s", err, string(out)))
-				return 1
-			}
-		} else {
-			// Standard shallow clone
-			if err := r.runCommand("git", buildArgs(true)...); err != nil {
-				r.log(fmt.Sprintf("Git clone failed: %v", err))
-				return 1
-			}
-		}
-	}
 
 	// Capture the actual commit hash that was cloned
 	commitHashCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "rev-parse", "HEAD")
@@ -479,32 +411,6 @@ func (r *Runner) streamOutput(reader io.Reader) {
 	for scanner.Scan() {
 		r.log(scanner.Text())
 	}
-}
-
-func (r *Runner) requestToken() (string, error) {
-	reqBody, _ := json.Marshal(map[string]string{"run_id": r.runID})
-	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/token", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.runToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token request failed: %d", resp.StatusCode)
-	}
-
-	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", err
-	}
-	return tokenResp.Token, nil
 }
 
 func (r *Runner) uploadFile(filePath, fileType string) error {
@@ -696,9 +602,9 @@ func mustJSON(v interface{}) []byte {
 }
 
 // runCloneMode runs in init-container mode: requests PAT, clones the repo,
-// and exits. Auth is passed via http.extraHeader so the PAT is never written
-// to .git/config — the cloned repo is identical to a public clone.
-// The main container then mounts the work volume read-only.
+// and exits. Auth is provided via a one-shot credential helper that feeds
+// the PAT through git's credential protocol — the PAT never appears in the
+// URL or .git/config. The main container then mounts the work volume read-only.
 func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) int {
 	repoName := strings.TrimSuffix(filepath.Base(cloneURL), ".git")
 	workDir := filepath.Join("/work", repoName)
@@ -721,16 +627,28 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 		}
 	}
 
-	// Build git args — pass auth via http.extraHeader so the PAT never
-	// touches .git/config. The resulting repo is identical to a public clone.
+	// Write a one-shot credential helper script to /tmp. This feeds the PAT
+	// through git's credential protocol so it never appears in the URL or
+	// .git/config. Works with GitHub, GitLab, Gitea, Bitbucket, etc.
 	gitEnv := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_TERMINAL_PROMPT=0"}
-	buildCloneArgs := func(depth string) []string {
-		args := []string{"clone", "-c", "credential.helper="}
-		if pat != "" {
-			basicAuth := base64.StdEncoding.EncodeToString([]byte("token:" + pat))
-			args = append(args, "-c", fmt.Sprintf("http.extraHeader=Authorization: Basic %s", basicAuth))
+	credentialHelper := ""
+	if pat != "" {
+		helperPath := filepath.Join(os.TempDir(), "git-credential-helper")
+		helperContent := fmt.Sprintf("#!/bin/sh\necho username=token\necho password=%s\n", pat)
+		if err := os.WriteFile(helperPath, []byte(helperContent), 0700); err != nil {
+			log.Printf("Failed to write credential helper: %v", err)
+			return 1
 		}
-		if depth != "" {
+		defer os.Remove(helperPath)
+		credentialHelper = helperPath
+	}
+
+	buildCloneArgs := func(shallow bool) []string {
+		args := []string{"clone", "-c", "credential.helper="}
+		if credentialHelper != "" {
+			args = append(args, "-c", fmt.Sprintf("credential.helper=%s", credentialHelper))
+		}
+		if shallow {
 			args = append(args, "--depth=1")
 		} else {
 			args = append(args, "--no-tags")
@@ -748,7 +666,7 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 	log.Printf("Cloning %s...", cloneURL)
 	if commitSHA != "" {
 		// Pinned-commit mode: full clone, then checkout exact SHA
-		cmd := exec.CommandContext(ctx, "git", buildCloneArgs("")...)
+		cmd := exec.CommandContext(ctx, "git", buildCloneArgs(false)...)
 		cmd.Env = gitEnv
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("Git clone failed: %v\n%s", err, string(out))
@@ -763,7 +681,7 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 		}
 	} else {
 		// Standard shallow clone
-		cmd := exec.CommandContext(ctx, "git", buildCloneArgs("1")...)
+		cmd := exec.CommandContext(ctx, "git", buildCloneArgs(true)...)
 		cmd.Env = gitEnv
 		if out, err := cmd.CombinedOutput(); err != nil {
 			log.Printf("Git clone failed: %v\n%s", err, string(out))
