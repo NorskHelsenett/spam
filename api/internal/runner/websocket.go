@@ -12,6 +12,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm/clause"
 )
 
 var upgrader = websocket.Upgrader{
@@ -225,27 +226,22 @@ func (s *Server) fetchInitContainerLogs(runID string) {
 }
 
 func (s *Server) storeToolVersions(ctx context.Context, runID string, versions []ToolVersion) {
-	payload, err := json.Marshal(versions)
+	versionsJSON, err := json.Marshal(versions)
 	if err != nil {
 		log.Printf("failed to marshal tool versions: %v", err)
 		return
 	}
 
-	// Store in run result JSON under the "tool_versions" key
-	var raw json.RawMessage
-	if err := s.db.WithContext(ctx).Table("jobs").Select("result").Where("id = ?", runID).Scan(&raw).Error; err != nil {
-		log.Printf("failed to load run result: %v", err)
-		return
+	record := ScannerVersion{
+		Source:    "runner",
+		Versions:  versionsJSON,
+		UpdatedAt: time.Now(),
 	}
-
-	resultMap := map[string]json.RawMessage{}
-	if len(raw) > 0 {
-		json.Unmarshal(raw, &resultMap)
-	}
-	resultMap["tool_versions"] = json.RawMessage(payload)
-
-	merged, _ := json.Marshal(resultMap)
-	if err := s.db.WithContext(ctx).Table("jobs").Where("id = ?", runID).Update("result", merged).Error; err != nil {
+	if err := s.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "source"}},
+			DoUpdates: clause.AssignmentColumns([]string{"versions", "updated_at"}),
+		}).Create(&record).Error; err != nil {
 		log.Printf("failed to store tool versions: %v", err)
 	}
 }

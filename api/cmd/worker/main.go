@@ -131,7 +131,7 @@ func run() error {
 
 	// Auto-migrate runner tables
 	if cfg.Runner.Enabled {
-		if err := gormDB.AutoMigrate(&runner.RunLog{}, &runner.RunSecret{}); err != nil {
+		if err := gormDB.AutoMigrate(&runner.RunLog{}, &runner.RunSecret{}, &runner.ScannerVersion{}); err != nil {
 			return fmt.Errorf("migrate runner tables: %w", err)
 		}
 	}

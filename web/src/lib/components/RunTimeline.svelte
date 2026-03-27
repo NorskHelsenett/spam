@@ -537,7 +537,7 @@
 	};
 
 	// Format raw logs grouped by container with headers showing container name and job name
-	const rawLogsHtml = $derived(() => {
+	const rawLogsHtml = $derived.by(() => {
 		const containerLabels: Record<string, string> = {
 			'clone': 'clone [init]',
 			'runner': `runner [${runId.substring(0, 8)}]`,

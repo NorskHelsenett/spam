@@ -26,6 +26,12 @@ import (
 	"time"
 )
 
+type toolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatalf("trivy-scanner: %v", err)
@@ -44,6 +50,9 @@ func run() error {
 	if cacheDir == "" {
 		cacheDir = "/trivy-cache"
 	}
+
+	// Report tool version + binary digest for auditability
+	reportToolVersion(apiURL, hmacKey)
 
 	log.Printf("downloading trivy vulnerability database …")
 	if err := trivyDownloadDB(cacheDir); err != nil {
@@ -366,6 +375,54 @@ func signRequest(r *http.Request, body []byte, hmacKey []byte) {
 	mac := hmac.New(sha256.New, hmacKey)
 	mac.Write(body)
 	r.Header.Set("X-Scanner-Signature", hex.EncodeToString(mac.Sum(nil)))
+}
+
+func binaryDigest(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "unknown"
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "unknown"
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+func reportToolVersion(apiURL string, hmacKey []byte) {
+	version := "unknown"
+	if out, err := exec.Command("trivy", "--version").Output(); err == nil {
+		if idx := strings.IndexByte(string(out), '\n'); idx > 0 {
+			version = strings.TrimSpace(string(out[:idx]))
+		} else {
+			version = strings.TrimSpace(string(out))
+		}
+	}
+	digest := binaryDigest("/usr/local/bin/trivy")
+	log.Printf("Tool: trivy | %s | %s", version, digest)
+
+	payload, _ := json.Marshal(map[string]interface{}{
+		"source": "trivy-scanner",
+		"versions": []toolVersion{
+			{Name: "trivy", Version: version, BinaryDigest: digest},
+		},
+	})
+
+	req, err := http.NewRequest(http.MethodPost, apiURL+"/api/tool-versions", bytes.NewReader(payload))
+	if err != nil {
+		log.Printf("failed to report tool version: %v", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	signRequest(req, payload, hmacKey)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("failed to report tool version: %v", err)
+		return
+	}
+	resp.Body.Close()
 }
 
 func parseHMACKey(value string) []byte {
