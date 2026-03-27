@@ -247,21 +247,29 @@
 		return completed;
 	};
 
-	// Derive clone step status from pod's init container status
+	// Derive clone step status from pod's init container status.
+	// If the main container is running (status=RUNNING or we have logs),
+	// the clone must have completed — init containers always finish first.
 	const parseInitContainerStatus = (): CompletedStepData | null => {
-		if (!podStatus?.init_container_status) return null;
-		switch (podStatus.init_container_status) {
-			case 'running':
-				return { description: 'Fetching source code', status: 'running' };
-			case 'completed':
-				return { description: 'Source code fetched', status: 'completed' };
-			case 'failed':
-				return { description: podStatus.message || 'Clone failed', status: 'error' };
-			case 'waiting':
-				return { description: 'Waiting to start', status: 'running' };
-			default:
-				return null;
+		if (podStatus?.init_container_status) {
+			switch (podStatus.init_container_status) {
+				case 'running':
+					return { description: 'Fetching source code', status: 'running' };
+				case 'completed':
+					return { description: 'Source code fetched', status: 'completed' };
+				case 'failed':
+					return { description: podStatus.message || 'Clone failed', status: 'error' };
+				case 'waiting':
+					return { description: 'Waiting to start', status: 'running' };
+			}
 		}
+
+		// Main container is running or has run — clone must have completed
+		if (status === 'RUNNING' || status === 'SUCCEEDED' || status === 'FAILED' || (logs && logs.length > 0)) {
+			return { description: 'Source code fetched', status: 'completed' };
+		}
+
+		return null;
 	};
 
 	// Parse K8s events to extract completed step data
