@@ -35,8 +35,9 @@ type AppSummaryCounts struct {
 }
 
 type AppSummaryScanner struct {
-	Name  string `json:"name"`
-	Count int64  `json:"count"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Count   int64  `json:"count"`
 }
 
 type AppSummarySBOM struct {
@@ -233,12 +234,15 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 	resp.Counts.OSVSBOMPURLCount = int64(purlStats.SBOMDistinct)
 	resp.Counts.OSVManifestPURLCount = int64(purlStats.ManifestAdded)
 
-	// Scanners
+	// Scanners — include the most recent version per scanner
 	if err := db.WithContext(ctx).Raw(`
 		SELECT
 			scanner_name AS name,
+			(SELECT m2.scanner_version FROM sbom_metadata_view m2
+			 WHERE m2.scanner_name = m.scanner_name AND m2.scanner_version <> ''
+			 ORDER BY m2.created_at DESC LIMIT 1) AS version,
 			COUNT(DISTINCT sbom_id) AS count
-		FROM sbom_metadata_view
+		FROM sbom_metadata_view m
 		WHERE scanner_name <> ''
 		GROUP BY scanner_name
 		ORDER BY count DESC, scanner_name ASC
