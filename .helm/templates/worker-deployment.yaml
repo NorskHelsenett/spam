@@ -126,10 +126,6 @@ spec:
               value: {{ .Values.runner.ttlSecondsAfterFinished | default 3600 | quote }}
             - name: RUNNER_ACTIVE_DEADLINE
               value: {{ .Values.runner.activeDeadlineSeconds | default 1800 | quote }}
-            {{- if .Values.runner.localMode }}
-            - name: RUNNER_LOCAL_MODE
-              value: "true"
-            {{- end }}
             {{- if .Values.runner.podAnnotations }}
             - name: RUNNER_POD_ANNOTATIONS
               value: {{ include "spam.runnerPodAnnotations" . | quote }}

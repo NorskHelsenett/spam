@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -31,10 +30,6 @@ type K8sClient struct {
 
 // NewK8sClient creates a new Kubernetes client.
 func NewK8sClient(cfg config.RunnerConfig) (*K8sClient, error) {
-	if cfg.LocalMode {
-		return &K8sClient{cfg: cfg}, nil
-	}
-
 	var k8sConfig *rest.Config
 	var err error
 
@@ -120,10 +115,6 @@ func (k *K8sClient) discoverPodAnnotations() error {
 
 // CreateRunJob creates a Kubernetes job for a run.
 func (k *K8sClient) CreateRunJob(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
-	if k.cfg.LocalMode {
-		return k.createLocalDockerRun(ctx, runID, cloneURL, ref, token, commitSHA)
-	}
-
 	return k.createK8sJob(ctx, runID, cloneURL, ref, token, commitSHA)
 }
 
@@ -338,44 +329,8 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	return existing.Name, namespace, nil
 }
 
-func (k *K8sClient) createLocalDockerRun(ctx context.Context, runID, cloneURL, ref, token, commitSHA string) (string, string, error) {
-	args := []string{
-		"run", "--rm",
-		"-e", fmt.Sprintf("WORKER_URL=%s", k.cfg.WorkerURL),
-		"-e", fmt.Sprintf("RUN_ID=%s", runID),
-		"-e", fmt.Sprintf("RUN_TOKEN=%s", token),
-		"-e", fmt.Sprintf("REPO_CLONE_URL=%s", cloneURL),
-	}
-	if ref != "" {
-		args = append(args, "-e", fmt.Sprintf("REPO_REF=%s", ref))
-	}
-	if commitSHA != "" {
-		args = append(args, "-e", fmt.Sprintf("REPO_COMMIT_SHA=%s", commitSHA))
-	}
-	args = append(args, k.cfg.Image)
-
-	cmd := exec.CommandContext(ctx, "docker", args...)
-
-	// Run in background
-	go func() {
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			log.Printf("docker run failed: %v\nOutput: %s", err, string(output))
-		}
-	}()
-
-	return fmt.Sprintf("docker-%s", runID[:8]), "local", nil
-}
-
 // DeleteJob deletes a Kubernetes job.
 func (k *K8sClient) DeleteJob(ctx context.Context, jobName, namespace string) error {
-	if k.cfg.LocalMode {
-		// For local mode, we can't easily stop a detached docker run
-		// The container will complete on its own
-		log.Printf("local mode: cannot delete job %s", jobName)
-		return nil
-	}
-
 	propagationPolicy := metav1.DeletePropagationBackground
 	return k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
 		PropagationPolicy: &propagationPolicy,
@@ -384,10 +339,6 @@ func (k *K8sClient) DeleteJob(ctx context.Context, jobName, namespace string) er
 
 // GetJobStatus returns the status of a Kubernetes job.
 func (k *K8sClient) GetJobStatus(ctx context.Context, jobName, namespace string) (*batchv1.Job, error) {
-	if k.cfg.LocalMode {
-		return nil, fmt.Errorf("job status not available in local mode")
-	}
-
 	return k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
 }
 
@@ -406,10 +357,6 @@ type PodStatus struct {
 // GetPodStatus retrieves the status of the pod associated with a job.
 // It returns error states like ImagePullBackOff, ErrImagePull, CrashLoopBackOff, etc.
 func (k *K8sClient) GetPodStatus(ctx context.Context, jobName, namespace string) (*PodStatus, error) {
-	if k.cfg.LocalMode {
-		return nil, fmt.Errorf("pod status not available in local mode")
-	}
-
 	// Find the pod created by this job
 	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
@@ -525,10 +472,6 @@ type K8sEvent struct {
 
 // GetJobEvents retrieves Kubernetes events for a job and its pods.
 func (k *K8sClient) GetJobEvents(ctx context.Context, jobName, namespace string) ([]K8sEvent, error) {
-	if k.cfg.LocalMode {
-		return nil, fmt.Errorf("events not available in local mode")
-	}
-
 	var result []K8sEvent
 
 	// Get events for the job
@@ -600,9 +543,6 @@ func (k *K8sClient) GetJobEvents(ctx context.Context, jobName, namespace string)
 // GetJobStatusString returns a simple status string for a named job.
 // Returns "not_found" when the job does not exist.
 func (k *K8sClient) GetJobStatusString(ctx context.Context, jobName string) (string, error) {
-	if k.cfg.LocalMode {
-		return "not_found", nil
-	}
 	job, err := k.clientset.BatchV1().Jobs(k.cfg.Namespace).Get(ctx, jobName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -626,9 +566,6 @@ func (k *K8sClient) GetJobStatusString(ctx context.Context, jobName string) (str
 // If a job with the given name already exists and is still running, it returns an error.
 // If it has finished (succeeded or failed), the old job is deleted before creating a new one.
 func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobName string, ttlSecondsAfterFinished int32) error {
-	if k.cfg.LocalMode {
-		return fmt.Errorf("create job from cronjob not supported in local mode")
-	}
 	namespace := k.cfg.Namespace
 
 	// Check whether a prior adhoc job still exists.
@@ -687,10 +624,6 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 
 // GetContainerLogs retrieves logs from a specific container in the pod associated with a job.
 func (k *K8sClient) GetContainerLogs(ctx context.Context, jobName, namespace, container string) (string, error) {
-	if k.cfg.LocalMode {
-		return "", fmt.Errorf("pod logs not available in local mode")
-	}
-
 	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
 	})
@@ -725,10 +658,6 @@ func (k *K8sClient) GetContainerLogs(ctx context.Context, jobName, namespace, co
 
 // GetPodLogs retrieves logs from the runner pod associated with a job.
 func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, tailLines *int64) (string, error) {
-	if k.cfg.LocalMode {
-		return "", fmt.Errorf("pod logs not available in local mode")
-	}
-
 	// Find the pod created by this job
 	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
