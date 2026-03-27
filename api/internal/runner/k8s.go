@@ -144,9 +144,9 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 			Name:      jobName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/name":    "spam-runner",
-				"app.kubernetes.io/part-of": "spam",
-				"spam.io/run-id":            runID,
+				"app.kubernetes.io/name":      "spam-runner",
+				"app.kubernetes.io/component": "runner",
+				"spam.io/run-id":              runID,
 			},
 		},
 		Spec: batchv1.JobSpec{
@@ -156,9 +156,9 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: map[string]string{
-						"app.kubernetes.io/name":    "spam-runner",
-						"app.kubernetes.io/part-of": "spam",
-						"spam.io/run-id":            runID,
+						"app.kubernetes.io/name":      "spam-runner",
+						"app.kubernetes.io/component": "runner",
+						"spam.io/run-id":              runID,
 					},
 					Annotations: k.cfg.PodAnnotations,
 				},
@@ -609,8 +609,9 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 			Name:      jobName,
 			Namespace: namespace,
 			Labels: map[string]string{
-				"app.kubernetes.io/part-of": "spam",
-				"spam.io/adhoc-trivy-scan":  "true",
+				"app.kubernetes.io/name":      "spam-runner",
+				"app.kubernetes.io/component": "scanner",
+				"spam.io/adhoc-trivy-scan":    "true",
 			},
 			Annotations: map[string]string{
 				"spam.io/created-by": "admin-adhoc",
@@ -619,6 +620,11 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 		Spec: cronJob.Spec.JobTemplate.Spec,
 	}
 	job.Spec.TTLSecondsAfterFinished = &ttlSecondsAfterFinished
+	// Ensure pod template has the trivy-scanner component label so the network policy applies.
+	if job.Spec.Template.Labels == nil {
+		job.Spec.Template.Labels = make(map[string]string)
+	}
+	job.Spec.Template.Labels["app.kubernetes.io/component"] = "trivy-scanner"
 
 	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create job: %w", err)

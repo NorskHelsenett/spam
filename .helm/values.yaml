@@ -366,12 +366,11 @@ postgresqlConnection:
   sslmode: disable
 
 # Network Policy configuration
+# Network policies are automatically applied when runner or trivyScanner is enabled.
 # Restricts egress from runner and trivy-scanner pods to prevent data exfiltration.
-# When enabled, pods can ONLY reach the worker service and DNS by default.
+# Pods can ONLY reach the worker service and DNS by default.
 # All other outbound traffic (internet) is blocked unless explicitly allowed.
 networkPolicy:
-  enabled: false
-
   runner:
     # Additional egress rules for runner pods (e.g., to allow git clone).
     # Without these, runner jobs cannot reach external git providers.
