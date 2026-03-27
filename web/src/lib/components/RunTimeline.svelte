@@ -101,6 +101,64 @@
 	// Strip ANSI escape codes (colors, bold, etc.) from log lines
 	const stripAnsi = (str: string) => str.replace(/\x1b\[[0-9;]*m/g, '');
 
+	// Convert ANSI escape codes to HTML spans with theme-aware colors
+	const ansiToHtml = (str: string): string => {
+		const colors: Record<string, string> = {
+			'30': 'var(--text-muted)',     // black
+			'31': 'var(--red-dim)',        // red
+			'32': 'var(--green-dim)',      // green
+			'33': 'var(--yellow-dim)',     // yellow
+			'34': 'var(--blue-dim)',       // blue
+			'35': 'var(--purple-dim)',     // magenta
+			'36': 'var(--aqua-dim)',       // cyan
+			'37': 'var(--text-secondary)', // white
+			'90': 'var(--text-muted)',     // bright black (gray)
+			'91': 'var(--red)',            // bright red
+			'92': 'var(--green)',          // bright green
+			'93': 'var(--yellow)',         // bright yellow
+			'94': 'var(--blue)',           // bright blue
+			'95': 'var(--purple)',         // bright magenta
+			'96': 'var(--aqua)',           // bright cyan
+			'97': 'var(--text-bright)',    // bright white
+		};
+
+		// HTML-escape first to prevent XSS
+		const escaped = str
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;');
+
+		let result = '';
+		let openSpans = 0;
+
+		// Split on ANSI sequences, keeping the delimiters
+		const parts = escaped.split(/(\x1b\[[0-9;]*m)/);
+		for (const part of parts) {
+			const match = part.match(/\x1b\[([0-9;]*)m/);
+			if (!match) {
+				result += part;
+				continue;
+			}
+
+			const codes = match[1].split(';');
+			for (const code of codes) {
+				if (code === '0' || code === '') {
+					// Reset — close all open spans
+					while (openSpans > 0) { result += '</span>'; openSpans--; }
+				} else if (code === '1') {
+					result += '<span style="font-weight:bold">';
+					openSpans++;
+				} else if (colors[code]) {
+					result += `<span style="color:${colors[code]}">`;
+					openSpans++;
+				}
+			}
+		}
+		// Close any remaining open spans
+		while (openSpans > 0) { result += '</span>'; openSpans--; }
+		return result;
+	};
+
 	// Track completed step data from logs/events
 	type CompletedStepData = {
 		timestamp?: string;
@@ -474,8 +532,8 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	};
 
-	// Format raw logs for display
-	const rawLogsText = $derived(logs.map(l => `[${formatTimestamp(l.ts)}] ${stripAnsi(l.line)}`).join('\n'));
+	// Format raw logs for display (with ANSI colors rendered)
+	const rawLogsHtml = $derived(logs.map(l => `<span style="color:var(--text-muted)">[${formatTimestamp(l.ts)}]</span> ${ansiToHtml(l.line)}`).join('\n'));
 </script>
 
 <div class="timeline-container">
@@ -636,7 +694,7 @@
 
 				{#if showRawLogs}
 					<div class="mt-3 max-h-80 overflow-auto rounded-lg border border-[var(--border-color)]/60 bg-[var(--main-content-bg)]/80 p-4 shadow-inner">
-						<pre class="code-block text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all"><code>{rawLogsText}</code></pre>
+						<pre class="code-block text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all"><code>{@html rawLogsHtml}</code></pre>
 					</div>
 				{/if}
 			</div>
