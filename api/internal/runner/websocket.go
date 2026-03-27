@@ -191,7 +191,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // fetchInitContainerLogs retrieves logs from the clone init container via
 // the K8s API and stores them as run log entries so they appear in the UI.
 func (s *Server) fetchInitContainerLogs(runID string) {
-	if s.k8sClient == nil || s.k8sClient.cfg.LocalMode {
+	if s.k8sClient == nil {
 		return
 	}
 

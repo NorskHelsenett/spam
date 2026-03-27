@@ -102,8 +102,6 @@ type RunnerConfig struct {
 	HTTPPort           int               // Worker runner HTTP port (default 8081)
 	TTLSeconds         int32             // TTL for completed K8s jobs
 	ActiveDeadline     int64             // Maximum runtime for K8s jobs in seconds
-	LocalMode          bool              // Skip K8s, run Docker inline for testing
-	DockerSocket       string            // Docker socket path for local mode
 	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
 	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
 }
@@ -168,8 +166,6 @@ func loadRunnerConfig() (RunnerConfig, error) {
 		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
 		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
-		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
-		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
 	}
@@ -216,8 +212,6 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
 		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
-		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
-		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
 	}

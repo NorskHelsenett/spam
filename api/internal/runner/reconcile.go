@@ -16,10 +16,6 @@ import (
 // state and updates the database accordingly. This catches runs whose
 // WebSocket connection was lost before the runner could send a "done" message.
 func (e *RunExecutor) ReconcileRunningJobs(ctx context.Context, db *gorm.DB, minAge time.Duration) (int, error) {
-	if e.k8s.cfg.LocalMode {
-		return 0, nil
-	}
-
 	cutoff := time.Now().Add(-minAge)
 	var runs []Run
 

@@ -163,7 +163,7 @@ func run() error {
 			}
 		}()
 
-		log.Printf("runner server enabled on port %d (local_mode=%v)", cfg.Runner.HTTPPort, cfg.Runner.LocalMode)
+		log.Printf("runner server enabled on port %d", cfg.Runner.HTTPPort)
 	}
 
 	// Create provider store and poller for commit-based polling

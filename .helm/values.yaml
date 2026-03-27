@@ -329,9 +329,6 @@ runner:
   ttlSecondsAfterFinished: 3600  # TTL for completed jobs (1 hour)
   activeDeadlineSeconds: 1800   # Maximum runtime for jobs (30 minutes)
 
-  # Local mode for testing (uses Docker instead of K8s jobs)
-  localMode: false
-
 # Trivy scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.

@@ -54,12 +54,11 @@ type Runner struct {
 	artifactDir   string
 	ctx           context.Context
 	cancel        context.CancelFunc
-	wsConn        *websocket.Conn
-	logChan       chan string
-	localMode     bool
-	sbomScanner   string // "trivy" or "syft"
-	commitHash    string
-	runnerMode    string // "clone", "scan", or "" (legacy)
+	wsConn      *websocket.Conn
+	logChan     chan string
+	sbomScanner string // "trivy" or "syft"
+	commitHash  string
+	runnerMode  string // "clone" or "scan"
 }
 
 func main() {
@@ -106,9 +105,8 @@ func main() {
 		artifactDir:   artifactDir,
 		ctx:           ctx,
 		cancel:        cancel,
-		logChan:       make(chan string, 100),
-		localMode:     workerURL == "local",
-		sbomScanner:   sbomScanner,
+		logChan:     make(chan string, 100),
+		sbomScanner: sbomScanner,
 		runnerMode:    runnerMode,
 	}
 
@@ -124,18 +122,16 @@ func main() {
 		cancel()
 	}()
 
-	// Connect WebSocket if not in local mode
-	if !r.localMode {
-		if err := r.connectWebSocket(); err != nil {
-			log.Fatalf("Failed to connect WebSocket: %v", err)
-		}
-		defer r.wsConn.Close(websocket.StatusNormalClosure, "")
-
-		// Start log streaming goroutine
-		go r.streamLogs()
-		// Start cancellation monitor
-		go r.monitorCancellation()
+	// Connect WebSocket
+	if err := r.connectWebSocket(); err != nil {
+		log.Fatalf("Failed to connect WebSocket: %v", err)
 	}
+	defer r.wsConn.Close(websocket.StatusNormalClosure, "")
+
+	// Start log streaming goroutine
+	go r.streamLogs()
+	// Start cancellation monitor
+	go r.monitorCancellation()
 
 	r.log(fmt.Sprintf("Starting run: %s", runID))
 
@@ -177,11 +173,9 @@ func (r *Runner) connectWebSocket() error {
 
 func (r *Runner) log(line string) {
 	fmt.Println(line)
-	if !r.localMode {
-		select {
-		case r.logChan <- line:
-		case <-r.ctx.Done():
-		}
+	select {
+	case r.logChan <- line:
+	case <-r.ctx.Done():
 	}
 }
 
@@ -223,9 +217,6 @@ func (r *Runner) monitorCancellation() {
 }
 
 func (r *Runner) sendDone(exitCode int) {
-	if r.localMode {
-		return
-	}
 	msg := LogMessage{
 		Type:     "done",
 		ExitCode: exitCode,
@@ -257,14 +248,12 @@ func (r *Runner) runPipeline() int {
 		r.commitHash = strings.TrimSpace(string(commitHashOut))
 		r.log(fmt.Sprintf("Commit hash: %s", r.commitHash))
 		// Send commit hash via WebSocket
-		if !r.localMode {
-			msg := LogMessage{
-				Type:       "commit_hash",
-				CommitHash: r.commitHash,
-			}
-			if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
-				r.log(fmt.Sprintf("Failed to send commit hash: %v", err))
-			}
+		msg := LogMessage{
+			Type:       "commit_hash",
+			CommitHash: r.commitHash,
+		}
+		if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
+			r.log(fmt.Sprintf("Failed to send commit hash: %v", err))
 		}
 	}
 
@@ -317,60 +306,25 @@ func (r *Runner) runPipeline() int {
 		}
 	}
 
-	// Upload results if not in local mode, otherwise copy to output dir
-	if !r.localMode {
-		r.log("Uploading SBOM...")
-		if err := r.uploadFile(sbomPath, "sbom"); err != nil {
-			r.log(fmt.Sprintf("Failed to upload SBOM: %v", err))
+	// Upload results
+	r.log("Uploading SBOM...")
+	if err := r.uploadFile(sbomPath, "sbom"); err != nil {
+		r.log(fmt.Sprintf("Failed to upload SBOM: %v", err))
+		return 1
+	}
+
+	r.log("Uploading BetterLeaks results...")
+	if err := r.uploadFile(betterleaksPath, "secrets"); err != nil {
+		r.log(fmt.Sprintf("Failed to upload BetterLeaks results: %v", err))
+		return 1
+	}
+
+	// Upload manifests if they exist
+	if _, err := os.Stat(manifestsPath); err == nil {
+		r.log("Uploading dependency manifests...")
+		if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
+			r.log(fmt.Sprintf("Failed to upload manifests: %v", err))
 			return 1
-		}
-
-		r.log("Uploading BetterLeaks results...")
-		if err := r.uploadFile(betterleaksPath, "secrets"); err != nil {
-			r.log(fmt.Sprintf("Failed to upload BetterLeaks results: %v", err))
-			return 1
-		}
-
-		// Upload manifests if they exist
-		if _, err := os.Stat(manifestsPath); err == nil {
-			r.log("Uploading dependency manifests...")
-			if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
-				r.log(fmt.Sprintf("Failed to upload manifests: %v", err))
-				return 1
-			}
-		}
-	} else {
-		// Local mode: copy results to output directory
-		outputDir := os.Getenv("OUTPUT_DIR")
-		if outputDir != "" {
-			r.log(fmt.Sprintf("Copying results to %s...", outputDir))
-			if err := os.MkdirAll(outputDir, 0755); err != nil {
-				r.log(fmt.Sprintf("Failed to create output dir: %v", err))
-				return 1
-			}
-
-			// Copy SBOM
-			if err := r.copyFile(sbomPath, filepath.Join(outputDir, "sbom.json")); err != nil {
-				r.log(fmt.Sprintf("Failed to copy SBOM: %v", err))
-			} else {
-				r.log("✓ SBOM saved")
-			}
-
-			// Copy BetterLeaks results
-			if err := r.copyFile(betterleaksPath, filepath.Join(outputDir, "betterleaks.json")); err != nil {
-				r.log(fmt.Sprintf("Failed to copy BetterLeaks results: %v", err))
-			} else {
-				r.log("✓ BetterLeaks results saved")
-			}
-
-			// Copy manifests if they exist
-			if _, err := os.Stat(manifestsPath); err == nil {
-				if err := r.copyFile(manifestsPath, filepath.Join(outputDir, "manifests.json")); err != nil {
-					r.log(fmt.Sprintf("Failed to copy manifests: %v", err))
-				} else {
-					r.log("✓ Dependency manifests saved")
-				}
-			}
 		}
 	}
 
@@ -400,7 +354,7 @@ func (r *Runner) logToolVersions() {
 		path        string
 		versionArgs []string
 	}{
-		{"syft", "/usr/local/bin/syft", []string{"version", "-o", "text"}},
+		{"syft", "/usr/local/bin/syft", []string{"--version"}},
 		{"trivy", "/usr/local/bin/trivy", []string{"--version"}},
 		{"betterleaks", "/usr/local/bin/betterleaks", []string{"version"}},
 		{"git", "/usr/bin/git", []string{"--version"}},
@@ -422,7 +376,7 @@ func (r *Runner) logToolVersions() {
 	}
 
 	// Send structured tool versions via websocket
-	if !r.localMode && r.wsConn != nil {
+	if r.wsConn != nil {
 		msg := LogMessage{Type: "tool_versions", ToolVersions: versions}
 		if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
 			r.log(fmt.Sprintf("Failed to send tool versions: %v", err))
@@ -652,14 +606,6 @@ func (r *Runner) createManifestsArchive(files []string, outputPath string) error
 	return os.WriteFile(outputPath, data, 0644)
 }
 
-func (r *Runner) copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644)
-}
-
 func mustJSON(v interface{}) []byte {
 	data, _ := json.Marshal(v)
 	return data
@@ -681,14 +627,10 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 	}
 
 	// Request PAT for private repos
-	pat := ""
-	if workerURL != "local" {
-		log.Printf("Requesting access token...")
-		var err error
-		pat, err = requestPAT(workerURL, runID, runToken)
-		if err != nil {
-			log.Printf("Failed to get token: %v (continuing for public repos)", err)
-		}
+	log.Printf("Requesting access token...")
+	pat, err := requestPAT(workerURL, runID, runToken)
+	if err != nil {
+		log.Printf("Failed to get token: %v (continuing for public repos)", err)
 	}
 
 	// Write a one-shot credential helper script to /tmp. This feeds the PAT
