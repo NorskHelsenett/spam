@@ -1,4 +1,4 @@
-{{- if and .Values.runner.enabled .Values.networkPolicy.enabled }}
+{{- if .Values.runner.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -13,8 +13,7 @@ spec:
   # Matches dynamically-created runner Job pods (labels set in Go code)
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: spam-runner
-      app.kubernetes.io/part-of: spam
+      app.kubernetes.io/component: runner
   policyTypes:
     - Ingress
     - Egress

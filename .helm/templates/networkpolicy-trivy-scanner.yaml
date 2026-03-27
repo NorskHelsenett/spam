@@ -1,4 +1,4 @@
-{{- if and .Values.trivyScanner.enabled .Values.networkPolicy.enabled }}
+{{- if .Values.trivyScanner.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -7,14 +7,12 @@ metadata:
     app.kubernetes.io/name: {{ .Chart.Name }}-trivy-scanner
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
-    app.kubernetes.io/component: trivy-scanner
+    app.kubernetes.io/component: scanner
     app.kubernetes.io/managed-by: Helm
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: {{ .Chart.Name }}-trivy-scanner
-      app.kubernetes.io/instance: {{ .Release.Name }}
-      app.kubernetes.io/component: trivy-scanner
+      app.kubernetes.io/component: scanner
   policyTypes:
     - Ingress
     - Egress
