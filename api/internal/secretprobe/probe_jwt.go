@@ -172,44 +172,50 @@ func verifyJWTSignature(ctx context.Context, token, issuer, kid string) ProbeOut
 		"token_kid":  kid,
 	}
 
-	if kid != "" {
-		found := false
-		for _, rawKey := range jwks.Keys {
-			var keyInfo struct {
-				KID string `json:"kid"`
-				Alg string `json:"alg"`
-				Kty string `json:"kty"`
-				Use string `json:"use"`
-			}
-			if err := json.Unmarshal(rawKey, &keyInfo); err != nil {
-				continue
-			}
-			if keyInfo.KID == kid {
-				found = true
-				meta["matched_key_alg"] = keyInfo.Alg
-				meta["matched_key_kty"] = keyInfo.Kty
-				if keyInfo.Use != "" {
-					meta["matched_key_use"] = keyInfo.Use
-				}
-				break
-			}
-		}
-		if !found {
-			return ProbeOutput{
-				Status:   StatusInvalid,
-				Reason:   fmt.Sprintf("kid %q not found in JWKS (%d keys)", kid, len(jwks.Keys)),
-				Metadata: meta,
-			}
+	if kid == "" {
+		// No kid in the JWT header — we can't match a specific key.
+		return ProbeOutput{
+			Status:   StatusUnknown,
+			Reason:   "no kid in JWT header, cannot match JWKS key",
+			Metadata: meta,
 		}
 	}
 
-	// We found the issuer's JWKS and (if kid was present) the matching key.
-	// Full cryptographic verification would require importing the key and
-	// checking the signature, but confirming the kid exists in the issuer's
-	// current JWKS is already a strong signal.
+	found := false
+	for _, rawKey := range jwks.Keys {
+		var keyInfo struct {
+			KID string `json:"kid"`
+			Alg string `json:"alg"`
+			Kty string `json:"kty"`
+			Use string `json:"use"`
+		}
+		if err := json.Unmarshal(rawKey, &keyInfo); err != nil {
+			continue
+		}
+		if keyInfo.KID == kid {
+			found = true
+			meta["matched_key_alg"] = keyInfo.Alg
+			meta["matched_key_kty"] = keyInfo.Kty
+			if keyInfo.Use != "" {
+				meta["matched_key_use"] = keyInfo.Use
+			}
+			break
+		}
+	}
+	if !found {
+		return ProbeOutput{
+			Status:   StatusInvalid,
+			Reason:   fmt.Sprintf("kid %q not found in JWKS (%d keys)", kid, len(jwks.Keys)),
+			Metadata: meta,
+		}
+	}
+
+	// We found the matching key in the issuer's JWKS. Full cryptographic
+	// signature verification is not performed — report as unknown rather
+	// than valid to avoid false confidence.
 	return ProbeOutput{
-		Status:   StatusValid,
-		Reason:   "kid found in issuer JWKS",
+		Status:   StatusUnknown,
+		Reason:   "kid found in issuer JWKS (signature not cryptographically verified)",
 		Metadata: meta,
 	}
 }
@@ -230,8 +236,9 @@ func jwtIssuer(token string) string {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return ""
 	}
-	// Only return HTTP(S) issuers — we need a URL to fetch discovery from.
-	if strings.HasPrefix(claims.Iss, "http://") || strings.HasPrefix(claims.Iss, "https://") {
+	// Only return HTTPS issuers — we need a secure URL to fetch discovery from.
+	// Allowing http:// would enable SSRF against internal/metadata endpoints.
+	if strings.HasPrefix(claims.Iss, "https://") {
 		return claims.Iss
 	}
 	return ""
