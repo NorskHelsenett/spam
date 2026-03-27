@@ -148,6 +148,9 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 				"status":      string(run.Status),
 				"commit_hash": run.CommitHash,
 			}
+			if run.Error != "" {
+				statusEvent["error"] = run.Error
+			}
 
 			// Parse payload to get repo_id for SBOM lookup
 			var payload jobs.CreateRunPayload
@@ -270,6 +273,9 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 						statusEvent := map[string]interface{}{
 							"status":      string(run.Status),
 							"commit_hash": run.CommitHash,
+						}
+						if run.Error != "" {
+							statusEvent["error"] = run.Error
 						}
 
 						// Parse payload to get repo_id for SBOM lookup
