@@ -308,21 +308,21 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
-	// Tool versions from the most recent completed run
-	var latestResult json.RawMessage
-	if err := db.WithContext(ctx).Table("jobs").
-		Select("result").
-		Where("type = 'CREATE_RUN' AND status = 'SUCCEEDED' AND result IS NOT NULL").
-		Order("finished_at DESC").
-		Limit(1).
-		Scan(&latestResult).Error; err == nil && len(latestResult) > 0 {
-		var resultMap map[string]json.RawMessage
-		if json.Unmarshal(latestResult, &resultMap) == nil {
-			if raw, ok := resultMap["tool_versions"]; ok {
-				var versions []AppSummaryToolVersion
-				if json.Unmarshal(raw, &versions) == nil {
-					resp.ToolVersions = versions
+	// Tool versions from all scanner components
+	var scannerVersions []struct {
+		Source   string          `gorm:"column:source"`
+		Versions json.RawMessage `gorm:"column:versions"`
+	}
+	if err := db.WithContext(ctx).Table("scanner_versions").
+		Order("source ASC").
+		Find(&scannerVersions).Error; err == nil {
+		for _, sv := range scannerVersions {
+			var versions []AppSummaryToolVersion
+			if json.Unmarshal(sv.Versions, &versions) == nil {
+				for i := range versions {
+					versions[i].Name = sv.Source + "/" + versions[i].Name
 				}
+				resp.ToolVersions = append(resp.ToolVersions, versions...)
 			}
 		}
 	}
