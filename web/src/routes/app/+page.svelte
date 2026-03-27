@@ -51,12 +51,19 @@
 		count: number;
 	};
 
+	type ToolVersion = {
+		name: string;
+		version: string;
+		binary_digest: string;
+	};
+
 	type SummaryResponse = {
 		counts: SummaryCounts;
 		scanners: ScannerCount[];
 		recent_sboms: RecentSBOM[];
 		top_components: TopComponent[];
 		top_licenses: TopLicense[];
+		tool_versions?: ToolVersion[];
 	};
 
 	let summary: SummaryResponse | null = null;
@@ -337,6 +344,19 @@
 				total={totalScans()}
 				segments={scannerSegments()}
 			/>
+			{#if summary.tool_versions && summary.tool_versions.length > 0}
+				<div class="mt-4 border-t border-[var(--border-color)]/40 pt-4">
+					<h3 class="mb-2 text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Tool versions</h3>
+					<div class="space-y-1.5">
+						{#each summary.tool_versions as tool}
+							<div class="flex items-baseline justify-between gap-2 text-xs">
+								<span class="font-medium text-[var(--text-secondary)]">{tool.name}</span>
+								<span class="font-mono text-[var(--text-tertiary)]" title={tool.binary_digest}>{tool.version}</span>
+							</div>
+						{/each}
+					</div>
+				</div>
+			{/if}
 			</section>
 		</div>
 	{/if}
