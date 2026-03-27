@@ -293,7 +293,7 @@
 		<!-- Header -->
 		<header class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
 			<div class="flex items-center gap-3">
-				<KeyRound class="h-6 w-6 flex-shrink-0 text-[var(--accent)]" />
+				<KeyRound class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
 				<div>
 					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Secrets</h1>
 					<p class="text-sm text-[var(--text-tertiary)]">Secret scan results across all repositories.</p>
