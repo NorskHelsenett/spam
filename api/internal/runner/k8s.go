@@ -685,6 +685,44 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 	return nil
 }
 
+// GetContainerLogs retrieves logs from a specific container in the pod associated with a job.
+func (k *K8sClient) GetContainerLogs(ctx context.Context, jobName, namespace, container string) (string, error) {
+	if k.cfg.LocalMode {
+		return "", fmt.Errorf("pod logs not available in local mode")
+	}
+
+	pods, err := k.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("job-name=%s", jobName),
+	})
+	if err != nil {
+		return "", fmt.Errorf("list pods: %w", err)
+	}
+	if len(pods.Items) == 0 {
+		return "", fmt.Errorf("no pods found for job %s", jobName)
+	}
+
+	opts := &corev1.PodLogOptions{Container: container}
+	req := k.clientset.CoreV1().Pods(namespace).GetLogs(pods.Items[0].Name, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("stream logs: %w", err)
+	}
+	defer stream.Close()
+
+	var result []byte
+	buf := make([]byte, 2048)
+	for {
+		n, err := stream.Read(buf)
+		if n > 0 {
+			result = append(result, buf[:n]...)
+		}
+		if err != nil {
+			break
+		}
+	}
+	return string(result), nil
+}
+
 // GetPodLogs retrieves logs from the runner pod associated with a job.
 func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, tailLines *int64) (string, error) {
 	if k.cfg.LocalMode {

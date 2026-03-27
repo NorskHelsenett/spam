@@ -117,8 +117,9 @@ func RunStreamHandler(db *gorm.DB, authService *auth.Service, k8sClient *runner.
 
 		for _, logEntry := range logs {
 			event := map[string]interface{}{
-				"line": logEntry.Line,
-				"ts":   logEntry.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				"line":      logEntry.Line,
+				"ts":        logEntry.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				"container": logEntry.Container,
 			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "id: %d\n", logEntry.ID)

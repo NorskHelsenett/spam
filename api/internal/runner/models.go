@@ -50,6 +50,7 @@ func (Run) TableName() string {
 type RunLog struct {
 	ID        int64     `gorm:"primaryKey;autoIncrement" json:"id"`
 	RunID     string    `gorm:"size:36;not null;index:idx_run_logs_run_id;index:idx_run_logs_run_created" json:"run_id"`
+	Container string    `gorm:"size:64;not null;default:'runner'" json:"container"`
 	Line      string    `gorm:"type:text;not null" json:"line"`
 	CreatedAt time.Time `gorm:"index:idx_run_logs_run_created" json:"created_at"`
 }
