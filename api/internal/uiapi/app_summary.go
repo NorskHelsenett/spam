@@ -2,7 +2,6 @@ package uiapi
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net/http"
 	"sync/atomic"
@@ -67,19 +66,12 @@ type AppSummaryLicense struct {
 	Count   int64  `json:"count"`
 }
 
-type AppSummaryToolVersion struct {
-	Name         string `json:"name"`
-	Version      string `json:"version"`
-	BinaryDigest string `json:"binary_digest"`
-}
-
 type AppSummaryResponse struct {
-	Counts        AppSummaryCounts        `json:"counts"`
-	Scanners      []AppSummaryScanner     `json:"scanners"`
-	RecentSBOMs   []AppSummarySBOM        `json:"recent_sboms"`
-	TopComponents []AppSummaryComponent   `json:"top_components"`
-	TopLicenses   []AppSummaryLicense     `json:"top_licenses"`
-	ToolVersions  []AppSummaryToolVersion `json:"tool_versions,omitempty"`
+	Counts        AppSummaryCounts      `json:"counts"`
+	Scanners      []AppSummaryScanner   `json:"scanners"`
+	RecentSBOMs   []AppSummarySBOM      `json:"recent_sboms"`
+	TopComponents []AppSummaryComponent `json:"top_components"`
+	TopLicenses   []AppSummaryLicense   `json:"top_licenses"`
 }
 
 // appSummaryCacheEntry wraps the response with the materialized view version
@@ -310,28 +302,6 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		LIMIT 10
 	`).Scan(&resp.TopLicenses).Error; err != nil {
 		return resp, err
-	}
-
-	// Tool versions — only include SBOM-related tools (syft, trivy)
-	sbomTools := map[string]bool{"syft": true, "trivy": true}
-	var scannerVersions []struct {
-		Source   string          `gorm:"column:source"`
-		Versions json.RawMessage `gorm:"column:versions"`
-	}
-	if err := db.WithContext(ctx).Table("scanner_versions").
-		Order("source ASC").
-		Find(&scannerVersions).Error; err == nil {
-		for _, sv := range scannerVersions {
-			var versions []AppSummaryToolVersion
-			if json.Unmarshal(sv.Versions, &versions) == nil {
-				for _, v := range versions {
-					if sbomTools[v.Name] {
-						v.Name = sv.Source + "/" + v.Name
-						resp.ToolVersions = append(resp.ToolVersions, v)
-					}
-				}
-			}
-		}
 	}
 
 	return resp, nil
