@@ -196,6 +196,42 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 							},
 						},
 					},
+					InitContainers: []corev1.Container{
+						{
+							Name:            "clone",
+							Image:           k.cfg.Image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Env: func() []corev1.EnvVar {
+								envs := []corev1.EnvVar{
+									{Name: "RUNNER_MODE", Value: "clone"},
+									{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
+									{Name: "RUN_ID", Value: runID},
+									{Name: "RUN_TOKEN", Value: token},
+									{Name: "REPO_CLONE_URL", Value: cloneURL},
+									{Name: "REPO_REF", Value: ref},
+								}
+								if commitSHA != "" {
+									envs = append(envs, corev1.EnvVar{Name: "REPO_COMMIT_SHA", Value: commitSHA})
+								}
+								return envs
+							}(),
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "tmp", MountPath: "/tmp"},
+								{Name: "work", MountPath: "/work"},
+								{Name: "home", MountPath: "/home/runner"},
+							},
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: &[]bool{false}[0],
+								ReadOnlyRootFilesystem:   &[]bool{true}[0],
+								Capabilities: &corev1.Capabilities{
+									Drop: []corev1.Capability{"ALL"},
+								},
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeRuntimeDefault,
+								},
+							},
+						},
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "runner",
@@ -203,6 +239,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Env: func() []corev1.EnvVar {
 								envs := []corev1.EnvVar{
+									{Name: "RUNNER_MODE", Value: "scan"},
 									{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
 									{Name: "RUN_ID", Value: runID},
 									{Name: "RUN_TOKEN", Value: token},
@@ -231,7 +268,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{Name: "tmp", MountPath: "/tmp"},
-								{Name: "work", MountPath: "/work"},
+								{Name: "work", MountPath: "/work", ReadOnly: true},
 								{Name: "home", MountPath: "/home/runner"},
 							},
 							SecurityContext: &corev1.SecurityContext{

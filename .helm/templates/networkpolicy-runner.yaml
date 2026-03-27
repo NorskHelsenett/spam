@@ -1,4 +1,4 @@
-{{- if .Values.runner.enabled }}
+{{- if and .Values.runner.enabled .Values.networkPolicy.runner.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
