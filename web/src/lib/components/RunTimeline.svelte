@@ -42,6 +42,7 @@
 	type RunLog = {
 		line: string;
 		ts: string;
+		container?: string;
 	};
 
 	type Props = {
@@ -535,8 +536,23 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	};
 
-	// Format raw logs for display (with ANSI colors rendered)
-	const rawLogsHtml = $derived(logs.map(l => `<span style="color:var(--text-muted)">[${formatTimestamp(l.ts)}]</span> ${ansiToHtml(l.line)}`).join('\n'));
+	// Format raw logs grouped by container with headers
+	const rawLogsHtml = $derived(() => {
+		const groups = new Map<string, string[]>();
+
+		for (const l of logs) {
+			const container = l.container || 'runner';
+			const ts = `<span style="color:var(--text-muted)">[${formatTimestamp(l.ts)}]</span>`;
+			if (!groups.has(container)) groups.set(container, []);
+			groups.get(container)!.push(`${ts} ${ansiToHtml(l.line)}`);
+		}
+
+		const sections: string[] = [];
+		for (const [container, lines] of groups) {
+			sections.push(`<span style="color:var(--aqua);font-weight:bold">── ${container} ──</span>\n${lines.join('\n')}`);
+		}
+		return sections.join('\n\n');
+	});
 </script>
 
 <div class="timeline-container">
