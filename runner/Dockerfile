@@ -8,14 +8,14 @@ RUN go mod download
 COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o runner ./cmd/main.go
 
-# Get syft binary
-FROM ghcr.io/anchore/syft:latest AS syft
+# Get syft binary (pinned digest for reproducibility)
+FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36 AS syft
 
-# Get trivy binary
+# Get trivy binary (pinned digest for reproducibility)
 FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
 
-# Get betterleaks binary
-FROM ghcr.io/betterleaks/betterleaks:latest AS betterleaks
+# Get betterleaks binary (pinned digest for reproducibility)
+FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 
 # Runtime stage
 FROM alpine:3.20

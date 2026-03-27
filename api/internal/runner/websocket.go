@@ -20,13 +20,21 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// ToolVersion represents a tool's version and binary digest.
+type ToolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
+}
+
 // WSMessage represents a WebSocket message.
 type WSMessage struct {
-	Type       string    `json:"type"`
-	Line       string    `json:"line,omitempty"`
-	Timestamp  time.Time `json:"ts,omitempty"`
-	ExitCode   int       `json:"exit_code,omitempty"`
-	CommitHash string    `json:"commit_hash,omitempty"`
+	Type         string        `json:"type"`
+	Line         string        `json:"line,omitempty"`
+	Timestamp    time.Time     `json:"ts,omitempty"`
+	ExitCode     int           `json:"exit_code,omitempty"`
+	CommitHash   string        `json:"commit_hash,omitempty"`
+	ToolVersions []ToolVersion `json:"tool_versions,omitempty"`
 }
 
 // WSConn wraps a WebSocket connection for a run.
@@ -154,6 +162,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				log.Printf("failed to update commit hash: %v", err)
 			}
 
+		case "tool_versions":
+			if len(msg.ToolVersions) > 0 {
+				log.Printf("received tool versions for run %s: %d tools", claims.RunID, len(msg.ToolVersions))
+				s.storeToolVersions(r.Context(), claims.RunID, msg.ToolVersions)
+			}
+
 		case "done":
 			log.Printf("run completed: run_id=%s exit_code=%d", claims.RunID, msg.ExitCode)
 			status := RunStatusSucceeded
@@ -165,6 +179,32 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+	}
+}
+
+func (s *Server) storeToolVersions(ctx context.Context, runID string, versions []ToolVersion) {
+	payload, err := json.Marshal(versions)
+	if err != nil {
+		log.Printf("failed to marshal tool versions: %v", err)
+		return
+	}
+
+	// Store in run result JSON under the "tool_versions" key
+	var raw json.RawMessage
+	if err := s.db.WithContext(ctx).Table("jobs").Select("result").Where("id = ?", runID).Scan(&raw).Error; err != nil {
+		log.Printf("failed to load run result: %v", err)
+		return
+	}
+
+	resultMap := map[string]json.RawMessage{}
+	if len(raw) > 0 {
+		json.Unmarshal(raw, &resultMap)
+	}
+	resultMap["tool_versions"] = json.RawMessage(payload)
+
+	merged, _ := json.Marshal(resultMap)
+	if err := s.db.WithContext(ctx).Table("jobs").Where("id = ?", runID).Update("result", merged).Error; err != nil {
+		log.Printf("failed to store tool versions: %v", err)
 	}
 }
 
