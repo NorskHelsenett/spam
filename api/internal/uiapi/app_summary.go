@@ -312,7 +312,8 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
-	// Tool versions from all scanner components
+	// Tool versions — only include SBOM-related tools (syft, trivy)
+	sbomTools := map[string]bool{"syft": true, "trivy": true}
 	var scannerVersions []struct {
 		Source   string          `gorm:"column:source"`
 		Versions json.RawMessage `gorm:"column:versions"`
@@ -323,10 +324,12 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		for _, sv := range scannerVersions {
 			var versions []AppSummaryToolVersion
 			if json.Unmarshal(sv.Versions, &versions) == nil {
-				for i := range versions {
-					versions[i].Name = sv.Source + "/" + versions[i].Name
+				for _, v := range versions {
+					if sbomTools[v.Name] {
+						v.Name = sv.Source + "/" + v.Name
+						resp.ToolVersions = append(resp.ToolVersions, v)
+					}
 				}
-				resp.ToolVersions = append(resp.ToolVersions, versions...)
 			}
 		}
 	}
