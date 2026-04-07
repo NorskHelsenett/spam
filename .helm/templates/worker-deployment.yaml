@@ -127,7 +127,7 @@ spec:
             - name: RUNNER_ACTIVE_DEADLINE
               value: {{ .Values.runner.activeDeadlineSeconds | default 1800 | quote }}
             - name: RUNNER_EGRESS_SELF_TEST_ENABLED
-              value: {{ .Values.runner.egressSelfTest.enabled | default true | quote }}
+              value: {{ .Values.runner.egressSelfTest.enabled | quote }}
             - name: RUNNER_EGRESS_SELF_TEST_URL
               value: {{ .Values.runner.egressSelfTest.url | default "https://example.com" | quote }}
             - name: RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS
