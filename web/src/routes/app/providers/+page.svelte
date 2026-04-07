@@ -11,7 +11,7 @@
 	import RepoTable from '$lib/components/RepoTable.svelte';
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
-	import Checkbox from '$lib/components/Checkbox.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
 	import type {
 		RepoData,
 		GroupData,
@@ -58,7 +58,7 @@
 	let glPage = $state(1);
 	let glHasNextPage = $state(false);
 	let glTotalCount = $state(0);
-	let glIncludeSubgroups = $state(false);
+	let glIncludeSubgroups = $state(true);
 	let glGroupPath: string[] = $state([]);
 
 	// Custom provider state (for active custom tab)
@@ -71,10 +71,27 @@
 	let cpPage = $state(1);
 	let cpHasNextPage = $state(false);
 	let cpTotalCount = $state(0);
-	let cpIncludeSubgroups = $state(false);
+	let cpIncludeSubgroups = $state(true);
 	let cpGroupPath: string[] = $state([]);
 
 	const pageSize = 30;
+
+	// Client-side filter: when off, show only direct projects of the current group
+	const filterDirectProjects = (projects: RepoData[], group: string) => {
+		if (!group) return projects;
+		const prefix = group.endsWith('/') ? group : group + '/';
+		return projects.filter(p => {
+			const sub = p.full_path.startsWith(prefix) ? p.full_path.slice(prefix.length) : '';
+			return sub !== '' && !sub.includes('/');
+		});
+	};
+
+	const glFilteredProjects = $derived(
+		glIncludeSubgroups ? glProjects : filterDirectProjects(glProjects, glGroup)
+	);
+	const cpFilteredProjects = $derived(
+		cpIncludeSubgroups ? cpProjects : filterDirectProjects(cpProjects, cpGroup)
+	);
 
 	// Sorting state
 	let sortColumn = $state<string>('');
@@ -414,7 +431,7 @@
 			const params = new URLSearchParams({
 				page: String(page),
 				page_size: String(pageSize),
-				include_subgroups: String(glIncludeSubgroups),
+				include_subgroups: 'true',
 				group: glGroup
 			});
 			if (sortColumn) {
@@ -505,7 +522,7 @@
 			let url: string;
 
 			if (provider.type === 'gitlab') {
-				params.set('include_subgroups', String(cpIncludeSubgroups));
+				params.set('include_subgroups', 'true');
 				if (groupPath) params.set('group', groupPath);
 				url = `/api/providers/gitlab/projects?${params}`;
 			} else {
@@ -1065,7 +1082,6 @@
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 						<input type="text" placeholder="Group path (e.g., gitlab-org)" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
 					</div>
-					<Checkbox bind:checked={glIncludeSubgroups} label="Include subgroups" />
 					<button type="button" class="btn btn-outline" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
 						{glLoading ? 'Loading...' : 'Fetch Projects'}
 					</button>
@@ -1118,11 +1134,17 @@
 					</div>
 				{/if}
 
-				{#if glProjects.length === 0 && !glLoading && !glError}
+				{#if glProjects.length > 0}
+					<div class="flex items-center justify-between">
+						<Toggle bind:checked={glIncludeSubgroups} label="Include subgroup projects" />
+						<span class="text-xs text-[var(--text-muted)]">{glFilteredProjects.length} of {glProjects.length} projects</span>
+					</div>
+				{/if}
+				{#if glFilteredProjects.length === 0 && !glLoading && !glError}
 					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
-				{:else if glProjects.length > 0}
+				{:else if glFilteredProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
-						{#each glProjects as project}
+						{#each glFilteredProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath
@@ -1270,9 +1292,6 @@
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
 						<input type="text" placeholder="Group/organization path" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
 					</div>
-					{#if provider.type === 'gitlab'}
-						<Checkbox bind:checked={cpIncludeSubgroups} label="Include subgroups" />
-					{/if}
 					<button type="button" class="btn btn-outline" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
 						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
 					</button>
@@ -1325,11 +1344,17 @@
 					</div>
 				{/if}
 
-				{#if cpProjects.length === 0 && !cpLoading && !cpError}
+				{#if provider.type === 'gitlab' && cpProjects.length > 0}
+					<div class="flex items-center justify-between">
+						<Toggle bind:checked={cpIncludeSubgroups} label="Include subgroup projects" />
+						<span class="text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpProjects.length} projects</span>
+					</div>
+				{/if}
+				{#if cpFilteredProjects.length === 0 && !cpLoading && !cpError}
 					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
-				{:else if cpProjects.length > 0}
+				{:else if cpFilteredProjects.length > 0}
 					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
-						{#each cpProjects as project}
+						{#each cpFilteredProjects as project}
 							<RepoTableRow
 								repo={project}
 								showPath
