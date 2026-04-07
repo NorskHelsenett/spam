@@ -75,6 +75,8 @@ func main() {
 		log.Fatal("Missing required environment variables")
 	}
 
+	clearRunEnv()
+
 	// Clone mode: init container that clones the repo and exits
 	if runnerMode == "clone" {
 		os.Exit(runCloneMode(workerURL, runID, runToken, repoCloneURL, repoRef, repoCommitSHA))
@@ -610,10 +612,22 @@ func mustJSON(v interface{}) []byte {
 	return data
 }
 
-// runCloneMode runs in init-container mode: requests PAT, clones the repo,
-// and exits. Auth is provided via a one-shot credential helper that feeds
-// the PAT through git's credential protocol — the PAT never appears in the
-// URL or .git/config. The main container then mounts the work volume read-only.
+func clearRunEnv() {
+	for _, key := range []string{
+		"WORKER_URL",
+		"RUN_ID",
+		"RUN_TOKEN",
+		"REPO_CLONE_URL",
+		"REPO_REF",
+		"REPO_COMMIT_SHA",
+	} {
+		_ = os.Unsetenv(key)
+	}
+}
+
+// runCloneMode runs in init-container mode, clones the repo through the worker
+// git proxy, and exits. The provider PAT stays in the worker and is never
+// exposed to the runner environment or .git/config.
 func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) int {
 	repoName := strings.TrimSuffix(filepath.Base(cloneURL), ".git")
 	workDir := filepath.Join("/work", repoName)

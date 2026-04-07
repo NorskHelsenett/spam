@@ -59,7 +59,6 @@ func (s *Server) Start(ctx context.Context) error {
 		r.HandleFunc("/git/{run_id}/*", s.handleGitProxy)
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.Timeout(60 * time.Second))
-			r.Post("/token", s.handleTokenExchange)
 			r.Post("/results", s.handleResults)
 		})
 	})

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"net"
+	"os"
 	"testing"
 	"time"
 )
@@ -73,6 +74,20 @@ func TestParseEgressProbeAddress(t *testing.T) {
 		}
 		if got != tt.want {
 			t.Fatalf("parseEgressProbeAddress(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestClearRunEnv(t *testing.T) {
+	t.Setenv("WORKER_URL", "http://worker:8081")
+	t.Setenv("RUN_TOKEN", "token")
+	t.Setenv("REPO_CLONE_URL", "https://git.example.com/org/repo.git")
+
+	clearRunEnv()
+
+	for _, key := range []string{"WORKER_URL", "RUN_TOKEN", "REPO_CLONE_URL"} {
+		if got := os.Getenv(key); got != "" {
+			t.Fatalf("expected %s to be cleared, got %q", key, got)
 		}
 	}
 }

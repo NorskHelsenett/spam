@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -69,9 +70,21 @@ func (s *Server) handleGitProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamURL, err := url.Parse(payload.CloneURL)
-	if err != nil || upstreamURL.Scheme == "" || upstreamURL.Host == "" {
+	upstreamURL, err := parseGitProxyCloneURL(payload.CloneURL)
+	if err != nil {
 		http.Error(w, "invalid clone url", http.StatusInternalServerError)
+		return
+	}
+
+	expectedBaseURL, err := s.resolveGitProxyBaseURL(r.Context(), payload)
+	if err != nil {
+		log.Printf("git proxy: failed to resolve provider base url for run %s: %v", runID, err)
+		http.Error(w, "failed to resolve provider base url", http.StatusInternalServerError)
+		return
+	}
+	if err := ensureGitProxyUpstreamAllowed(upstreamURL, expectedBaseURL); err != nil {
+		log.Printf("git proxy upstream rejected: run_id=%s clone_url=%s err=%v", runID, payload.CloneURL, err)
+		http.Error(w, "clone url not allowed", http.StatusForbidden)
 		return
 	}
 
@@ -98,6 +111,31 @@ func (s *Server) handleGitProxy(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+func (s *Server) resolveGitProxyBaseURL(ctx context.Context, payload jobs.CreateRunPayload) (string, error) {
+	if providerID := strings.TrimSpace(payload.ProviderID); providerID != "" {
+		var provider struct {
+			BaseURL string
+		}
+		if err := s.db.WithContext(ctx).
+			Table("provider_instances").
+			Select("base_url").
+			Where("id = ?", providerID).
+			Scan(&provider).Error; err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(provider.BaseURL) == "" {
+			return "", fmt.Errorf("provider %s has no base url", providerID)
+		}
+		return provider.BaseURL, nil
+	}
+
+	if baseURL := providerconfig.NormalizeBaseURL(strings.TrimSpace(payload.Provider), ""); baseURL != "" {
+		return baseURL, nil
+	}
+
+	return "", nil
+}
+
 func validateGitProxyRequest(r *http.Request, gitPath string) error {
 	switch gitPath {
 	case gitSmartHTTPInfoRefs:
@@ -122,6 +160,70 @@ func validateGitProxyRequest(r *http.Request, gitPath string) error {
 		return nil
 	default:
 		return fmt.Errorf("git path not allowed")
+	}
+}
+
+func parseGitProxyCloneURL(raw string) (*url.URL, error) {
+	upstreamURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return nil, err
+	}
+	if upstreamURL.Scheme != "https" || upstreamURL.Host == "" {
+		return nil, fmt.Errorf("clone url must use https")
+	}
+	if upstreamURL.User != nil {
+		return nil, fmt.Errorf("clone url must not include credentials")
+	}
+	if upstreamURL.RawQuery != "" || upstreamURL.Fragment != "" {
+		return nil, fmt.Errorf("clone url must not include query or fragment")
+	}
+	if path := strings.TrimSpace(upstreamURL.EscapedPath()); path == "" || !strings.HasSuffix(path, ".git") {
+		return nil, fmt.Errorf("clone url must target a git repository path")
+	}
+	return upstreamURL, nil
+}
+
+func ensureGitProxyUpstreamAllowed(cloneURL *url.URL, expectedBaseURL string) error {
+	if cloneURL == nil {
+		return fmt.Errorf("missing clone url")
+	}
+	if strings.TrimSpace(expectedBaseURL) == "" {
+		return nil
+	}
+
+	baseURL, err := url.Parse(expectedBaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid provider base url: %w", err)
+	}
+	if baseURL.Scheme != "https" || baseURL.Host == "" {
+		return fmt.Errorf("provider base url must use https")
+	}
+	if baseURL.User != nil {
+		return fmt.Errorf("provider base url must not include credentials")
+	}
+	if !sameURLOrigin(cloneURL, baseURL) {
+		return fmt.Errorf("clone url host does not match provider base url")
+	}
+	return nil
+}
+
+func sameURLOrigin(a, b *url.URL) bool {
+	return strings.EqualFold(a.Scheme, b.Scheme) &&
+		strings.EqualFold(a.Hostname(), b.Hostname()) &&
+		effectivePort(a) == effectivePort(b)
+}
+
+func effectivePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
 	}
 }
 
