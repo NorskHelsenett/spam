@@ -104,6 +104,13 @@ type RunnerConfig struct {
 	ActiveDeadline     int64             // Maximum runtime for K8s jobs in seconds
 	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
 	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
+	EgressSelfTest     RunnerEgressSelfTestConfig
+}
+
+type RunnerEgressSelfTestConfig struct {
+	Enabled        bool
+	URL            string
+	TimeoutSeconds int
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -168,6 +175,11 @@ func loadRunnerConfig() (RunnerConfig, error) {
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+		EgressSelfTest: RunnerEgressSelfTestConfig{
+			Enabled:        parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED", false),
+			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
+			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
+		},
 	}
 
 	// HMAC key is required when runner is enabled
@@ -214,6 +226,11 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+		EgressSelfTest: RunnerEgressSelfTestConfig{
+			Enabled:        parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED", false),
+			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
+			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
+		},
 	}
 
 	// HMAC key is optional for read-only access

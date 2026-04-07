@@ -101,21 +101,9 @@ fi
 
 log "Starting run: $RUN_ID"
 
-# Request PAT for private repos (returns empty for public)
-PAT=""
-if [ "$WORKER_URL" != "local" ]; then
-    log "Requesting access token..."
-    PAT=$(curl -sf "$WORKER_URL/runner/token" \
-        -H "Authorization: Bearer $RUN_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"run_id":"'"$RUN_ID"'"}' 2>/dev/null | jq -r '.token // empty' || true)
-fi
-
-# Build clone URL with authentication if PAT provided
 CLONE_URL="$REPO_CLONE_URL"
-if [ -n "$PAT" ]; then
-    # Provider-agnostic: https://token:PAT@host/repo.git
-    CLONE_URL=$(echo "$REPO_CLONE_URL" | sed "s|https://|https://token:${PAT}@|")
+if [ "$WORKER_URL" != "local" ]; then
+    CLONE_URL="${WORKER_URL%/}/runner/git/$RUN_ID"
 fi
 
 # Clone repository
@@ -132,10 +120,24 @@ fi
 
 # Clone and capture output
 CLONE_LOG="$WORK_DIR/clone.log"
-if GIT_CONFIG_COUNT=2 \
-   GIT_CONFIG_KEY_0="http.lowSpeedLimit" GIT_CONFIG_VALUE_0="1024" \
-   GIT_CONFIG_KEY_1="http.lowSpeedTime"  GIT_CONFIG_VALUE_1="30" \
-   git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1; then
+set +e
+if [ "$WORKER_URL" != "local" ]; then
+    GIT_CONFIG_COUNT=3 \
+    GIT_CONFIG_KEY_0="http.lowSpeedLimit" GIT_CONFIG_VALUE_0="1024" \
+    GIT_CONFIG_KEY_1="http.lowSpeedTime"  GIT_CONFIG_VALUE_1="30" \
+    GIT_CONFIG_KEY_2="http.extraHeader"   GIT_CONFIG_VALUE_2="Authorization: Bearer $RUN_TOKEN" \
+    git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1
+    CLONE_EXIT=$?
+else
+    GIT_CONFIG_COUNT=2 \
+    GIT_CONFIG_KEY_0="http.lowSpeedLimit" GIT_CONFIG_VALUE_0="1024" \
+    GIT_CONFIG_KEY_1="http.lowSpeedTime"  GIT_CONFIG_VALUE_1="30" \
+    git clone $CLONE_ARGS "$CLONE_URL" "$WORK_DIR/src" > "$CLONE_LOG" 2>&1
+    CLONE_EXIT=$?
+fi
+set -e
+
+if [ "$CLONE_EXIT" -eq 0 ]; then
     # Log the output
     while IFS= read -r line; do
         log "$line"

@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -39,10 +40,6 @@ type LogMessage struct {
 	ToolVersions []ToolVersion `json:"tool_versions,omitempty"`
 }
 
-type TokenResponse struct {
-	Token string `json:"token"`
-}
-
 type Runner struct {
 	workerURL     string
 	runID         string
@@ -54,11 +51,11 @@ type Runner struct {
 	artifactDir   string
 	ctx           context.Context
 	cancel        context.CancelFunc
-	wsConn      *websocket.Conn
-	logChan     chan string
-	sbomScanner string // "trivy" or "syft"
-	commitHash  string
-	runnerMode  string // "clone" or "scan"
+	wsConn        *websocket.Conn
+	logChan       chan string
+	sbomScanner   string // "trivy" or "syft"
+	commitHash    string
+	runnerMode    string // "clone" or "scan"
 }
 
 func main() {
@@ -105,8 +102,8 @@ func main() {
 		artifactDir:   artifactDir,
 		ctx:           ctx,
 		cancel:        cancel,
-		logChan:     make(chan string, 100),
-		sbomScanner: sbomScanner,
+		logChan:       make(chan string, 100),
+		sbomScanner:   sbomScanner,
 		runnerMode:    runnerMode,
 	}
 
@@ -626,34 +623,16 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 		return 1
 	}
 
-	// Request PAT for private repos
-	log.Printf("Requesting access token...")
-	pat, err := requestPAT(workerURL, runID, runToken)
-	if err != nil {
-		log.Printf("Failed to get token: %v (continuing for public repos)", err)
+	if err := enforceExternalEgressBlockedFromEnv(); err != nil {
+		log.Printf("Runner egress self-test failed: %v", err)
+		return 1
 	}
 
-	// Write a one-shot credential helper script to /tmp. This feeds the PAT
-	// through git's credential protocol so it never appears in the URL or
-	// .git/config. Works with GitHub, GitLab, Gitea, Bitbucket, etc.
+	proxyCloneURL := buildGitProxyCloneURL(workerURL, runID)
 	gitEnv := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_TERMINAL_PROMPT=0"}
-	credentialHelper := ""
-	if pat != "" {
-		helperPath := filepath.Join(os.TempDir(), "git-credential-helper")
-		helperContent := fmt.Sprintf("#!/bin/sh\necho username=token\necho password=%s\n", pat)
-		if err := os.WriteFile(helperPath, []byte(helperContent), 0700); err != nil {
-			log.Printf("Failed to write credential helper: %v", err)
-			return 1
-		}
-		defer os.Remove(helperPath)
-		credentialHelper = helperPath
-	}
 
 	buildCloneArgs := func(shallow bool) []string {
-		args := []string{"clone", "-c", "credential.helper="}
-		if credentialHelper != "" {
-			args = append(args, "-c", fmt.Sprintf("credential.helper=%s", credentialHelper))
-		}
+		args := []string{"-c", "credential.helper=", "-c", "http.extraHeader=Authorization: Bearer " + runToken, "clone"}
 		if shallow {
 			args = append(args, "--depth=1")
 		} else {
@@ -662,14 +641,14 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 		if ref != "" {
 			args = append(args, "--branch", ref)
 		}
-		args = append(args, cloneURL, workDir)
+		args = append(args, proxyCloneURL, workDir)
 		return args
 	}
 
 	ctx := context.Background()
 
 	// Clone repository
-	log.Printf("Cloning %s...", cloneURL)
+	log.Printf("Cloning %s through worker git proxy...", cloneURL)
 	if commitSHA != "" {
 		// Pinned-commit mode: full clone, then checkout exact SHA
 		cmd := exec.CommandContext(ctx, "git", buildCloneArgs(false)...)
@@ -699,29 +678,67 @@ func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) i
 	return 0
 }
 
-// requestPAT requests a PAT token from the worker service.
-func requestPAT(workerURL, runID, runToken string) (string, error) {
-	reqBody, _ := json.Marshal(map[string]string{"run_id": runID})
-	req, err := http.NewRequest("POST", workerURL+"/runner/token", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+runToken)
-	req.Header.Set("Content-Type", "application/json")
+func buildGitProxyCloneURL(workerURL, runID string) string {
+	return strings.TrimRight(workerURL, "/") + "/runner/git/" + runID
+}
 
-	resp, err := http.DefaultClient.Do(req)
+func enforceExternalEgressBlockedFromEnv() error {
+	if !parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED") {
+		return nil
+	}
+
+	probeURL := strings.TrimSpace(os.Getenv("RUNNER_EGRESS_SELF_TEST_URL"))
+	if probeURL == "" {
+		probeURL = "https://example.com"
+	}
+
+	timeout := 5 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS")); raw != "" {
+		secs, err := strconv.Atoi(raw)
+		if err != nil || secs <= 0 {
+			return fmt.Errorf("invalid RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS: %q", raw)
+		}
+		timeout = time.Duration(secs) * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := ensureExternalEgressBlocked(ctx, probeURL); err != nil {
+		return err
+	}
+	log.Printf("Runner egress self-test passed: external probe %s was not reachable", probeURL)
+	return nil
+}
+
+func ensureExternalEgressBlocked(ctx context.Context, probeURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, probeURL, nil)
 	if err != nil {
-		return "", err
+		return fmt.Errorf("build egress probe request: %w", err)
+	}
+
+	client := &http.Client{
+		Timeout: 0,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token request failed: %d", resp.StatusCode)
-	}
+	return fmt.Errorf("external egress unexpectedly allowed: %s returned %s", probeURL, resp.Status)
+}
 
-	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", err
+func parseBoolEnv(key string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
-	return tokenResp.Token, nil
 }

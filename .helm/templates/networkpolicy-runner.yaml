@@ -35,19 +35,6 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.runner.httpPort | default 8081 }}
-    # Allow HTTPS to public internet for git clone (GitHub, GitLab, Gitea, etc.).
-    # All RFC 1918 private ranges are BLOCKED — runner pods cannot reach
-    # internal cluster services, databases, or other pods outside the worker.
-    - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except:
-              - 10.0.0.0/8
-              - 172.16.0.0/12
-              - 192.168.0.0/16
-      ports:
-        - protocol: TCP
-          port: 443
     {{- with .Values.networkPolicy.runner.additionalEgressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

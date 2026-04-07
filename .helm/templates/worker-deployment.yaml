@@ -126,6 +126,12 @@ spec:
               value: {{ .Values.runner.ttlSecondsAfterFinished | default 3600 | quote }}
             - name: RUNNER_ACTIVE_DEADLINE
               value: {{ .Values.runner.activeDeadlineSeconds | default 1800 | quote }}
+            - name: RUNNER_EGRESS_SELF_TEST_ENABLED
+              value: {{ .Values.runner.egressSelfTest.enabled | default true | quote }}
+            - name: RUNNER_EGRESS_SELF_TEST_URL
+              value: {{ .Values.runner.egressSelfTest.url | default "https://example.com" | quote }}
+            - name: RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS
+              value: {{ .Values.runner.egressSelfTest.timeoutSeconds | default 5 | quote }}
             {{- if .Values.runner.podAnnotations }}
             - name: RUNNER_POD_ANNOTATIONS
               value: {{ include "spam.runnerPodAnnotations" . | quote }}

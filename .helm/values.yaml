@@ -329,6 +329,14 @@ runner:
   ttlSecondsAfterFinished: 3600  # TTL for completed jobs (1 hour)
   activeDeadlineSeconds: 1800   # Maximum runtime for jobs (30 minutes)
 
+  # Fail the clone init container if it can still reach the public internet.
+  # This is a defense-in-depth check that verifies the runner NetworkPolicy is
+  # actually enforced at runtime.
+  egressSelfTest:
+    enabled: true
+    url: "https://example.com"
+    timeoutSeconds: 5
+
 # Trivy scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.
@@ -372,9 +380,7 @@ networkPolicy:
     # Set to false to disable the runner network policy entirely.
     enabled: true
     # Additional egress rules for runner pods.
-    # By default: DNS + worker API + HTTPS to public internet (for git clone
-    # from GitHub, GitLab, Gitea, etc.) are allowed. All RFC 1918 private
-    # ranges are blocked — runners cannot reach internal cluster services.
+    # By default: DNS + worker API only. Public internet egress is blocked.
     additionalEgressRules: []
 
   trivyScanner:
