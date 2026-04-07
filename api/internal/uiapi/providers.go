@@ -1400,9 +1400,6 @@ func serveFromProviderRepoList(w http.ResponseWriter, r *http.Request, c cache.S
 	}
 
 	filtered := filterReposByOwner(allRepos, owner)
-	if owner != "" && len(filtered) == 0 {
-		return false // no cached repos match this group; fall through to live API
-	}
 	if sortColumn != "" {
 		sortRepos(filtered, sortColumn, sortOrder)
 	}
