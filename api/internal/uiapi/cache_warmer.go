@@ -220,8 +220,9 @@ func discoverRepos(ctx context.Context, db *gorm.DB, c cache.Store, p providerco
 	page := 1
 	for {
 		repos, pageInfo, err := client.ListPublicRepos(ctx, p.OwnerPath, providers.ListOptions{
-			Page:     page,
-			PageSize: 100,
+			Page:             page,
+			PageSize:         100,
+			IncludeSubgroups: true,
 		})
 		if err != nil {
 			log.Printf("cache warmer: %s list page %d: %v", p.DisplayName, page, err)
