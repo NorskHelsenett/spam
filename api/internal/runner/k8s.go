@@ -200,6 +200,9 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 									{Name: "RUN_TOKEN", Value: token},
 									{Name: "REPO_CLONE_URL", Value: cloneURL},
 									{Name: "REPO_REF", Value: ref},
+									{Name: "RUNNER_EGRESS_SELF_TEST_ENABLED", Value: fmt.Sprintf("%t", k.cfg.EgressSelfTest.Enabled)},
+									{Name: "RUNNER_EGRESS_SELF_TEST_URL", Value: k.cfg.EgressSelfTest.URL},
+									{Name: "RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", Value: fmt.Sprintf("%d", k.cfg.EgressSelfTest.TimeoutSeconds)},
 								}
 								if commitSHA != "" {
 									envs = append(envs, corev1.EnvVar{Name: "REPO_COMMIT_SHA", Value: commitSHA})

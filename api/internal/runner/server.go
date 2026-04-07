@@ -46,7 +46,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -57,14 +56,19 @@ func (s *Server) Start(ctx context.Context) error {
 	// Runner endpoints (internal, token auth)
 	r.Route("/runner", func(r chi.Router) {
 		r.Get("/ws", s.handleWebSocket)
-		r.Post("/token", s.handleTokenExchange)
-		r.Post("/results", s.handleResults)
+		r.HandleFunc("/git/{run_id}/*", s.handleGitProxy)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(60 * time.Second))
+			r.Post("/token", s.handleTokenExchange)
+			r.Post("/results", s.handleResults)
+		})
 	})
 
 	// Trivy scanner endpoints are served by the worker listener so scanner jobs
 	// can talk directly to the worker service.
 	r.Group(func(r chi.Router) {
 		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))
+		r.Use(middleware.Timeout(60 * time.Second))
 		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
 		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
