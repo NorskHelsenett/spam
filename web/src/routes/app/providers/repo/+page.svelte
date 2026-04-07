@@ -475,6 +475,10 @@
 		if (!browser) return;
 		// Re-fetch whenever URL params change (handles same-route navigation)
 		const _ = $page.url.href;
+		// Clear cached dialog data so stale results aren't shown for a different repo
+		vulnDialogData = [];
+		secretsDialogData = [];
+		dependenciesDialogData = [];
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
 

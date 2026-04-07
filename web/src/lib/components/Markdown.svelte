@@ -110,6 +110,7 @@
 	}
 	.prose :global(pre) {
 		background: var(--hover-bg);
+		color: var(--text-primary);
 		padding: 1rem;
 		border-radius: 0.5rem;
 		border: 1px solid var(--border-color);
