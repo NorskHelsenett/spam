@@ -422,8 +422,6 @@
 
 	// GitLab functions
 	const fetchGitLabProjects = async (page = 1) => {
-		if (!glGroup.trim()) return;
-
 		glLoading = true;
 		glError = '';
 
@@ -431,9 +429,9 @@
 			const params = new URLSearchParams({
 				page: String(page),
 				page_size: String(pageSize),
-				include_subgroups: 'true',
-				group: glGroup
+				include_subgroups: 'true'
 			});
+			if (glGroup.trim()) params.set('group', glGroup);
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
@@ -474,9 +472,9 @@
 		try {
 			const params = new URLSearchParams({
 				page: '1',
-				page_size: '50',
-				group: glGroup
+				page_size: '50'
 			});
+			if (glGroup.trim()) params.set('group', glGroup);
 
 			const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
 				credentials: 'include'
@@ -652,13 +650,17 @@
 		fetchGitHubRepos(1);
 	};
 
-	const searchReposDB = async (query: string, providerId?: string): Promise<RepoData[]> => {
+	type SearchGroupResult = { full_path: string; name: string; repo_count: number; provider_id: string };
+	let glSearchGroups: SearchGroupResult[] = $state([]);
+	let cpSearchGroups: SearchGroupResult[] = $state([]);
+
+	const searchReposDB = async (query: string, providerId?: string): Promise<{ projects: RepoData[]; groups: SearchGroupResult[] }> => {
 		const params = new URLSearchParams({ q: query, limit: String(pageSize) });
 		if (providerId) params.set('provider_id', providerId);
 		const res = await fetch(`/api/repos/search?${params}`, { credentials: 'include' });
-		if (!res.ok) return [];
+		if (!res.ok) return { projects: [], groups: [] };
 		const data = await res.json();
-		return (data.results || []).map((r: any) => ({
+		const projects = (data.results || []).map((r: any) => ({
 			name: r.slug,
 			full_path: r.org + '/' + r.slug,
 			description: '',
@@ -674,21 +676,32 @@
 			updated_at: '',
 			pushed_at: ''
 		}));
+		return { projects, groups: data.groups || [] };
 	};
 
 	const handleGitLabSearch = async () => {
+		if (!glGroup.trim()) {
+			glSearchGroups = [];
+			glGroupPath = [];
+			fetchGitLabProjects(1);
+			fetchGitLabSubgroups();
+			return;
+		}
 		glLoading = true;
 		glError = '';
 		glPage = 1;
 		glGroupPath = [];
 		glSubgroups = [];
 		try {
-			glProjects = await searchReposDB(glGroup);
+			const result = await searchReposDB(glGroup);
+			glProjects = result.projects;
+			glSearchGroups = result.groups;
 			glHasNextPage = false;
 			glTotalCount = glProjects.length;
 		} catch {
 			glError = 'Search failed.';
 			glProjects = [];
+			glSearchGroups = [];
 		} finally {
 			glLoading = false;
 		}
@@ -702,18 +715,28 @@
 			fetchGitHubRepos(1);
 			return;
 		}
+		if (!cpGroup.trim()) {
+			cpSearchGroups = [];
+			cpGroupPath = [];
+			fetchCustomProjects(provider, 1);
+			fetchCustomSubgroups(provider);
+			return;
+		}
 		cpLoading = true;
 		cpError = '';
 		cpPage = 1;
 		cpGroupPath = [];
 		cpSubgroups = [];
 		try {
-			cpProjects = await searchReposDB(cpGroup, managedProvidersEnabled ? provider.id : undefined);
+			const result = await searchReposDB(cpGroup, managedProvidersEnabled ? provider.id : undefined);
+			cpProjects = result.projects;
+			cpSearchGroups = result.groups;
 			cpHasNextPage = false;
 			cpTotalCount = cpProjects.length;
 		} catch {
 			cpError = 'Search failed.';
 			cpProjects = [];
+			cpSearchGroups = [];
 		} finally {
 			cpLoading = false;
 		}
@@ -1128,16 +1151,21 @@
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
+						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-10 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
+						{#if glGroup}
+							<button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] transition hover:text-[var(--text-primary)]" onclick={() => { glGroup = ''; glSearchGroups = []; glGroupPath = []; fetchGitLabProjects(1); fetchGitLabSubgroups(); }}>
+								<X class="h-4 w-4" />
+							</button>
+						{/if}
 					</div>
-					<button type="button" class="btn btn-outline" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
-						{glLoading ? 'Searching...' : 'Search'}
+					<button type="button" class="btn btn-outline" onclick={handleGitLabSearch} disabled={glLoading}>
+						{glLoading ? 'Loading...' : glGroup.trim() ? 'Search' : 'Browse All'}
 					</button>
 					<button
 						type="button"
 						class="btn btn-primary"
 						onclick={() => openQueueDialog('gitlab', '', glGroup, undefined, glIncludeSubgroups)}
-						disabled={isQueueing('gitlab') || !glGroup.trim()}
+						disabled={isQueueing('gitlab')}
 						title="Queue SBOM generation for all projects from {glGroup}"
 					>
 						{isQueueing('gitlab') ? 'Queueing...' : 'Queue All'}
@@ -1175,6 +1203,22 @@
 								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => navigateToSubgroup(group)}>
 									<Folder class="h-4 w-4 text-[var(--accent)]" />
 									{group.name}
+									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				{#if glSearchGroups.length > 0}
+					<div class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Groups</h3>
+						<div class="flex flex-wrap gap-2">
+							{#each glSearchGroups as group}
+								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => { glGroup = group.full_path; glSearchGroups = []; glGroupPath = []; fetchGitLabProjects(1); fetchGitLabSubgroups(); }}>
+									<Folder class="h-4 w-4 text-[var(--accent)]" />
+									{group.full_path}
+									<span class="text-xs text-[var(--text-muted)]">({group.repo_count})</span>
 									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
 								</button>
 							{/each}
@@ -1338,7 +1382,12 @@
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
+						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-10 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
+						{#if cpGroup}
+							<button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] transition hover:text-[var(--text-primary)]" onclick={() => { cpGroup = ''; cpSearchGroups = []; cpGroupPath = []; fetchCustomProjects(provider, 1); fetchCustomSubgroups(provider); }}>
+								<X class="h-4 w-4" />
+							</button>
+						{/if}
 					</div>
 					<button type="button" class="btn btn-outline" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
 						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
@@ -1385,6 +1434,22 @@
 								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => navigateToCustomSubgroup(provider, group)}>
 									<Folder class="h-4 w-4 text-[var(--accent)]" />
 									{group.name}
+									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				{#if cpSearchGroups.length > 0}
+					<div class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Groups</h3>
+						<div class="flex flex-wrap gap-2">
+							{#each cpSearchGroups as group}
+								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => { cpGroup = group.full_path; cpSearchGroups = []; cpGroupPath = []; fetchCustomProjects(provider, 1); fetchCustomSubgroups(provider); }}>
+									<Folder class="h-4 w-4 text-[var(--accent)]" />
+									{group.full_path}
+									<span class="text-xs text-[var(--text-muted)]">({group.repo_count})</span>
 									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
 								</button>
 							{/each}
