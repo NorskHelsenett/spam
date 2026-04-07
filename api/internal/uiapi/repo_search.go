@@ -55,6 +55,8 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			offset = o
 		}
 
+		providerID := r.URL.Query().Get("provider_id")
+
 		var rows []RepoSearchResult
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT
@@ -89,6 +91,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				) LIKE LOWER(?) || '%'
 			)
 			AND pi.id IS NOT NULL
+			AND (? = '' OR pi.id = ?)
 			ORDER BY
 				CASE
 					WHEN LOWER(r.slug) = LOWER(?) THEN 0
@@ -138,6 +141,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			`,
 			q, q, q,
 			q, q, q, q, q, q, q,
+			providerID, providerID,
 			q, q, q, q, q, q, q, q, q, q,
 			limit+1, offset,
 		).Scan(&rows).Error

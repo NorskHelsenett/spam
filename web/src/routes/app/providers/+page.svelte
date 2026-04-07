@@ -609,6 +609,7 @@
 	};
 
 	const navigateBack = (index?: number) => {
+		glSearchMode = false;
 		if (index !== undefined) {
 			glGroup = glGroupPath[index];
 			glGroupPath = glGroupPath.slice(0, index);
@@ -632,6 +633,7 @@
 
 	const navigateCustomBack = (provider: CustomProvider, index?: number) => {
 		if (provider.type === 'github') return;
+		cpSearchMode = false;
 		if (index !== undefined) {
 			cpGroup = cpGroupPath[index];
 			cpGroupPath = cpGroupPath.slice(0, index);
@@ -650,14 +652,49 @@
 		fetchGitHubRepos(1);
 	};
 
-	const handleGitLabSearch = () => {
-		glPage = 1;
-		glGroupPath = [];
-		fetchGitLabProjects(1);
-		fetchGitLabSubgroups();
+	const searchReposDB = async (query: string, providerId?: string): Promise<RepoData[]> => {
+		const params = new URLSearchParams({ q: query, limit: String(pageSize) });
+		if (providerId) params.set('provider_id', providerId);
+		const res = await fetch(`/api/repos/search?${params}`, { credentials: 'include' });
+		if (!res.ok) return [];
+		const data = await res.json();
+		return (data.results || []).map((r: any) => ({
+			name: r.slug,
+			full_path: r.org + '/' + r.slug,
+			description: '',
+			html_url: '',
+			default_branch: '',
+			languages: [],
+			is_private: false,
+			is_archived: false,
+			is_disabled: false,
+			is_fork: false,
+			topics: [],
+			created_at: '',
+			updated_at: '',
+			pushed_at: ''
+		}));
 	};
 
-	const handleCustomSearch = (provider: CustomProvider) => {
+	const handleGitLabSearch = async () => {
+		glLoading = true;
+		glError = '';
+		glPage = 1;
+		glGroupPath = [];
+		glSubgroups = [];
+		try {
+			glProjects = await searchReposDB(glGroup);
+			glHasNextPage = false;
+			glTotalCount = glProjects.length;
+		} catch {
+			glError = 'Search failed.';
+			glProjects = [];
+		} finally {
+			glLoading = false;
+		}
+	};
+
+	const handleCustomSearch = async (provider: CustomProvider) => {
 		if (provider.type === 'github') {
 			ghProviderId = managedProvidersEnabled ? provider.id : null;
 			ghPage = 1;
@@ -665,10 +702,21 @@
 			fetchGitHubRepos(1);
 			return;
 		}
+		cpLoading = true;
+		cpError = '';
 		cpPage = 1;
 		cpGroupPath = [];
-		fetchCustomProjects(provider, 1);
-		fetchCustomSubgroups(provider);
+		cpSubgroups = [];
+		try {
+			cpProjects = await searchReposDB(cpGroup, managedProvidersEnabled ? provider.id : undefined);
+			cpHasNextPage = false;
+			cpTotalCount = cpProjects.length;
+		} catch {
+			cpError = 'Search failed.';
+			cpProjects = [];
+		} finally {
+			cpLoading = false;
+		}
 	};
 
 	const handleGitHubKeydown = (e: KeyboardEvent) => {
@@ -1080,10 +1128,10 @@
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-						<input type="text" placeholder="Group path (e.g., gitlab-org)" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
+						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={glGroup} onkeydown={handleGitLabKeydown} />
 					</div>
 					<button type="button" class="btn btn-outline" onclick={handleGitLabSearch} disabled={glLoading || !glGroup.trim()}>
-						{glLoading ? 'Loading...' : 'Fetch Projects'}
+						{glLoading ? 'Searching...' : 'Search'}
 					</button>
 					<button
 						type="button"
@@ -1135,9 +1183,9 @@
 				{/if}
 
 				{#if glProjects.length > 0}
-					<div class="flex items-center justify-between">
+					<div class="flex items-center gap-3">
 						<Toggle bind:checked={glIncludeSubgroups} label="Include subgroup projects" />
-						<span class="text-xs text-[var(--text-muted)]">{glFilteredProjects.length} of {glProjects.length} projects</span>
+						<span class="shrink-0 text-xs text-[var(--text-muted)]">{glFilteredProjects.length} of {glProjects.length}</span>
 					</div>
 				{/if}
 				{#if glFilteredProjects.length === 0 && !glLoading && !glError}
@@ -1290,7 +1338,7 @@
 				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
 					<div class="relative flex-1">
 						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
-						<input type="text" placeholder="Group/organization path" class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
+						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-4 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
 					</div>
 					<button type="button" class="btn btn-outline" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
 						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
@@ -1345,9 +1393,9 @@
 				{/if}
 
 				{#if provider.type === 'gitlab' && cpProjects.length > 0}
-					<div class="flex items-center justify-between">
+					<div class="flex items-center gap-3">
 						<Toggle bind:checked={cpIncludeSubgroups} label="Include subgroup projects" />
-						<span class="text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpProjects.length} projects</span>
+						<span class="shrink-0 text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpProjects.length}</span>
 					</div>
 				{/if}
 				{#if cpFilteredProjects.length === 0 && !cpLoading && !cpError}
