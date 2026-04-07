@@ -470,24 +470,28 @@
 
 	const fetchGitLabSubgroups = async () => {
 		try {
-			const params = new URLSearchParams({
-				page: '1',
-				page_size: '50'
-			});
-			if (glGroup.trim()) params.set('group', glGroup);
+			let all: GroupData[] = [];
+			let page = 1;
+			while (true) {
+				const params = new URLSearchParams({
+					page: String(page),
+					page_size: '50'
+				});
+				if (glGroup.trim()) params.set('group', glGroup);
 
-			const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
-				credentials: 'include'
-			});
+				const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
+					credentials: 'include'
+				});
 
-			if (response.ok) {
+				if (!response.ok) break;
 				const data: GitLabGroupsResponse = await response.json();
-				glSubgroups = data.groups || [];
-			} else {
-				glSubgroups = [];
+				all = [...all, ...(data.groups || [])];
+				glSubgroups = all;
+				if (!data.has_next_page) break;
+				page++;
 			}
 		} catch {
-			glSubgroups = [];
+			if (glSubgroups.length === 0) glSubgroups = [];
 		}
 	};
 
@@ -570,31 +574,34 @@
 		}
 
 		try {
-			const params = new URLSearchParams({
-				page: '1',
-				page_size: '50',
-				base_url: provider.baseUrl
-			});
-			if (managedProvidersEnabled) {
-				params.set('provider_id', provider.id);
-			}
+			let all: GroupData[] = [];
+			let page = 1;
+			while (true) {
+				const params = new URLSearchParams({
+					page: String(page),
+					page_size: '50',
+					base_url: provider.baseUrl
+				});
+				if (managedProvidersEnabled) {
+					params.set('provider_id', provider.id);
+				}
 
-			const groupPath = cpGroup.trim();
-			if (groupPath) params.set('group', groupPath);
-			const url = `/api/providers/gitlab/subgroups?${params}`;
+				const groupPath = cpGroup.trim();
+				if (groupPath) params.set('group', groupPath);
 
-			const response = await fetch(url, {
-				credentials: 'include'
-			});
+				const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
+					credentials: 'include'
+				});
 
-			if (response.ok) {
+				if (!response.ok) break;
 				const data: GitLabGroupsResponse = await response.json();
-				cpSubgroups = data.groups || [];
-			} else {
-				cpSubgroups = [];
+				all = [...all, ...(data.groups || [])];
+				cpSubgroups = all;
+				if (!data.has_next_page) break;
+				page++;
 			}
 		} catch {
-			cpSubgroups = [];
+			if (cpSubgroups.length === 0) cpSubgroups = [];
 		}
 	};
 
@@ -607,7 +614,6 @@
 	};
 
 	const navigateBack = (index?: number) => {
-		glSearchMode = false;
 		if (index !== undefined) {
 			glGroup = glGroupPath[index];
 			glGroupPath = glGroupPath.slice(0, index);
@@ -631,7 +637,6 @@
 
 	const navigateCustomBack = (provider: CustomProvider, index?: number) => {
 		if (provider.type === 'github') return;
-		cpSearchMode = false;
 		if (index !== undefined) {
 			cpGroup = cpGroupPath[index];
 			cpGroupPath = cpGroupPath.slice(0, index);
@@ -1176,10 +1181,10 @@
 					<QueueStatus state={queueStates['gitlab']} singular="project" plural="projects" />
 				{/if}
 
-				{#if glGroupPath.length > 0}
+				{#if glGroupPath.length > 0 || glGroup}
 					<div class="flex items-center gap-1 text-sm text-[var(--text-secondary)]">
 						{#each glGroupPath as pathPart, i}
-							<button type="button" class="text-[var(--accent)] hover:underline" onclick={() => navigateBack(i)}>{pathPart.split('/').pop()}</button>
+							<button type="button" class="text-[var(--accent)] hover:underline" onclick={() => navigateBack(i)}>{pathPart ? pathPart.split('/').pop() : 'All'}</button>
 							<ChevronRight class="h-4 w-4 text-[var(--text-muted)]" />
 						{/each}
 						<span class="text-[var(--text-bright)]">{glGroup.split('/').pop()}</span>
@@ -1229,7 +1234,7 @@
 				{#if glProjects.length > 0}
 					<div class="flex items-center gap-3">
 						<Toggle bind:checked={glIncludeSubgroups} label="Include subgroup projects" />
-						<span class="shrink-0 text-xs text-[var(--text-muted)]">{glFilteredProjects.length} of {glProjects.length}</span>
+						<span class="shrink-0 text-xs text-[var(--text-muted)]">{glFilteredProjects.length} of {glTotalCount}</span>
 					</div>
 				{/if}
 				{#if glFilteredProjects.length === 0 && !glLoading && !glError}
@@ -1407,10 +1412,10 @@
 					<QueueStatus state={queueStates[provider.id]} singular="project" plural="projects" />
 				{/if}
 
-				{#if cpGroupPath.length > 0}
+				{#if cpGroupPath.length > 0 || cpGroup}
 					<div class="flex items-center gap-1 text-sm text-[var(--text-secondary)]">
 						{#each cpGroupPath as pathPart, i}
-							<button type="button" class="text-[var(--accent)] hover:underline" onclick={() => navigateCustomBack(provider, i)}>{pathPart.split('/').pop()}</button>
+							<button type="button" class="text-[var(--accent)] hover:underline" onclick={() => navigateCustomBack(provider, i)}>{pathPart ? pathPart.split('/').pop() : 'All'}</button>
 							<ChevronRight class="h-4 w-4 text-[var(--text-muted)]" />
 						{/each}
 						<span class="text-[var(--text-bright)]">{cpGroup.split('/').pop()}</span>
@@ -1460,7 +1465,7 @@
 				{#if provider.type === 'gitlab' && cpProjects.length > 0}
 					<div class="flex items-center gap-3">
 						<Toggle bind:checked={cpIncludeSubgroups} label="Include subgroup projects" />
-						<span class="shrink-0 text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpProjects.length}</span>
+						<span class="shrink-0 text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpTotalCount}</span>
 					</div>
 				{/if}
 				{#if cpFilteredProjects.length === 0 && !cpLoading && !cpError}
