@@ -87,14 +87,7 @@ func (s *Server) handleGitProxy(w http.ResponseWriter, r *http.Request) {
 
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			target := buildGitProxyUpstreamURL(upstreamURL, gitPath, r.URL.RawQuery)
-			pr.SetURL(target)
-			pr.Out.Host = target.Host
-			pr.Out.Header.Del("Authorization")
-			pr.Out.Header.Del("Proxy-Authorization")
-			if providerToken != "" {
-				pr.Out.SetBasicAuth("token", providerToken)
-			}
+			rewriteGitProxyRequest(pr, upstreamURL, gitPath, r.URL.RawQuery, providerToken)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("git proxy upstream error: run_id=%s url=%s err=%v", runID, payload.CloneURL, err)
@@ -141,4 +134,19 @@ func buildGitProxyUpstreamURL(base *url.URL, gitPath, rawQuery string) *url.URL 
 	target.RawPath = ""
 	target.RawQuery = rawQuery
 	return &target
+}
+
+func rewriteGitProxyRequest(pr *httputil.ProxyRequest, upstreamBase *url.URL, gitPath, rawQuery, providerToken string) {
+	target := buildGitProxyUpstreamURL(upstreamBase, gitPath, rawQuery)
+	pr.Out.URL.Scheme = target.Scheme
+	pr.Out.URL.Host = target.Host
+	pr.Out.URL.Path = target.Path
+	pr.Out.URL.RawPath = target.RawPath
+	pr.Out.URL.RawQuery = target.RawQuery
+	pr.Out.Host = target.Host
+	pr.Out.Header.Del("Authorization")
+	pr.Out.Header.Del("Proxy-Authorization")
+	if providerToken != "" {
+		pr.Out.SetBasicAuth("token", providerToken)
+	}
 }

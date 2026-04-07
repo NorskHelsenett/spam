@@ -3,6 +3,7 @@ package runner
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
 	"net/url"
 	"testing"
 )
@@ -46,5 +47,28 @@ func TestBuildGitProxyUpstreamURL(t *testing.T) {
 	target := buildGitProxyUpstreamURL(base, gitSmartHTTPInfoRefs, "service=git-upload-pack")
 	if got, want := target.String(), "https://github.example.com/org/repo.git/info/refs?service=git-upload-pack"; got != want {
 		t.Fatalf("unexpected upstream URL: got %q want %q", got, want)
+	}
+}
+
+func TestRewriteGitProxyRequest(t *testing.T) {
+	in := httptest.NewRequest(http.MethodGet, "http://worker/runner/git/run-123/info/refs?service=git-upload-pack", nil)
+	out := in.Clone(in.Context())
+	base, err := url.Parse("https://git.example.com/org/repo.git")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	pr := &httputil.ProxyRequest{In: in, Out: out}
+	rewriteGitProxyRequest(pr, base, gitSmartHTTPInfoRefs, "service=git-upload-pack", "secret-token")
+
+	if got, want := pr.Out.URL.String(), "https://git.example.com/org/repo.git/info/refs?service=git-upload-pack"; got != want {
+		t.Fatalf("unexpected rewritten URL: got %q want %q", got, want)
+	}
+	if got, want := pr.Out.Host, "git.example.com"; got != want {
+		t.Fatalf("unexpected host: got %q want %q", got, want)
+	}
+	username, password, ok := pr.Out.BasicAuth()
+	if !ok || username != "token" || password != "secret-token" {
+		t.Fatalf("expected basic auth to be set, got ok=%v username=%q password=%q", ok, username, password)
 	}
 }
