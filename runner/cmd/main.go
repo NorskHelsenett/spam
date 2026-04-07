@@ -12,7 +12,9 @@ import (
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -712,25 +714,19 @@ func enforceExternalEgressBlockedFromEnv() error {
 }
 
 func ensureExternalEgressBlocked(ctx context.Context, probeURL string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, probeURL, nil)
+	target, err := parseEgressProbeAddress(probeURL)
 	if err != nil {
-		return fmt.Errorf("build egress probe request: %w", err)
+		return err
 	}
 
-	client := &http.Client{
-		Timeout: 0,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.Do(req)
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", target)
 	if err != nil {
 		return nil
 	}
-	defer resp.Body.Close()
+	defer conn.Close()
 
-	return fmt.Errorf("external egress unexpectedly allowed: %s returned %s", probeURL, resp.Status)
+	return fmt.Errorf("external egress unexpectedly allowed: tcp connection to %s succeeded", target)
 }
 
 func parseBoolEnv(key string) bool {
@@ -741,4 +737,40 @@ func parseBoolEnv(key string) bool {
 	default:
 		return false
 	}
+}
+
+func parseEgressProbeAddress(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty egress probe target")
+	}
+
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", fmt.Errorf("invalid egress probe URL %q: %w", raw, err)
+		}
+		host := u.Hostname()
+		if host == "" {
+			return "", fmt.Errorf("invalid egress probe URL %q: missing host", raw)
+		}
+		port := u.Port()
+		if port == "" {
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			case "http":
+				port = "80"
+			default:
+				return "", fmt.Errorf("invalid egress probe URL %q: unsupported scheme %q", raw, u.Scheme)
+			}
+		}
+		return net.JoinHostPort(host, port), nil
+	}
+
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return raw, nil
+	}
+
+	return net.JoinHostPort(raw, "443"), nil
 }

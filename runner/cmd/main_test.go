@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -18,16 +16,24 @@ func TestBuildGitProxyCloneURL(t *testing.T) {
 }
 
 func TestEnsureExternalEgressBlocked(t *testing.T) {
-	t.Run("returns error when probe succeeds", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusNoContent)
-		}))
-		defer server.Close()
+	t.Run("returns error when tcp probe succeeds", func(t *testing.T) {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("net.Listen: %v", err)
+		}
+		defer listener.Close()
+
+		go func() {
+			conn, err := listener.Accept()
+			if err == nil {
+				conn.Close()
+			}
+		}()
 
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
 
-		if err := ensureExternalEgressBlocked(ctx, server.URL); err == nil {
+		if err := ensureExternalEgressBlocked(ctx, listener.Addr().String()); err == nil {
 			t.Fatal("expected reachable probe URL to fail the self-test")
 		}
 	})
@@ -47,4 +53,26 @@ func TestEnsureExternalEgressBlocked(t *testing.T) {
 			t.Fatalf("expected unreachable probe URL to pass, got %v", err)
 		}
 	})
+}
+
+func TestParseEgressProbeAddress(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{in: "https://github.com", want: "github.com:443"},
+		{in: "http://example.com/path", want: "example.com:80"},
+		{in: "github.com", want: "github.com:443"},
+		{in: "github.com:8443", want: "github.com:8443"},
+	}
+
+	for _, tt := range tests {
+		got, err := parseEgressProbeAddress(tt.in)
+		if err != nil {
+			t.Fatalf("parseEgressProbeAddress(%q) returned error: %v", tt.in, err)
+		}
+		if got != tt.want {
+			t.Fatalf("parseEgressProbeAddress(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
 }
