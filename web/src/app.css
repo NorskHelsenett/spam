@@ -198,6 +198,10 @@
   section {
     @apply border border-[var(--border-color)] bg-[var(--card-bg)]/85 px-6 py-8 shadow-xl;
   }
+
+  html.light pre {
+    color: var(--fg);
+  }
 }
 
 button {

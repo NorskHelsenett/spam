@@ -414,14 +414,15 @@
 			const params = new URLSearchParams({
 				page: String(page),
 				page_size: String(pageSize),
-				include_subgroups: String(glIncludeSubgroups)
+				include_subgroups: String(glIncludeSubgroups),
+				group: glGroup
 			});
 			if (sortColumn) {
 				params.set('sort', sortColumn);
 				params.set('order', sortDirection);
 			}
 
-			const response = await fetch(`/api/providers/gitlab/${encodeURIComponent(glGroup)}/projects?${params}`, {
+			const response = await fetch(`/api/providers/gitlab/projects?${params}`, {
 				credentials: 'include'
 			});
 
@@ -456,10 +457,11 @@
 		try {
 			const params = new URLSearchParams({
 				page: '1',
-				page_size: '50'
+				page_size: '50',
+				group: glGroup
 			});
 
-			const response = await fetch(`/api/providers/gitlab/${encodeURIComponent(glGroup)}/subgroups?${params}`, {
+			const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
 				credentials: 'include'
 			});
 
@@ -504,9 +506,8 @@
 
 			if (provider.type === 'gitlab') {
 				params.set('include_subgroups', String(cpIncludeSubgroups));
-				url = groupPath
-					? `/api/providers/gitlab/${encodeURIComponent(groupPath)}/projects?${params}`
-					: `/api/providers/gitlab/projects?${params}`;
+				if (groupPath) params.set('group', groupPath);
+				url = `/api/providers/gitlab/projects?${params}`;
 			} else {
 				// Gitea/Forgejo (both use the same API)
 				url = groupPath
@@ -564,9 +565,8 @@
 			}
 
 			const groupPath = cpGroup.trim();
-			const url = groupPath
-				? `/api/providers/gitlab/${encodeURIComponent(groupPath)}/subgroups?${params}`
-				: `/api/providers/gitlab/subgroups?${params}`;
+			if (groupPath) params.set('group', groupPath);
+			const url = `/api/providers/gitlab/subgroups?${params}`;
 
 			const response = await fetch(url, {
 				credentials: 'include'
