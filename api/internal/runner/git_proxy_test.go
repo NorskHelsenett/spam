@@ -50,6 +50,51 @@ func TestBuildGitProxyUpstreamURL(t *testing.T) {
 	}
 }
 
+func TestParseGitProxyCloneURL(t *testing.T) {
+	t.Run("accepts https git clone url", func(t *testing.T) {
+		if _, err := parseGitProxyCloneURL("https://git.example.com/org/repo.git"); err != nil {
+			t.Fatalf("parseGitProxyCloneURL returned error: %v", err)
+		}
+	})
+
+	t.Run("rejects non https clone url", func(t *testing.T) {
+		if _, err := parseGitProxyCloneURL("http://git.example.com/org/repo.git"); err == nil {
+			t.Fatal("expected non-https clone URL to be rejected")
+		}
+	})
+
+	t.Run("rejects clone url with user info", func(t *testing.T) {
+		if _, err := parseGitProxyCloneURL("https://token:secret@git.example.com/org/repo.git"); err == nil {
+			t.Fatal("expected clone URL with credentials to be rejected")
+		}
+	})
+}
+
+func TestEnsureGitProxyUpstreamAllowed(t *testing.T) {
+	cloneURL, err := url.Parse("https://git.example.com/org/repo.git")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	t.Run("accepts matching provider base url", func(t *testing.T) {
+		if err := ensureGitProxyUpstreamAllowed(cloneURL, "https://git.example.com"); err != nil {
+			t.Fatalf("ensureGitProxyUpstreamAllowed returned error: %v", err)
+		}
+	})
+
+	t.Run("accepts equivalent default https port", func(t *testing.T) {
+		if err := ensureGitProxyUpstreamAllowed(cloneURL, "https://git.example.com:443"); err != nil {
+			t.Fatalf("ensureGitProxyUpstreamAllowed returned error: %v", err)
+		}
+	})
+
+	t.Run("rejects mismatched host", func(t *testing.T) {
+		if err := ensureGitProxyUpstreamAllowed(cloneURL, "https://other.example.com"); err == nil {
+			t.Fatal("expected mismatched host to be rejected")
+		}
+	})
+}
+
 func TestRewriteGitProxyRequest(t *testing.T) {
 	in := httptest.NewRequest(http.MethodGet, "http://worker/runner/git/run-123/info/refs?service=git-upload-pack", nil)
 	out := in.Clone(in.Context())
