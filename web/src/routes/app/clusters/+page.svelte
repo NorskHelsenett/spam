@@ -8,6 +8,7 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
 
 	type ClusterRow = {
 		cluster: string;
@@ -244,6 +245,72 @@
 
 	const parseTags = (t: string) => t ? t.split(',').filter(Boolean) : [];
 
+	// --- Cluster filters ---
+	let clusterFilterOpen = $state(false);
+	let clusterSearch = $state('');
+	let clusterRecentOnly = $state(false);
+
+	const clusterActiveFilterCount = $derived(
+		(clusterSearch.trim() ? 1 : 0) + (clusterRecentOnly ? 1 : 0)
+	);
+
+	const filteredClusters = $derived(
+		clusters.filter((c) => {
+			if (clusterRecentOnly && c.last_seen) {
+				const age = Date.now() - new Date(c.last_seen).getTime();
+				if (age > 24 * 60 * 60 * 1000) return false;
+			}
+			if (clusterSearch.trim()) {
+				const q = clusterSearch.trim().toLowerCase();
+				if (
+					!(c.cluster || '').toLowerCase().includes(q) &&
+					!(c.cluster_id || '').toLowerCase().includes(q) &&
+					!(c.environment || '').toLowerCase().includes(q)
+				) return false;
+			}
+			return true;
+		})
+	);
+
+	const clearClusterFilters = () => {
+		clusterSearch = '';
+		clusterRecentOnly = false;
+	};
+
+	// --- Image filters ---
+	let imageFilterOpen = $state(false);
+	let imageSearch = $state('');
+	let imageSelectedRegistries: string[] = $state([]);
+
+	const imageRegistryOptions: MultiSelectOption[] = $derived(
+		[...new Set(imageDetails.map((i) => i.registry))].sort().map((r) => ({ value: r, label: r }))
+	);
+
+	const imageActiveFilterCount = $derived(
+		(imageSearch.trim() ? 1 : 0) + (imageSelectedRegistries.length > 0 ? 1 : 0)
+	);
+
+	const filteredImages = $derived(
+		imageDetails.filter((img) => {
+			if (imageSelectedRegistries.length > 0 && !imageSelectedRegistries.includes(img.registry)) return false;
+			if (imageSearch.trim()) {
+				const q = imageSearch.trim().toLowerCase();
+				if (
+					!img.image.toLowerCase().includes(q) &&
+					!img.registry.toLowerCase().includes(q) &&
+					!(img.tags || '').toLowerCase().includes(q) &&
+					!(img.digest || '').toLowerCase().includes(q)
+				) return false;
+			}
+			return true;
+		})
+	);
+
+	const clearImageFilters = () => {
+		imageSearch = '';
+		imageSelectedRegistries = [];
+	};
+
 	// --- Host filters ---
 	let hostFilterOpen = $state(false);
 	let hostSearch = $state('');
@@ -326,11 +393,11 @@
 	};
 
 	const sortedClusters = $derived(
-		[...clusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
+		[...filteredClusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
 	);
 
 	const sortedImages = $derived(
-		[...imageDetails].sort((a, b) => cmp(a[imageSortKey], b[imageSortKey], imageSortDir))
+		[...filteredImages].sort((a, b) => cmp(a[imageSortKey], b[imageSortKey], imageSortDir))
 	);
 
 	const sortedHosts = $derived(
@@ -444,6 +511,64 @@
 	{#if !loading && !error && clusters.length > 0}
 		{#if activeTab === 'clusters'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+				<header class="flex items-start justify-between gap-4">
+					<div>
+						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
+						<p class="text-sm text-[var(--text-tertiary)]">
+							Reporting SCAM agents and their inventory.
+							{#if clusterActiveFilterCount > 0}
+								<span class="text-[var(--text-muted)]">&middot; showing {filteredClusters.length} of {clusters.length}</span>
+							{/if}
+						</p>
+					</div>
+					<button
+						type="button"
+						class="host-filter-toggle"
+						class:active={clusterFilterOpen}
+						onclick={() => (clusterFilterOpen = !clusterFilterOpen)}
+						aria-expanded={clusterFilterOpen}
+						aria-label="Toggle filters"
+					>
+						<SlidersHorizontal size={14} />
+						<span>Filters</span>
+						{#if clusterActiveFilterCount > 0}
+							<span class="host-filter-badge">{clusterActiveFilterCount}</span>
+						{/if}
+					</button>
+				</header>
+
+				{#if clusterFilterOpen}
+					<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+						<div class="flex flex-wrap items-start gap-6">
+							<div class="flex flex-col gap-1">
+								<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
+								<div class="relative flex items-center">
+									<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+									<input
+										type="text"
+										class="host-search-input"
+										placeholder="Cluster name, environment…"
+										bind:value={clusterSearch}
+									/>
+								</div>
+							</div>
+
+							<div class="flex flex-col gap-1">
+								<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Seen recently</span>
+								<div class="flex items-center h-[28px]">
+									<Toggle bind:checked={clusterRecentOnly} label="Last 24h" />
+								</div>
+							</div>
+
+							{#if clusterActiveFilterCount > 0}
+								<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+									<button type="button" class="host-clear-filters" onclick={clearClusterFilters}>Clear all</button>
+								</div>
+							{/if}
+						</div>
+					</div>
+				{/if}
+
 				<div class="overflow-x-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
@@ -488,6 +613,62 @@
 						<p class="text-sm text-[var(--text-muted)]">No container images with resolved digests yet.</p>
 					</div>
 				{:else}
+					<header class="flex items-start justify-between gap-4">
+						<div>
+							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Images</h2>
+							<p class="text-sm text-[var(--text-tertiary)]">
+								Container images across all clusters.
+								{#if imageActiveFilterCount > 0}
+									<span class="text-[var(--text-muted)]">&middot; showing {filteredImages.length} of {imageDetails.length}</span>
+								{/if}
+							</p>
+						</div>
+						<button
+							type="button"
+							class="host-filter-toggle"
+							class:active={imageFilterOpen}
+							onclick={() => (imageFilterOpen = !imageFilterOpen)}
+							aria-expanded={imageFilterOpen}
+							aria-label="Toggle filters"
+						>
+							<SlidersHorizontal size={14} />
+							<span>Filters</span>
+							{#if imageActiveFilterCount > 0}
+								<span class="host-filter-badge">{imageActiveFilterCount}</span>
+							{/if}
+						</button>
+					</header>
+
+					{#if imageFilterOpen}
+						<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+							<div class="flex flex-wrap items-start gap-6">
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
+									<div class="relative flex items-center">
+										<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+										<input
+											type="text"
+											class="host-search-input"
+											placeholder="Image name, tag, digest…"
+											bind:value={imageSearch}
+										/>
+									</div>
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Registry</span>
+									<MultiSelect bind:selected={imageSelectedRegistries} options={imageRegistryOptions} placeholder="All registries" size="sm" />
+								</div>
+
+								{#if imageActiveFilterCount > 0}
+									<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+										<button type="button" class="host-clear-filters" onclick={clearImageFilters}>Clear all</button>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
+
 					<div class="overflow-x-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">

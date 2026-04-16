@@ -206,6 +206,17 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "lb_ips":["10.0.1.100"],"lb_hostnames":[]
 }', NOW() - INTERVAL '5 minutes');
 
+-- Ingress with missing/null optional fields (edge case: no lb_ips, no tls, no paths backends)
+INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
+  "time":"2026-04-16T08:00:24Z","level":"INFO","msg":"INITIAL","kind":"Ingress",
+  "cluster":"t-prod-001","cluster_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","environment":"production",
+  "uid":"44444444-5555-6666-7777-dddddddddddd","namespace":"legacy","name":"legacy-app",
+  "labels":{},"ingress_class":"nginx",
+  "rules":[{"host":"legacy.example.com","paths":[{"path":"/","path_type":"Prefix"}]}],
+  "tls":null,
+  "lb_ips":null,"lb_hostnames":null
+}', NOW() - INTERVAL '5 minutes');
+
 -- IngressClass
 INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:00:25Z","level":"INFO","msg":"INITIAL","kind":"IngressClass",

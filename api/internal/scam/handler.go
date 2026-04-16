@@ -287,19 +287,22 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 // HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and IngressRoute.
 func HostsHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		activeOnly := r.URL.Query().Get("active_only") == "true"
+
 		type row struct {
-			Host         string    `json:"host"`
-			Kind         string    `json:"kind"`
-			Name         string    `json:"name"`
-			Namespace    string    `json:"namespace"`
-			Cluster      string    `json:"cluster"`
-			ClusterID    string    `json:"cluster_id"`
-			Environment  string    `json:"environment"`
-			TLS          bool      `json:"tls"`
-			LBIPs        string    `json:"lb_ips"`
-			IngressClass string    `json:"ingress_class"`
-			Backends     string    `json:"backends"`
-			LastSeen     time.Time `json:"last_seen"`
+			Host          string    `json:"host"`
+			Kind          string    `json:"kind"`
+			Name          string    `json:"name"`
+			Namespace     string    `json:"namespace"`
+			Cluster       string    `json:"cluster"`
+			ClusterID     string    `json:"cluster_id"`
+			Environment   string    `json:"environment"`
+			TLS           bool      `json:"tls"`
+			LBIPs         string    `json:"lb_ips"`
+			IngressClass  string    `json:"ingress_class"`
+			Backends      string    `json:"backends"`
+			WorkloadCount int64     `json:"workload_count"`
+			LastSeen      time.Time `json:"last_seen"`
 		}
 		var rows []row
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
@@ -381,22 +384,43 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
-			SELECT host, kind, name, namespace, cluster, cluster_id, environment,
-			       tls, lb_ips, ingress_class, backends, last_seen
+			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
+			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
+			       COALESCE(w.cnt, 0) AS workload_count, h.last_seen
 			FROM (
 				SELECT * FROM ingress_hosts
 				UNION ALL
 				SELECT * FROM route_hosts
 				UNION ALL
 				SELECT * FROM traefik_hosts
-			) combined
-			WHERE host IS NOT NULL AND host != ''
-			ORDER BY host, cluster
+			) h
+			LEFT JOIN LATERAL (
+				SELECT COUNT(*) AS cnt
+				FROM cluster_record c
+				WHERE c.data->>'kind' = 'Container'
+				  AND c.data->>'msg' != 'DELETE'
+				  AND c.data->>'pod_phase' = 'Running'
+				  AND c.data->>'cluster_id' = h.cluster_id
+				  AND c.data->>'namespace' = h.namespace
+				  AND h.backends != ''
+				  AND c.data->>'owner' = ANY(string_to_array(h.backends, ', '))
+			) w ON true
+			WHERE h.host IS NOT NULL AND h.host != ''
+			ORDER BY h.host, h.cluster
 		`).Scan(&rows).Error
 		if err != nil {
 			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
+		}
+		if activeOnly {
+			filtered := rows[:0]
+			for _, row := range rows {
+				if row.WorkloadCount > 0 {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
 		}
 		writeJSON(w, http.StatusOK, rows)
 	}
