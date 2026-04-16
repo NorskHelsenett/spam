@@ -105,6 +105,12 @@ type RunnerConfig struct {
 	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
 	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
 	EgressSelfTest     RunnerEgressSelfTestConfig
+	// ImageScanEnv are extra environment variables forwarded to image-scan
+	// runner pods. Typical keys: GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE,
+	// TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY. Parsed from
+	// RUNNER_IMAGE_SCAN_ENV (same format as RUNNER_POD_ANNOTATIONS:
+	// "KEY1=VAL1,KEY2=VAL2").
+	ImageScanEnv map[string]string
 }
 
 type RunnerEgressSelfTestConfig struct {
@@ -180,6 +186,7 @@ func loadRunnerConfig() (RunnerConfig, error) {
 			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
 			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
 		},
+		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
 	}
 
 	// HMAC key is required when runner is enabled
@@ -231,6 +238,7 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
 			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
 		},
+		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
 	}
 
 	// HMAC key is optional for read-only access
