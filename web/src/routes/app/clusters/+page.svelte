@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container, Globe, Shield } from 'lucide-svelte';
+	import { Server, Container, Globe, ChevronDown } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 
@@ -140,6 +140,39 @@
 	};
 
 	const parseTags = (t: string) => t ? t.split(',').filter(Boolean) : [];
+
+	// --- Sorting ---
+	type SortDir = 'asc' | 'desc';
+	let clusterSortKey = $state<keyof ClusterRow>('last_seen');
+	let clusterSortDir = $state<SortDir>('desc');
+	let imageSortKey = $state<keyof ImageDetail>('container_count');
+	let imageSortDir = $state<SortDir>('desc');
+
+	const cmp = (a: any, b: any, dir: SortDir): number => {
+		if (a == null && b == null) return 0;
+		if (a == null) return 1;
+		if (b == null) return -1;
+		const result = typeof a === 'string' ? a.localeCompare(b) : (a as number) - (b as number);
+		return dir === 'asc' ? result : -result;
+	};
+
+	const sc = (k: keyof ClusterRow) => () => {
+		if (clusterSortKey === k) { clusterSortDir = clusterSortDir === 'asc' ? 'desc' : 'asc'; }
+		else { clusterSortKey = k; clusterSortDir = 'desc'; }
+	};
+
+	const si = (k: keyof ImageDetail) => () => {
+		if (imageSortKey === k) { imageSortDir = imageSortDir === 'asc' ? 'desc' : 'asc'; }
+		else { imageSortKey = k; imageSortDir = 'desc'; }
+	};
+
+	const sortedClusters = $derived(
+		[...clusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
+	);
+
+	const sortedImages = $derived(
+		[...imageDetails].sort((a, b) => cmp(a[imageSortKey], b[imageSortKey], imageSortDir))
+	);
 </script>
 
 <svelte:head>
@@ -243,17 +276,17 @@
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
-								<th class="px-5 py-3 text-left">Cluster</th>
-								<th class="px-5 py-3 text-left">Environment</th>
-								<th class="px-5 py-3 text-right">Images</th>
-								<th class="px-5 py-3 text-right">Containers</th>
-								<th class="px-5 py-3 text-right">Namespaces</th>
-								<th class="px-5 py-3 text-right">Routes</th>
-								<th class="px-5 py-3 text-left">Last seen</th>
+								<th class="sortable-th px-5 py-3 text-left" onclick={sc('cluster')}>Cluster <ChevronDown class="sort-icon {clusterSortKey === 'cluster' ? 'active' : ''} {clusterSortKey === 'cluster' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-left" onclick={sc('environment')}>Environment <ChevronDown class="sort-icon {clusterSortKey === 'environment' ? 'active' : ''} {clusterSortKey === 'environment' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-right" onclick={sc('images')}>Images <ChevronDown class="sort-icon {clusterSortKey === 'images' ? 'active' : ''} {clusterSortKey === 'images' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-right" onclick={sc('containers')}>Containers <ChevronDown class="sort-icon {clusterSortKey === 'containers' ? 'active' : ''} {clusterSortKey === 'containers' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-right" onclick={sc('namespaces')}>Namespaces <ChevronDown class="sort-icon {clusterSortKey === 'namespaces' ? 'active' : ''} {clusterSortKey === 'namespaces' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-right" onclick={sc('ingress_count')}>Routes <ChevronDown class="sort-icon {clusterSortKey === 'ingress_count' ? 'active' : ''} {clusterSortKey === 'ingress_count' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th px-5 py-3 text-left" onclick={sc('last_seen')}>Last seen <ChevronDown class="sort-icon {clusterSortKey === 'last_seen' ? 'active' : ''} {clusterSortKey === 'last_seen' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each clusters as c}
+							{#each sortedClusters as c}
 								<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
 									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
 									<td class="px-5 py-3">
@@ -283,20 +316,20 @@
 					</div>
 				{:else}
 					<div class="overflow-x-auto">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
-									<th class="px-5 py-3 text-left">Registry</th>
-									<th class="px-5 py-3 text-left">Image</th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="px-5 py-3 text-left">Digest</th>
 									<th class="px-5 py-3 text-left">Tags</th>
-									<th class="px-5 py-3 text-right">Clusters</th>
-									<th class="px-5 py-3 text-right">Containers</th>
-									<th class="px-5 py-3 text-left">Last seen</th>
+									<th class="sortable-th px-5 py-3 text-right" onclick={si('cluster_count')}>Clusters <ChevronDown class="sort-icon {imageSortKey === 'cluster_count' ? 'active' : ''} {imageSortKey === 'cluster_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-right" onclick={si('container_count')}>Containers <ChevronDown class="sort-icon {imageSortKey === 'container_count' ? 'active' : ''} {imageSortKey === 'container_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-								{#each imageDetails as img}
+								{#each sortedImages as img}
 									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
 										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{img.image}</td>
@@ -325,6 +358,34 @@
 </div>
 
 <style>
+	.sortable-th {
+		cursor: pointer;
+		user-select: none;
+		white-space: nowrap;
+		transition: color 150ms ease;
+	}
+
+	.sortable-th:hover {
+		color: var(--text-bright);
+	}
+
+	:global(.sort-icon) {
+		display: inline-block;
+		width: 12px;
+		height: 12px;
+		vertical-align: middle;
+		visibility: hidden;
+		transition: transform 150ms ease;
+	}
+
+	:global(.sort-icon.active) {
+		visibility: visible;
+	}
+
+	:global(.sort-icon.flipped) {
+		transform: rotate(180deg);
+	}
+
 	.loading-bar {
 		position: relative;
 		width: 35%;
