@@ -49,6 +49,7 @@
 		lb_ips: string;
 		ingress_class: string;
 		backends: string;
+		workload_count: number;
 		last_seen: string;
 	};
 
@@ -317,6 +318,7 @@
 	let hostSelectedClusters: string[] = $state([]);
 	let hostSelectedNamespaces: string[] = $state([]);
 	let hostSelectedKinds: string[] = $state([]);
+	let hostActiveWorkloadsOnly = $state(false);
 
 	const hostClusterOptions: MultiSelectOption[] = $derived(
 		[...new Set(hosts.map((h) => h.cluster || h.cluster_id))].sort().map((c) => ({ value: c, label: c }))
@@ -332,11 +334,13 @@
 		(hostSearch.trim() ? 1 : 0) +
 		(hostSelectedClusters.length > 0 ? 1 : 0) +
 		(hostSelectedNamespaces.length > 0 ? 1 : 0) +
-		(hostSelectedKinds.length > 0 ? 1 : 0)
+		(hostSelectedKinds.length > 0 ? 1 : 0) +
+		(hostActiveWorkloadsOnly ? 1 : 0)
 	);
 
 	const filteredHosts = $derived(
 		hosts.filter((h) => {
+			if (hostActiveWorkloadsOnly && h.workload_count === 0) return false;
 			if (hostSelectedClusters.length > 0 && !hostSelectedClusters.includes(h.cluster || h.cluster_id)) return false;
 			if (hostSelectedNamespaces.length > 0 && !hostSelectedNamespaces.includes(h.namespace)) return false;
 			if (hostSelectedKinds.length > 0 && !hostSelectedKinds.includes(h.kind)) return false;
@@ -358,6 +362,7 @@
 		hostSelectedClusters = [];
 		hostSelectedNamespaces = [];
 		hostSelectedKinds = [];
+		hostActiveWorkloadsOnly = false;
 	};
 
 	// --- Sorting ---
@@ -771,6 +776,13 @@
 									<MultiSelect bind:selected={hostSelectedKinds} options={hostKindOptions} placeholder="All kinds" size="sm" />
 								</div>
 
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Workloads</span>
+									<div class="flex items-center h-[28px]">
+										<Toggle bind:checked={hostActiveWorkloadsOnly} label="Active only" />
+									</div>
+								</div>
+
 								{#if hostActiveFilterCount > 0}
 									<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
 										<button
@@ -810,7 +822,7 @@
 								{#each sortedHosts as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="border: none;">
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="border: none;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}">
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
