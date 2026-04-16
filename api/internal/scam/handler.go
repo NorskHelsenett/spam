@@ -403,7 +403,16 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				  AND c.data->>'cluster_id' = h.cluster_id
 				  AND c.data->>'namespace' = h.namespace
 				  AND h.backends != ''
-				  AND c.data->>'owner' = ANY(string_to_array(h.backends, ', '))
+				  AND EXISTS (
+				    SELECT 1 FROM cluster_record s
+				    WHERE s.data->>'kind' = 'Service'
+				      AND s.data->>'msg' != 'DELETE'
+				      AND s.data->>'cluster_id' = h.cluster_id
+				      AND s.data->>'namespace' = h.namespace
+				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
+				      AND jsonb_typeof(s.data->'selector') = 'object'
+				      AND c.data->'pod_labels' @> s.data->'selector'
+				  )
 			) w ON true
 			WHERE h.host IS NOT NULL AND h.host != ''
 			ORDER BY h.host, h.cluster
