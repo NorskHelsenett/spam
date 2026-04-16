@@ -165,6 +165,26 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "lb_ips":[],"lb_hostnames":[]
 }', NOW() - INTERVAL '5 minutes');
 
+INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
+  "time":"2026-04-16T08:00:14Z","level":"INFO","msg":"INITIAL","kind":"Service",
+  "cluster":"t-prod-001","cluster_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","environment":"production",
+  "uid":"eeeeeeee-1111-2222-3333-444444444444","namespace":"vaultwarden","name":"vaultwarden-db",
+  "labels":{"app":"vaultwarden-db"},"service_type":"ClusterIP",
+  "cluster_ips":["10.96.42.50"],"external_ips":[],"external_name":"",
+  "selector":{"app":"vaultwarden-db"},"ports":[{"name":"postgres","port":5432,"target_port":"5432","protocol":"TCP"}],
+  "lb_ips":[],"lb_hostnames":[]
+}', NOW() - INTERVAL '5 minutes');
+
+INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
+  "time":"2026-04-16T08:00:15Z","level":"INFO","msg":"INITIAL","kind":"Service",
+  "cluster":"t-prod-001","cluster_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","environment":"production",
+  "uid":"ffffffff-1111-2222-3333-555555555555","namespace":"monitoring","name":"prometheus",
+  "labels":{"app.kubernetes.io/name":"prometheus"},"service_type":"ClusterIP",
+  "cluster_ips":["10.96.42.60"],"external_ips":[],"external_name":"",
+  "selector":{"app.kubernetes.io/name":"prometheus"},"ports":[{"name":"http","port":9090,"target_port":"9090","protocol":"TCP"}],
+  "lb_ips":[],"lb_hostnames":[]
+}', NOW() - INTERVAL '5 minutes');
+
 -- Ingresses: prod cluster (internet-facing)
 INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:00:20Z","level":"INFO","msg":"INITIAL","kind":"Ingress",

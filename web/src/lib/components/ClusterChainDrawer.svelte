@@ -17,7 +17,7 @@
 		namespace: string;
 		ingresses: { host: string; kind: string; name: string; ingress_class: string; tls: boolean; backends: string }[];
 		services: { name: string; service_type: string; ports: any[]; selector: Record<string, string> }[];
-		pods: { owner: string; owner_kind: string; pod_count: number; phase: string; containers: { name: string; image: string; tag: string; digest?: string; registry: string }[]; service_name?: string }[];
+		pods: { owner: string; owner_kind: string; pod_count: number; phase: string; containers: { name: string; image: string; tag: string; digest?: string; registry: string }[]; service_names?: string[] }[];
 	};
 
 	type ClusterChainData = {
@@ -46,7 +46,8 @@
 				ingress_class: ing.ingress_class,
 				tls: ing.tls,
 				lb_ips: '',
-				paths: []
+				paths: [],
+				backends: ing.backends
 			} : null,
 			services: ns.services?.map(s => ({
 				...s,
@@ -55,7 +56,7 @@
 			})) ?? [],
 			pods: ns.pods?.map(p => ({
 				...p,
-				service_name: p.service_name ?? ''
+				service_names: p.service_names ?? []
 			})) ?? []
 		};
 	}
@@ -115,59 +116,9 @@
 						<span class="inline-block h-px flex-1 bg-[var(--border-color)]/40"></span>
 					</h4>
 
-					{#if ns.ingresses?.length || ns.services?.length}
+					{#if ns.ingresses?.length || ns.services?.length || ns.pods?.length}
 						<div class="overflow-x-auto rounded-xl border border-[var(--border-color)]/40 bg-[var(--card-bg)]/40 p-3">
 							<HostChainDiagram chain={toChainData(ns, data.cluster, data.cluster_id)} />
-						</div>
-					{/if}
-
-					<!-- Pod groups without services/ingresses -->
-					{#if ns.pods?.length && !ns.services?.length && !ns.ingresses?.length}
-						<div class="space-y-1.5">
-							{#each ns.pods as pg}
-								<div class="rounded-lg border border-[var(--border-color)]/30 bg-[var(--bg1)]/30 px-4 py-2.5">
-									<div class="flex items-center gap-2">
-										<span class="font-semibold text-[var(--text-bright)] text-xs">{pg.owner}</span>
-										<span class="rounded-full bg-[var(--aqua)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--aqua)]">{pg.owner_kind}</span>
-										<span class="text-[10px] text-[var(--text-tertiary)]">{pg.pod_count} pod{pg.pod_count !== 1 ? 's' : ''}</span>
-									</div>
-									{#if pg.containers?.length}
-										<div class="mt-1 space-y-0.5">
-											{#each pg.containers as c}
-												{@const fullRef = `${c.registry ? c.registry + '/' : ''}${c.image}${c.digest ? '@' + c.digest : c.tag ? ':' + c.tag : ''}`}
-												<div class="relative rounded bg-[var(--bg2)]/40 px-2.5 py-1.5 text-xs">
-													{#if c.digest}
-														<button
-															type="button"
-															class="absolute right-2 top-1.5 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] transition hover:bg-[var(--bg3)] hover:text-[var(--text-bright)]"
-															title="Copy: docker pull {fullRef}"
-															onclick={() => navigator.clipboard.writeText(`docker pull ${fullRef}`)}
-														>
-															<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-														</button>
-													{/if}
-													<div class="flex items-baseline gap-1">
-														<span class="text-[var(--text-muted)]">image</span>
-														<code class="text-[var(--text-bright)]">{c.registry ? c.registry + '/' : ''}{c.image}</code>
-													</div>
-													{#if c.tag}
-														<div class="mt-0.5 flex items-baseline gap-1">
-															<span class="text-[var(--text-muted)]">tag</span>
-															<code class="text-[var(--green)]">{c.tag}</code>
-														</div>
-													{/if}
-													{#if c.digest}
-														<div class="mt-0.5 flex items-baseline gap-1">
-															<span class="text-[var(--text-muted)]">digest</span>
-															<code class="truncate text-[var(--text-tertiary)]">{c.digest}</code>
-														</div>
-													{/if}
-												</div>
-											{/each}
-										</div>
-									{/if}
-								</div>
-							{/each}
 						</div>
 					{/if}
 				</div>
