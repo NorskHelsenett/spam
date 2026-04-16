@@ -2,8 +2,9 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search } from 'lucide-svelte';
-	import { slide } from 'svelte/transition';
-	import { cubicOut } from 'svelte/easing';
+	import { slide, fly } from 'svelte/transition';
+	import { cubicOut, cubicIn } from 'svelte/easing';
+	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
@@ -76,6 +77,18 @@
 	let imagesFetched = $state(false);
 	let hostsFetched = $state(false);
 	let tick = $state(0);
+	let chainDrawerOpen = $state(false);
+	let chainDrawerRow: HostRow | null = $state(null);
+
+	function openChainDrawer(row: HostRow) {
+		if (chainDrawerOpen && chainDrawerRow?.host === row.host && chainDrawerRow?.cluster_id === row.cluster_id && chainDrawerRow?.namespace === row.namespace) {
+			chainDrawerOpen = false;
+			chainDrawerRow = null;
+		} else {
+			chainDrawerRow = row;
+			chainDrawerOpen = true;
+		}
+	}
 
 	const palette = [
 		'var(--accent)', 'var(--blue)', 'var(--green)',
@@ -717,7 +730,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8">
 				{#if hosts.length > 0}
 					<header class="flex items-start justify-between gap-4">
 						<div>
@@ -822,7 +835,7 @@
 								{#each sortedHosts as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="border: none;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}">
+									<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="border: none;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
@@ -891,6 +904,23 @@
 								{/each}
 							</tbody>
 						</table>
+					</div>
+				{/if}
+
+				{#if chainDrawerOpen && chainDrawerRow}
+					<div
+						class="absolute inset-y-0 right-0 z-10 w-[780px] border-l border-[var(--border-color)] shadow-xl"
+						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
+						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<HostChainDrawer
+							host={chainDrawerRow.host}
+							clusterId={chainDrawerRow.cluster_id}
+							namespace={chainDrawerRow.namespace}
+							kind={chainDrawerRow.kind}
+							name={chainDrawerRow.name}
+							onClose={() => { chainDrawerOpen = false; chainDrawerRow = null; }}
+						/>
 					</div>
 				{/if}
 			</section>

@@ -435,6 +435,289 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// HostChainHandler returns the exposure chain for a given host: Ingress → Service(s) → Pod group(s).
+func HostChainHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host := r.URL.Query().Get("host")
+		clusterID := r.URL.Query().Get("cluster_id")
+		namespace := r.URL.Query().Get("namespace")
+		if host == "" || clusterID == "" || namespace == "" {
+			http.Error(w, "missing host, cluster_id, or namespace", http.StatusBadRequest)
+			return
+		}
+
+		type chainPath struct {
+			Path        string `json:"path,omitempty"`
+			BackendName string `json:"backend_name,omitempty"`
+			BackendPort string `json:"backend_port,omitempty"`
+		}
+		type chainIngress struct {
+			Kind         string      `json:"kind"`
+			Name         string      `json:"name"`
+			Namespace    string      `json:"namespace"`
+			IngressClass string      `json:"ingress_class"`
+			TLS          bool        `json:"tls"`
+			LBIPs        string      `json:"lb_ips"`
+			Paths        []chainPath `json:"paths"`
+		}
+		type chainPort struct {
+			Name       string `json:"name,omitempty"`
+			Port       int    `json:"port"`
+			TargetPort string `json:"target_port,omitempty"`
+			Protocol   string `json:"protocol,omitempty"`
+		}
+		type chainService struct {
+			Name        string            `json:"name"`
+			Namespace   string            `json:"namespace"`
+			ServiceType string            `json:"service_type"`
+			Ports       []chainPort       `json:"ports"`
+			Selector    map[string]string `json:"selector"`
+			PodCount    int64             `json:"pod_count"`
+		}
+		type chainContainer struct {
+			Name     string `json:"name"`
+			Image    string `json:"image"`
+			Tag      string `json:"tag"`
+			Registry string `json:"registry"`
+		}
+		type chainPodGroup struct {
+			Owner       string           `json:"owner"`
+			OwnerKind   string           `json:"owner_kind"`
+			PodCount    int64            `json:"pod_count"`
+			Phase       string           `json:"phase"`
+			Containers  []chainContainer `json:"containers"`
+			ServiceName string           `json:"service_name"`
+		}
+		type chainResponse struct {
+			Host      string          `json:"host"`
+			ClusterID string          `json:"cluster_id"`
+			Namespace string          `json:"namespace"`
+			Ingress   *chainIngress   `json:"ingress"`
+			Services  []chainService  `json:"services"`
+			Pods      []chainPodGroup `json:"pods"`
+		}
+
+		resp := chainResponse{Host: host, ClusterID: clusterID, Namespace: namespace}
+
+		// --- Step 1: Find the ingress/route resource for this host ---
+		type ingressRow struct {
+			Kind         string `json:"kind"`
+			Name         string `json:"name"`
+			Namespace    string `json:"namespace"`
+			IngressClass string `json:"ingress_class"`
+			TLS          bool   `json:"tls"`
+			LBIPs        string `json:"lb_ips"`
+			Backends     string `json:"backends"`
+			PathsJSON    string `json:"paths_json"`
+		}
+		var ing ingressRow
+		err := db.Raw(`
+			SELECT * FROM (
+				-- Ingress
+				SELECT
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					COALESCE(data->>'ingress_class', '') AS ingress_class,
+					jsonb_typeof(data->'tls') = 'array' AND jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
+					CASE WHEN jsonb_typeof(data->'lb_ips') = 'array'
+						THEN COALESCE((SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip), '')
+						ELSE '' END AS lb_ips,
+					COALESCE(
+						(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
+						 FROM jsonb_array_elements(data->'rules') AS r,
+						      jsonb_array_elements(r->'paths') AS p
+						 WHERE r->>'host' = ?
+						   AND p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
+						'') AS backends,
+					COALESCE(
+						(SELECT jsonb_agg(jsonb_build_object(
+							'path', p->>'path',
+							'backend_name', p->>'backend_name',
+							'backend_port', p->>'backend_port'))
+						 FROM jsonb_array_elements(data->'rules') AS r,
+						      jsonb_array_elements(r->'paths') AS p
+						 WHERE r->>'host' = ?),
+						'[]') AS paths_json
+				FROM cluster_record
+				WHERE data->>'kind' = 'Ingress'
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND data->>'namespace' = ?
+				  AND jsonb_typeof(data->'rules') = 'array'
+				  AND EXISTS (
+				    SELECT 1 FROM jsonb_array_elements(data->'rules') AS r WHERE r->>'host' = ?
+				  )
+				UNION ALL
+				-- IngressRoute / IngressRouteTCP
+				SELECT
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					'' AS ingress_class,
+					COALESCE(data->>'tls_secret', '') != '' AS tls,
+					'' AS lb_ips,
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b
+							 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
+							'')
+						ELSE '' END AS backends,
+					'[]' AS paths_json
+				FROM cluster_record
+				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND data->>'namespace' = ?
+				  AND jsonb_typeof(data->'hosts') = 'array'
+				  AND ? = ANY(
+				    SELECT jsonb_array_elements_text(data->'hosts')
+				  )
+				UNION ALL
+				-- HTTPRoute / GRPCRoute / TLSRoute
+				SELECT
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					'' AS ingress_class,
+					FALSE AS tls,
+					'' AS lb_ips,
+					'' AS backends,
+					'[]' AS paths_json
+				FROM cluster_record
+				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND data->>'namespace' = ?
+				  AND jsonb_typeof(data->'hostnames') = 'array'
+				  AND ? = ANY(
+				    SELECT jsonb_array_elements_text(data->'hostnames')
+				  )
+			) sub LIMIT 1
+		`, host, host, clusterID, namespace, host,
+			clusterID, namespace, host,
+			clusterID, namespace, host,
+		).Scan(&ing).Error
+		if err != nil {
+			log.Printf("HostChainHandler ingress query error: %v", err)
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		if ing.Name != "" {
+			ci := chainIngress{
+				Kind: ing.Kind, Name: ing.Name, Namespace: ing.Namespace,
+				IngressClass: ing.IngressClass, TLS: ing.TLS, LBIPs: ing.LBIPs,
+			}
+			if ing.PathsJSON != "" && ing.PathsJSON != "[]" {
+				_ = json.Unmarshal([]byte(ing.PathsJSON), &ci.Paths)
+			}
+			resp.Ingress = &ci
+		}
+
+		// --- Step 2: Find services matching backend names ---
+		backends := strings.Split(ing.Backends, ", ")
+		if ing.Backends == "" {
+			backends = nil
+		}
+		if len(backends) > 0 {
+			type svcRow struct {
+				Name        string `json:"name"`
+				Namespace   string `json:"namespace"`
+				ServiceType string `json:"service_type"`
+				PortsJSON   string `json:"ports_json"`
+				SelectorJSON string `json:"selector_json"`
+			}
+			var svcRows []svcRow
+			err = db.Raw(`
+				SELECT
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					COALESCE(data->>'service_type', '') AS service_type,
+					COALESCE(data->'ports'::text, '[]') AS ports_json,
+					COALESCE(data->'selector'::text, '{}') AS selector_json
+				FROM cluster_record
+				WHERE data->>'kind' = 'Service'
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND data->>'namespace' = ?
+				  AND data->>'name' = ANY(?)
+			`, clusterID, namespace, backends).Scan(&svcRows).Error
+			if err != nil {
+				log.Printf("HostChainHandler service query error: %v", err)
+			}
+
+			for _, s := range svcRows {
+				cs := chainService{
+					Name: s.Name, Namespace: s.Namespace, ServiceType: s.ServiceType,
+				}
+				if s.PortsJSON != "" {
+					_ = json.Unmarshal([]byte(s.PortsJSON), &cs.Ports)
+				}
+				if s.SelectorJSON != "" {
+					_ = json.Unmarshal([]byte(s.SelectorJSON), &cs.Selector)
+				}
+
+				// --- Step 3: Find running pods matching this service's selector ---
+				if len(cs.Selector) > 0 {
+					selectorJSON, _ := json.Marshal(cs.Selector)
+					type podRow struct {
+						Owner      string `json:"owner"`
+						OwnerKind  string `json:"owner_kind"`
+						PodCount   int64  `json:"pod_count"`
+						Phase      string `json:"phase"`
+						Containers string `json:"containers_json"`
+					}
+					var podRows []podRow
+					err = db.Raw(`
+						SELECT
+							data->>'owner' AS owner,
+							data->>'owner_kind' AS owner_kind,
+							COUNT(DISTINCT data->>'pod_uid') AS pod_count,
+							MAX(data->>'pod_phase') AS phase,
+							jsonb_agg(DISTINCT jsonb_build_object(
+								'name', data->>'container',
+								'image', data->>'image',
+								'tag', data->>'tag',
+								'registry', data->>'registry'
+							)) AS containers_json
+						FROM cluster_record
+						WHERE data->>'kind' = 'Container'
+						  AND data->>'msg' != 'DELETE'
+						  AND data->>'pod_phase' = 'Running'
+						  AND data->>'cluster_id' = ?
+						  AND data->>'namespace' = ?
+						  AND (data->'pod_labels') @> ?::jsonb
+						GROUP BY data->>'owner', data->>'owner_kind'
+					`, clusterID, namespace, string(selectorJSON)).Scan(&podRows).Error
+					if err != nil {
+						log.Printf("HostChainHandler pod query error: %v", err)
+					}
+
+					var totalPods int64
+					for _, p := range podRows {
+						pg := chainPodGroup{
+							Owner: p.Owner, OwnerKind: p.OwnerKind,
+							PodCount: p.PodCount, Phase: p.Phase,
+							ServiceName: s.Name,
+						}
+						if p.Containers != "" {
+							_ = json.Unmarshal([]byte(p.Containers), &pg.Containers)
+						}
+						resp.Pods = append(resp.Pods, pg)
+						totalPods += p.PodCount
+					}
+					cs.PodCount = totalPods
+				}
+
+				resp.Services = append(resp.Services, cs)
+			}
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
 // ResolveHostHandler does a DNS lookup for a given host and returns the IPs.
 func ResolveHostHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
