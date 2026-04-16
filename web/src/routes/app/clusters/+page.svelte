@@ -5,6 +5,7 @@
 	import { slide, fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
+	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
@@ -79,6 +80,18 @@
 	let tick = $state(0);
 	let chainDrawerOpen = $state(false);
 	let chainDrawerRow: HostRow | null = $state(null);
+	let clusterDrawerOpen = $state(false);
+	let clusterDrawerRow: ClusterRow | null = $state(null);
+
+	function openClusterDrawer(row: ClusterRow) {
+		if (clusterDrawerOpen && clusterDrawerRow?.cluster_id === row.cluster_id) {
+			clusterDrawerOpen = false;
+			clusterDrawerRow = null;
+		} else {
+			clusterDrawerRow = row;
+			clusterDrawerOpen = true;
+		}
+	}
 
 	function openChainDrawer(row: HostRow) {
 		if (chainDrawerOpen && chainDrawerRow?.host === row.host && chainDrawerRow?.cluster_id === row.cluster_id && chainDrawerRow?.namespace === row.namespace) {
@@ -528,7 +541,7 @@
 	<!-- Tables -->
 	{#if !loading && !error && clusters.length > 0}
 		{#if activeTab === 'clusters'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8">
 				<header class="flex items-start justify-between gap-4">
 					<div>
 						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
@@ -602,7 +615,7 @@
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
 							{#each sortedClusters as c}
-								<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+								<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" onclick={() => openClusterDrawer(c)}>
 									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
 									<td class="px-5 py-3">
 										{#if c.environment}
@@ -621,6 +634,20 @@
 						</tbody>
 					</table>
 				</div>
+
+				{#if clusterDrawerOpen && clusterDrawerRow}
+					<div
+						class="absolute inset-y-0 right-0 z-10 w-[780px] rounded-l-[10px] border-l border-[var(--border-color)] shadow-xl"
+						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
+						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
+					>
+						<ClusterChainDrawer
+							cluster={clusterDrawerRow.cluster}
+							clusterId={clusterDrawerRow.cluster_id}
+							onClose={() => { clusterDrawerOpen = false; clusterDrawerRow = null; }}
+						/>
+					</div>
+				{/if}
 			</section>
 		{:else if activeTab === 'images'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">

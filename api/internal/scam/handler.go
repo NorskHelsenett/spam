@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sort"
 	"net/http"
 	"strings"
 	"time"
@@ -432,6 +433,267 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			rows = filtered
 		}
 		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+// labelsMatch returns true if podLabels contains all key-value pairs from selector.
+func labelsMatch(podLabels, selector map[string]string) bool {
+	for k, v := range selector {
+		if podLabels[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// ClusterChainHandler returns the exposure chain for every namespace in a cluster.
+func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		clusterID := r.URL.Query().Get("cluster_id")
+		if clusterID == "" {
+			http.Error(w, "missing cluster_id", http.StatusBadRequest)
+			return
+		}
+
+		type nsIngress struct {
+			Namespace    string `json:"namespace"`
+			Host         string `json:"host"`
+			Kind         string `json:"kind"`
+			Name         string `json:"name"`
+			IngressClass string `json:"ingress_class"`
+			TLS          bool   `json:"tls"`
+			Backends     string `json:"backends"`
+		}
+		type nsSvc struct {
+			Namespace   string `json:"namespace"`
+			Name        string `json:"name"`
+			ServiceType string `json:"service_type"`
+			PortsJSON   string `gorm:"column:ports_json"`
+			SelectorJSON string `gorm:"column:selector_json"`
+		}
+		type nsPod struct {
+			Namespace      string `json:"namespace"`
+			Owner          string `json:"owner"`
+			OwnerKind      string `json:"owner_kind"`
+			PodCount       int64  `json:"pod_count"`
+			Phase          string `json:"phase"`
+			ContainersJSON string `gorm:"column:containers_json"`
+			LabelsJSON     string `gorm:"column:labels_json"`
+		}
+
+		// Step 1: All ingresses/routes in this cluster
+		var ingresses []nsIngress
+		db.Raw(`
+			SELECT * FROM (
+				SELECT
+					data->>'namespace' AS namespace,
+					r->>'host' AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					COALESCE(data->>'ingress_class', '') AS ingress_class,
+					jsonb_typeof(data->'tls') = 'array' AND jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
+					COALESCE(
+						(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
+						 FROM jsonb_array_elements(r->'paths') AS p
+						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
+						'') AS backends
+				FROM cluster_record
+				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
+				WHERE data->>'kind' = 'Ingress'
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND jsonb_typeof(data->'rules') = 'array'
+				UNION ALL
+				SELECT
+					data->>'namespace' AS namespace,
+					h AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					'' AS ingress_class,
+					COALESCE(data->>'tls_secret', '') != '' AS tls,
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b), '')
+						ELSE '' END AS backends
+				FROM cluster_record,
+				     jsonb_array_elements_text(data->'hosts') AS h
+				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND jsonb_typeof(data->'hosts') = 'array'
+				UNION ALL
+				SELECT
+					data->>'namespace' AS namespace,
+					h AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					'' AS ingress_class,
+					FALSE AS tls,
+					'' AS backends
+				FROM cluster_record,
+				     jsonb_array_elements_text(data->'hostnames') AS h
+				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
+				  AND data->>'msg' != 'DELETE'
+				  AND data->>'cluster_id' = ?
+				  AND jsonb_typeof(data->'hostnames') = 'array'
+			) sub WHERE host IS NOT NULL AND host != ''
+			ORDER BY namespace, host
+		`, clusterID, clusterID, clusterID).Scan(&ingresses)
+
+		// Step 2: All services in this cluster
+		var services []nsSvc
+		db.Raw(`
+			SELECT
+				data->>'namespace' AS namespace,
+				data->>'name' AS name,
+				COALESCE(data->>'service_type', '') AS service_type,
+				COALESCE(data->'ports'::text, '[]') AS ports_json,
+				COALESCE(data->'selector'::text, '{}') AS selector_json
+			FROM cluster_record
+			WHERE data->>'kind' = 'Service'
+			  AND data->>'msg' != 'DELETE'
+			  AND data->>'cluster_id' = ?
+			ORDER BY data->>'namespace', data->>'name'
+		`, clusterID).Scan(&services)
+
+		// Step 3: All running pod groups in this cluster
+		var pods []nsPod
+		db.Raw(`
+			SELECT
+				data->>'namespace' AS namespace,
+				data->>'owner' AS owner,
+				data->>'owner_kind' AS owner_kind,
+				COUNT(DISTINCT data->>'pod_uid') AS pod_count,
+				MAX(data->>'pod_phase') AS phase,
+				jsonb_agg(DISTINCT jsonb_build_object(
+					'name', data->>'container',
+					'image', data->>'image',
+					'tag', data->>'tag',
+					'digest', data->>'digest',
+					'registry', data->>'registry'
+				)) AS containers_json,
+				(array_agg(data->'pod_labels'))[1] AS labels_json
+			FROM cluster_record
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'msg' != 'DELETE'
+			  AND data->>'pod_phase' = 'Running'
+			  AND data->>'cluster_id' = ?
+			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
+			ORDER BY data->>'namespace', data->>'owner'
+		`, clusterID).Scan(&pods)
+
+		// Build per-namespace view
+		type chainContainer struct {
+			Name     string `json:"name"`
+			Image    string `json:"image"`
+			Tag      string `json:"tag"`
+			Digest   string `json:"digest,omitempty"`
+			Registry string `json:"registry"`
+		}
+		type chainPodGroup struct {
+			Owner       string           `json:"owner"`
+			OwnerKind   string           `json:"owner_kind"`
+			PodCount    int64            `json:"pod_count"`
+			Phase       string           `json:"phase"`
+			Containers  []chainContainer `json:"containers"`
+			ServiceName string           `json:"service_name,omitempty"`
+		}
+		type chainSvc struct {
+			Name        string            `json:"name"`
+			ServiceType string            `json:"service_type"`
+			Ports       json.RawMessage   `json:"ports"`
+			Selector    map[string]string `json:"selector"`
+		}
+		type chainIng struct {
+			Host         string `json:"host"`
+			Kind         string `json:"kind"`
+			Name         string `json:"name"`
+			IngressClass string `json:"ingress_class"`
+			TLS          bool   `json:"tls"`
+			Backends     string `json:"backends"`
+		}
+		type nsChain struct {
+			Namespace string         `json:"namespace"`
+			Ingresses []chainIng     `json:"ingresses"`
+			Services  []chainSvc     `json:"services"`
+			Pods      []chainPodGroup `json:"pods"`
+		}
+
+		nsMap := map[string]*nsChain{}
+		getOrCreate := func(ns string) *nsChain {
+			if c, ok := nsMap[ns]; ok {
+				return c
+			}
+			c := &nsChain{Namespace: ns}
+			nsMap[ns] = c
+			return c
+		}
+
+		for _, ing := range ingresses {
+			c := getOrCreate(ing.Namespace)
+			c.Ingresses = append(c.Ingresses, chainIng{
+				Host: ing.Host, Kind: ing.Kind, Name: ing.Name,
+				IngressClass: ing.IngressClass, TLS: ing.TLS, Backends: ing.Backends,
+			})
+		}
+		for _, svc := range services {
+			c := getOrCreate(svc.Namespace)
+			cs := chainSvc{Name: svc.Name, ServiceType: svc.ServiceType}
+			if svc.PortsJSON != "" {
+				cs.Ports = json.RawMessage(svc.PortsJSON)
+			}
+			if svc.SelectorJSON != "" {
+				_ = json.Unmarshal([]byte(svc.SelectorJSON), &cs.Selector)
+			}
+			c.Services = append(c.Services, cs)
+		}
+		for _, pod := range pods {
+			c := getOrCreate(pod.Namespace)
+			pg := chainPodGroup{
+				Owner: pod.Owner, OwnerKind: pod.OwnerKind,
+				PodCount: pod.PodCount, Phase: pod.Phase,
+			}
+			if pod.ContainersJSON != "" {
+				_ = json.Unmarshal([]byte(pod.ContainersJSON), &pg.Containers)
+			}
+			// Match this pod group to a service via selector containment
+			if pod.LabelsJSON != "" {
+				var podLabels map[string]string
+				if json.Unmarshal([]byte(pod.LabelsJSON), &podLabels) == nil {
+					for _, svc := range c.Services {
+						if len(svc.Selector) > 0 && labelsMatch(podLabels, svc.Selector) {
+							pg.ServiceName = svc.Name
+							break
+						}
+					}
+				}
+			}
+			c.Pods = append(c.Pods, pg)
+		}
+
+		// Look up cluster name
+		var clusterName string
+		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+
+		// Sort namespaces and build result
+		type result struct {
+			Cluster    string    `json:"cluster"`
+			ClusterID  string    `json:"cluster_id"`
+			Namespaces []nsChain `json:"namespaces"`
+		}
+		res := result{Cluster: clusterName, ClusterID: clusterID}
+		// Collect and sort namespace names
+		nsNames := make([]string, 0, len(nsMap))
+		for ns := range nsMap {
+			nsNames = append(nsNames, ns)
+		}
+		sort.Strings(nsNames)
+		for _, ns := range nsNames {
+			res.Namespaces = append(res.Namespaces, *nsMap[ns])
+		}
+
+		writeJSON(w, http.StatusOK, res)
 	}
 }
 
