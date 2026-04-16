@@ -903,7 +903,7 @@
 								{#each sortedHosts.slice(hostVirt.start, hostVirt.end) as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{HOST_ROW_HEIGHT}px;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
+									<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{HOST_ROW_HEIGHT}px;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
