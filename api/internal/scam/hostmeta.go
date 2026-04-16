@@ -121,28 +121,18 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 func fetchHostMeta(ctx context.Context, host string) hostMeta {
 	meta := hostMeta{}
 
-	// Try HTTPS first, fall back to HTTP
+	// Try HTTPS first, fall back to HTTP. Use the final URL after redirects
+	// as the base for resolving relative hrefs (e.g., Jellyfin 302→/web/).
 	baseURL := "https://" + host
-	htmlBody, err := fetchBody(ctx, baseURL, maxHTMLBytes)
+	htmlBody, finalURL, err := fetchBody(ctx, baseURL, maxHTMLBytes)
 	if err != nil {
 		baseURL = "http://" + host
-		htmlBody, err = fetchBody(ctx, baseURL, maxHTMLBytes)
+		htmlBody, finalURL, err = fetchBody(ctx, baseURL, maxHTMLBytes)
 		if err != nil {
 			return meta
 		}
 	}
-
-	// Some SPAs (e.g., Jellyfin) serve content on a subpath. If the root
-	// returned empty or very short HTML, try common SPA entry points.
-	if len(htmlBody) < 128 {
-		for _, subpath := range []string{"/web/", "/app/"} {
-			if body, err := fetchBody(ctx, baseURL+subpath, maxHTMLBytes); err == nil && len(body) > len(htmlBody) {
-				htmlBody = body
-				baseURL = baseURL + subpath
-				break
-			}
-		}
-	}
+	baseURL = finalURL
 
 	html := string(htmlBody)
 
@@ -178,7 +168,7 @@ func fetchHostMeta(ctx context.Context, host string) hostMeta {
 
 	// Try each candidate until one works
 	for _, u := range candidates {
-		favBytes, fetchErr := fetchBody(ctx, u, maxFaviconBytes)
+		favBytes, _, fetchErr := fetchBody(ctx, u, maxFaviconBytes)
 		if fetchErr != nil || len(favBytes) == 0 {
 			continue
 		}
@@ -249,25 +239,31 @@ func detectImageType(data []byte) string {
 	return ct
 }
 
-func fetchBody(ctx context.Context, targetURL string, maxBytes int64) ([]byte, error) {
+// fetchBody fetches a URL and returns the body bytes and the final URL after
+// any redirects. The final URL is needed to correctly resolve relative hrefs
+// (e.g., a favicon path) when the server redirected to a different path.
+func fetchBody(ctx context.Context, targetURL string, maxBytes int64) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, targetURL, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SPAM-Monitor/1.0)")
 	req.Header.Set("Accept", "text/html,image/*,*/*")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, targetURL, err
 	}
 	defer resp.Body.Close()
 
+	finalURL := resp.Request.URL.String()
+
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		return nil, finalURL, fmt.Errorf("status %d", resp.StatusCode)
 	}
 
-	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	return body, finalURL, err
 }
 
 func resolveURL(base, href string) string {
