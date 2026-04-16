@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container } from 'lucide-svelte';
+	import { Server, Container, Globe, Shield } from 'lucide-svelte';
+	import DonutChart from '$lib/components/DonutChart.svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 
 	type ClusterRow = {
 		cluster: string;
@@ -10,30 +12,56 @@
 		containers: number;
 		images: number;
 		namespaces: number;
+		ingress_count: number;
 		last_seen: string;
 	};
 
-	type ImageRow = {
-		cluster: string;
-		cluster_id: string;
-		environment: string;
+	type RegistryDist = {
 		registry: string;
 		image_count: number;
 	};
 
+	type Exposure = {
+		internet_exposed: number;
+		internal_services: number;
+	};
+
+	type ImageDetail = {
+		registry: string;
+		image: string;
+		digest: string;
+		tags: string;
+		cluster_count: number;
+		namespace_count: number;
+		container_count: number;
+		last_seen: string;
+	};
+
 	let clusters: ClusterRow[] = $state([]);
-	let images: ImageRow[] = $state([]);
+	let registryDist: RegistryDist[] = $state([]);
+	let exposure: Exposure = $state({ internet_exposed: 0, internal_services: 0 });
+	let imageDetails: ImageDetail[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
+	let activeTab = $state('clusters');
+	let imagesFetched = $state(false);
+	let tick = $state(0);
 
-	const load = async () => {
+	const palette = [
+		'var(--accent)', 'var(--blue)', 'var(--green)',
+		'var(--yellow)', 'var(--orange)', 'var(--purple)', 'var(--aqua)'
+	];
+
+	const loadMain = async () => {
 		try {
-			const [clusterRes, imageRes] = await Promise.all([
+			const [clusterRes, regRes, expRes] = await Promise.all([
 				fetch('/api/scam/clusters', { credentials: 'include' }),
-				fetch('/api/scam/images', { credentials: 'include' })
+				fetch('/api/scam/registry-distribution', { credentials: 'include' }),
+				fetch('/api/scam/exposure', { credentials: 'include' })
 			]);
 			if (clusterRes.ok) clusters = await clusterRes.json();
-			if (imageRes.ok) images = await imageRes.json();
+			if (regRes.ok) registryDist = await regRes.json();
+			if (expRes.ok) exposure = await expRes.json();
 		} catch {
 			error = 'Failed to load cluster data';
 		} finally {
@@ -41,23 +69,60 @@
 		}
 	};
 
+	const loadImages = async () => {
+		if (imagesFetched) return;
+		try {
+			const res = await fetch('/api/scam/images/detail', { credentials: 'include' });
+			if (res.ok) imageDetails = await res.json();
+			imagesFetched = true;
+		} catch { /* silent */ }
+	};
+
 	onMount(() => {
 		if (!browser) return;
-		load();
+		loadMain();
+
+		const interval = setInterval(() => tick++, 60_000);
 
 		const es = new EventSource('/api/app/stream');
-		es.addEventListener('scam_ingest', () => load());
-		return () => es.close();
+		es.addEventListener('scam_ingest', () => {
+			loadMain();
+			if (imagesFetched) {
+				imagesFetched = false;
+				loadImages();
+			}
+		});
+
+		return () => {
+			clearInterval(interval);
+			es.close();
+		};
 	});
 
-	const totalImages = $derived(
-		clusters.reduce((sum, c) => sum + c.images, 0)
-	);
-	const totalContainers = $derived(
-		clusters.reduce((sum, c) => sum + c.containers, 0)
-	);
+	$effect(() => {
+		if (activeTab === 'images') loadImages();
+	});
 
-	const timeAgo = (iso: string) => {
+	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
+	const totalContainers = $derived(clusters.reduce((s, c) => s + c.containers, 0));
+	const totalExposed = $derived(clusters.reduce((s, c) => s + c.ingress_count, 0));
+
+	const registrySegments = $derived(
+		registryDist.map((r, i) => ({
+			label: r.registry,
+			value: r.image_count,
+			color: palette[i % palette.length]
+		}))
+	);
+	const registryTotal = $derived(registryDist.reduce((s, r) => s + r.image_count, 0));
+
+	const exposureSegments = $derived([
+		{ label: 'Internet', value: exposure.internet_exposed, color: 'var(--red)' },
+		{ label: 'Internal', value: exposure.internal_services, color: 'var(--green)' }
+	]);
+	const exposureTotal = $derived(exposure.internet_exposed + exposure.internal_services);
+
+	const timeAgo = (iso: string, _tick: number) => {
 		if (!iso) return '';
 		const diff = Date.now() - new Date(iso).getTime();
 		const mins = Math.floor(diff / 60000);
@@ -67,6 +132,14 @@
 		if (hours < 24) return `${hours}h ago`;
 		return `${Math.floor(hours / 24)}d ago`;
 	};
+
+	const shortDigest = (d: string) => {
+		if (!d) return '';
+		const hash = d.startsWith('sha256:') ? d.slice(7) : d;
+		return hash.slice(0, 12);
+	};
+
+	const parseTags = (t: string) => t ? t.split(',').filter(Boolean) : [];
 </script>
 
 <svelte:head>
@@ -101,99 +174,154 @@
 				<p class="mt-4 text-xs text-[var(--text-muted)]">Agents POST to <code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5">/api/scam/callcenter</code></p>
 			</div>
 		{:else}
-			<div class="grid gap-4 sm:grid-cols-3">
-				<article class="metric-card p-5 sm:p-6">
+			<!-- Metric cards -->
+			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+				<article class="metric-card p-4">
 					<div class="flex items-center gap-2">
-						<Server class="h-5 w-5 text-[var(--accent)]" />
-						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Clusters</h2>
+						<Server class="h-4 w-4 text-[var(--accent)]" />
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Clusters</h2>
 					</div>
-					<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">{clusters.length}</p>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{clusters.length}</p>
 					<p class="mt-1 text-xs text-[var(--text-muted)]">Reporting agents</p>
 				</article>
-				<article class="metric-card p-5 sm:p-6">
+				<article class="metric-card p-4">
 					<div class="flex items-center gap-2">
-						<Container class="h-5 w-5 text-[var(--info)]" />
-						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Images</h2>
+						<Container class="h-4 w-4 text-[var(--blue)]" />
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Images</h2>
 					</div>
-					<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">{totalImages}</p>
-					<p class="mt-1 text-xs text-[var(--text-muted)]">Unique across all clusters</p>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{totalImages}</p>
+					<p class="mt-1 text-xs text-[var(--text-muted)]">Unique by digest</p>
 				</article>
-				<article class="metric-card p-5 sm:p-6">
+				<article class="metric-card p-4">
 					<div class="flex items-center gap-2">
-						<Container class="h-5 w-5 text-[var(--success)]" />
-						<h2 class="text-sm font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Containers</h2>
+						<Container class="h-4 w-4 text-[var(--green)]" />
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Containers</h2>
 					</div>
-					<p class="mt-3 text-3xl font-bold text-[var(--text-bright)]">{totalContainers}</p>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{totalContainers}</p>
 					<p class="mt-1 text-xs text-[var(--text-muted)]">Running instances</p>
 				</article>
+				<article class="metric-card p-4">
+					<div class="flex items-center gap-2">
+						<Globe class="h-4 w-4 text-[var(--red)]" />
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Exposed</h2>
+					</div>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{totalExposed}</p>
+					<p class="mt-1 text-xs text-[var(--text-muted)]">Internet-facing routes</p>
+				</article>
 			</div>
 
-			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-						<tr>
-							<th class="px-5 py-3 text-left">Cluster</th>
-							<th class="px-5 py-3 text-left">Environment</th>
-							<th class="px-5 py-3 text-right">Images</th>
-							<th class="px-5 py-3 text-right">Containers</th>
-							<th class="px-5 py-3 text-right">Namespaces</th>
-							<th class="px-5 py-3 text-left">Last seen</th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-						{#each clusters as c}
-							<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-								<td class="px-5 py-3">
-									<span class="font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</span>
-								</td>
-								<td class="px-5 py-3">
-									{#if c.environment}
-										<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{c.environment}</span>
-									{:else}
-										<span class="text-[var(--text-muted)]">&mdash;</span>
-									{/if}
-								</td>
-								<td class="px-5 py-3 text-right font-semibold">{c.images}</td>
-								<td class="px-5 py-3 text-right">{c.containers}</td>
-								<td class="px-5 py-3 text-right">{c.namespaces}</td>
-								<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(c.last_seen)}</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
+			<!-- Charts -->
+			<div class="grid gap-6 lg:grid-cols-2">
+				{#if registryTotal > 0}
+					<div class="metric-card rounded-2xl p-5">
+						<DonutChart title="Registry distribution" total={registryTotal} segments={registrySegments} />
+					</div>
+				{/if}
+				{#if exposureTotal > 0}
+					<div class="metric-card rounded-2xl p-5">
+						<DonutChart title="Network exposure" total={exposureTotal} segments={exposureSegments} />
+					</div>
+				{/if}
 			</div>
 
-			{#if images.length > 0}
-				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Images by registry</h2>
-				<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+			<!-- Tab selector -->
+			<TabSelector
+				bind:value={activeTab}
+				options={[
+					{ value: 'clusters', label: 'Clusters' },
+					{ value: 'images', label: 'Images' }
+				]}
+			/>
+		{/if}
+	</section>
+
+	<!-- Tables -->
+	{#if !loading && !error && clusters.length > 0}
+		{#if activeTab === 'clusters'}
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+				<div class="overflow-x-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
 								<th class="px-5 py-3 text-left">Cluster</th>
-								<th class="px-5 py-3 text-left">Registry</th>
+								<th class="px-5 py-3 text-left">Environment</th>
 								<th class="px-5 py-3 text-right">Images</th>
+								<th class="px-5 py-3 text-right">Containers</th>
+								<th class="px-5 py-3 text-right">Namespaces</th>
+								<th class="px-5 py-3 text-right">Routes</th>
+								<th class="px-5 py-3 text-left">Last seen</th>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each images as row}
+							{#each clusters as c}
 								<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{row.cluster || row.cluster_id}</td>
+									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
 									<td class="px-5 py-3">
-										{#if row.registry}
-											{row.registry}
+										{#if c.environment}
+											<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{c.environment}</span>
 										{:else}
-											<span class="text-[var(--text-muted)]">Docker Hub</span>
+											<span class="text-[var(--text-muted)]">&mdash;</span>
 										{/if}
 									</td>
-									<td class="px-5 py-3 text-right font-semibold">{row.image_count}</td>
+									<td class="px-5 py-3 text-right font-semibold">{c.images}</td>
+									<td class="px-5 py-3 text-right">{c.containers}</td>
+									<td class="px-5 py-3 text-right">{c.namespaces}</td>
+									<td class="px-5 py-3 text-right">{c.ingress_count}</td>
+									<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(c.last_seen, tick)}</td>
 								</tr>
 							{/each}
 						</tbody>
 					</table>
 				</div>
-			{/if}
+			</section>
+		{:else}
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+				{#if imageDetails.length === 0}
+					<div class="flex flex-col items-center justify-center gap-5 py-12">
+						<Container class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-sm text-[var(--text-secondary)]">No image data with resolved digests yet.</p>
+					</div>
+				{:else}
+					<div class="overflow-x-auto">
+						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+								<tr>
+									<th class="px-5 py-3 text-left">Registry</th>
+									<th class="px-5 py-3 text-left">Image</th>
+									<th class="px-5 py-3 text-left">Digest</th>
+									<th class="px-5 py-3 text-left">Tags</th>
+									<th class="px-5 py-3 text-right">Clusters</th>
+									<th class="px-5 py-3 text-right">Containers</th>
+									<th class="px-5 py-3 text-left">Last seen</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+								{#each imageDetails as img}
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
+										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{img.image}</td>
+										<td class="px-5 py-3">
+											<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(img.digest)}</code>
+										</td>
+										<td class="px-5 py-3">
+											<div class="flex flex-wrap gap-1">
+												{#each parseTags(img.tags) as tag}
+													<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">{tag}</span>
+												{/each}
+											</div>
+										</td>
+										<td class="px-5 py-3 text-right">{img.cluster_count}</td>
+										<td class="px-5 py-3 text-right font-semibold">{img.container_count}</td>
+										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(img.last_seen, tick)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
 		{/if}
-	</section>
+	{/if}
 </div>
 
 <style>
