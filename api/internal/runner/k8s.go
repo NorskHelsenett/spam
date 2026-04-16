@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -333,207 +332,6 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	return existing.Name, namespace, nil
 }
 
-// ImageScanJobRequest bundles the inputs for an IMAGE_SCAN K8s job. The
-// runner is invoked with RUNNER_MODE=scan-image and pulls the image directly
-// — no git init container, no source checkout.
-type ImageScanJobRequest struct {
-	JobID           string
-	ImageDigestID   string
-	ImageRegistry   string
-	ImageRepository string
-	ImageDigest     string            // sha256:...
-	Scanners        map[string]string // category -> scanner name (empty = defaults)
-	Token           string
-}
-
-// CreateImageScanJob creates a K8s Job that runs the runner in scan-image
-// mode for a single image digest. Returns the job name and namespace.
-func (k *K8sClient) CreateImageScanJob(ctx context.Context, req ImageScanJobRequest) (string, string, error) {
-	if req.JobID == "" || req.ImageDigestID == "" ||
-		req.ImageRegistry == "" || req.ImageRepository == "" || req.ImageDigest == "" {
-		return "", "", fmt.Errorf("image scan job request missing required fields")
-	}
-
-	jobName := fmt.Sprintf("img-scan-%s", req.JobID[:8])
-	namespace := k.cfg.Namespace
-
-	ttlSeconds := k.cfg.TTLSeconds
-	backoffLimit := int32(0)
-	activeDeadline := k.cfg.ActiveDeadline
-	runAsNonRoot := true
-	runAsUser := int64(1000)
-
-	scannersJSON := ""
-	if len(req.Scanners) > 0 {
-		if data, err := json.Marshal(req.Scanners); err == nil {
-			scannersJSON = string(data)
-		}
-	}
-
-	env := []corev1.EnvVar{
-		{Name: "RUNNER_MODE", Value: "scan-image"},
-		{Name: "WORKER_URL", Value: k.cfg.WorkerURL},
-		{Name: "RUN_ID", Value: req.JobID},
-		{Name: "RUN_TOKEN", Value: req.Token},
-		{Name: "IMAGE_DIGEST_ID", Value: req.ImageDigestID},
-		{Name: "IMAGE_REGISTRY", Value: req.ImageRegistry},
-		{Name: "IMAGE_REPOSITORY", Value: req.ImageRepository},
-		{Name: "IMAGE_DIGEST", Value: req.ImageDigest},
-	}
-	if scannersJSON != "" {
-		env = append(env, corev1.EnvVar{Name: "IMAGE_SCANNERS", Value: scannersJSON})
-	}
-	// Pass operator-supplied DB URLs / auth env (GRYPE_DB_UPDATE_URL etc.)
-	// through to the scanner subprocess. Deterministic order for stable
-	// pod specs (helps K8s dedupe and tracing).
-	extra := k.cfg.ImageScanEnv
-	keys := make([]string, 0, len(extra))
-	for name := range extra {
-		keys = append(keys, name)
-	}
-	sort.Strings(keys)
-	for _, name := range keys {
-		env = append(env, corev1.EnvVar{Name: name, Value: extra[name]})
-	}
-
-	job := &batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "spam-runner",
-				"app.kubernetes.io/component": "image-scanner",
-				"spam.io/run-id":              req.JobID,
-				"spam.io/scan-kind":           "image",
-			},
-		},
-		Spec: batchv1.JobSpec{
-			TTLSecondsAfterFinished: &ttlSeconds,
-			BackoffLimit:            &backoffLimit,
-			ActiveDeadlineSeconds:   &activeDeadline,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app.kubernetes.io/name":      "spam-runner",
-						"app.kubernetes.io/component": "image-scanner",
-						"spam.io/run-id":              req.JobID,
-						"spam.io/scan-kind":           "image",
-					},
-					Annotations: k.cfg.PodAnnotations,
-				},
-				Spec: corev1.PodSpec{
-					RestartPolicy:                corev1.RestartPolicyNever,
-					ServiceAccountName:           k.cfg.ServiceAccount,
-					AutomountServiceAccountToken: &[]bool{false}[0],
-					SecurityContext: &corev1.PodSecurityContext{
-						RunAsNonRoot: &runAsNonRoot,
-						RunAsUser:    &runAsUser,
-					},
-					Volumes: []corev1.Volume{
-						{
-							Name: "tmp",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{
-									Medium:    corev1.StorageMediumMemory,
-									SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
-								},
-							},
-						},
-						{
-							// /work holds the extracted image rootfs (via
-							// `crane export`) plus any scanner scratch space.
-							// Disk-backed, no size cap — the K8s Job deadline
-							// is the real bound.
-							Name: "work",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{},
-							},
-						},
-						{
-							Name: "home",
-							VolumeSource: corev1.VolumeSource{
-								EmptyDir: &corev1.EmptyDirVolumeSource{
-									Medium:    corev1.StorageMediumMemory,
-									SizeLimit: resource.NewQuantity(10*1024*1024, resource.BinarySI),
-								},
-							},
-						},
-					},
-					Containers: []corev1.Container{
-						{
-							Name:            "runner",
-							Image:           k.cfg.Image,
-							ImagePullPolicy: corev1.PullIfNotPresent,
-							Env:             env,
-							Resources: corev1.ResourceRequirements{
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("200m"),
-									corev1.ResourceMemory: resource.MustParse("512Mi"),
-								},
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU:    resource.MustParse("2"),
-									corev1.ResourceMemory: resource.MustParse("4Gi"),
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "tmp", MountPath: "/tmp"},
-								{Name: "work", MountPath: "/work"},
-								{Name: "home", MountPath: "/home/runner"},
-							},
-							SecurityContext: &corev1.SecurityContext{
-								AllowPrivilegeEscalation: &[]bool{false}[0],
-								ReadOnlyRootFilesystem:   &[]bool{true}[0],
-								Capabilities: &corev1.Capabilities{
-									Drop: []corev1.Capability{"ALL"},
-								},
-								SeccompProfile: &corev1.SeccompProfile{
-									Type: corev1.SeccompProfileTypeRuntimeDefault,
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	created, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
-	if err == nil {
-		return created.Name, namespace, nil
-	}
-	if !apierrors.IsAlreadyExists(err) {
-		return "", "", fmt.Errorf("create image scan job: %w", err)
-	}
-
-	// Adopt-or-replace (same policy as CreateRunJob).
-	existing, getErr := k.GetJobStatus(ctx, jobName, namespace)
-	if getErr != nil {
-		return "", "", fmt.Errorf("image scan job exists but status lookup failed: %w", getErr)
-	}
-	if existing.Labels["spam.io/run-id"] != req.JobID {
-		return "", "", fmt.Errorf("image scan job %s already exists for a different run", jobName)
-	}
-	if existing.Status.Active > 0 || existing.Status.Succeeded > 0 {
-		log.Printf("adopting existing image scan job: %s/%s", namespace, jobName)
-		return existing.Name, namespace, nil
-	}
-	if existing.Status.Failed > 0 {
-		log.Printf("replacing failed image scan job: %s/%s", namespace, jobName)
-		propagation := metav1.DeletePropagationBackground
-		if delErr := k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
-			PropagationPolicy: &propagation,
-		}); delErr != nil {
-			return "", "", fmt.Errorf("delete failed image scan job: %w", delErr)
-		}
-		time.Sleep(2 * time.Second)
-		retried, retryErr := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
-		if retryErr != nil {
-			return "", "", fmt.Errorf("recreate image scan job: %w", retryErr)
-		}
-		return retried.Name, namespace, nil
-	}
-	return existing.Name, namespace, nil
-}
 
 // DeleteJob deletes a Kubernetes job.
 func (k *K8sClient) DeleteJob(ctx context.Context, jobName, namespace string) error {
@@ -909,12 +707,11 @@ func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, t
 }
 
 // Compile-time assertions that RunExecutor satisfies the job-side executor
-// interfaces. A mismatch here fails the build instead of surfacing as a
-// cryptic runtime "runner does not support IMAGE_SCAN" error.
+// interfaces the worker expects. IMAGE_SCAN is not here — it is leased by
+// the dedicated spam-image-scanner pod rather than executed in-worker.
 var (
-	_ jobs.RunExecutor       = (*RunExecutor)(nil)
-	_ jobs.ImageScanExecutor = (*RunExecutor)(nil)
-	_ jobs.TrivyJobCreator   = (*RunExecutor)(nil)
+	_ jobs.RunExecutor     = (*RunExecutor)(nil)
+	_ jobs.TrivyJobCreator = (*RunExecutor)(nil)
 )
 
 // RunExecutor handles creating and managing runs.
@@ -984,33 +781,6 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	}
 
 	log.Printf("created run job: run_id=%s job=%s/%s", runID, namespace, jobName)
-	return nil
-}
-
-// ExecuteImageScan implements jobs.ImageScanExecutor. It mints a run token
-// and spawns the image-scan K8s job, recording the job name/namespace on the
-// matching ImageScanRun row if one exists.
-func (e *RunExecutor) ExecuteImageScan(ctx context.Context, jobID string, payload jobs.ImageScanPayload) error {
-	token, err := GenerateRunToken(e.cfg.HMACKey, jobID, 2*time.Hour)
-	if err != nil {
-		return fmt.Errorf("generate token: %w", err)
-	}
-
-	jobName, namespace, err := e.k8s.CreateImageScanJob(ctx, ImageScanJobRequest{
-		JobID:           jobID,
-		ImageDigestID:   payload.ImageDigestID,
-		ImageRegistry:   payload.Registry,
-		ImageRepository: payload.Repository,
-		ImageDigest:     payload.Digest,
-		Scanners:        payload.Scanners,
-		Token:           token,
-	})
-	if err != nil {
-		return fmt.Errorf("create image scan job: %w", err)
-	}
-
-	log.Printf("created image scan job: job_id=%s image=%s/%s@%s k8s=%s/%s",
-		jobID, payload.Registry, payload.Repository, payload.Digest, namespace, jobName)
 	return nil
 }
 

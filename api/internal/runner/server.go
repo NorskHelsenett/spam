@@ -80,6 +80,12 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
 		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
 		r.Post("/api/tool-versions", toolVersionsHandler(s.db))
+		// Image scanner endpoints — the dedicated spam-image-scanner pod
+		// leases IMAGE_SCAN jobs via /next, uploads artifacts via
+		// /runner/image-results (run-token-auth), and reports terminal
+		// status via /complete.
+		r.Get("/api/image-scans/next", s.handleImageScanNext)
+		r.Post("/api/image-scans/{job_id}/complete", s.handleImageScanComplete)
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)

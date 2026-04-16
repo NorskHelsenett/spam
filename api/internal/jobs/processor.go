@@ -41,13 +41,6 @@ type RunExecutor interface {
 	ExecuteRun(ctx context.Context, runID string, payload interface{}) error
 }
 
-// ImageScanExecutor is implemented by the runner when it supports image scan
-// jobs. The method mirrors RunExecutor.ExecuteRun but takes a typed payload
-// so the runner can skip the interface{}-type-assert dance.
-type ImageScanExecutor interface {
-	ExecuteImageScan(ctx context.Context, jobID string, payload ImageScanPayload) error
-}
-
 // RunReconciler reconciles RUNNING jobs against their K8s job state.
 type RunReconciler interface {
 	ReconcileRunningJobs(ctx context.Context, db *gorm.DB, minAge time.Duration) (int, error)
@@ -66,38 +59,13 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processTrivyAdhocScan(ctx, job, runExecutor)
 	case JobTypeProbeSecrets:
 		return processProbeSecrets(ctx, db, job)
-	case JobTypeImageScan:
-		return processImageScan(ctx, job, runExecutor)
 	default:
+		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
+		// excludes them in ClaimNextJob, so reaching this branch would mean
+		// the exclusion was removed without a replacement runtime. Fail
+		// non-retryable so operators see the misconfiguration immediately.
 		return nil, fmt.Errorf("unknown job type: %s", job.Type)
 	}
-}
-
-func processImageScan(ctx context.Context, job *Job, runExecutor RunExecutor) (interface{}, error) {
-	executor, ok := runExecutor.(ImageScanExecutor)
-	if !ok {
-		return nil, NonRetryable(errors.New("image scan not available: runner does not support IMAGE_SCAN"))
-	}
-
-	var payload ImageScanPayload
-	if len(job.Payload) == 0 {
-		return nil, NonRetryable(errors.New("missing job payload"))
-	}
-	if err := json.Unmarshal(job.Payload, &payload); err != nil {
-		return nil, NonRetryable(fmt.Errorf("unmarshal payload: %w", err))
-	}
-	if payload.Digest == "" || payload.Registry == "" || payload.Repository == "" {
-		return nil, NonRetryable(errors.New("payload missing registry/repository/digest"))
-	}
-
-	if err := executor.ExecuteImageScan(ctx, job.ID, payload); err != nil {
-		return nil, fmt.Errorf("execute image scan: %w", err)
-	}
-
-	return map[string]string{
-		"status":          "started",
-		"image_digest_id": payload.ImageDigestID,
-	}, nil
 }
 
 func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, error) {
