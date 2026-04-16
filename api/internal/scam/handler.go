@@ -160,14 +160,17 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 				data->>'cluster_id'  AS cluster_id,
 				data->>'environment' AS environment,
 				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'msg' != 'DELETE') AS containers,
+					AND data->>'msg' != 'DELETE'
+					AND data->>'pod_phase' = 'Running') AS containers,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
 					FILTER (WHERE data->>'kind' = 'Container'
 						AND data->>'msg' != 'DELETE'
+						AND data->>'pod_phase' = 'Running'
 						AND COALESCE(data->>'digest','') != '') AS images,
 				COUNT(DISTINCT data->>'namespace')
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE') AS namespaces,
+						AND data->>'msg' != 'DELETE'
+						AND data->>'pod_phase' = 'Running') AS namespaces,
 				COUNT(DISTINCT data->>'uid')
 					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
 						AND data->>'msg' != 'DELETE') AS ingress_count,
@@ -199,6 +202,7 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
 			  AND data->>'msg' != 'DELETE'
+			  AND data->>'pod_phase' = 'Running'
 			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
 			ORDER BY image_count DESC
@@ -266,6 +270,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
 			  AND data->>'msg' != 'DELETE'
+			  AND data->>'pod_phase' = 'Running'
 			GROUP BY data->>'registry', data->>'image', data->>'digest'
 			ORDER BY container_count DESC, data->>'image'
 		`).Scan(&rows).Error
