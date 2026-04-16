@@ -137,6 +137,59 @@
 	function truncate(s: string, max: number): string {
 		return s.length > max ? s.slice(0, max - 1) + '…' : s;
 	}
+
+	// --- Popover state ---
+	type PopoverData = {
+		x: number;
+		y: number;
+		type: 'ingress' | 'service' | 'pod';
+		title: string;
+		lines: string[];
+	};
+	let popover: PopoverData | null = $state(null);
+
+	function showIngress(e: MouseEvent) {
+		if (!chain.ingress) return;
+		const ing = chain.ingress;
+		popover = {
+			x: col0x, y: layout.ingressY,
+			type: 'ingress', title: ing.name,
+			lines: [
+				`Kind: ${ing.kind}`,
+				ing.ingress_class ? `Class: ${ing.ingress_class}` : '',
+				`TLS: ${ing.tls ? 'yes' : 'no'}`,
+				ing.lb_ips ? `LB: ${ing.lb_ips}` : '',
+				...(ing.paths ?? []).map(p => `${p.path ?? '/'} → ${p.backend_name}${p.backend_port ? ':' + p.backend_port : ''}`),
+			].filter(Boolean)
+		};
+	}
+
+	function showService(svc: ChainService) {
+		popover = {
+			x: 0, y: 0, // positioned via CSS
+			type: 'service', title: svc.name,
+			lines: [
+				`Type: ${svc.service_type || 'ClusterIP'}`,
+				...(svc.ports ?? []).map(p => `${p.port}${p.target_port ? ':' + p.target_port : ''}/${p.protocol || 'TCP'}`),
+				...Object.entries(svc.selector ?? {}).map(([k, v]) => `${k}=${v}`),
+			]
+		};
+	}
+
+	function showPod(pg: ChainPodGroup) {
+		popover = {
+			x: 0, y: 0,
+			type: 'pod', title: pg.owner,
+			lines: [
+				`${pg.owner_kind} · ${pg.pod_count} pod${pg.pod_count !== 1 ? 's' : ''} · ${pg.phase}`,
+				...(pg.containers ?? []).map(c =>
+					`${c.registry ? c.registry + '/' : ''}${c.image}${c.tag ? ':' + c.tag : ''}${c.digest ? '\n  @' + c.digest : ''}`
+				),
+			]
+		};
+	}
+
+	function hidePopover() { popover = null; }
 </script>
 
 <svg
@@ -183,7 +236,8 @@
 
 	<!-- Ingress node -->
 	{#if chain.ingress}
-		<g>
+		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+		<g class="cursor-pointer" onclick={showIngress}>
 			<circle cx={col0x} cy={layout.ingressY} r={ICON_R} fill="var(--green)" opacity="0.15" stroke="var(--green)" stroke-width="1.5" />
 			<!-- Globe icon -->
 			<g transform="translate({col0x - 7}, {layout.ingressY - 7})">
@@ -200,7 +254,8 @@
 
 	<!-- Service nodes -->
 	{#each layout.svcPositions as sp}
-		<g>
+		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+		<g class="cursor-pointer" onclick={() => showService(sp.svc)}>
 			<circle cx={sp.x} cy={sp.y} r={ICON_R} fill="var(--blue)" opacity="0.15" stroke="var(--blue)" stroke-width="1.5" />
 			<!-- Service/network icon -->
 			<g transform="translate({sp.x - 7}, {sp.y - 7})">
@@ -216,7 +271,8 @@
 
 	<!-- Pod group nodes -->
 	{#each layout.podPositions as pp}
-		<g>
+		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+		<g class="cursor-pointer" onclick={() => pp.pg.pod_count > 0 && showPod(pp.pg)}>
 			{#if pp.pg.pod_count > 0}
 				<circle cx={pp.x} cy={pp.y} r={ICON_R} fill="var(--aqua)" opacity="0.15" stroke="var(--aqua)" stroke-width="1.5" />
 				<!-- Container/box icon -->
@@ -243,4 +299,27 @@
 			{/if}
 		</g>
 	{/each}
+
+	<!-- Click-away background -->
+	{#if popover}
+		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
+		<rect x="0" y="0" width={layout.totalWidth} height={layout.totalHeight} fill="transparent" onclick={hidePopover} />
+	{/if}
 </svg>
+
+<!-- Metadata popover (HTML overlay) -->
+{#if popover}
+	<div
+		class="mt-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--bg)] px-4 py-3 text-xs shadow-lg"
+	>
+		<div class="flex items-center justify-between">
+			<span class="font-semibold text-[var(--text-bright)]">{popover.title}</span>
+			<button class="text-[var(--text-muted)] hover:text-[var(--text-bright)]" onclick={hidePopover}>&times;</button>
+		</div>
+		<div class="mt-1.5 space-y-0.5">
+			{#each popover.lines as line}
+				<div class="whitespace-pre-wrap text-[var(--text-secondary)]">{line}</div>
+			{/each}
+		</div>
+	</div>
+{/if}
