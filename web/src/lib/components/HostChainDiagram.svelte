@@ -8,6 +8,7 @@
 		lb_ips: string;
 		paths: { path?: string; backend_name?: string; backend_port?: string }[];
 		backends?: string;
+		host?: string;
 	};
 	export type ChainService = {
 		name: string;
@@ -32,6 +33,7 @@
 		cluster_id: string;
 		namespace: string;
 		ingress: ChainIngress | null;
+		ingresses?: ChainIngress[];
 		services: ChainService[];
 		pods: ChainPodGroup[];
 	};
@@ -82,8 +84,13 @@
 		return [...seen.values()];
 	});
 
-	// Has ingress?
-	let hasIngress = $derived(!!chain.ingress);
+	// Collect all ingresses (single or multiple)
+	let allIngresses = $derived.by(() => {
+		if (chain.ingresses?.length) return chain.ingresses;
+		if (chain.ingress) return [chain.ingress];
+		return [];
+	});
+	let hasIngress = $derived(allIngresses.length > 0);
 	let hasServices = $derived((chain.services?.length ?? 0) > 0);
 
 	// Column x positions — skip ingress column if no ingress
@@ -119,11 +126,19 @@
 		const svcCount = Math.max(services.length, 0);
 		const svcColHeight = svcCount > 0 ? svcCount * (ICON_R * 2) + (svcCount - 1) * ROW_GAP : 0;
 		const podColHeight = totalPodSlots > 0 ? totalPodSlots * (SMALL_R * 2) + (totalPodSlots - 1) * REPLICA_GAP + (pods.length - 1) * (ROW_GAP - REPLICA_GAP) : 0;
-		const maxColHeight = Math.max(svcColHeight, podColHeight, ICON_R * 2);
+		const ingCount = allIngresses.length;
+		const ingColHeight = ingCount > 0 ? ingCount * (ICON_R * 2) + (ingCount - 1) * ROW_GAP : 0;
+		const maxColHeight = Math.max(svcColHeight, podColHeight, ingColHeight, ICON_R * 2);
 		const totalHeight = maxColHeight + PAD.top + PAD.bottom + SUBLABEL_OFFSET;
 		const totalWidth = podX + ICON_R + PAD.right + 30;
 
-		const ingressY = PAD.top + maxColHeight / 2;
+		// Ingresses: stacked vertically, centered
+		const ingStartY = PAD.top + (maxColHeight - ingColHeight) / 2 + ICON_R;
+		type IngPos = { x: number; y: number; ing: ChainIngress };
+		const ingPositions: IngPos[] = [];
+		for (let i = 0; i < allIngresses.length; i++) {
+			ingPositions.push({ x: ingressX, y: ingStartY + i * (ICON_R * 2 + ROW_GAP), ing: allIngresses[i] });
+		}
 
 		// Services
 		const svcStartY = PAD.top + (maxColHeight - svcColHeight) / 2 + ICON_R;
@@ -153,41 +168,42 @@
 			if (gi < pods.length - 1) podNodeY += ROW_GAP - REPLICA_GAP;
 		}
 
-		// Build edges: service → pod
+		// Build edges: service → pod (one arrow per individual pod node)
 		type Edge = { sx: number; sy: number; px: number; py: number };
 		const svcToPodEdges: Edge[] = [];
 		for (const sp of svcPositions) {
 			for (const og of ownerGroups) {
 				const svcNames = podServices(og.pg);
 				if (svcNames.includes(sp.svc.name)) {
-					// Connect to center of the owner group
-					const centerY = og.nodes.reduce((s, n) => s + n.y, 0) / og.nodes.length;
-					svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: og.nodes[0].x - SMALL_R - 4, py: centerY });
+					for (const node of og.nodes) {
+						svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: node.x - SMALL_R - 4, py: node.y });
+					}
 				}
 			}
 		}
 
 		// Ingress → service edges (only for services named as backends)
 		const ingToSvcEdges: { sx: number; sy: number; tx: number; ty: number }[] = [];
-		if (hasIngress && hasServices && chain.ingress) {
-			const backendNames = new Set<string>();
-			for (const p of chain.ingress.paths ?? []) {
-				if (p.backend_name) backendNames.add(p.backend_name);
-			}
-			// Also check if ingress has a backends string (from cluster chain)
-			if (chain.ingress.backends) {
-				for (const b of chain.ingress.backends.split(', ')) {
-					if (b) backendNames.add(b);
+		if (hasIngress && hasServices) {
+			for (const ip of ingPositions) {
+				const backendNames = new Set<string>();
+				for (const p of ip.ing.paths ?? []) {
+					if (p.backend_name) backendNames.add(p.backend_name);
 				}
-			}
-			for (const sp of svcPositions) {
-				if (backendNames.has(sp.svc.name)) {
-					ingToSvcEdges.push({ sx: ingressX + ICON_R + 4, sy: ingressY, tx: sp.x - ICON_R - 4, ty: sp.y });
+				if (ip.ing.backends) {
+					for (const b of ip.ing.backends.split(', ')) {
+						if (b) backendNames.add(b);
+					}
+				}
+				for (const sp of svcPositions) {
+					if (backendNames.has(sp.svc.name)) {
+						ingToSvcEdges.push({ sx: ip.x + ICON_R + 4, sy: ip.y, tx: sp.x - ICON_R - 4, ty: sp.y });
+					}
 				}
 			}
 		}
 
-		return { totalWidth, totalHeight, ingressY, svcPositions, ownerGroups, svcToPodEdges, ingToSvcEdges };
+		return { totalWidth, totalHeight, ingPositions, svcPositions, ownerGroups, svcToPodEdges, ingToSvcEdges };
 	});
 
 	// --- Popover ---
@@ -195,17 +211,19 @@
 	type PopoverData = { type: string; title: string; lines: string[]; containers?: ContainerInfo[] };
 	let popover: PopoverData | null = $state(null);
 
-	function showIngress() {
-		if (!chain.ingress) return;
-		const ing = chain.ingress;
+	function showIngress(ing?: ChainIngress) {
+		const target = ing ?? chain.ingress;
+		if (!target) return;
 		popover = {
-			type: 'ingress', title: ing.name,
+			type: 'ingress', title: target.name,
 			lines: [
-				`Kind: ${ing.kind}`,
-				ing.ingress_class ? `Class: ${ing.ingress_class}` : '',
-				`TLS: ${ing.tls ? 'yes' : 'no'}`,
-				ing.lb_ips ? `LB: ${ing.lb_ips}` : '',
-				...(ing.paths ?? []).map(p => `${p.path ?? '/'} → ${p.backend_name}${p.backend_port ? ':' + p.backend_port : ''}`),
+				`Kind: ${target.kind}`,
+				target.host ? `Host: ${target.host}` : '',
+				target.ingress_class ? `Class: ${target.ingress_class}` : '',
+				`TLS: ${target.tls ? 'yes' : 'no'}`,
+				target.lb_ips ? `LB: ${target.lb_ips}` : '',
+				target.backends ? `Backends: ${target.backends}` : '',
+				...(target.paths ?? []).map(p => `${p.path ?? '/'} → ${p.backend_name}${p.backend_port ? ':' + p.backend_port : ''}`),
 			].filter(Boolean)
 		};
 	}
@@ -254,22 +272,22 @@
 		<path d={arrow(e.sx, e.sy, e.px, e.py)} stroke="var(--bg4)" stroke-width="1.5" stroke-dasharray="6 4" fill="none" marker-end="url(#arrowhead)" opacity="0.6" />
 	{/each}
 
-	<!-- Ingress node -->
-	{#if chain.ingress && hasIngress}
+	<!-- Ingress nodes -->
+	{#each layout.ingPositions as ip}
 		<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-		<g class="cursor-pointer" onclick={showIngress}>
-			<circle cx={ingressX} cy={layout.ingressY} r={ICON_R} fill="var(--green)" opacity="0.15" stroke="var(--green)" stroke-width="1.5" />
-			<g transform="translate({ingressX - 7}, {layout.ingressY - 7})">
+		<g class="cursor-pointer" onclick={() => showIngress(ip.ing)}>
+			<circle cx={ip.x} cy={ip.y} r={ICON_R} fill="var(--green)" opacity="0.15" stroke="var(--green)" stroke-width="1.5" />
+			<g transform="translate({ip.x - 7}, {ip.y - 7})">
 				<circle cx="7" cy="7" r="6" fill="none" stroke="var(--green)" stroke-width="1.2" />
 				<ellipse cx="7" cy="7" rx="3" ry="6" fill="none" stroke="var(--green)" stroke-width="0.8" />
 				<line x1="1" y1="7" x2="13" y2="7" stroke="var(--green)" stroke-width="0.8" />
 			</g>
-			<text x={ingressX} y={layout.ingressY + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(chain.host, 22)}</text>
-			<text x={ingressX} y={layout.ingressY + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
-				{chain.ingress.kind}{chain.ingress.ingress_class ? ` · ${chain.ingress.ingress_class}` : ''}{chain.ingress.tls ? ' · TLS' : ''}
+			<text x={ip.x} y={ip.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(ip.ing.host ?? ip.ing.name, 22)}</text>
+			<text x={ip.x} y={ip.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
+				{ip.ing.kind}{ip.ing.ingress_class ? ` · ${ip.ing.ingress_class}` : ''}{ip.ing.lb_ips ? ` · ${ip.ing.lb_ips}` : ''}
 			</text>
 		</g>
-	{/if}
+	{/each}
 
 	<!-- Service nodes -->
 	{#each layout.svcPositions as sp}
@@ -289,18 +307,6 @@
 
 	<!-- Pod owner groups -->
 	{#each layout.ownerGroups as og}
-		<!-- Grouping box when multiple nodes -->
-		{#if og.nodes.length > 1}
-			<rect
-				x={og.nodes[0].x - SMALL_R - 10}
-				y={og.y1}
-				width={SMALL_R * 2 + 20}
-				height={og.y2 - og.y1}
-				rx="8"
-				fill="var(--bg1)" opacity="0.3"
-				stroke="var(--bg3)" stroke-width="0.5" stroke-dasharray="3 2"
-			/>
-		{/if}
 
 		{#each og.nodes as node}
 			<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->

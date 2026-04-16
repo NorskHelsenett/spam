@@ -32,14 +32,13 @@
 
 	// Convert a NsChain into a ChainData for the diagram component
 	function toChainData(ns: NsChain, clusterName: string, clId: string): ChainData {
-		// Pick first ingress as the primary (diagram shows one ingress node)
-		const ing = ns.ingresses?.[0];
 		return {
-			host: ing?.host ?? '',
+			host: ns.ingresses?.[0]?.host ?? '',
 			cluster: clusterName,
 			cluster_id: clId,
 			namespace: ns.namespace,
-			ingress: ing ? {
+			ingress: null,
+			ingresses: (ns.ingresses ?? []).map(ing => ({
 				kind: ing.kind,
 				name: ing.name,
 				namespace: ns.namespace,
@@ -47,8 +46,9 @@
 				tls: ing.tls,
 				lb_ips: '',
 				paths: [],
-				backends: ing.backends
-			} : null,
+				backends: ing.backends,
+				host: ing.host
+			})),
 			services: ns.services?.map(s => ({
 				...s,
 				namespace: ns.namespace,
