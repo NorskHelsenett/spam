@@ -37,12 +37,12 @@
 	let { chain }: { chain: ChainData } = $props();
 
 	// --- Layout constants ---
-	const ICON_R = 22;
-	const COL_GAP = 140;
-	const ROW_GAP = 80;
-	const PAD = { top: 40, left: 60, right: 60, bottom: 40 };
-	const LABEL_OFFSET = 34;
-	const SUBLABEL_OFFSET = 50;
+	const ICON_R = 18;
+	const COL_GAP = 110;
+	const ROW_GAP = 62;
+	const PAD = { top: 28, left: 70, right: 44, bottom: 28 };
+	const LABEL_OFFSET = 28;
+	const SUBLABEL_OFFSET = 42;
 
 	// --- Build service → pod group map ---
 	let svcPodMap = $derived.by(() => {
@@ -141,7 +141,9 @@
 
 <svg
 	viewBox="0 0 {layout.totalWidth} {layout.totalHeight}"
-	class="h-full w-full"
+	width={layout.totalWidth}
+	height={layout.totalHeight}
+	class="max-w-full"
 	xmlns="http://www.w3.org/2000/svg"
 >
 	<defs>
@@ -184,13 +186,13 @@
 		<g>
 			<circle cx={col0x} cy={layout.ingressY} r={ICON_R} fill="var(--green)" opacity="0.15" stroke="var(--green)" stroke-width="1.5" />
 			<!-- Globe icon -->
-			<g transform="translate({col0x - 10}, {layout.ingressY - 10})">
-				<circle cx="10" cy="10" r="8" fill="none" stroke="var(--green)" stroke-width="1.5" />
-				<ellipse cx="10" cy="10" rx="4" ry="8" fill="none" stroke="var(--green)" stroke-width="1" />
-				<line x1="2" y1="10" x2="18" y2="10" stroke="var(--green)" stroke-width="1" />
+			<g transform="translate({col0x - 7}, {layout.ingressY - 7})">
+				<circle cx="7" cy="7" r="6" fill="none" stroke="var(--green)" stroke-width="1.2" />
+				<ellipse cx="7" cy="7" rx="3" ry="6" fill="none" stroke="var(--green)" stroke-width="0.8" />
+				<line x1="1" y1="7" x2="13" y2="7" stroke="var(--green)" stroke-width="0.8" />
 			</g>
-			<text x={col0x} y={layout.ingressY + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(chain.host, 18)}</text>
-			<text x={col0x} y={layout.ingressY + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="9">
+			<text x={col0x} y={layout.ingressY + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(chain.host, 22)}</text>
+			<text x={col0x} y={layout.ingressY + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
 				{chain.ingress.kind}{chain.ingress.ingress_class ? ` · ${chain.ingress.ingress_class}` : ''}{chain.ingress.tls ? ' · TLS' : ''}
 			</text>
 		</g>
@@ -201,12 +203,12 @@
 		<g>
 			<circle cx={sp.x} cy={sp.y} r={ICON_R} fill="var(--blue)" opacity="0.15" stroke="var(--blue)" stroke-width="1.5" />
 			<!-- Service/network icon -->
-			<g transform="translate({sp.x - 9}, {sp.y - 9})">
-				<rect x="2" y="2" width="14" height="14" rx="3" fill="none" stroke="var(--blue)" stroke-width="1.5" />
-				<circle cx="9" cy="9" r="2.5" fill="var(--blue)" opacity="0.6" />
+			<g transform="translate({sp.x - 7}, {sp.y - 7})">
+				<rect x="1" y="1" width="12" height="12" rx="2.5" fill="none" stroke="var(--blue)" stroke-width="1.2" />
+				<circle cx="7" cy="7" r="2" fill="var(--blue)" opacity="0.6" />
 			</g>
-			<text x={sp.x} y={sp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(sp.svc.name, 18)}</text>
-			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="9">
+			<text x={sp.x} y={sp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(sp.svc.name, 22)}</text>
+			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
 				{sp.svc.service_type || 'ClusterIP'}{sp.svc.ports?.length ? ` · ${sp.svc.ports.map((p) => `${p.port}`).join(',')}` : ''}
 			</text>
 		</g>
@@ -218,19 +220,19 @@
 			{#if pp.pg.pod_count > 0}
 				<circle cx={pp.x} cy={pp.y} r={ICON_R} fill="var(--aqua)" opacity="0.15" stroke="var(--aqua)" stroke-width="1.5" />
 				<!-- Container/box icon -->
-				<g transform="translate({pp.x - 9}, {pp.y - 9})">
-					<rect x="1" y="5" width="16" height="12" rx="2" fill="none" stroke="var(--aqua)" stroke-width="1.5" />
-					<line x1="1" y1="9" x2="17" y2="9" stroke="var(--aqua)" stroke-width="1" />
-					<line x1="9" y1="1" x2="4" y2="5" stroke="var(--aqua)" stroke-width="1" />
-					<line x1="9" y1="1" x2="14" y2="5" stroke="var(--aqua)" stroke-width="1" />
+				<g transform="translate({pp.x - 7}, {pp.y - 7})">
+					<rect x="1" y="3" width="12" height="10" rx="1.5" fill="none" stroke="var(--aqua)" stroke-width="1.2" />
+					<line x1="1" y1="7" x2="13" y2="7" stroke="var(--aqua)" stroke-width="0.8" />
+					<line x1="7" y1="0" x2="3" y2="3" stroke="var(--aqua)" stroke-width="0.8" />
+					<line x1="7" y1="0" x2="11" y2="3" stroke="var(--aqua)" stroke-width="0.8" />
 				</g>
 				<!-- Pod count badge -->
 				{#if pp.pg.pod_count > 1}
 					<circle cx={pp.x + ICON_R - 4} cy={pp.y - ICON_R + 4} r="8" fill="var(--accent)" />
 					<text x={pp.x + ICON_R - 4} y={pp.y - ICON_R + 7.5} text-anchor="middle" fill="var(--bg-hard)" font-size="9" font-weight="700">{pp.pg.pod_count}</text>
 				{/if}
-				<text x={pp.x} y={pp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(pp.pg.owner, 18)}</text>
-				<text x={pp.x} y={pp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="10">
+				<text x={pp.x} y={pp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(pp.pg.owner, 22)}</text>
+				<text x={pp.x} y={pp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
 					{pp.pg.owner_kind}{pp.pg.containers?.length ? ` · ${pp.pg.containers.map((c) => c.image.split('/').pop()).join(', ').slice(0, 30)}` : ''}
 				</text>
 			{:else}

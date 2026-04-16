@@ -131,7 +131,20 @@
 							{#if pg.containers?.length}
 								<div class="mt-1.5 space-y-0.5">
 									{#each pg.containers as c}
-									<div class="rounded bg-[var(--bg2)]/40 px-2.5 py-1.5 text-xs">
+									{@const fullRef = `${c.registry ? c.registry + '/' : ''}${c.image}${c.digest ? '@' + c.digest : c.tag ? ':' + c.tag : ''}`}
+									<div class="relative rounded bg-[var(--bg2)]/40 px-2.5 py-1.5 text-xs">
+										{#if c.digest}
+											<button
+												type="button"
+												class="absolute right-2 top-1.5 rounded px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] transition hover:bg-[var(--bg3)] hover:text-[var(--text-bright)]"
+												title="Copy: docker pull {fullRef}"
+												onclick={() => {
+													navigator.clipboard.writeText(`docker pull ${fullRef}`);
+												}}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+											</button>
+										{/if}
 										<div class="flex items-baseline gap-1">
 											<span class="text-[var(--text-muted)]">image</span>
 											<code class="text-[var(--text-bright)]">{c.registry ? c.registry + '/' : ''}{c.image}</code>
