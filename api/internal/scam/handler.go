@@ -3,6 +3,7 @@ package scam
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -314,18 +315,18 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'cluster' AS cluster,
 					data->>'cluster_id' AS cluster_id,
 					data->>'environment' AS environment,
-					jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
-					COALESCE(
-						(SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(COALESCE(data->'lb_ips', '[]'::jsonb)) AS ip),
-						''
-					) AS lb_ips,
+					jsonb_typeof(data->'tls') = 'array' AND jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
+					CASE WHEN jsonb_typeof(data->'lb_ips') = 'array'
+						THEN COALESCE((SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip), '')
+						ELSE '' END AS lb_ips,
 					COALESCE(data->>'ingress_class', '') AS ingress_class,
-					COALESCE(
-						(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
-						 FROM jsonb_array_elements(COALESCE(r->'paths', '[]'::jsonb)) AS p
-						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
-						''
-					) AS backends,
+					CASE WHEN jsonb_typeof(r->'paths') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
+							 FROM jsonb_array_elements(r->'paths') AS p
+							 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
+							'')
+						ELSE '' END AS backends,
 					received_at AS last_seen
 				FROM cluster_record
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
@@ -366,12 +367,13 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(data->>'tls_secret', '') != '' AS tls,
 					'' AS lb_ips,
 					'' AS ingress_class,
-					COALESCE(
-						(SELECT string_agg(DISTINCT b->>'name', ', ')
-						 FROM jsonb_array_elements(COALESCE(data->'backends', '[]'::jsonb)) AS b
-						 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
-						''
-					) AS backends,
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b
+							 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
+							'')
+						ELSE '' END AS backends,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
@@ -392,6 +394,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			ORDER BY host, cluster
 		`).Scan(&rows).Error
 		if err != nil {
+			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
