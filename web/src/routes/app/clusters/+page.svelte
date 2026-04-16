@@ -1,9 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container, Globe, ChevronDown, ExternalLink } from 'lucide-svelte';
+	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { slide } from 'svelte/transition';
+	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
+	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
 
 	type ClusterRow = {
 		cluster: string;
@@ -19,11 +23,6 @@
 	type RegistryDist = {
 		registry: string;
 		image_count: number;
-	};
-
-	type Exposure = {
-		internet_exposed: number;
-		internal_services: number;
 	};
 
 	type ImageDetail = {
@@ -47,6 +46,8 @@
 		environment: string;
 		tls: boolean;
 		lb_ips: string;
+		ingress_class: string;
+		backends: string;
 		last_seen: string;
 	};
 
@@ -63,7 +64,6 @@
 
 	let clusters: ClusterRow[] = $state([]);
 	let registryDist: RegistryDist[] = $state([]);
-	let exposure: Exposure = $state({ internet_exposed: 0, internal_services: 0 });
 	let imageDetails: ImageDetail[] = $state([]);
 	let hosts: HostRow[] = $state([]);
 	let hostResolutions = $state<Record<string, HostResolve>>({});
@@ -82,14 +82,13 @@
 
 	const loadMain = async () => {
 		try {
-			const [clusterRes, regRes, expRes] = await Promise.all([
+			const [clusterRes, regRes] = await Promise.all([
 				fetch('/api/clusters/summary', { credentials: 'include' }),
-				fetch('/api/clusters/registry-distribution', { credentials: 'include' }),
-				fetch('/api/clusters/exposure', { credentials: 'include' })
+				fetch('/api/clusters/registry-distribution', { credentials: 'include' })
 			]);
 			if (clusterRes.ok) clusters = await clusterRes.json();
 			if (regRes.ok) registryDist = await regRes.json();
-			if (expRes.ok) exposure = await expRes.json();
+			loadHosts();
 		} catch {
 			error = 'Failed to load cluster data';
 		} finally {
@@ -170,12 +169,11 @@
 
 	$effect(() => {
 		if (activeTab === 'images') loadImages();
-		if (activeTab === 'hosts') loadHosts();
 	});
 
 	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
 	const totalContainers = $derived(clusters.reduce((s, c) => s + c.containers, 0));
-	const totalExposed = $derived(clusters.reduce((s, c) => s + c.ingress_count, 0));
+	const uniqueHosts = $derived(new Set(hosts.map((h) => h.host)).size);
 
 	const registrySegments = $derived(
 		registryDist.map((r, i) => ({
@@ -186,11 +184,46 @@
 	);
 	const registryTotal = $derived(registryDist.reduce((s, r) => s + r.image_count, 0));
 
+	const isPrivateIP = (ip: string): boolean => {
+		const parts = ip.split('.').map(Number);
+		if (parts.length !== 4) return false;
+		if (parts[0] === 10) return true;
+		if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+		if (parts[0] === 192 && parts[1] === 168) return true;
+		if (parts[0] === 127) return true;
+		return false;
+	};
+
+	const exposureCounts = $derived.by(() => {
+		const seen = new Map<string, HostRow>();
+		for (const h of hosts) {
+			if (!seen.has(h.host)) seen.set(h.host, h);
+		}
+		let external = 0;
+		let internal = 0;
+		let pending = 0;
+		for (const [host, h] of seen) {
+			const r = hostResolutions[host];
+			if (!r) { pending++; continue; }
+			// DNS resolved — use that
+			if (!r.error) {
+				if (r.is_local) internal++; else external++;
+				continue;
+			}
+			// DNS unresolvable — fall back to LB IP
+			const firstLB = h.lb_ips?.split(',')[0]?.trim();
+			if (firstLB && isPrivateIP(firstLB)) { internal++; continue; }
+			if (firstLB) { external++; continue; }
+			// No DNS, no LB — unknown, count as external
+			external++;
+		}
+		return { external, internal, pending };
+	});
 	const exposureSegments = $derived([
-		{ label: 'Internet', value: exposure.internet_exposed, color: 'var(--red)' },
-		{ label: 'Internal', value: exposure.internal_services, color: 'var(--green)' }
+		{ label: 'External', value: exposureCounts.external, color: 'var(--red)' },
+		{ label: 'Internal', value: exposureCounts.internal, color: 'var(--green)' }
 	]);
-	const exposureTotal = $derived(exposure.internet_exposed + exposure.internal_services);
+	const exposureTotal = $derived(exposureCounts.external + exposureCounts.internal + exposureCounts.pending);
 
 	const timeAgo = (iso: string, _tick: number) => {
 		if (!iso) return '';
@@ -210,6 +243,55 @@
 	};
 
 	const parseTags = (t: string) => t ? t.split(',').filter(Boolean) : [];
+
+	// --- Host filters ---
+	let hostFilterOpen = $state(false);
+	let hostSearch = $state('');
+	let hostSelectedClusters: string[] = $state([]);
+	let hostSelectedNamespaces: string[] = $state([]);
+	let hostSelectedKinds: string[] = $state([]);
+
+	const hostClusterOptions: MultiSelectOption[] = $derived(
+		[...new Set(hosts.map((h) => h.cluster || h.cluster_id))].sort().map((c) => ({ value: c, label: c }))
+	);
+	const hostNamespaceOptions: MultiSelectOption[] = $derived(
+		[...new Set(hosts.map((h) => h.namespace))].sort().map((n) => ({ value: n, label: n }))
+	);
+	const hostKindOptions: MultiSelectOption[] = $derived(
+		[...new Set(hosts.map((h) => h.kind))].sort().map((k) => ({ value: k, label: k }))
+	);
+
+	const hostActiveFilterCount = $derived(
+		(hostSearch.trim() ? 1 : 0) +
+		(hostSelectedClusters.length > 0 ? 1 : 0) +
+		(hostSelectedNamespaces.length > 0 ? 1 : 0) +
+		(hostSelectedKinds.length > 0 ? 1 : 0)
+	);
+
+	const filteredHosts = $derived(
+		hosts.filter((h) => {
+			if (hostSelectedClusters.length > 0 && !hostSelectedClusters.includes(h.cluster || h.cluster_id)) return false;
+			if (hostSelectedNamespaces.length > 0 && !hostSelectedNamespaces.includes(h.namespace)) return false;
+			if (hostSelectedKinds.length > 0 && !hostSelectedKinds.includes(h.kind)) return false;
+			if (hostSearch.trim()) {
+				const q = hostSearch.trim().toLowerCase();
+				const fields = [
+					h.host, h.namespace, h.name,
+					h.cluster, h.cluster_id, h.environment,
+					h.kind, h.ingress_class, h.backends, h.lb_ips
+				];
+				if (!fields.some((f) => f && f.toLowerCase().includes(q))) return false;
+			}
+			return true;
+		})
+	);
+
+	const clearHostFilters = () => {
+		hostSearch = '';
+		hostSelectedClusters = [];
+		hostSelectedNamespaces = [];
+		hostSelectedKinds = [];
+	};
 
 	// --- Sorting ---
 	type SortDir = 'asc' | 'desc';
@@ -252,7 +334,7 @@
 	);
 
 	const sortedHosts = $derived(
-		[...hosts].sort((a, b) => {
+		[...filteredHosts].sort((a, b) => {
 			const primary = cmp(a[hostSortKey], b[hostSortKey], hostSortDir);
 			if (primary !== 0) return primary;
 			return hostSortKey === 'cluster'
@@ -325,10 +407,10 @@
 				<article class="metric-card p-4">
 					<div class="flex items-center gap-2">
 						<Globe class="h-4 w-4 text-[var(--red)]" />
-						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Exposed</h2>
+						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Hosts</h2>
 					</div>
-					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{totalExposed}</p>
-					<p class="mt-1 text-xs text-[var(--text-muted)]">Internet-facing routes</p>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{uniqueHosts}</p>
+					<p class="mt-1 text-xs text-[var(--text-muted)]">Unique hostnames</p>
 				</article>
 			</div>
 
@@ -449,7 +531,81 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style="border: none;">
+				{#if hosts.length > 0}
+					<header class="flex items-start justify-between gap-4">
+						<div>
+							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Hosts</h2>
+							<p class="text-sm text-[var(--text-tertiary)]">
+								Hostnames exposed via Ingress and route resources.
+								{#if hostActiveFilterCount > 0}
+									<span class="text-[var(--text-muted)]">&middot; showing {filteredHosts.length} of {hosts.length}</span>
+								{/if}
+							</p>
+						</div>
+						<button
+							type="button"
+							class="host-filter-toggle"
+							class:active={hostFilterOpen}
+							onclick={() => (hostFilterOpen = !hostFilterOpen)}
+							aria-expanded={hostFilterOpen}
+							aria-label="Toggle filters"
+						>
+							<SlidersHorizontal size={14} />
+							<span>Filters</span>
+							{#if hostActiveFilterCount > 0}
+								<span class="host-filter-badge">{hostActiveFilterCount}</span>
+							{/if}
+						</button>
+					</header>
+
+					{#if hostFilterOpen}
+						<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+							<div class="flex flex-wrap items-start gap-6">
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
+									<div class="relative flex items-center">
+										<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+										<input
+											type="text"
+											class="host-search-input"
+											placeholder="Host, cluster, backend, namespace…"
+											bind:value={hostSearch}
+										/>
+									</div>
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Cluster</span>
+									<MultiSelect bind:selected={hostSelectedClusters} options={hostClusterOptions} placeholder="All clusters" size="sm" />
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Namespace</span>
+									<MultiSelect bind:selected={hostSelectedNamespaces} options={hostNamespaceOptions} placeholder="All namespaces" size="sm" />
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Kind</span>
+									<MultiSelect bind:selected={hostSelectedKinds} options={hostKindOptions} placeholder="All kinds" size="sm" />
+								</div>
+
+								{#if hostActiveFilterCount > 0}
+									<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+										<button
+											type="button"
+											class="host-clear-filters"
+											onclick={clearHostFilters}
+										>
+											Clear all
+										</button>
+									</div>
+								{/if}
+							</div>
+						</div>
+					{/if}
+				{/if}
+
 				{#if hosts.length === 0}
 					<div class="flex flex-col items-center justify-center gap-3 py-16">
 						<Globe class="h-10 w-10 text-[var(--yellow)]" />
@@ -473,7 +629,7 @@
 								{#each sortedHosts as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="border: none;">
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
@@ -506,6 +662,13 @@
 												<span class="w-6 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">lb</span>
 												{#if h.lb_ips}
 													<code class="text-[var(--text-secondary)]">{h.lb_ips}</code>
+													{#if !(resolved && !resolved.error)}
+														{#if isPrivateIP(h.lb_ips.split(',')[0].trim())}
+															<span class="rounded-full bg-[var(--blue)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--blue)]">local</span>
+														{:else}
+															<span class="rounded-full bg-[var(--green)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--green)]">external</span>
+														{/if}
+													{/if}
 												{:else}
 													<span class="text-[var(--text-tertiary)]">&mdash;</span>
 												{/if}
@@ -569,6 +732,89 @@
 
 	:global(.sort-icon.flipped) {
 		transform: rotate(180deg);
+	}
+
+	.host-filter-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.35rem 0.75rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: transparent;
+		color: var(--text-secondary);
+		font-size: 0.75rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+		white-space: nowrap;
+	}
+
+	.host-filter-toggle:hover {
+		color: var(--text-bright);
+		border-color: var(--text-tertiary);
+	}
+
+	.host-filter-toggle.active {
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+		color: var(--accent);
+	}
+
+	.host-filter-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 16px;
+		height: 16px;
+		border-radius: 999px;
+		background: var(--accent);
+		color: var(--bg-hard);
+		font-size: 0.6rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0 0.25rem;
+	}
+
+	.host-search-input {
+		height: 28px;
+		width: 100%;
+		min-width: 320px;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		padding: 0 0.6rem 0 1.7rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		transition: border-color 150ms ease, box-shadow 150ms ease;
+	}
+
+	.host-search-input::placeholder {
+		color: var(--text-muted);
+	}
+
+	.host-search-input:focus {
+		outline: none;
+		border-color: var(--accent);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+	}
+
+	.host-clear-filters {
+		padding: 0.3rem 0.75rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+		background: transparent;
+		color: var(--accent);
+		font-size: 0.75rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+	}
+
+	.host-clear-filters:hover {
+		background: color-mix(in srgb, var(--red) 14%, transparent);
+		border-color: color-mix(in srgb, var(--red) 50%, transparent);
+		color: var(--red);
 	}
 
 	.loading-bar {
