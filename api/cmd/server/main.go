@@ -21,6 +21,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
@@ -81,6 +82,7 @@ func run() error {
 		&secretprobe.SecretProbe{},
 		&secretprobe.ProbeAuditLog{},
 		&secretprobe.SecretDismissal{},
+		&scam.Record{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
