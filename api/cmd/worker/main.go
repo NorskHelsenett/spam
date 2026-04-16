@@ -14,6 +14,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/poller"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
@@ -261,9 +262,13 @@ func run() error {
 
 				// Determine which job types to claim based on running runs.
 				// Per-provider circuit breaking is handled in processJob itself.
-				var excludeTypes []jobs.JobType
+				//
+				// IMAGE_SCAN jobs are always excluded: they are leased and
+				// executed by the dedicated spam-image-scanner pod, which
+				// keeps the grype/trivy vuln DB warm across many digests.
+				excludeTypes := []jobs.JobType{jobs.JobTypeImageScan}
 				if runningRuns >= int64(cfg.Concurrency) {
-					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
+					excludeTypes = append(excludeTypes, jobs.JobTypeCreateRun)
 				}
 
 				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now(), excludeTypes...)

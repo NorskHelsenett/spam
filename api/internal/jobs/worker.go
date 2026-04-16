@@ -80,6 +80,67 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 	return claimed, nil
 }
 
+// ClaimNextJobOfType is the inclusive counterpart to ClaimNextJob: it only
+// claims jobs of the given type. Used by dedicated scanner pods
+// (image-scanner, trivy-scanner) that own a specific job type end-to-end and
+// should not accidentally pick up unrelated work.
+func ClaimNextJobOfType(ctx context.Context, db *gorm.DB, workerID string, now time.Time, jobType JobType) (*Job, error) {
+	var claimed *Job
+
+	if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var job Job
+		err := tx.
+			Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+			Where("type = ? AND status IN ? AND run_at <= ?", jobType,
+				[]JobStatus{JobStatusQueued, JobStatusRetry}, now).
+			Order("run_at asc, created_at asc").
+			First(&job).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+
+		previous := job.Status
+		attemptedAt := now
+		updates := map[string]interface{}{
+			"status":            JobStatusRunning,
+			"locked_at":         attemptedAt,
+			"locked_by":         workerID,
+			"attempts":          job.Attempts + 1,
+			"last_attempted_at": attemptedAt,
+			"updated_at":        attemptedAt,
+		}
+		if err := tx.Model(&job).Updates(updates).Error; err != nil {
+			return err
+		}
+
+		job.Status = JobStatusRunning
+		job.LockedAt = &attemptedAt
+		job.LockedBy = workerID
+		job.Attempts++
+		job.LastAttemptedAt = &attemptedAt
+
+		if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{
+			JobID:       job.ID,
+			Type:        job.Type,
+			Status:      job.Status,
+			Previous:    previous,
+			Attempts:    job.Attempts,
+			MaxAttempts: job.MaxAttempts,
+			RunAt:       job.RunAt,
+		}); err != nil {
+			return err
+		}
+		claimed = &job
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return claimed, nil
+}
+
 // CountRunningByType returns the number of jobs of a given type currently in RUNNING status.
 func CountRunningByType(ctx context.Context, db *gorm.DB, jobType JobType) (int64, error) {
 	var count int64
