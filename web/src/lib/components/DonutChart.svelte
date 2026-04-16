@@ -134,21 +134,20 @@
 				</div>
 			{/if}
 		</div>
-		<div class="flex-1 space-y-2">
+		<div class="flex-1 space-y-0.5">
 			{#each segmentData as seg (seg.index)}
 				<button
 					type="button"
-					class="flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-xs text-[var(--text-tertiary)] transition"
-					class:bg-[var(--hover-bg)]={hoveredIndex === seg.index}
-					class:bg-[var(--card-bg)]={hoveredIndex !== seg.index}
+					class="flex w-full items-center justify-between rounded-xl px-3 py-1.5 text-left text-xs text-[var(--text-tertiary)] transition"
+					style={hoveredIndex === seg.index ? `background: color-mix(in srgb, ${seg.color} 15%, transparent)` : ''}
 					on:mouseenter={() => (hoveredIndex = seg.index)}
 					on:mouseleave={() => (hoveredIndex = null)}
 				>
 					<span class="inline-flex min-w-0 items-center gap-2">
 						<span class="h-2.5 w-2.5 shrink-0 rounded-full" style="background: {seg.color}"></span>
-						<span class="truncate">{seg.label}</span>
+						<span class={hoveredIndex === seg.index ? 'whitespace-normal break-all' : 'truncate'}>{seg.label}</span>
 					</span>
-					<span class="shrink-0 text-[var(--text-bright)]">{seg.value}</span>
+					<span class="shrink-0 pl-2 text-[var(--text-bright)]">{seg.value}</span>
 				</button>
 			{/each}
 		</div>
