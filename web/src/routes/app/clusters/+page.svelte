@@ -141,8 +141,8 @@
 				fetch('/api/clusters/summary', { credentials: 'include' }),
 				fetch('/api/clusters/registry-distribution', { credentials: 'include' })
 			]);
-			if (clusterRes.ok) clusters = await clusterRes.json();
-			if (regRes.ok) registryDist = await regRes.json();
+			if (clusterRes.ok) clusters = (await clusterRes.json()) ?? [];
+			if (regRes.ok) registryDist = (await regRes.json()) ?? [];
 			loadHosts();
 		} catch {
 			error = 'Failed to load cluster data';
@@ -155,7 +155,7 @@
 		if (imagesFetched) return;
 		try {
 			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
-			if (res.ok) imageDetails = await res.json();
+			if (res.ok) imageDetails = (await res.json()) ?? [];
 			imagesFetched = true;
 		} catch { /* silent */ }
 	};
@@ -165,7 +165,7 @@
 		try {
 			const res = await fetch('/api/clusters/hosts', { credentials: 'include' });
 			if (res.ok) {
-				hosts = await res.json();
+				hosts = (await res.json()) ?? [];
 			}
 			hostsFetched = true;
 		} catch { /* silent */ }
@@ -492,10 +492,11 @@
 		{#if loading}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
 				<Server class="h-12 w-12 text-[var(--yellow)]" />
+				<p class="text-base font-medium text-[var(--text-secondary)]">Waiting for cluster data</p>
+				<p class="text-sm text-[var(--text-muted)]">Connecting to SCAM agents...</p>
 				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
 					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
 				</div>
-				<!-- <p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Waiting for first probe</p> -->
 			</div>
 		{:else if error}
 			<div class="flex flex-col items-center justify-center py-24">
