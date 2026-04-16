@@ -3,6 +3,7 @@ package scam
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -294,6 +295,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			ClusterID   string    `json:"cluster_id"`
 			Environment string    `json:"environment"`
 			TLS         bool      `json:"tls"`
+			LBIPs       string    `json:"lb_ips"`
 			LastSeen    time.Time `json:"last_seen"`
 		}
 		var rows []row
@@ -311,6 +313,10 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'cluster_id' AS cluster_id,
 					data->>'environment' AS environment,
 					jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
+					COALESCE(
+						(SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip),
+						''
+					) AS lb_ips,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' = 'Ingress'
@@ -327,6 +333,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'cluster_id' AS cluster_id,
 					data->>'environment' AS environment,
 					FALSE AS tls,
+					'' AS lb_ips,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
@@ -344,6 +351,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'cluster_id' AS cluster_id,
 					data->>'environment' AS environment,
 					COALESCE(data->>'tls_secret', '') != '' AS tls,
+					'' AS lb_ips,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
@@ -351,7 +359,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
-			SELECT host, kind, name, namespace, cluster, cluster_id, environment, tls, last_seen
+			SELECT host, kind, name, namespace, cluster, cluster_id, environment, tls, lb_ips, last_seen
 			FROM (
 				SELECT * FROM ingress_hosts
 				UNION ALL
@@ -368,6 +376,68 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 		}
 		writeJSON(w, http.StatusOK, rows)
 	}
+}
+
+// ResolveHostHandler does a DNS lookup for a given host and returns the IPs.
+func ResolveHostHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host := r.URL.Query().Get("host")
+		if host == "" {
+			http.Error(w, "missing host parameter", http.StatusBadRequest)
+			return
+		}
+
+		type result struct {
+			Host     string   `json:"host"`
+			IPs      []string `json:"ips"`
+			IsLocal  bool     `json:"is_local"`
+			Error    string   `json:"error,omitempty"`
+		}
+
+		ips, err := net.LookupHost(host)
+		if err != nil {
+			writeJSON(w, http.StatusOK, result{Host: host, Error: "unresolvable"})
+			return
+		}
+
+		local := false
+		if len(ips) > 0 {
+			local = isPrivateIP(ips[0])
+		}
+
+		writeJSON(w, http.StatusOK, result{Host: host, IPs: ips, IsLocal: local})
+	}
+}
+
+func isPrivateIP(ipStr string) bool {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return false
+	}
+	privateRanges := []struct{ start, end net.IP }{
+		{net.ParseIP("10.0.0.0"), net.ParseIP("10.255.255.255")},
+		{net.ParseIP("172.16.0.0"), net.ParseIP("172.31.255.255")},
+		{net.ParseIP("192.168.0.0"), net.ParseIP("192.168.255.255")},
+		{net.ParseIP("127.0.0.0"), net.ParseIP("127.255.255.255")},
+	}
+	for _, r := range privateRanges {
+		if bytesCompare(ip.To16(), r.start.To16()) >= 0 && bytesCompare(ip.To16(), r.end.To16()) <= 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func bytesCompare(a, b net.IP) int {
+	for i := range a {
+		if a[i] < b[i] {
+			return -1
+		}
+		if a[i] > b[i] {
+			return 1
+		}
+	}
+	return 0
 }
 
 type ingestResponse struct {

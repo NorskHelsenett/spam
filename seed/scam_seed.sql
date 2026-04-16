@@ -201,8 +201,8 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "cluster":"t-prod-001","cluster_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","environment":"production",
   "uid":"22222222-3333-4444-5555-bbbbbbbbbbbb","namespace":"spam","name":"spam",
   "labels":{"app.kubernetes.io/name":"spam"},"ingress_class":"nginx",
-  "rules":[{"host":"spam.example.com","paths":[{"path":"/","path_type":"Prefix","backend_kind":"Service","backend_name":"spam","backend_port":"8080"}]}],
-  "tls":[{"hosts":["spam.example.com"],"secret":"spam-tls"}],
+  "rules":[{"host":"spam.sikkerhet.nhn.no","paths":[{"path":"/","path_type":"Prefix","backend_kind":"Service","backend_name":"spam","backend_port":"8080"}]}],
+  "tls":[{"hosts":["spam.sikkerhet.nhn.no"],"secret":"spam-tls"}],
   "lb_ips":["10.0.1.100"],"lb_hostnames":[]
 }', NOW() - INTERVAL '5 minutes');
 
