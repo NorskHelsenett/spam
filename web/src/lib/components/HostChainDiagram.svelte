@@ -17,6 +17,7 @@
 		ports: { name?: string; port: number; target_port?: string; protocol?: string }[];
 		selector: Record<string, string>;
 		pod_count: number;
+		endpoint_ips?: string[];
 	};
 	export type ChainPodGroup = {
 		owner: string;
@@ -109,6 +110,7 @@
 	// --- Compute individual pod nodes per group ---
 	type PodNode = { x: number; y: number; pg: ChainPodGroup; isCollapsed: boolean; replicaIndex: number };
 	type OwnerGroup = { owner: string; ownerKind: string; nodes: PodNode[]; y1: number; y2: number; pg: ChainPodGroup };
+	type EndpointNode = { x: number; y: number; ip: string; svcName: string };
 
 	let layout = $derived.by(() => {
 		const services = chain.services ?? [];
@@ -143,16 +145,18 @@
 			return pg.pod_count <= MAX_INDIVIDUAL_PODS ? Math.max(pg.pod_count, 1) : 1;
 		}
 
-		// Each service row's height = max(service node height, its pod group height)
-		type SvcRow = { svc: ChainService; pods: ChainPodGroup[]; podSlots: number; rowH: number };
+		// Each service row's height = max(service node height, its pod/endpoint group height)
+		type SvcRow = { svc: ChainService; pods: ChainPodGroup[]; podSlots: number; rowH: number; hasEndpoints: boolean };
 		const svcRows: SvcRow[] = [];
 		for (const svc of services) {
 			const matched = svcToPods.get(svc.name) ?? [];
+			const hasEndpoints = matched.length === 0 && (svc.endpoint_ips?.length ?? 0) > 0;
 			let slots = 0;
 			for (const pg of matched) slots += podSlotCount(pg);
+			if (hasEndpoints) slots = Math.min(svc.endpoint_ips!.length, MAX_INDIVIDUAL_PODS);
 			const podH = slots > 0 ? slots * POD_SLOT_H - REPLICA_GAP : 0;
 			const rowH = Math.max(ICON_R * 2 + SUBLABEL_OFFSET, podH + SUBLABEL_OFFSET);
-			svcRows.push({ svc, pods: matched, podSlots: slots, rowH });
+			svcRows.push({ svc, pods: matched, podSlots: slots, rowH, hasEndpoints });
 		}
 
 		// Orphan pod rows
@@ -195,11 +199,12 @@
 		const totalHeight = maxColHeight + PAD.top + PAD.bottom;
 		const totalWidth = podX + SMALL_R + PAD.right + 60;
 
-		// --- Position services, pods, and ingresses aligned by row ---
+		// --- Position services, pods, endpoints, and ingresses aligned by row ---
 		type IngPos = { x: number; y: number; ing: ChainIngress };
 		const ingPositions: IngPos[] = [];
 		const svcPositions: { x: number; y: number; svc: ChainService }[] = [];
 		const ownerGroups: OwnerGroup[] = [];
+		const endpointNodes: EndpointNode[] = [];
 		let curY = PAD.top + (maxColHeight - contentH) / 2;
 
 		for (const row of svcRows) {
@@ -219,23 +224,32 @@
 				}
 			}
 
-			// Position pods centered on this service row
+			// Position pods or endpoint IPs centered on this service row
 			let podY = curY + (row.rowH - (row.podSlots * POD_SLOT_H - (row.podSlots > 0 ? REPLICA_GAP : 0))) / 2 + SMALL_R;
-			for (const pg of row.pods) {
-				const nodes: PodNode[] = [];
-				const slots = podSlotCount(pg);
-				if (pg.pod_count <= MAX_INDIVIDUAL_PODS) {
-					for (let ri = 0; ri < Math.max(pg.pod_count, 1); ri++) {
-						nodes.push({ x: podX, y: podY, pg, isCollapsed: false, replicaIndex: ri });
-						podY += POD_SLOT_H;
-					}
-				} else {
-					nodes.push({ x: podX, y: podY, pg, isCollapsed: true, replicaIndex: 0 });
+			if (row.hasEndpoints) {
+				// External service: show endpoint IPs instead of pods
+				const ips = row.svc.endpoint_ips ?? [];
+				for (const ip of ips.slice(0, MAX_INDIVIDUAL_PODS)) {
+					endpointNodes.push({ x: podX, y: podY, ip, svcName: row.svc.name });
 					podY += POD_SLOT_H;
 				}
-				const y1 = nodes[0].y - SMALL_R - 6;
-				const y2 = nodes[nodes.length - 1].y + SMALL_R + SUBLABEL_OFFSET + 2;
-				ownerGroups.push({ owner: pg.owner, ownerKind: pg.owner_kind, nodes, y1, y2, pg });
+			} else {
+				for (const pg of row.pods) {
+					const nodes: PodNode[] = [];
+					const slots = podSlotCount(pg);
+					if (pg.pod_count <= MAX_INDIVIDUAL_PODS) {
+						for (let ri = 0; ri < Math.max(pg.pod_count, 1); ri++) {
+							nodes.push({ x: podX, y: podY, pg, isCollapsed: false, replicaIndex: ri });
+							podY += POD_SLOT_H;
+						}
+					} else {
+						nodes.push({ x: podX, y: podY, pg, isCollapsed: true, replicaIndex: 0 });
+						podY += POD_SLOT_H;
+					}
+					const y1 = nodes[0].y - SMALL_R - 6;
+					const y2 = nodes[nodes.length - 1].y + SMALL_R + SUBLABEL_OFFSET + 2;
+					ownerGroups.push({ owner: pg.owner, ownerKind: pg.owner_kind, nodes, y1, y2, pg });
+				}
 			}
 			curY += row.rowH + ROW_GAP;
 		}
@@ -277,6 +291,12 @@
 					}
 				}
 			}
+			// Edges to endpoint IP nodes
+			for (const ep of endpointNodes) {
+				if (ep.svcName === sp.svc.name) {
+					svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: ep.x - SMALL_R - 4, py: ep.y });
+				}
+			}
 		}
 
 		const ingToSvcEdges: { sx: number; sy: number; tx: number; ty: number }[] = [];
@@ -299,7 +319,7 @@
 			}
 		}
 
-		return { totalWidth, totalHeight, ingPositions, svcPositions, ownerGroups, svcToPodEdges, ingToSvcEdges };
+		return { totalWidth, totalHeight, ingPositions, svcPositions, ownerGroups, endpointNodes, svcToPodEdges, ingToSvcEdges };
 	});
 
 	// --- Popover ---
@@ -431,6 +451,21 @@
 		{@const lastNode = og.nodes[og.nodes.length - 1]}
 		<text x={lastNode.x} y={lastNode.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(og.owner, 22)}</text>
 		<text x={lastNode.x} y={lastNode.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">{og.ownerKind}</text>
+	{/each}
+
+	<!-- Endpoint IP nodes (external services) -->
+	{#each layout.endpointNodes as ep}
+		{@const svc = chain.services?.find(s => s.name === ep.svcName)}
+		<g>
+			<circle cx={ep.x} cy={ep.y} r={SMALL_R} fill="var(--orange)" opacity="0.15" stroke="var(--orange)" stroke-width="1.2" />
+			<g transform="translate({ep.x - 5}, {ep.y - 5})">
+				<rect x="1" y="0" width="8" height="10" rx="1" fill="none" stroke="var(--orange)" stroke-width="1" />
+				<line x1="1" y1="3" x2="9" y2="3" stroke="var(--orange)" stroke-width="0.7" />
+				<line x1="1" y1="6" x2="9" y2="6" stroke="var(--orange)" stroke-width="0.7" />
+			</g>
+			<text x={ep.x + SMALL_R + 6} y={ep.y + 3} fill="var(--orange)" font-size="8" font-weight="500">{ep.ip}{svc?.ports?.length ? ':' + svc.ports.map(p => p.port).join(',') : ''}</text>
+			<text x={ep.x + SMALL_R + 6} y={ep.y + 13} fill="var(--fg4)" font-size="7">external</text>
+		</g>
 	{/each}
 
 	<!-- Click-away on empty SVG area -->

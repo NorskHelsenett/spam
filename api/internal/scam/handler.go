@@ -608,6 +608,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			ServiceType string            `json:"service_type"`
 			Ports       json.RawMessage   `json:"ports"`
 			Selector    map[string]string `json:"selector"`
+			EndpointIPs []string          `json:"endpoint_ips,omitempty"`
 		}
 		type chainIng struct {
 			Host         string `json:"host"`
@@ -675,6 +676,53 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			c.Pods = append(c.Pods, pg)
 		}
 
+		// Populate EndpointSlice IPs for services that have no matching pods
+		type epIPRow struct {
+			Namespace   string `json:"namespace"`
+			ServiceName string `gorm:"column:service_name"`
+			Address     string `gorm:"column:address"`
+		}
+		var epIPs []epIPRow
+		db.Raw(liveCTE + `
+			SELECT
+				data->>'namespace' AS namespace,
+				data->>'service_name' AS service_name,
+				jsonb_array_elements_text(
+					jsonb_array_elements(data->'endpoints')->'addresses'
+				) AS address
+			FROM live
+			WHERE data->>'kind' = 'EndpointSlice'
+			  AND data->>'cluster_id' = ?
+		`, clusterID).Scan(&epIPs)
+
+		// Build a map: namespace/service_name → IPs
+		epMap := make(map[string][]string)
+		for _, ep := range epIPs {
+			key := ep.Namespace + "/" + ep.ServiceName
+			if ep.Address != "" {
+				epMap[key] = append(epMap[key], ep.Address)
+			}
+		}
+
+		// Attach endpoint IPs to services that have no pods connected
+		for ns, chain := range nsMap {
+			// Collect pod owners connected to services in this namespace
+			connectedSvcs := make(map[string]bool)
+			for _, pg := range chain.Pods {
+				for _, sn := range pg.ServiceNames {
+					connectedSvcs[sn] = true
+				}
+			}
+			for i, svc := range chain.Services {
+				if !connectedSvcs[svc.Name] {
+					key := ns + "/" + svc.Name
+					if ips, ok := epMap[key]; ok {
+						chain.Services[i].EndpointIPs = ips
+					}
+				}
+			}
+		}
+
 		// Look up cluster name
 		var clusterName string
 		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
@@ -738,6 +786,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Ports       []chainPort       `json:"ports"`
 			Selector    map[string]string `json:"selector"`
 			PodCount    int64             `json:"pod_count"`
+			EndpointIPs []string          `json:"endpoint_ips,omitempty"`
 		}
 		type chainContainer struct {
 			Name     string `json:"name"`
@@ -1044,6 +1093,33 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					_ = json.Unmarshal([]byte(es.SelectorJSON), &cs.Selector)
 				}
 				resp.Services = append(resp.Services, cs)
+			}
+		}
+
+		// --- Step 5: For services with no pods, look up EndpointSlice IPs ---
+		for i := range resp.Services {
+			if resp.Services[i].PodCount == 0 {
+				type epRow struct {
+					Addresses string `gorm:"column:addresses"`
+				}
+				var eps []epRow
+				db.Raw(liveCTE+`
+					SELECT jsonb_array_elements_text(
+						jsonb_array_elements(data->'endpoints')->'addresses'
+					) AS addresses
+					FROM live
+					WHERE data->>'kind' = 'EndpointSlice'
+					  AND data->>'cluster_id' = ?
+					  AND data->>'namespace' = ?
+					  AND data->>'service_name' = ?
+				`, clusterID, namespace, resp.Services[i].Name).Scan(&eps)
+				seen := make(map[string]bool)
+				for _, ep := range eps {
+					if ep.Addresses != "" && !seen[ep.Addresses] {
+						resp.Services[i].EndpointIPs = append(resp.Services[i].EndpointIPs, ep.Addresses)
+						seen[ep.Addresses] = true
+					}
+				}
 			}
 		}
 

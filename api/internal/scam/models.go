@@ -56,6 +56,7 @@ var validKinds = map[string]bool{
 	"IngressRoute":    true,
 	"IngressRouteTCP": true,
 	"IngressRouteUDP": true,
+	"EndpointSlice":   true,
 }
 
 // validEvents is the set of event types SCAM emits.
