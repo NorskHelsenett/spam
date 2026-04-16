@@ -541,7 +541,7 @@
 	<!-- Tables -->
 	{#if !loading && !error && clusters.length > 0}
 		{#if activeTab === 'clusters'}
-			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '600px' : undefined}>
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
 				<header class="flex items-start justify-between gap-4">
 					<div>
 						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
@@ -637,7 +637,7 @@
 
 				{#if clusterDrawerOpen && clusterDrawerRow}
 					<div
-						class="absolute inset-y-0 right-0 z-10 w-[780px] rounded-l-[10px] border-l border-[var(--border-color)] shadow-xl"
+						class="fixed inset-y-0 right-0 z-50 flex w-[780px] flex-col overflow-hidden rounded-l-[10px] border-l border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
 						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
 						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 					>
@@ -757,7 +757,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '600px' : undefined}>
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
 				{#if hosts.length > 0}
 					<header class="flex items-start justify-between gap-4">
 						<div>
@@ -936,7 +936,7 @@
 
 				{#if chainDrawerOpen && chainDrawerRow}
 					<div
-						class="absolute inset-y-0 right-0 z-10 w-[780px] rounded-l-[10px] border-l border-[var(--border-color)] shadow-xl"
+						class="fixed inset-y-0 right-0 z-50 flex w-[780px] flex-col overflow-hidden rounded-l-[10px] border-l border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
 						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
 						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 					>
