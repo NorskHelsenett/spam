@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/events"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -60,6 +61,13 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 				http.Error(w, "database error", http.StatusInternalServerError)
 				return
 			}
+
+			// Notify connected dashboards so the clusters page updates live.
+			payload, _ := json.Marshal(map[string]any{
+				"accepted": len(records),
+				"rejected": rejected,
+			})
+			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{

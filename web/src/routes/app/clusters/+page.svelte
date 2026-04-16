@@ -44,6 +44,10 @@
 	onMount(() => {
 		if (!browser) return;
 		load();
+
+		const es = new EventSource('/api/app/stream');
+		es.addEventListener('scam_ingest', () => load());
+		return () => es.close();
 	});
 
 	const totalImages = $derived(
@@ -77,9 +81,25 @@
 		</header>
 
 		{#if loading}
-			<p class="text-sm text-[var(--text-muted)]">Loading...</p>
+			<div class="flex flex-col items-center justify-center gap-5 py-24">
+				<Server class="h-12 w-12 text-[var(--yellow)]" />
+				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
+					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
+				</div>
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Waiting for first probe</p>
+			</div>
 		{:else if error}
-			<p class="text-sm text-[var(--error)]">{error}</p>
+			<div class="flex flex-col items-center justify-center py-24">
+				<Server class="h-12 w-12 text-[var(--error)]" />
+				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">{error}</p>
+			</div>
+		{:else if clusters.length === 0}
+			<div class="flex flex-col items-center justify-center py-24">
+				<Server class="h-12 w-12 text-[var(--text-muted)]" />
+				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
+				<p class="mt-1 text-sm text-[var(--text-muted)]">Deploy a SCAM agent to start collecting container inventory.</p>
+				<p class="mt-4 text-xs text-[var(--text-muted)]">Agents POST to <code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5">/api/scam/callcenter</code></p>
+			</div>
 		{:else}
 			<div class="grid gap-4 sm:grid-cols-3">
 				<article class="metric-card p-5 sm:p-6">
@@ -108,42 +128,40 @@
 				</article>
 			</div>
 
-			{#if clusters.length > 0}
-				<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-							<tr>
-								<th class="px-5 py-3 text-left">Cluster</th>
-								<th class="px-5 py-3 text-left">Environment</th>
-								<th class="px-5 py-3 text-right">Images</th>
-								<th class="px-5 py-3 text-right">Containers</th>
-								<th class="px-5 py-3 text-right">Namespaces</th>
-								<th class="px-5 py-3 text-left">Last seen</th>
+			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-5 py-3 text-left">Cluster</th>
+							<th class="px-5 py-3 text-left">Environment</th>
+							<th class="px-5 py-3 text-right">Images</th>
+							<th class="px-5 py-3 text-right">Containers</th>
+							<th class="px-5 py-3 text-right">Namespaces</th>
+							<th class="px-5 py-3 text-left">Last seen</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+						{#each clusters as c}
+							<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+								<td class="px-5 py-3">
+									<span class="font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</span>
+								</td>
+								<td class="px-5 py-3">
+									{#if c.environment}
+										<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{c.environment}</span>
+									{:else}
+										<span class="text-[var(--text-muted)]">&mdash;</span>
+									{/if}
+								</td>
+								<td class="px-5 py-3 text-right font-semibold">{c.images}</td>
+								<td class="px-5 py-3 text-right">{c.containers}</td>
+								<td class="px-5 py-3 text-right">{c.namespaces}</td>
+								<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(c.last_seen)}</td>
 							</tr>
-						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-							{#each clusters as c}
-								<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-									<td class="px-5 py-3">
-										<span class="font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</span>
-									</td>
-									<td class="px-5 py-3">
-										{#if c.environment}
-											<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{c.environment}</span>
-										{:else}
-											<span class="text-[var(--text-muted)]">&mdash;</span>
-										{/if}
-									</td>
-									<td class="px-5 py-3 text-right font-semibold">{c.images}</td>
-									<td class="px-5 py-3 text-right">{c.containers}</td>
-									<td class="px-5 py-3 text-right">{c.namespaces}</td>
-									<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(c.last_seen)}</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
+						{/each}
+					</tbody>
+				</table>
+			</div>
 
 			{#if images.length > 0}
 				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Images by registry</h2>
@@ -174,14 +192,25 @@
 					</table>
 				</div>
 			{/if}
-
-			{#if clusters.length === 0}
-				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-8 text-center">
-					<Server class="mx-auto h-10 w-10 text-[var(--text-muted)]" />
-					<p class="mt-4 text-sm text-[var(--text-secondary)]">No cluster data yet. Deploy a SCAM agent to start collecting.</p>
-					<p class="mt-1 text-xs text-[var(--text-muted)]">Agents POST to <code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5">/api/scam/callcenter</code></p>
-				</div>
-			{/if}
 		{/if}
 	</section>
 </div>
+
+<style>
+	.loading-bar {
+		position: relative;
+		width: 35%;
+		animation: slide 2s linear infinite alternate;
+	}
+
+	@keyframes slide {
+		0% {
+			left: 0%;
+			transform: translateX(-95%);
+		}
+		100% {
+			left: 100%;
+			transform: translateX(-5%);
+		}
+	}
+</style>
