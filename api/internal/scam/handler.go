@@ -411,7 +411,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				      AND s.data->>'namespace' = h.namespace
 				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
 				      AND jsonb_typeof(s.data->'selector') = 'object'
-				      AND c.data->'pod_labels' @> s.data->'selector'
+				      AND (c.data->'pod_labels') @> (s.data->'selector')
 				  )
 			) w ON true
 			WHERE h.host IS NOT NULL AND h.host != ''
