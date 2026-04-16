@@ -531,7 +531,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style="border: none;">
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
 				{#if hosts.length > 0}
 					<header class="flex items-start justify-between gap-4">
 						<div>
