@@ -641,7 +641,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
-				  AND data->>'name' = ANY(?)
+				  AND data->>'name' IN (?)
 			`, clusterID, namespace, backends).Scan(&svcRows).Error
 			if err != nil {
 				log.Printf("HostChainHandler service query error: %v", err)

@@ -909,7 +909,7 @@
 
 				{#if chainDrawerOpen && chainDrawerRow}
 					<div
-						class="absolute inset-y-0 right-0 z-10 w-[780px] border-l border-[var(--border-color)] shadow-xl"
+						class="absolute inset-y-0 right-0 z-10 w-[780px] rounded-l-[10px] border-l border-[var(--border-color)] shadow-xl"
 						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
 						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 					>
