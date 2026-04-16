@@ -10,6 +10,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
+	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -45,6 +46,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 	// Health check endpoint without middleware to avoid noise in logs
 	r.Get("/api/healthz", health.Handler(db))
+
+	// SCAM ingest — open endpoint, no auth. Agents POST records here.
+	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db))
 
 	// SSE / long-lived streaming endpoints — registered without the 60 s timeout
 	// so the server doesn't kill the connection mid-stream.
@@ -159,6 +163,10 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/providers/gitea/{owner}/repos", uiapi.GiteaReposHandler(authService, providerStore, appCache, db))
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
+
+				// SCAM query endpoints (authenticated)
+				api.Get("/scam/clusters", scam.ClusterSummaryHandler(db))
+				api.Get("/scam/images", scam.ImageSummaryHandler(db))
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
