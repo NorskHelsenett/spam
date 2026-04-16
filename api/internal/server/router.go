@@ -170,6 +170,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/clusters/exposure", scam.ExposureHandler(db))
 				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
 				api.Get("/clusters/hosts", scam.HostsHandler(db))
+				api.Get("/clusters/hosts/chain", scam.HostChainHandler(db))
 				api.Get("/clusters/hosts/resolve", scam.ResolveHostHandler())
 				api.Get("/clusters/hosts/meta", scam.HostMetaHandler(appCache))
 				api.Get("/clusters/hosts/favicon", scam.HostFaviconHandler(appCache))
