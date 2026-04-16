@@ -166,7 +166,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 				// SCAM query endpoints (authenticated)
 				api.Get("/scam/clusters", scam.ClusterSummaryHandler(db))
-				api.Get("/scam/images", scam.ImageSummaryHandler(db))
+				api.Get("/scam/registry-distribution", scam.RegistryDistributionHandler(db))
+				api.Get("/scam/exposure", scam.ExposureHandler(db))
+				api.Get("/scam/images/detail", scam.ImageDetailHandler(db))
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
