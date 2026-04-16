@@ -131,13 +131,25 @@
 							{#if pg.containers?.length}
 								<div class="mt-1.5 space-y-0.5">
 									{#each pg.containers as c}
-									<div class="text-xs">
-										<code class="text-[var(--text-secondary)]">{c.registry ? c.registry + '/' : ''}{c.image}{c.tag ? ':' + c.tag : ''}</code>
+									<div class="rounded bg-[var(--bg2)]/40 px-2.5 py-1.5 text-xs">
+										<div class="flex items-baseline gap-1">
+											<span class="text-[var(--text-muted)]">image</span>
+											<code class="text-[var(--text-bright)]">{c.registry ? c.registry + '/' : ''}{c.image}</code>
+										</div>
+										{#if c.tag}
+											<div class="mt-0.5 flex items-baseline gap-1">
+												<span class="text-[var(--text-muted)]">tag</span>
+												<code class="text-[var(--green)]">{c.tag}</code>
+											</div>
+										{/if}
 										{#if c.digest}
-											<div class="ml-0 mt-0.5 truncate text-[10px] text-[var(--text-muted)]">@{c.digest}</div>
+											<div class="mt-0.5 flex items-baseline gap-1">
+												<span class="text-[var(--text-muted)]">digest</span>
+												<code class="truncate text-[var(--text-tertiary)]">{c.digest}</code>
+											</div>
 										{/if}
 									</div>
-									{/each}
+								{/each}
 								</div>
 							{/if}
 						</div>
