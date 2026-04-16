@@ -638,8 +638,7 @@
 				{#if clusterDrawerOpen && clusterDrawerRow}
 					<div
 						class="fixed top-2 bottom-2 right-2 z-50 flex w-[780px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
-						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
-						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
+						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
 					>
 						<ClusterChainDrawer
 							cluster={clusterDrawerRow.cluster}
@@ -937,8 +936,7 @@
 				{#if chainDrawerOpen && chainDrawerRow}
 					<div
 						class="fixed top-2 bottom-2 right-2 z-50 flex w-[780px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
-						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
-						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
+						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
 					>
 						<HostChainDrawer
 							host={chainDrawerRow.host}
