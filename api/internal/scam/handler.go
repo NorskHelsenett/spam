@@ -983,6 +983,74 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
+		// --- Step 4: Find additional services that select the same pods ---
+		// This picks up sibling services like gitea-ssh (LoadBalancer) that
+		// share the same pod selector as the ingress-backed gitea-http.
+		if len(resp.Pods) > 0 {
+			knownSvcs := make(map[string]bool)
+			for _, s := range resp.Services {
+				knownSvcs[s.Name] = true
+			}
+			type extraSvcRow struct {
+				Name         string `json:"name"`
+				Namespace    string `json:"namespace"`
+				ServiceType  string `json:"service_type"`
+				PortsJSON    string `gorm:"column:ports_json"`
+				SelectorJSON string `gorm:"column:selector_json"`
+			}
+			var extraSvcs []extraSvcRow
+			db.Raw(`
+				SELECT DISTINCT
+					s.data->>'name' AS name,
+					s.data->>'namespace' AS namespace,
+					COALESCE(s.data->>'service_type', '') AS service_type,
+					COALESCE(s.data->'ports'::text, '[]') AS ports_json,
+					COALESCE(s.data->'selector'::text, '{}') AS selector_json
+				FROM cluster_record s, cluster_record c
+				WHERE s.data->>'kind' = 'Service'
+				  AND s.data->>'msg' != 'DELETE'
+				  AND s.data->>'cluster_id' = ?
+				  AND s.data->>'namespace' = ?
+				  AND s.data->>'service_type' IN ('LoadBalancer', 'NodePort')
+				  AND c.data->>'kind' = 'Container'
+				  AND c.data->>'msg' != 'DELETE'
+				  AND c.data->>'pod_phase' = 'Running'
+				  AND c.data->>'cluster_id' = ?
+				  AND c.data->>'namespace' = ?
+				  AND jsonb_typeof(s.data->'selector') = 'object'
+				  AND (c.data->'pod_labels') @> (s.data->'selector')
+				  AND c.data->>'owner' IN (?)
+			`, clusterID, namespace, clusterID, namespace,
+				func() []string {
+					owners := make([]string, 0)
+					seen := make(map[string]bool)
+					for _, p := range resp.Pods {
+						if !seen[p.Owner] {
+							owners = append(owners, p.Owner)
+							seen[p.Owner] = true
+						}
+					}
+					return owners
+				}(),
+			).Scan(&extraSvcs)
+
+			for _, es := range extraSvcs {
+				if knownSvcs[es.Name] {
+					continue
+				}
+				cs := chainService{
+					Name: es.Name, Namespace: es.Namespace, ServiceType: es.ServiceType,
+				}
+				if es.PortsJSON != "" {
+					_ = json.Unmarshal([]byte(es.PortsJSON), &cs.Ports)
+				}
+				if es.SelectorJSON != "" {
+					_ = json.Unmarshal([]byte(es.SelectorJSON), &cs.Selector)
+				}
+				resp.Services = append(resp.Services, cs)
+			}
+		}
+
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

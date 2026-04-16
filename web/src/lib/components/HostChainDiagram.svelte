@@ -162,21 +162,36 @@
 		const gapBetween = (svcRows.length > 0 && orphanRows.length > 0) ? ROW_GAP : 0;
 		const contentH = svcTotalH + gapBetween + orphanTotalH;
 
-		const ingCount = allIngresses.length;
-		const ingColHeight = ingCount > 0 ? ingCount * (ICON_R * 2 + SUBLABEL_OFFSET) + (ingCount - 1) * ROW_GAP : 0;
-		const maxColHeight = Math.max(contentH, ingColHeight, ICON_R * 2 + SUBLABEL_OFFSET);
+		// --- Map ingresses to their backend services ---
+		function ingressBackends(ing: ChainIngress): Set<string> {
+			const names = new Set<string>();
+			for (const p of ing.paths ?? []) { if (p.backend_name) names.add(p.backend_name); }
+			if (ing.backends) { for (const b of ing.backends.split(', ')) { if (b) names.add(b); } }
+			return names;
+		}
+		const svcToIngresses = new Map<string, ChainIngress[]>();
+		const orphanIngresses: ChainIngress[] = [];
+		for (const ing of allIngresses) {
+			const backends = ingressBackends(ing);
+			let matched = false;
+			for (const svc of services) {
+				if (backends.has(svc.name)) {
+					const list = svcToIngresses.get(svc.name) ?? [];
+					list.push(ing);
+					svcToIngresses.set(svc.name, list);
+					matched = true;
+				}
+			}
+			if (!matched) orphanIngresses.push(ing);
+		}
+
+		const maxColHeight = Math.max(contentH, ICON_R * 2 + SUBLABEL_OFFSET);
 		const totalHeight = maxColHeight + PAD.top + PAD.bottom;
 		const totalWidth = podX + SMALL_R + PAD.right + 60;
 
-		// --- Position ingresses ---
-		const ingStartY = PAD.top + (maxColHeight - ingColHeight) / 2 + ICON_R;
+		// --- Position services, pods, and ingresses aligned by row ---
 		type IngPos = { x: number; y: number; ing: ChainIngress };
 		const ingPositions: IngPos[] = [];
-		for (let i = 0; i < allIngresses.length; i++) {
-			ingPositions.push({ x: ingressX, y: ingStartY + i * (ICON_R * 2 + SUBLABEL_OFFSET + ROW_GAP), ing: allIngresses[i] });
-		}
-
-		// --- Position services and their pods side by side ---
 		const svcPositions: { x: number; y: number; svc: ChainService }[] = [];
 		const ownerGroups: OwnerGroup[] = [];
 		let curY = PAD.top + (maxColHeight - contentH) / 2;
@@ -184,6 +199,19 @@
 		for (const row of svcRows) {
 			const svcY = curY + row.rowH / 2;
 			svcPositions.push({ x: serviceX, y: svcY, svc: row.svc });
+
+			// Position ingresses aligned to this service
+			const ings = svcToIngresses.get(row.svc.name) ?? [];
+			if (ings.length === 1) {
+				ingPositions.push({ x: ingressX, y: svcY, ing: ings[0] });
+			} else if (ings.length > 1) {
+				const ingH = ings.length * (ICON_R * 2) + (ings.length - 1) * 8;
+				let iy = svcY - ingH / 2 + ICON_R;
+				for (const ing of ings) {
+					ingPositions.push({ x: ingressX, y: iy, ing });
+					iy += ICON_R * 2 + 8;
+				}
+			}
 
 			// Position pods centered on this service row
 			let podY = curY + (row.rowH - (row.podSlots * POD_SLOT_H - (row.podSlots > 0 ? REPLICA_GAP : 0))) / 2 + SMALL_R;
@@ -224,6 +252,12 @@
 			const y2 = nodes[nodes.length - 1].y + SMALL_R + SUBLABEL_OFFSET + 2;
 			ownerGroups.push({ owner: orow.pg.owner, ownerKind: orow.pg.owner_kind, nodes, y1, y2, pg: orow.pg });
 			curY += orow.rowH + ROW_GAP;
+		}
+
+		// Orphan ingresses (not connected to any service in this namespace)
+		for (const ing of orphanIngresses) {
+			ingPositions.push({ x: ingressX, y: curY + ICON_R, ing });
+			curY += ICON_R * 2 + SUBLABEL_OFFSET + ROW_GAP;
 		}
 
 		// --- Build edges ---
