@@ -113,68 +113,125 @@
 	let layout = $derived.by(() => {
 		const services = chain.services ?? [];
 		const pods = uniquePods;
+		const POD_SLOT_H = SMALL_R * 2 + REPLICA_GAP;
 
-		// Count pod nodes (individual up to MAX, then 1 collapsed node)
-		let totalPodSlots = 0;
-		const podSlots: number[] = [];
-		for (const pg of pods) {
-			const slots = pg.pod_count <= MAX_INDIVIDUAL_PODS ? Math.max(pg.pod_count, 1) : 1;
-			podSlots.push(slots);
-			totalPodSlots += slots;
+		// --- Map pods to services ---
+		// For each service, find which pod groups connect to it
+		const svcToPods = new Map<string, ChainPodGroup[]>();
+		const connectedPodKeys = new Set<string>();
+		for (const svc of services) {
+			const matched: ChainPodGroup[] = [];
+			for (const pg of pods) {
+				if (podServices(pg).includes(svc.name)) {
+					matched.push(pg);
+					connectedPodKeys.add(`${pg.owner_kind}/${pg.owner}`);
+				}
+			}
+			svcToPods.set(svc.name, matched);
+		}
+		// Orphan pods (not connected to any service)
+		const orphanPods = pods.filter(pg => !connectedPodKeys.has(`${pg.owner_kind}/${pg.owner}`));
+
+		// --- Count pod slots per service for height calculation ---
+		function podSlotCount(pg: ChainPodGroup): number {
+			return pg.pod_count <= MAX_INDIVIDUAL_PODS ? Math.max(pg.pod_count, 1) : 1;
 		}
 
-		const svcCount = Math.max(services.length, 0);
-		const svcColHeight = svcCount > 0 ? svcCount * (ICON_R * 2) + (svcCount - 1) * ROW_GAP : 0;
-		const podColHeight = totalPodSlots > 0 ? totalPodSlots * (SMALL_R * 2) + (totalPodSlots - 1) * REPLICA_GAP + (pods.length - 1) * (ROW_GAP - REPLICA_GAP) : 0;
-		const ingCount = allIngresses.length;
-		const ingColHeight = ingCount > 0 ? ingCount * (ICON_R * 2) + (ingCount - 1) * ROW_GAP : 0;
-		const maxColHeight = Math.max(svcColHeight, podColHeight, ingColHeight, ICON_R * 2);
-		const totalHeight = maxColHeight + PAD.top + PAD.bottom + SUBLABEL_OFFSET;
-		const totalWidth = podX + ICON_R + PAD.right + 30;
+		// Each service row's height = max(service node height, its pod group height)
+		type SvcRow = { svc: ChainService; pods: ChainPodGroup[]; podSlots: number; rowH: number };
+		const svcRows: SvcRow[] = [];
+		for (const svc of services) {
+			const matched = svcToPods.get(svc.name) ?? [];
+			let slots = 0;
+			for (const pg of matched) slots += podSlotCount(pg);
+			const podH = slots > 0 ? slots * POD_SLOT_H - REPLICA_GAP : 0;
+			const rowH = Math.max(ICON_R * 2 + SUBLABEL_OFFSET, podH + SUBLABEL_OFFSET);
+			svcRows.push({ svc, pods: matched, podSlots: slots, rowH });
+		}
 
-		// Ingresses: stacked vertically, centered
+		// Orphan pod rows
+		type OrphanRow = { pg: ChainPodGroup; slots: number; rowH: number };
+		const orphanRows: OrphanRow[] = orphanPods.map(pg => {
+			const slots = podSlotCount(pg);
+			return { pg, slots, rowH: slots * POD_SLOT_H - REPLICA_GAP + SUBLABEL_OFFSET };
+		});
+
+		// Total content height
+		const svcTotalH = svcRows.reduce((s, r) => s + r.rowH, 0) + Math.max(svcRows.length - 1, 0) * ROW_GAP;
+		const orphanTotalH = orphanRows.reduce((s, r) => s + r.rowH, 0) + Math.max(orphanRows.length - 1, 0) * ROW_GAP;
+		const gapBetween = (svcRows.length > 0 && orphanRows.length > 0) ? ROW_GAP : 0;
+		const contentH = svcTotalH + gapBetween + orphanTotalH;
+
+		const ingCount = allIngresses.length;
+		const ingColHeight = ingCount > 0 ? ingCount * (ICON_R * 2 + SUBLABEL_OFFSET) + (ingCount - 1) * ROW_GAP : 0;
+		const maxColHeight = Math.max(contentH, ingColHeight, ICON_R * 2 + SUBLABEL_OFFSET);
+		const totalHeight = maxColHeight + PAD.top + PAD.bottom;
+		const totalWidth = podX + SMALL_R + PAD.right + 60;
+
+		// --- Position ingresses ---
 		const ingStartY = PAD.top + (maxColHeight - ingColHeight) / 2 + ICON_R;
 		type IngPos = { x: number; y: number; ing: ChainIngress };
 		const ingPositions: IngPos[] = [];
 		for (let i = 0; i < allIngresses.length; i++) {
-			ingPositions.push({ x: ingressX, y: ingStartY + i * (ICON_R * 2 + ROW_GAP), ing: allIngresses[i] });
+			ingPositions.push({ x: ingressX, y: ingStartY + i * (ICON_R * 2 + SUBLABEL_OFFSET + ROW_GAP), ing: allIngresses[i] });
 		}
 
-		// Services
-		const svcStartY = PAD.top + (maxColHeight - svcColHeight) / 2 + ICON_R;
+		// --- Position services and their pods side by side ---
 		const svcPositions: { x: number; y: number; svc: ChainService }[] = [];
-		for (let i = 0; i < services.length; i++) {
-			svcPositions.push({ x: serviceX, y: svcStartY + i * (ICON_R * 2 + ROW_GAP), svc: services[i] });
+		const ownerGroups: OwnerGroup[] = [];
+		let curY = PAD.top + (maxColHeight - contentH) / 2;
+
+		for (const row of svcRows) {
+			const svcY = curY + row.rowH / 2;
+			svcPositions.push({ x: serviceX, y: svcY, svc: row.svc });
+
+			// Position pods centered on this service row
+			let podY = curY + (row.rowH - (row.podSlots * POD_SLOT_H - (row.podSlots > 0 ? REPLICA_GAP : 0))) / 2 + SMALL_R;
+			for (const pg of row.pods) {
+				const nodes: PodNode[] = [];
+				const slots = podSlotCount(pg);
+				if (pg.pod_count <= MAX_INDIVIDUAL_PODS) {
+					for (let ri = 0; ri < Math.max(pg.pod_count, 1); ri++) {
+						nodes.push({ x: podX, y: podY, pg, isCollapsed: false, replicaIndex: ri });
+						podY += POD_SLOT_H;
+					}
+				} else {
+					nodes.push({ x: podX, y: podY, pg, isCollapsed: true, replicaIndex: 0 });
+					podY += POD_SLOT_H;
+				}
+				const y1 = nodes[0].y - SMALL_R - 6;
+				const y2 = nodes[nodes.length - 1].y + SMALL_R + SUBLABEL_OFFSET + 2;
+				ownerGroups.push({ owner: pg.owner, ownerKind: pg.owner_kind, nodes, y1, y2, pg });
+			}
+			curY += row.rowH + ROW_GAP;
 		}
 
-		// Pod groups with individual nodes
-		const ownerGroups: OwnerGroup[] = [];
-		let podNodeY = PAD.top + (maxColHeight - podColHeight) / 2 + SMALL_R;
-		for (let gi = 0; gi < pods.length; gi++) {
-			const pg = pods[gi];
+		// Orphan pods (no service)
+		if (orphanRows.length > 0 && svcRows.length > 0) curY += gapBetween - ROW_GAP;
+		for (const orow of orphanRows) {
+			let podY = curY + SMALL_R;
 			const nodes: PodNode[] = [];
-			if (pg.pod_count <= MAX_INDIVIDUAL_PODS) {
-				for (let ri = 0; ri < Math.max(pg.pod_count, 1); ri++) {
-					nodes.push({ x: podX, y: podNodeY, pg, isCollapsed: false, replicaIndex: ri });
-					podNodeY += SMALL_R * 2 + REPLICA_GAP;
+			if (orow.pg.pod_count <= MAX_INDIVIDUAL_PODS) {
+				for (let ri = 0; ri < Math.max(orow.pg.pod_count, 1); ri++) {
+					nodes.push({ x: podX, y: podY, pg: orow.pg, isCollapsed: false, replicaIndex: ri });
+					podY += POD_SLOT_H;
 				}
 			} else {
-				nodes.push({ x: podX, y: podNodeY, pg, isCollapsed: true, replicaIndex: 0 });
-				podNodeY += SMALL_R * 2 + REPLICA_GAP;
+				nodes.push({ x: podX, y: podY, pg: orow.pg, isCollapsed: true, replicaIndex: 0 });
+				podY += POD_SLOT_H;
 			}
 			const y1 = nodes[0].y - SMALL_R - 6;
 			const y2 = nodes[nodes.length - 1].y + SMALL_R + SUBLABEL_OFFSET + 2;
-			ownerGroups.push({ owner: pg.owner, ownerKind: pg.owner_kind, nodes, y1, y2, pg });
-			if (gi < pods.length - 1) podNodeY += ROW_GAP - REPLICA_GAP;
+			ownerGroups.push({ owner: orow.pg.owner, ownerKind: orow.pg.owner_kind, nodes, y1, y2, pg: orow.pg });
+			curY += orow.rowH + ROW_GAP;
 		}
 
-		// Build edges: service → pod (one arrow per individual pod node)
+		// --- Build edges ---
 		type Edge = { sx: number; sy: number; px: number; py: number };
 		const svcToPodEdges: Edge[] = [];
 		for (const sp of svcPositions) {
 			for (const og of ownerGroups) {
-				const svcNames = podServices(og.pg);
-				if (svcNames.includes(sp.svc.name)) {
+				if (podServices(og.pg).includes(sp.svc.name)) {
 					for (const node of og.nodes) {
 						svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: node.x - SMALL_R - 4, py: node.y });
 					}
@@ -182,7 +239,6 @@
 			}
 		}
 
-		// Ingress → service edges (only for services named as backends)
 		const ingToSvcEdges: { sx: number; sy: number; tx: number; ty: number }[] = [];
 		if (hasIngress && hasServices) {
 			for (const ip of ingPositions) {
@@ -307,8 +363,9 @@
 
 	<!-- Pod owner groups -->
 	{#each layout.ownerGroups as og}
+		{@const imgLabel = og.pg.containers?.length ? og.pg.containers.map((c) => c.image.split('/').pop()).join(', ') : ''}
 
-		{#each og.nodes as node}
+		{#each og.nodes as node, ni}
 			<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
 			<g class="cursor-pointer" onclick={() => showPod(node.pg)}>
 				{#if node.pg.pod_count > 0}
@@ -321,6 +378,8 @@
 						<circle cx={node.x + SMALL_R - 2} cy={node.y - SMALL_R + 2} r="7" fill="var(--accent)" />
 						<text x={node.x + SMALL_R - 2} y={node.y - SMALL_R + 5} text-anchor="middle" fill="var(--bg-hard)" font-size="8" font-weight="700">{node.pg.pod_count}</text>
 					{/if}
+					<!-- Image name to the right of each pod -->
+					<text x={node.x + SMALL_R + 6} y={node.y + 3} fill="var(--fg4)" font-size="7">{truncate(imgLabel, 24)}</text>
 				{:else}
 					<circle cx={node.x} cy={node.y} r={SMALL_R} fill="var(--bg2)" opacity="0.3" stroke="var(--bg3)" stroke-width="1.2" stroke-dasharray="3 2" />
 					<text x={node.x} y={node.y + 3} text-anchor="middle" fill="var(--fg4)" font-size="8">—</text>
@@ -328,12 +387,10 @@
 			</g>
 		{/each}
 
-		<!-- Owner label below the group -->
+		<!-- Owner label below the last node -->
 		{@const lastNode = og.nodes[og.nodes.length - 1]}
 		<text x={lastNode.x} y={lastNode.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(og.owner, 22)}</text>
-		<text x={lastNode.x} y={lastNode.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
-			{og.ownerKind}{og.pg.containers?.length ? ` · ${og.pg.containers.map((c) => c.image.split('/').pop()).join(', ').slice(0, 28)}` : ''}
-		</text>
+		<text x={lastNode.x} y={lastNode.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">{og.ownerKind}</text>
 	{/each}
 
 	<!-- Click-away on empty SVG area -->
