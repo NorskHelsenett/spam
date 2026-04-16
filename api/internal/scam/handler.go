@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -988,7 +989,17 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 }
 
 // ResolveHostHandler does a DNS lookup for a given host and returns the IPs.
-func ResolveHostHandler() http.HandlerFunc {
+func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
+	const resolveTTL = 1 * time.Hour
+	const resolvePrefix = "resolve:"
+
+	type result struct {
+		Host    string   `json:"host"`
+		IPs     []string `json:"ips"`
+		IsLocal bool     `json:"is_local"`
+		Error   string   `json:"error,omitempty"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		host := r.URL.Query().Get("host")
 		if host == "" {
@@ -996,16 +1007,19 @@ func ResolveHostHandler() http.HandlerFunc {
 			return
 		}
 
-		type result struct {
-			Host     string   `json:"host"`
-			IPs      []string `json:"ips"`
-			IsLocal  bool     `json:"is_local"`
-			Error    string   `json:"error,omitempty"`
+		ctx := r.Context()
+		cacheKey := resolvePrefix + host
+
+		if cached, ok, _ := cache.GetJSON[result](ctx, cs, cacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
 		}
 
 		ips, err := net.LookupHost(host)
 		if err != nil {
-			writeJSON(w, http.StatusOK, result{Host: host, Error: "unresolvable"})
+			res := result{Host: host, Error: "unresolvable"}
+			_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
+			writeJSON(w, http.StatusOK, res)
 			return
 		}
 
@@ -1014,7 +1028,9 @@ func ResolveHostHandler() http.HandlerFunc {
 			local = isPrivateIP(ips[0])
 		}
 
-		writeJSON(w, http.StatusOK, result{Host: host, IPs: ips, IsLocal: local})
+		res := result{Host: host, IPs: ips, IsLocal: local}
+		_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
+		writeJSON(w, http.StatusOK, res)
 	}
 }
 

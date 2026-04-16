@@ -166,15 +166,19 @@
 			const res = await fetch('/api/clusters/hosts', { credentials: 'include' });
 			if (res.ok) {
 				hosts = await res.json();
-				const unique = [...new Set(hosts.map((h) => h.host))];
-				for (const host of unique) {
-					fetchHostResolve(host);
-					fetchHostMeta(host);
-				}
 			}
 			hostsFetched = true;
 		} catch { /* silent */ }
 	};
+
+	// Lazy-load metadata only for hosts visible in the virtual scroll viewport.
+	$effect(() => {
+		const visible = sortedHosts.slice(hostVirt.start, hostVirt.end);
+		for (const h of visible) {
+			fetchHostResolve(h.host);
+			fetchHostMeta(h.host);
+		}
+	});
 
 	const fetchHostResolve = (host: string) => {
 		if (hostResolutions[host]) return;
