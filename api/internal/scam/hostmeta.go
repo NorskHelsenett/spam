@@ -25,9 +25,10 @@ type hostMeta struct {
 var (
 	// (?s) enables dotall so . matches newlines — titles can span lines
 	titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-	// Match any <link> with rel containing "icon" (covers icon, shortcut icon, apple-touch-icon, mask-icon)
-	faviconRe = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["'][^"']*icon[^"']*["'][^>]*>`)
-	hrefRe    = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
+	// Match any <link> with rel containing "icon" (covers icon, shortcut icon, apple-touch-icon, mask-icon).
+	// Handles both quoted (rel="icon") and unquoted (rel=icon) attribute values.
+	faviconRe = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*(?:["'][^"']*icon[^"']*["']|[^\s>"']*icon[^\s>"']*)[^>]*>`)
+	hrefRe    = regexp.MustCompile(`(?i)href\s*=\s*(?:["']([^"']+)["']|([^\s>"']+))`)
 )
 
 const (
@@ -131,6 +132,18 @@ func fetchHostMeta(ctx context.Context, host string) hostMeta {
 		}
 	}
 
+	// Some SPAs (e.g., Jellyfin) serve content on a subpath. If the root
+	// returned empty or very short HTML, try common SPA entry points.
+	if len(htmlBody) < 128 {
+		for _, subpath := range []string{"/web/", "/app/"} {
+			if body, err := fetchBody(ctx, baseURL+subpath, maxHTMLBytes); err == nil && len(body) > len(htmlBody) {
+				htmlBody = body
+				baseURL = baseURL + subpath
+				break
+			}
+		}
+	}
+
 	html := string(htmlBody)
 
 	// Extract <title>
@@ -189,15 +202,26 @@ func extractFaviconHrefs(html string) []string {
 	var preferred, fallback []string
 	for _, m := range matches {
 		hm := hrefRe.FindStringSubmatch(m)
-		if len(hm) < 2 || hm[1] == "" {
+		if len(hm) < 2 {
 			continue
 		}
+		// hm[1] is the quoted capture, hm[2] is the unquoted capture
+		href := hm[1]
+		if href == "" && len(hm) > 2 {
+			href = hm[2]
+		}
+		if href == "" {
+			continue
+		}
+		// Strip any trailing > that might leak into unquoted values
+		href = strings.TrimRight(href, ">")
 		lower := strings.ToLower(m)
 		if strings.Contains(lower, `rel="icon"`) || strings.Contains(lower, `rel='icon'`) ||
-			strings.Contains(lower, `rel="shortcut icon"`) || strings.Contains(lower, `rel='shortcut icon'`) {
-			preferred = append(preferred, hm[1])
+			strings.Contains(lower, `rel="shortcut icon"`) || strings.Contains(lower, `rel='shortcut icon'`) ||
+			strings.Contains(lower, `rel=icon`) {
+			preferred = append(preferred, href)
 		} else {
-			fallback = append(fallback, hm[1])
+			fallback = append(fallback, href)
 		}
 	}
 	return append(preferred, fallback...)
