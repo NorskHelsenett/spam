@@ -17,15 +17,27 @@ FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1
 # Get betterleaks binary (pinned digest for reproducibility)
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 
+# Get grype binary (image-scan: vulnerability scanner)
+FROM anchore/grype:v0.100.0 AS grype
+
+# Get crane binary (image-scan: OCI registry client for export/config/labels)
+FROM gcr.io/go-containerregistry/crane:v0.20.7 AS crane
+
+# Get cosign binary (image-scan: signature verification)
+FROM gcr.io/projectsigstore/cosign:v2.6.2 AS cosign
+
 # Runtime stage
 FROM alpine:3.20
 
-RUN apk add --no-cache git ca-certificates
+RUN apk add --no-cache git ca-certificates tar
 
 # Copy binaries from official images
 COPY --from=syft /syft /usr/local/bin/syft
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=betterleaks /usr/bin/betterleaks /usr/local/bin/betterleaks
+COPY --from=grype /grype /usr/local/bin/grype
+COPY --from=crane /ko-app/crane /usr/local/bin/crane
+COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
 
 # Copy Go binaries from builder
 COPY --from=builder /build/runner /usr/local/bin/runner

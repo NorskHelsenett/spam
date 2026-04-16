@@ -71,6 +71,12 @@ func main() {
 
 	runnerMode := os.Getenv("RUNNER_MODE")
 
+	// Image scan mode has its own env contract (no REPO_* vars) and diverges
+	// early before repo-env validation.
+	if runnerMode == "scan-image" {
+		os.Exit(runImageScanMode())
+	}
+
 	if workerURL == "" || runID == "" || repoCloneURL == "" {
 		log.Fatal("Missing required environment variables")
 	}

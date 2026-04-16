@@ -61,6 +61,13 @@ func (s *Server) Start(ctx context.Context) error {
 			r.Use(middleware.Timeout(60 * time.Second))
 			r.Post("/results", s.handleResults)
 		})
+		r.Group(func(r chi.Router) {
+			// Image-scan results can be larger than git-clone results
+			// (SBOM + grype JSON + cosign + labels + betterleaks); give
+			// the handler more breathing room on slower upstream writes.
+			r.Use(middleware.Timeout(180 * time.Second))
+			r.Post("/image-results", s.handleImageResults)
+		})
 	})
 
 	// Trivy scanner endpoints are served by the worker listener so scanner jobs

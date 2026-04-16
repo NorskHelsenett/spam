@@ -165,7 +165,7 @@ func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			}
 
 			if imageProvided {
-				image, err := assets.UpsertImageDigest(r.Context(), tx, assets.ImageDigestInput{
+				image, _, err := assets.UpsertImageDigestTx(r.Context(), tx, assets.ImageDigestInput{
 					Registry:        imageRegistry,
 					Repository:      imageRepository,
 					Digest:          imageDigest,
