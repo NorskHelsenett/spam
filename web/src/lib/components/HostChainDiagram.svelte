@@ -188,8 +188,8 @@
 				<ellipse cx="10" cy="10" rx="4" ry="8" fill="none" stroke="var(--green)" stroke-width="1" />
 				<line x1="2" y1="10" x2="18" y2="10" stroke="var(--green)" stroke-width="1" />
 			</g>
-			<text x={col0x} y={layout.ingressY + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="12" font-weight="600">{truncate(chain.host, 24)}</text>
-			<text x={col0x} y={layout.ingressY + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="10">
+			<text x={col0x} y={layout.ingressY + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(chain.host, 18)}</text>
+			<text x={col0x} y={layout.ingressY + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="9">
 				{chain.ingress.kind}{chain.ingress.ingress_class ? ` · ${chain.ingress.ingress_class}` : ''}{chain.ingress.tls ? ' · TLS' : ''}
 			</text>
 		</g>
@@ -204,8 +204,8 @@
 				<rect x="2" y="2" width="14" height="14" rx="3" fill="none" stroke="var(--blue)" stroke-width="1.5" />
 				<circle cx="9" cy="9" r="2.5" fill="var(--blue)" opacity="0.6" />
 			</g>
-			<text x={sp.x} y={sp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="12" font-weight="600">{truncate(sp.svc.name, 20)}</text>
-			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="10">
+			<text x={sp.x} y={sp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(sp.svc.name, 18)}</text>
+			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="9">
 				{sp.svc.service_type || 'ClusterIP'}{sp.svc.ports?.length ? ` · ${sp.svc.ports.map((p) => `${p.port}`).join(',')}` : ''}
 			</text>
 		</g>
@@ -228,7 +228,7 @@
 					<circle cx={pp.x + ICON_R - 4} cy={pp.y - ICON_R + 4} r="8" fill="var(--accent)" />
 					<text x={pp.x + ICON_R - 4} y={pp.y - ICON_R + 7.5} text-anchor="middle" fill="var(--bg-hard)" font-size="9" font-weight="700">{pp.pg.pod_count}</text>
 				{/if}
-				<text x={pp.x} y={pp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="12" font-weight="600">{truncate(pp.pg.owner, 20)}</text>
+				<text x={pp.x} y={pp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="10" font-weight="600">{truncate(pp.pg.owner, 18)}</text>
 				<text x={pp.x} y={pp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="10">
 					{pp.pg.owner_kind}{pp.pg.containers?.length ? ` · ${pp.pg.containers.map((c) => c.image.split('/').pop()).join(', ').slice(0, 30)}` : ''}
 				</text>
