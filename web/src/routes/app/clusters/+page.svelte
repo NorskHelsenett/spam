@@ -6,6 +6,22 @@
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
 	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
+
+	// --- Virtual scroll helpers for tables ---
+	const ROW_HEIGHT = 48;
+	const HOST_ROW_HEIGHT = 72;
+	const OVERSCAN = 10;
+
+	function useVirtualScroll(totalCount: number, rowHeight: number, scrollTop: number, viewportHeight: number) {
+		const start = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN);
+		const end = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN);
+		return {
+			start,
+			end,
+			topPad: start * rowHeight,
+			bottomPad: Math.max(0, (totalCount - end) * rowHeight),
+		};
+	}
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
@@ -80,6 +96,17 @@
 	let tick = $state(0);
 	let chainDrawerOpen = $state(false);
 	let chainDrawerRow: HostRow | null = $state(null);
+
+	// Virtual scroll state per tab
+	let clusterScrollEl: HTMLDivElement | undefined = $state();
+	let clusterScrollTop = $state(0);
+	let clusterViewH = $state(600);
+	let imageScrollEl: HTMLDivElement | undefined = $state();
+	let imageScrollTop = $state(0);
+	let imageViewH = $state(600);
+	let hostScrollEl: HTMLDivElement | undefined = $state();
+	let hostScrollTop = $state(0);
+	let hostViewH = $state(600);
 	let clusterDrawerOpen = $state(false);
 	let clusterDrawerRow: ClusterRow | null = $state(null);
 
@@ -440,6 +467,11 @@
 				: (a.cluster ?? '').localeCompare(b.cluster ?? '');
 		})
 	);
+
+	// Virtual scroll ranges (must be after sorted* declarations)
+	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
+	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH));
+	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH));
 </script>
 
 <svelte:head>
@@ -600,9 +632,9 @@
 					</div>
 				{/if}
 
-				<div class="overflow-x-auto">
+				<div class="overflow-auto" style="max-height: 70vh;" bind:this={clusterScrollEl} onscroll={() => { clusterScrollTop = clusterScrollEl?.scrollTop ?? 0; clusterViewH = clusterScrollEl?.clientHeight ?? 600; }}>
 					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
-						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+						<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
 								<th class="sortable-th px-5 py-3 text-left" onclick={sc('cluster')}>Cluster <ChevronDown class="sort-icon {clusterSortKey === 'cluster' ? 'active' : ''} {clusterSortKey === 'cluster' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								<th class="sortable-th px-5 py-3 text-left" onclick={sc('environment')}>Environment <ChevronDown class="sort-icon {clusterSortKey === 'environment' ? 'active' : ''} {clusterSortKey === 'environment' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -613,9 +645,10 @@
 								<th class="sortable-th px-5 py-3 text-left" onclick={sc('last_seen')}>Last seen <ChevronDown class="sort-icon {clusterSortKey === 'last_seen' ? 'active' : ''} {clusterSortKey === 'last_seen' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
-							{#each sortedClusters as c}
-								<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" onclick={() => openClusterDrawer(c)}>
+						<tbody class="text-[var(--text-secondary)]">
+							{#if clusterVirt.topPad > 0}<tr style="height:{clusterVirt.topPad}px"><td colspan="7"></td></tr>{/if}
+							{#each sortedClusters.slice(clusterVirt.start, clusterVirt.end) as c}
+								<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{ROW_HEIGHT}px" onclick={() => openClusterDrawer(c)}>
 									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
 									<td class="px-5 py-3">
 										{#if c.environment}
@@ -631,6 +664,7 @@
 									<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(c.last_seen, tick)}</td>
 								</tr>
 							{/each}
+							{#if clusterVirt.bottomPad > 0}<tr style="height:{clusterVirt.bottomPad}px"><td colspan="7"></td></tr>{/if}
 						</tbody>
 					</table>
 				</div>
@@ -713,9 +747,9 @@
 						</div>
 					{/if}
 
-					<div class="overflow-x-auto">
+					<div class="overflow-auto" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
 					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
-							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
 									<th class="sortable-th px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -726,9 +760,10 @@
 									<th class="sortable-th px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
-								{#each sortedImages as img}
-									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+							<tbody class="text-[var(--text-secondary)]">
+								{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="7"></td></tr>{/if}
+								{#each sortedImages.slice(imageVirt.start, imageVirt.end) as img}
+									<tr class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="height:{ROW_HEIGHT}px">
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
 										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{img.image}</td>
 										<td class="px-5 py-3">
@@ -750,6 +785,7 @@
 										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(img.last_seen, tick)}</td>
 									</tr>
 								{/each}
+								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="7"></td></tr>{/if}
 							</tbody>
 						</table>
 					</div>
@@ -845,9 +881,9 @@
 						<p class="text-sm text-[var(--text-muted)]">No exposed FQDNs found from Ingress or route resources.</p>
 					</div>
 				{:else}
-					<div class="overflow-x-auto">
+					<div class="overflow-auto" style="max-height: 70vh;" bind:this={hostScrollEl} onscroll={() => { hostScrollTop = hostScrollEl?.scrollTop ?? 0; hostViewH = hostScrollEl?.clientHeight ?? 600; }}>
 						<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
-							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
 									<th class="w-12 py-3 pl-5 pr-0"></th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('host')}>Host <ChevronDown class="sort-icon {hostSortKey === 'host' ? 'active' : ''} {hostSortKey === 'host' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -857,11 +893,12 @@
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('cluster')}>Cluster <ChevronDown class="sort-icon {hostSortKey === 'cluster' ? 'active' : ''} {hostSortKey === 'cluster' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
-								{#each sortedHosts as h}
+							<tbody class="text-[var(--text-secondary)]">
+								{#if hostVirt.topPad > 0}<tr style="height:{hostVirt.topPad}px"><td colspan="6"></td></tr>{/if}
+								{#each sortedHosts.slice(hostVirt.start, hostVirt.end) as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="border: none;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
+									<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{HOST_ROW_HEIGHT}px;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
@@ -928,6 +965,7 @@
 										<td class="px-5 py-3">{h.cluster || h.cluster_id}</td>
 									</tr>
 								{/each}
+								{#if hostVirt.bottomPad > 0}<tr style="height:{hostVirt.bottomPad}px"><td colspan="6"></td></tr>{/if}
 							</tbody>
 						</table>
 					</div>
