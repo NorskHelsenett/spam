@@ -16,15 +16,17 @@ import (
 
 type hostMeta struct {
 	Title          string `json:"title"`
-	FaviconURL     string `json:"favicon_url,omitempty"`     // original URL for reference
+	FaviconURL     string `json:"favicon_url,omitempty"`
 	HasFavicon     bool   `json:"has_favicon"`
 	FaviconType    string `json:"favicon_type,omitempty"`
 	faviconBytes   []byte // not serialized to JSON, stored separately
 }
 
 var (
-	titleRe   = regexp.MustCompile(`(?i)<title[^>]*>\s*(.*?)\s*</title>`)
-	faviconRe = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["'](?:shortcut )?icon["'][^>]*>`)
+	// (?s) enables dotall so . matches newlines — titles can span lines
+	titleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
+	// Match any <link> with rel containing "icon" (covers icon, shortcut icon, apple-touch-icon, mask-icon)
+	faviconRe = regexp.MustCompile(`(?i)<link[^>]+rel\s*=\s*["'][^"']*icon[^"']*["'][^>]*>`)
 	hrefRe    = regexp.MustCompile(`(?i)href\s*=\s*["']([^"']+)["']`)
 )
 
@@ -92,7 +94,6 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 
 		data, ok, _ := cs.Get(ctx, faviconCachePrefix+host)
 		if !ok || len(data) == 0 {
-			// Try fetching if not cached yet
 			meta := fetchHostMeta(ctx, host)
 			_ = cache.SetJSON(ctx, cs, metaCachePrefix+host, meta, metaTTL)
 			if meta.HasFavicon && meta.faviconBytes != nil {
@@ -106,6 +107,10 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 		}
 
 		contentType := http.DetectContentType(data)
+		// DetectContentType doesn't recognize SVG
+		if strings.Contains(string(data[:min(len(data), 512)]), "<svg") {
+			contentType = "image/svg+xml"
+		}
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write(data)
@@ -130,42 +135,94 @@ func fetchHostMeta(ctx context.Context, host string) hostMeta {
 
 	// Extract <title>
 	if m := titleRe.FindStringSubmatch(html); len(m) > 1 {
-		meta.Title = strings.TrimSpace(m[1])
+		title := strings.TrimSpace(m[1])
+		// Strip HTML entities and tags that might be inside <title>
+		title = regexp.MustCompile(`<[^>]*>`).ReplaceAllString(title, "")
+		title = strings.ReplaceAll(title, "&amp;", "&")
+		title = strings.ReplaceAll(title, "&lt;", "<")
+		title = strings.ReplaceAll(title, "&gt;", ">")
+		title = strings.ReplaceAll(title, "&#39;", "'")
+		title = strings.ReplaceAll(title, "&quot;", "\"")
+		meta.Title = title
 	}
 
-	// Extract favicon URL from <link rel="icon" href="...">
-	faviconHref := ""
-	if m := faviconRe.FindString(html); m != "" {
-		if hm := hrefRe.FindStringSubmatch(m); len(hm) > 1 {
-			faviconHref = hm[1]
+	// Extract all favicon candidates from <link> tags, prefer rel="icon" over apple-touch-icon
+	faviconHrefs := extractFaviconHrefs(html)
+
+	// Build candidate URLs: parsed hrefs first, then common fallbacks
+	var candidates []string
+	for _, href := range faviconHrefs {
+		candidates = append(candidates, resolveURL(baseURL, href))
+	}
+	// Always try common fallback paths
+	candidates = append(candidates,
+		baseURL+"/favicon.ico",
+		baseURL+"/favicon.png",
+		baseURL+"/favicon.svg",
+	)
+	// Deduplicate while preserving order
+	candidates = dedupStrings(candidates)
+
+	// Try each candidate until one works
+	for _, u := range candidates {
+		favBytes, fetchErr := fetchBody(ctx, u, maxFaviconBytes)
+		if fetchErr != nil || len(favBytes) == 0 {
+			continue
 		}
+		if !looksLikeImage(favBytes) {
+			continue
+		}
+		meta.FaviconURL = u
+		meta.HasFavicon = true
+		meta.FaviconType = detectImageType(favBytes)
+		meta.faviconBytes = favBytes
+		break
 	}
-
-	// Resolve favicon URL
-	faviconURL := ""
-	if faviconHref != "" {
-		faviconURL = resolveURL(baseURL, faviconHref)
-	} else {
-		faviconURL = baseURL + "/favicon.ico"
-	}
-	meta.FaviconURL = faviconURL
-
-	// Fetch the favicon
-	favBytes, err := fetchBody(ctx, faviconURL, maxFaviconBytes)
-	if err != nil || len(favBytes) == 0 {
-		return meta
-	}
-
-	ct := http.DetectContentType(favBytes)
-	if !strings.HasPrefix(ct, "image/") {
-		return meta
-	}
-
-	meta.HasFavicon = true
-	meta.FaviconType = ct
-	meta.faviconBytes = favBytes
 
 	return meta
+}
+
+// extractFaviconHrefs returns all href values from <link> tags with rel containing "icon",
+// ordered with rel="icon" first, then apple-touch-icon, etc.
+func extractFaviconHrefs(html string) []string {
+	matches := faviconRe.FindAllString(html, -1)
+	var preferred, fallback []string
+	for _, m := range matches {
+		hm := hrefRe.FindStringSubmatch(m)
+		if len(hm) < 2 || hm[1] == "" {
+			continue
+		}
+		lower := strings.ToLower(m)
+		if strings.Contains(lower, `rel="icon"`) || strings.Contains(lower, `rel='icon'`) ||
+			strings.Contains(lower, `rel="shortcut icon"`) || strings.Contains(lower, `rel='shortcut icon'`) {
+			preferred = append(preferred, hm[1])
+		} else {
+			fallback = append(fallback, hm[1])
+		}
+	}
+	return append(preferred, fallback...)
+}
+
+func looksLikeImage(data []byte) bool {
+	ct := http.DetectContentType(data)
+	if strings.HasPrefix(ct, "image/") {
+		return true
+	}
+	// DetectContentType misses SVGs (detected as text/xml or text/plain)
+	prefix := string(data[:min(len(data), 512)])
+	return strings.Contains(prefix, "<svg")
+}
+
+func detectImageType(data []byte) string {
+	ct := http.DetectContentType(data)
+	if strings.HasPrefix(ct, "image/") {
+		return ct
+	}
+	prefix := string(data[:min(len(data), 512)])
+	if strings.Contains(prefix, "<svg") {
+		return "image/svg+xml"
+	}
+	return ct
 }
 
 func fetchBody(ctx context.Context, targetURL string, maxBytes int64) ([]byte, error) {
@@ -173,7 +230,8 @@ func fetchBody(ctx context.Context, targetURL string, maxBytes int64) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "SPAM-Monitor/1.0")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; SPAM-Monitor/1.0)")
+	req.Header.Set("Accept", "text/html,image/*,*/*")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -201,4 +259,16 @@ func resolveURL(base, href string) string {
 		return href
 	}
 	return baseURL.ResolveReference(ref).String()
+}
+
+func dedupStrings(ss []string) []string {
+	seen := make(map[string]bool, len(ss))
+	var out []string
+	for _, s := range ss {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
