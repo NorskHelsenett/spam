@@ -116,15 +116,21 @@
 		const POD_SLOT_H = SMALL_R * 2 + REPLICA_GAP;
 
 		// --- Map pods to services ---
-		// For each service, find which pod groups connect to it
+		// For each service, find which pod groups connect to it.
+		// Each pod group is only placed once (under the first service that claims it).
 		const svcToPods = new Map<string, ChainPodGroup[]>();
 		const connectedPodKeys = new Set<string>();
+		const placedPodKeys = new Set<string>(); // pods already assigned to a service row
 		for (const svc of services) {
 			const matched: ChainPodGroup[] = [];
 			for (const pg of pods) {
 				if (podServices(pg).includes(svc.name)) {
-					matched.push(pg);
 					connectedPodKeys.add(`${pg.owner_kind}/${pg.owner}`);
+					// Only place pods in the first service row that claims them
+					if (!placedPodKeys.has(`${pg.owner_kind}/${pg.owner}`)) {
+						matched.push(pg);
+						placedPodKeys.add(`${pg.owner_kind}/${pg.owner}`);
+					}
 				}
 			}
 			svcToPods.set(svc.name, matched);
