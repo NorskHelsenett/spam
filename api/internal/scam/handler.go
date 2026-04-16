@@ -257,9 +257,8 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				data->>'image' AS image,
-				data->>'digest' AS digest,
-				STRING_AGG(DISTINCT data->>'tag', ',' ORDER BY data->>'tag')
-					FILTER (WHERE COALESCE(data->>'tag', '') != '') AS tags,
+				COALESCE(data->>'digest', '') AS digest,
+				STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
 				COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
 				COUNT(DISTINCT data->>'namespace') AS namespace_count,
 				COUNT(*) AS container_count,
@@ -267,9 +266,96 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
 			  AND data->>'msg' != 'DELETE'
-			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY data->>'registry', data->>'image', data->>'digest'
-			ORDER BY container_count DESC, image
+			ORDER BY container_count DESC, data->>'image'
+		`).Scan(&rows).Error
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+// HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and IngressRoute.
+func HostsHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type row struct {
+			Host        string    `json:"host"`
+			Kind        string    `json:"kind"`
+			Name        string    `json:"name"`
+			Namespace   string    `json:"namespace"`
+			Cluster     string    `json:"cluster"`
+			ClusterID   string    `json:"cluster_id"`
+			Environment string    `json:"environment"`
+			TLS         bool      `json:"tls"`
+			LastSeen    time.Time `json:"last_seen"`
+		}
+		var rows []row
+		// Ingress: hosts from rules array
+		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
+		// IngressRoute/IngressRouteTCP: hosts from hosts array
+		err := db.Raw(`
+			WITH ingress_hosts AS (
+				SELECT
+					jsonb_array_elements(data->'rules')->>'host' AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					data->>'cluster' AS cluster,
+					data->>'cluster_id' AS cluster_id,
+					data->>'environment' AS environment,
+					jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
+					received_at AS last_seen
+				FROM cluster_record
+				WHERE data->>'kind' = 'Ingress'
+				  AND data->>'msg' != 'DELETE'
+				  AND jsonb_typeof(data->'rules') = 'array'
+			),
+			route_hosts AS (
+				SELECT
+					jsonb_array_elements_text(data->'hostnames') AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					data->>'cluster' AS cluster,
+					data->>'cluster_id' AS cluster_id,
+					data->>'environment' AS environment,
+					FALSE AS tls,
+					received_at AS last_seen
+				FROM cluster_record
+				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
+				  AND data->>'msg' != 'DELETE'
+				  AND jsonb_typeof(data->'hostnames') = 'array'
+				  AND jsonb_array_length(data->'hostnames') > 0
+			),
+			traefik_hosts AS (
+				SELECT
+					jsonb_array_elements_text(data->'hosts') AS host,
+					data->>'kind' AS kind,
+					data->>'name' AS name,
+					data->>'namespace' AS namespace,
+					data->>'cluster' AS cluster,
+					data->>'cluster_id' AS cluster_id,
+					data->>'environment' AS environment,
+					COALESCE(data->>'tls_secret', '') != '' AS tls,
+					received_at AS last_seen
+				FROM cluster_record
+				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
+				  AND data->>'msg' != 'DELETE'
+				  AND jsonb_typeof(data->'hosts') = 'array'
+				  AND jsonb_array_length(data->'hosts') > 0
+			)
+			SELECT host, kind, name, namespace, cluster, cluster_id, environment, tls, last_seen
+			FROM (
+				SELECT * FROM ingress_hosts
+				UNION ALL
+				SELECT * FROM route_hosts
+				UNION ALL
+				SELECT * FROM traefik_hosts
+			) combined
+			WHERE host IS NOT NULL AND host != ''
+			ORDER BY host, cluster
 		`).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)

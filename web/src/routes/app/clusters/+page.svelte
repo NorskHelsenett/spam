@@ -37,14 +37,28 @@
 		last_seen: string;
 	};
 
+	type HostRow = {
+		host: string;
+		kind: string;
+		name: string;
+		namespace: string;
+		cluster: string;
+		cluster_id: string;
+		environment: string;
+		tls: boolean;
+		last_seen: string;
+	};
+
 	let clusters: ClusterRow[] = $state([]);
 	let registryDist: RegistryDist[] = $state([]);
 	let exposure: Exposure = $state({ internet_exposed: 0, internal_services: 0 });
 	let imageDetails: ImageDetail[] = $state([]);
+	let hosts: HostRow[] = $state([]);
 	let loading = $state(true);
 	let error = $state('');
 	let activeTab = $state('clusters');
 	let imagesFetched = $state(false);
+	let hostsFetched = $state(false);
 	let tick = $state(0);
 
 	const palette = [
@@ -55,9 +69,9 @@
 	const loadMain = async () => {
 		try {
 			const [clusterRes, regRes, expRes] = await Promise.all([
-				fetch('/api/scam/clusters', { credentials: 'include' }),
-				fetch('/api/scam/registry-distribution', { credentials: 'include' }),
-				fetch('/api/scam/exposure', { credentials: 'include' })
+				fetch('/api/clusters/summary', { credentials: 'include' }),
+				fetch('/api/clusters/registry-distribution', { credentials: 'include' }),
+				fetch('/api/clusters/exposure', { credentials: 'include' })
 			]);
 			if (clusterRes.ok) clusters = await clusterRes.json();
 			if (regRes.ok) registryDist = await regRes.json();
@@ -72,9 +86,18 @@
 	const loadImages = async () => {
 		if (imagesFetched) return;
 		try {
-			const res = await fetch('/api/scam/images/detail', { credentials: 'include' });
+			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
 			if (res.ok) imageDetails = await res.json();
 			imagesFetched = true;
+		} catch { /* silent */ }
+	};
+
+	const loadHosts = async () => {
+		if (hostsFetched) return;
+		try {
+			const res = await fetch('/api/clusters/hosts', { credentials: 'include' });
+			if (res.ok) hosts = await res.json();
+			hostsFetched = true;
 		} catch { /* silent */ }
 	};
 
@@ -87,10 +110,8 @@
 		const es = new EventSource('/api/app/stream');
 		es.addEventListener('scam_ingest', () => {
 			loadMain();
-			if (imagesFetched) {
-				imagesFetched = false;
-				loadImages();
-			}
+			if (imagesFetched) { imagesFetched = false; loadImages(); }
+			if (hostsFetched) { hostsFetched = false; loadHosts(); }
 		});
 
 		return () => {
@@ -101,6 +122,7 @@
 
 	$effect(() => {
 		if (activeTab === 'images') loadImages();
+		if (activeTab === 'hosts') loadHosts();
 	});
 
 	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
@@ -147,6 +169,8 @@
 	let clusterSortDir = $state<SortDir>('desc');
 	let imageSortKey = $state<keyof ImageDetail>('container_count');
 	let imageSortDir = $state<SortDir>('desc');
+	let hostSortKey = $state<keyof HostRow>('host');
+	let hostSortDir = $state<SortDir>('asc');
 
 	const cmp = (a: any, b: any, dir: SortDir): number => {
 		if (a == null && b == null) return 0;
@@ -166,12 +190,21 @@
 		else { imageSortKey = k; imageSortDir = 'desc'; }
 	};
 
+	const sh = (k: keyof HostRow) => () => {
+		if (hostSortKey === k) { hostSortDir = hostSortDir === 'asc' ? 'desc' : 'asc'; }
+		else { hostSortKey = k; hostSortDir = 'asc'; }
+	};
+
 	const sortedClusters = $derived(
 		[...clusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
 	);
 
 	const sortedImages = $derived(
 		[...imageDetails].sort((a, b) => cmp(a[imageSortKey], b[imageSortKey], imageSortDir))
+	);
+
+	const sortedHosts = $derived(
+		[...hosts].sort((a, b) => cmp(a[hostSortKey], b[hostSortKey], hostSortDir))
 	);
 </script>
 
@@ -192,7 +225,7 @@
 				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
 					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
 				</div>
-				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Waiting for first probe</p>
+				<!-- <p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Waiting for first probe</p> -->
 			</div>
 		{:else if error}
 			<div class="flex flex-col items-center justify-center py-24">
@@ -200,11 +233,13 @@
 				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">{error}</p>
 			</div>
 		{:else if clusters.length === 0}
-			<div class="flex flex-col items-center justify-center py-24">
-				<Server class="h-12 w-12 text-[var(--text-muted)]" />
-				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
-				<p class="mt-1 text-sm text-[var(--text-muted)]">Deploy a SCAM agent to start collecting container inventory.</p>
-				<p class="mt-4 text-xs text-[var(--text-muted)]">Agents POST to <code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5">/api/scam/callcenter</code></p>
+			<div class="flex flex-col items-center justify-center gap-5 py-24">
+				<Server class="h-12 w-12 text-[var(--yellow)]" />
+				<p class="text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
+				<p class="text-sm text-[var(--text-muted)]">Deploy a SCAM agent to start collecting container inventory.</p>
+				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
+					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
+				</div>
 			</div>
 		{:else}
 			<!-- Metric cards -->
@@ -262,7 +297,8 @@
 				bind:value={activeTab}
 				options={[
 					{ value: 'clusters', label: 'Clusters' },
-					{ value: 'images', label: 'Images' }
+					{ value: 'images', label: 'Images' },
+					{ value: 'hosts', label: 'Hosts' }
 				]}
 			/>
 		{/if}
@@ -307,12 +343,13 @@
 					</table>
 				</div>
 			</section>
-		{:else}
+		{:else if activeTab === 'images'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
 				{#if imageDetails.length === 0}
-					<div class="flex flex-col items-center justify-center gap-5 py-12">
-						<Container class="h-10 w-10 text-[var(--text-muted)]" />
-						<p class="text-sm text-[var(--text-secondary)]">No image data with resolved digests yet.</p>
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Container class="h-10 w-10 text-[var(--yellow)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">No images</p>
+						<p class="text-sm text-[var(--text-muted)]">No container images with resolved digests yet.</p>
 					</div>
 				{:else}
 					<div class="overflow-x-auto">
@@ -346,6 +383,45 @@
 										<td class="px-5 py-3 text-right">{img.cluster_count}</td>
 										<td class="px-5 py-3 text-right font-semibold">{img.container_count}</td>
 										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(img.last_seen, tick)}</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
+				{/if}
+			</section>
+		{:else if activeTab === 'hosts'}
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+				{#if hosts.length === 0}
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Globe class="h-10 w-10 text-[var(--yellow)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">No hosts</p>
+						<p class="text-sm text-[var(--text-muted)]">No exposed FQDNs found from Ingress or route resources.</p>
+					</div>
+				{:else}
+					<div class="overflow-x-auto">
+						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+								<tr>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('host')}>Host <ChevronDown class="sort-icon {hostSortKey === 'host' ? 'active' : ''} {hostSortKey === 'host' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('kind')}>Kind <ChevronDown class="sort-icon {hostSortKey === 'kind' ? 'active' : ''} {hostSortKey === 'kind' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('namespace')}>Namespace <ChevronDown class="sort-icon {hostSortKey === 'namespace' ? 'active' : ''} {hostSortKey === 'namespace' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('name')}>Name <ChevronDown class="sort-icon {hostSortKey === 'name' ? 'active' : ''} {hostSortKey === 'name' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('cluster')}>Cluster <ChevronDown class="sort-icon {hostSortKey === 'cluster' ? 'active' : ''} {hostSortKey === 'cluster' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="px-5 py-3 text-center">TLS</th>
+									<th class="sortable-th px-5 py-3 text-left" onclick={sh('last_seen')}>Last seen <ChevronDown class="sort-icon {hostSortKey === 'last_seen' ? 'active' : ''} {hostSortKey === 'last_seen' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+								{#each sortedHosts as h}
+									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
+										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{h.host}</td>
+										<td class="px-5 py-3"><span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{h.kind}</span></td>
+										<td class="px-5 py-3">{h.namespace}</td>
+										<td class="px-5 py-3">{h.name}</td>
+										<td class="px-5 py-3">{h.cluster || h.cluster_id}</td>
+										<td class="px-5 py-3 text-center">{#if h.tls}<span class="text-[var(--green)]">Yes</span>{:else}<span class="text-[var(--text-muted)]">No</span>{/if}</td>
+										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(h.last_seen, tick)}</td>
 									</tr>
 								{/each}
 							</tbody>
