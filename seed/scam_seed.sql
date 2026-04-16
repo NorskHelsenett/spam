@@ -212,7 +212,7 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "cluster":"t-prod-001","cluster_id":"a1b2c3d4-e5f6-7890-abcd-ef1234567890","environment":"production",
   "uid":"44444444-5555-6666-7777-dddddddddddd","namespace":"legacy","name":"legacy-app",
   "labels":{},"ingress_class":"nginx",
-  "rules":[{"host":"legacy.example.com","paths":[{"path":"/","path_type":"Prefix"}]}],
+  "rules":[{"host":"legacy.example.com","paths":[{"path":"/","path_type":"Prefix","backend_kind":"Service","backend_name":"legacy-svc","backend_port":"80"}]}],
   "tls":null,
   "lb_ips":null,"lb_hostnames":null
 }', NOW() - INTERVAL '5 minutes');

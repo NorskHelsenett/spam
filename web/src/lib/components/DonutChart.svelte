@@ -72,7 +72,7 @@
 					stroke="var(--gray)"
 					stroke-width={strokeWidth}
 					opacity={hoveredIndex === 'other' ? 0.6 : 0.35}
-					class="donut-segment transition-all duration-200 ease-out"
+					class="donut-segment"
 					class:hovered={hoveredIndex === 'other'}
 					on:mouseenter={() => (hoveredIndex = 'other')}
 					on:mouseleave={() => (hoveredIndex = null)}
@@ -101,7 +101,7 @@
 						stroke-width={strokeWidth}
 						stroke-dasharray="{seg.dashArray} {circumference}"
 						stroke-dashoffset={seg.dashOffset}
-						class="donut-segment transition-all duration-200 ease-out"
+						class="donut-segment"
 						class:hovered={hoveredIndex === seg.index}
 						style="transform-origin: {center}px {center}px;"
 						on:mouseenter={() => (hoveredIndex = seg.index)}
@@ -157,6 +157,12 @@
 <style>
 	.donut-segment {
 		cursor: pointer;
+		transition:
+			stroke-dasharray 800ms cubic-bezier(0.4, 0, 0.2, 1),
+			stroke-dashoffset 800ms cubic-bezier(0.4, 0, 0.2, 1),
+			opacity 800ms cubic-bezier(0.4, 0, 0.2, 1),
+			stroke-width 150ms ease-out,
+			filter 150ms ease-out;
 	}
 	.donut-segment.hovered {
 		stroke-width: 22;
