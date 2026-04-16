@@ -478,6 +478,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Name     string `json:"name"`
 			Image    string `json:"image"`
 			Tag      string `json:"tag"`
+			Digest   string `json:"digest,omitempty"`
 			Registry string `json:"registry"`
 		}
 		type chainPodGroup struct {
@@ -490,6 +491,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 		}
 		type chainResponse struct {
 			Host      string          `json:"host"`
+			Cluster   string          `json:"cluster"`
 			ClusterID string          `json:"cluster_id"`
 			Namespace string          `json:"namespace"`
 			Ingress   *chainIngress   `json:"ingress"`
@@ -497,7 +499,11 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Pods      []chainPodGroup `json:"pods"`
 		}
 
-		resp := chainResponse{Host: host, ClusterID: clusterID, Namespace: namespace}
+		// Look up cluster name from any record with this cluster_id.
+		var clusterName string
+		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+
+		resp := chainResponse{Host: host, Cluster: clusterName, ClusterID: clusterID, Namespace: namespace}
 
 		// --- Step 1: Find the ingress/route resource for this host ---
 		type ingressRow struct {
@@ -679,6 +685,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 								'name', data->>'container',
 								'image', data->>'image',
 								'tag', data->>'tag',
+								'digest', data->>'digest',
 								'registry', data->>'registry'
 							)) AS containers_json
 						FROM cluster_record
