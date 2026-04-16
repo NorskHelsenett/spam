@@ -541,7 +541,7 @@
 	<!-- Tables -->
 	{#if !loading && !error && clusters.length > 0}
 		{#if activeTab === 'clusters'}
-			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '600px' : undefined}>
 				<header class="flex items-start justify-between gap-4">
 					<div>
 						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
@@ -757,7 +757,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface relative space-y-4 overflow-hidden px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '600px' : undefined}>
 				{#if hosts.length > 0}
 					<header class="flex items-start justify-between gap-4">
 						<div>
