@@ -165,11 +165,11 @@
 
 	// --- Sorting ---
 	type SortDir = 'asc' | 'desc';
-	let clusterSortKey = $state<keyof ClusterRow>('last_seen');
-	let clusterSortDir = $state<SortDir>('desc');
+	let clusterSortKey = $state<keyof ClusterRow>('cluster');
+	let clusterSortDir = $state<SortDir>('asc');
 	let imageSortKey = $state<keyof ImageDetail>('container_count');
 	let imageSortDir = $state<SortDir>('desc');
-	let hostSortKey = $state<keyof HostRow>('host');
+	let hostSortKey = $state<keyof HostRow>('cluster');
 	let hostSortDir = $state<SortDir>('asc');
 
 	const cmp = (a: any, b: any, dir: SortDir): number => {
@@ -204,7 +204,13 @@
 	);
 
 	const sortedHosts = $derived(
-		[...hosts].sort((a, b) => cmp(a[hostSortKey], b[hostSortKey], hostSortDir))
+		[...hosts].sort((a, b) => {
+			const primary = cmp(a[hostSortKey], b[hostSortKey], hostSortDir);
+			if (primary !== 0) return primary;
+			return hostSortKey === 'cluster'
+				? (a.host ?? '').localeCompare(b.host ?? '')
+				: (a.cluster ?? '').localeCompare(b.cluster ?? '');
+		})
 	);
 </script>
 
@@ -371,7 +377,11 @@
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
 										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{img.image}</td>
 										<td class="px-5 py-3">
-											<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(img.digest)}</code>
+											{#if img.digest}
+												<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(img.digest)}</code>
+											{:else}
+												<span class="text-xs text-[var(--text-muted)]" title="The kubelet has not resolved a digest for this image. This typically happens when the image was pulled from a local cache (imagePullPolicy: IfNotPresent) or the container hasn't started yet.">unresolved</span>
+											{/if}
 										</td>
 										<td class="px-5 py-3">
 											<div class="flex flex-wrap gap-1">
