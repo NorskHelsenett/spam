@@ -21,11 +21,12 @@
 		owner_kind: string;
 		pod_count: number;
 		phase: string;
-		containers: { name: string; image: string; tag: string; registry: string }[];
+		containers: { name: string; image: string; tag: string; digest?: string; registry: string }[];
 		service_name: string;
 	};
 	export type ChainData = {
 		host: string;
+		cluster: string;
 		cluster_id: string;
 		namespace: string;
 		ingress: ChainIngress | null;

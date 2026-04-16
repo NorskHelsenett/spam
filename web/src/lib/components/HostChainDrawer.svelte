@@ -57,6 +57,9 @@
 				<p class="mt-0.5 text-xs text-[var(--text-tertiary)]">
 					{kind} <span class="text-[var(--text-muted)]">·</span> {name}
 					<span class="text-[var(--text-muted)]">·</span> {namespace}
+					{#if chain?.cluster}
+						<span class="text-[var(--text-muted)]">·</span> {chain.cluster}
+					{/if}
 				</p>
 			</div>
 			<button
@@ -128,12 +131,12 @@
 							{#if pg.containers?.length}
 								<div class="mt-1.5 space-y-0.5">
 									{#each pg.containers as c}
-										<div class="flex items-center gap-1.5 text-xs">
-											<code class="text-[var(--text-secondary)]">{c.image}{c.tag ? ':' + c.tag : ''}</code>
-											{#if c.registry}
-												<span class="text-[var(--text-muted)]">{c.registry}</span>
-											{/if}
-										</div>
+									<div class="text-xs">
+										<code class="text-[var(--text-secondary)]">{c.registry ? c.registry + '/' : ''}{c.image}{c.tag ? ':' + c.tag : ''}</code>
+										{#if c.digest}
+											<div class="ml-0 mt-0.5 truncate text-[10px] text-[var(--text-muted)]">@{c.digest}</div>
+										{/if}
+									</div>
 									{/each}
 								</div>
 							{/if}
