@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container, Globe, ChevronDown } from 'lucide-svelte';
+	import { Server, Container, Globe, ChevronDown, ExternalLink } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 
@@ -46,7 +46,19 @@
 		cluster_id: string;
 		environment: string;
 		tls: boolean;
+		lb_ips: string;
 		last_seen: string;
+	};
+
+	type HostResolve = {
+		ips: string[];
+		is_local: boolean;
+		error?: string;
+	};
+
+	type HostMeta = {
+		title: string;
+		has_favicon: boolean;
 	};
 
 	let clusters: ClusterRow[] = $state([]);
@@ -54,6 +66,8 @@
 	let exposure: Exposure = $state({ internet_exposed: 0, internal_services: 0 });
 	let imageDetails: ImageDetail[] = $state([]);
 	let hosts: HostRow[] = $state([]);
+	let hostResolutions = $state<Record<string, HostResolve>>({});
+	let hostMetas = $state<Record<string, HostMeta>>({});
 	let loading = $state(true);
 	let error = $state('');
 	let activeTab = $state('clusters');
@@ -96,10 +110,44 @@
 		if (hostsFetched) return;
 		try {
 			const res = await fetch('/api/clusters/hosts', { credentials: 'include' });
-			if (res.ok) hosts = await res.json();
+			if (res.ok) {
+				hosts = await res.json();
+				const unique = [...new Set(hosts.map((h) => h.host))];
+				for (const host of unique) {
+					fetchHostResolve(host);
+					fetchHostMeta(host);
+				}
+			}
 			hostsFetched = true;
 		} catch { /* silent */ }
 	};
+
+	const fetchHostResolve = (host: string) => {
+		if (hostResolutions[host]) return;
+		fetch(`/api/clusters/hosts/resolve?host=${encodeURIComponent(host)}`, { credentials: 'include' })
+			.then((r) => r.json())
+			.then((data: HostResolve) => {
+				hostResolutions = { ...hostResolutions, [host]: data };
+			})
+			.catch(() => {
+				hostResolutions = { ...hostResolutions, [host]: { ips: [], is_local: false, error: 'failed' } };
+			});
+	};
+
+	const fetchHostMeta = (host: string) => {
+		if (hostMetas[host]) return;
+		fetch(`/api/clusters/hosts/meta?host=${encodeURIComponent(host)}`, { credentials: 'include' })
+			.then((r) => r.json())
+			.then((data: HostMeta) => {
+				hostMetas = { ...hostMetas, [host]: data };
+			})
+			.catch(() => {
+				hostMetas = { ...hostMetas, [host]: { title: '', has_favicon: false } };
+			});
+	};
+
+	const hostUrl = (host: string, tls: boolean) => `${tls ? 'https' : 'http'}://${host}`;
+	const faviconProxyUrl = (host: string) => `/api/clusters/hosts/favicon?host=${encodeURIComponent(host)}`;
 
 	onMount(() => {
 		if (!browser) return;
@@ -315,7 +363,7 @@
 		{#if activeTab === 'clusters'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
 				<div class="overflow-x-auto">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
 								<th class="sortable-th px-5 py-3 text-left" onclick={sc('cluster')}>Cluster <ChevronDown class="sort-icon {clusterSortKey === 'cluster' ? 'active' : ''} {clusterSortKey === 'cluster' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -327,7 +375,7 @@
 								<th class="sortable-th px-5 py-3 text-left" onclick={sc('last_seen')}>Last seen <ChevronDown class="sort-icon {clusterSortKey === 'last_seen' ? 'active' : ''} {clusterSortKey === 'last_seen' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 							</tr>
 						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+						<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
 							{#each sortedClusters as c}
 								<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
 									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
@@ -359,7 +407,7 @@
 					</div>
 				{:else}
 					<div class="overflow-x-auto">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
 									<th class="sortable-th px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -371,7 +419,7 @@
 									<th class="sortable-th px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+							<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
 								{#each sortedImages as img}
 									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
@@ -410,28 +458,79 @@
 					</div>
 				{:else}
 					<div class="overflow-x-auto">
-						<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<table class="min-w-full divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
+									<th class="w-12 py-3 pl-5 pr-0"></th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('host')}>Host <ChevronDown class="sort-icon {hostSortKey === 'host' ? 'active' : ''} {hostSortKey === 'host' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th px-5 py-3 text-left" onclick={sh('kind')}>Kind <ChevronDown class="sort-icon {hostSortKey === 'kind' ? 'active' : ''} {hostSortKey === 'kind' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="px-5 py-3 text-left">IP</th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('namespace')}>Namespace <ChevronDown class="sort-icon {hostSortKey === 'namespace' ? 'active' : ''} {hostSortKey === 'namespace' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('name')}>Name <ChevronDown class="sort-icon {hostSortKey === 'name' ? 'active' : ''} {hostSortKey === 'name' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="sortable-th px-5 py-3 text-left" onclick={sh('cluster')}>Cluster <ChevronDown class="sort-icon {hostSortKey === 'cluster' ? 'active' : ''} {hostSortKey === 'cluster' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="px-5 py-3 text-center">TLS</th>
-									<th class="sortable-th px-5 py-3 text-left" onclick={sh('last_seen')}>Last seen <ChevronDown class="sort-icon {hostSortKey === 'last_seen' ? 'active' : ''} {hostSortKey === 'last_seen' && hostSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
-							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+							<tbody class="divide-y divide-[var(--border-color)]/15 text-[var(--text-secondary)]">
 								{#each sortedHosts as h}
+									{@const resolved = hostResolutions[h.host]}
+									{@const meta = hostMetas[h.host]}
 									<tr class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{h.host}</td>
-										<td class="px-5 py-3"><span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{h.kind}</span></td>
+										<td class="w-12 py-3 pl-5 pr-0">
+											<div class="flex h-7 w-7 items-center justify-center">
+												{#if meta?.has_favicon}
+													<img
+														src={faviconProxyUrl(h.host)}
+														alt=""
+														class="h-6 w-6 rounded"
+													/>
+												{/if}
+											</div>
+										</td>
+										<td class="px-5 py-3">
+											<div class="min-w-0">
+												<span class="inline-flex items-center gap-1.5">
+													<span class="font-semibold text-[var(--text-bright)]">{h.host}</span>
+													<a
+														href={hostUrl(h.host, h.tls)}
+														target="_blank"
+														rel="noopener noreferrer"
+														class="text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
+													><ExternalLink class="h-3 w-3" /></a>
+												</span>
+												{#if meta?.title}
+													<div class="mt-0.5 truncate text-xs text-[var(--text-tertiary)]">{meta.title}</div>
+												{/if}
+											</div>
+										</td>
+										<td class="px-5 py-3 text-xs">
+											<div class="flex items-center gap-3">
+												<span class="w-6 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">lb</span>
+												{#if h.lb_ips}
+													<code class="text-[var(--text-secondary)]">{h.lb_ips}</code>
+												{:else}
+													<span class="text-[var(--text-tertiary)]">&mdash;</span>
+												{/if}
+											</div>
+											<div class="mt-1 flex items-center gap-3">
+												<span class="w-6 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">dns</span>
+												{#if resolved}
+													{#if resolved.error}
+														<span class="text-[var(--text-tertiary)]">unresolvable</span>
+													{:else}
+														<code class="text-[var(--text-secondary)]">{resolved.ips[0]}</code>
+														{#if resolved.is_local}
+															<span class="rounded-full bg-[var(--blue)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--blue)]">local</span>
+														{:else}
+															<span class="rounded-full bg-[var(--green)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--green)]">external</span>
+														{/if}
+													{/if}
+												{:else}
+													<span class="inline-block h-3 w-16 animate-pulse rounded bg-[var(--bg3)]/40"></span>
+												{/if}
+											</div>
+										</td>
 										<td class="px-5 py-3">{h.namespace}</td>
 										<td class="px-5 py-3">{h.name}</td>
 										<td class="px-5 py-3">{h.cluster || h.cluster_id}</td>
-										<td class="px-5 py-3 text-center">{#if h.tls}<span class="text-[var(--green)]">Yes</span>{:else}<span class="text-[var(--text-muted)]">No</span>{/if}</td>
-										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(h.last_seen, tick)}</td>
 									</tr>
 								{/each}
 							</tbody>
