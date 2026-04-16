@@ -29,6 +29,27 @@ const resourceKeyExpr = `(
 	END
 )`
 
+// liveCTE is a Common Table Expression that deduplicates cluster_record rows,
+// keeping only the latest non-DELETE row per resource identity. This prevents
+// INITIAL+UPDATE duplicates from appearing in query results.
+const liveCTE = `WITH live AS (
+	SELECT DISTINCT ON (
+		data->>'cluster_id',
+		CASE WHEN data->>'kind' = 'Container'
+		     THEN 'Container:' || (data->>'pod_uid') || '/' || (data->>'container')
+		     ELSE (data->>'kind') || ':' || COALESCE(data->>'uid', '')
+		END
+	) *
+	FROM cluster_record
+	WHERE data->>'msg' != 'DELETE'
+	ORDER BY data->>'cluster_id',
+		CASE WHEN data->>'kind' = 'Container'
+		     THEN 'Container:' || (data->>'pod_uid') || '/' || (data->>'container')
+		     ELSE (data->>'kind') || ':' || COALESCE(data->>'uid', '')
+		END,
+		received_at DESC
+) `
+
 // CallcenterHandler accepts a JSON array of SCAM records, validates each one,
 // and upserts live-state rows. DELETE events are stored (not physically removed)
 // so the history is preserved. No authentication required.
@@ -158,28 +179,24 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		var rows []row
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				data->>'cluster'     AS cluster,
 				data->>'cluster_id'  AS cluster_id,
 				data->>'environment' AS environment,
 				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'msg' != 'DELETE'
 					AND data->>'pod_phase' = 'Running') AS containers,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE'
 						AND data->>'pod_phase' = 'Running'
 						AND COALESCE(data->>'digest','') != '') AS images,
 				COUNT(DISTINCT data->>'namespace')
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE'
 						AND data->>'pod_phase' = 'Running') AS namespaces,
 				COUNT(DISTINCT data->>'uid')
-					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-						AND data->>'msg' != 'DELETE') AS ingress_count,
+					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')) AS ingress_count,
 				MAX(received_at) AS last_seen
-			FROM cluster_record
+			FROM live
 			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
 			ORDER BY last_seen DESC
 		`).Scan(&rows).Error
@@ -199,13 +216,12 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		var rows []row
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
 			  AND data->>'pod_phase' = 'Running'
 			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
@@ -227,17 +243,15 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 			InternalServices int64 `json:"internal_services"`
 		}
 		var res result
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-					  AND data->>'msg' != 'DELETE'
 				) AS internet_exposed,
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' = 'Service'
-					  AND data->>'msg' != 'DELETE'
 				) AS internal_services
-			FROM cluster_record
+			FROM live
 		`).Scan(&res).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -261,7 +275,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen       time.Time `json:"last_seen"`
 		}
 		var rows []row
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				data->>'image' AS image,
@@ -271,9 +285,8 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				COUNT(DISTINCT data->>'namespace') AS namespace_count,
 				COUNT(*) AS container_count,
 				MAX(received_at) AS last_seen
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
 			  AND data->>'pod_phase' = 'Running'
 			GROUP BY data->>'registry', data->>'image', data->>'digest'
 			ORDER BY container_count DESC, data->>'image'
@@ -310,8 +323,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
 		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
-		err := db.Raw(`
-			WITH ingress_hosts AS (
+		err := db.Raw(liveCTE + `,
+			ingress_hosts AS (
 				SELECT
 					r->>'host' AS host,
 					data->>'kind' AS kind,
@@ -333,10 +346,9 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
 				  AND jsonb_typeof(data->'rules') = 'array'
 				  AND jsonb_array_length(data->'rules') > 0
 			),
@@ -354,9 +366,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					'' AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE'
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 				  AND jsonb_array_length(data->'hostnames') > 0
 			),
@@ -380,9 +391,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
@@ -398,17 +408,15 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			) h
 			LEFT JOIN LATERAL (
 				SELECT COUNT(*) AS cnt
-				FROM cluster_record c
+				FROM live c
 				WHERE c.data->>'kind' = 'Container'
-				  AND c.data->>'msg' != 'DELETE'
 				  AND c.data->>'pod_phase' = 'Running'
 				  AND c.data->>'cluster_id' = h.cluster_id
 				  AND c.data->>'namespace' = h.namespace
 				  AND h.backends != ''
 				  AND EXISTS (
-				    SELECT 1 FROM cluster_record s
+				    SELECT 1 FROM live s
 				    WHERE s.data->>'kind' = 'Service'
-				      AND s.data->>'msg' != 'DELETE'
 				      AND s.data->>'cluster_id' = h.cluster_id
 				      AND s.data->>'namespace' = h.namespace
 				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
@@ -484,7 +492,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 1: All ingresses/routes in this cluster
 		var ingresses []nsIngress
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT * FROM (
 				SELECT
 					data->>'namespace' AS namespace,
@@ -498,10 +506,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 						 FROM jsonb_array_elements(r->'paths') AS p
 						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
 						'') AS backends
-				FROM cluster_record
+				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				UNION ALL
@@ -517,10 +524,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 							(SELECT string_agg(DISTINCT b->>'name', ', ')
 							 FROM jsonb_array_elements(data->'backends') AS b), '')
 						ELSE '' END AS backends
-				FROM cluster_record,
+				FROM live,
 				     jsonb_array_elements_text(data->'hosts') AS h
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				UNION ALL
@@ -532,10 +538,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					FALSE AS tls,
 					'' AS backends
-				FROM cluster_record,
+				FROM live,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 			) sub WHERE host IS NOT NULL AND host != ''
@@ -544,23 +549,22 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 2: All services in this cluster
 		var services []nsSvc
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'name' AS name,
 				COALESCE(data->>'service_type', '') AS service_type,
 				COALESCE(data->'ports'::text, '[]') AS ports_json,
 				COALESCE(data->'selector'::text, '{}') AS selector_json
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Service'
-			  AND data->>'msg' != 'DELETE'
 			  AND data->>'cluster_id' = ?
 			ORDER BY data->>'namespace', data->>'name'
 		`, clusterID).Scan(&services)
 
 		// Step 3: All running pod groups in this cluster
 		var pods []nsPod
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'owner' AS owner,
@@ -575,9 +579,8 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					'registry', data->>'registry'
 				)) AS containers_json,
 				(array_agg(data->'pod_labels'))[1] AS labels_json
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
 			  AND data->>'pod_phase' = 'Running'
 			  AND data->>'cluster_id' = ?
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
@@ -674,7 +677,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Look up cluster name
 		var clusterName string
-		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		// Sort namespaces and build result
 		type result struct {
@@ -763,7 +766,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Look up cluster name from any record with this cluster_id.
 		var clusterName string
-		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		resp := chainResponse{Host: host, Cluster: clusterName, ClusterID: clusterID, Namespace: namespace}
 
@@ -779,7 +782,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT * FROM (
 				-- Ingress
 				SELECT
@@ -807,9 +810,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						      jsonb_array_elements(r->'paths') AS p
 						 WHERE r->>'host' = ?),
 						'[]') AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
@@ -833,9 +835,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					'[]' AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
@@ -853,9 +854,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS lb_ips,
 					'' AS backends,
 					'[]' AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
@@ -897,16 +897,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var svcRows []svcRow
-			err = db.Raw(`
+			err = db.Raw(liveCTE+`
 				SELECT
 					data->>'name' AS name,
 					data->>'namespace' AS namespace,
 					COALESCE(data->>'service_type', '') AS service_type,
 					COALESCE(data->'ports'::text, '[]') AS ports_json,
 					COALESCE(data->'selector'::text, '{}') AS selector_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' = 'Service'
-				  AND data->>'msg' != 'DELETE'
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND data->>'name' IN (?)
@@ -937,7 +936,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						Containers string `gorm:"column:containers_json"`
 					}
 					var podRows []podRow
-					err = db.Raw(`
+					err = db.Raw(liveCTE+`
 						SELECT
 							data->>'owner' AS owner,
 							data->>'owner_kind' AS owner_kind,
@@ -950,9 +949,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 								'digest', data->>'digest',
 								'registry', data->>'registry'
 							)) AS containers_json
-						FROM cluster_record
+						FROM live
 						WHERE data->>'kind' = 'Container'
-						  AND data->>'msg' != 'DELETE'
 						  AND data->>'pod_phase' = 'Running'
 						  AND data->>'cluster_id' = ?
 						  AND data->>'namespace' = ?
@@ -999,21 +997,19 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var extraSvcs []extraSvcRow
-			db.Raw(`
+			db.Raw(liveCTE+`
 				SELECT DISTINCT
 					s.data->>'name' AS name,
 					s.data->>'namespace' AS namespace,
 					COALESCE(s.data->>'service_type', '') AS service_type,
 					COALESCE(s.data->'ports'::text, '[]') AS ports_json,
 					COALESCE(s.data->'selector'::text, '{}') AS selector_json
-				FROM cluster_record s, cluster_record c
+				FROM live s, live c
 				WHERE s.data->>'kind' = 'Service'
-				  AND s.data->>'msg' != 'DELETE'
 				  AND s.data->>'cluster_id' = ?
 				  AND s.data->>'namespace' = ?
 				  AND s.data->>'service_type' IN ('LoadBalancer', 'NodePort')
 				  AND c.data->>'kind' = 'Container'
-				  AND c.data->>'msg' != 'DELETE'
 				  AND c.data->>'pod_phase' = 'Running'
 				  AND c.data->>'cluster_id' = ?
 				  AND c.data->>'namespace' = ?
