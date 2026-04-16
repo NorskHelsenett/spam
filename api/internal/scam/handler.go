@@ -514,7 +514,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			TLS          bool   `json:"tls"`
 			LBIPs        string `json:"lb_ips"`
 			Backends     string `json:"backends"`
-			PathsJSON    string `json:"paths_json"`
+			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
 		err := db.Raw(`
@@ -631,8 +631,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				Name        string `json:"name"`
 				Namespace   string `json:"namespace"`
 				ServiceType string `json:"service_type"`
-				PortsJSON   string `json:"ports_json"`
-				SelectorJSON string `json:"selector_json"`
+				PortsJSON    string `gorm:"column:ports_json"`
+				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var svcRows []svcRow
 			err = db.Raw(`
@@ -672,7 +672,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						OwnerKind  string `json:"owner_kind"`
 						PodCount   int64  `json:"pod_count"`
 						Phase      string `json:"phase"`
-						Containers string `json:"containers_json"`
+						Containers string `gorm:"column:containers_json"`
 					}
 					var podRows []podRow
 					err = db.Raw(`

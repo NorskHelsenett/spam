@@ -21,9 +21,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"ingress-nginx-controller-7b4c9f8d6-x2k9m","pod_labels":{"app.kubernetes.io/name":"ingress-nginx"},
   "container_kind":"main","container":"controller",
   "registry":"registry.k8s.io","image":"ingress-nginx/controller","tag":"v1.12.1",
-  "digest":"sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+  "digest":"sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b",
   "image_spec":"registry.k8s.io/ingress-nginx/controller:v1.12.1",
-  "image_id":"registry.k8s.io/ingress-nginx/controller@sha256:a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+  "image_id":"registry.k8s.io/ingress-nginx/controller@sha256:d2fbc4ec70d8aa2050dd91a91506e998765e86c96f32cffb56c503c9c34eed5b"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: argocd server
@@ -35,9 +35,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"argocd-server-6f8b9c7d5-p3q7r","pod_labels":{"app.kubernetes.io/name":"argocd-server"},
   "container_kind":"main","container":"argocd-server",
   "registry":"quay.io","image":"argoproj/argocd","tag":"v2.14.2",
-  "digest":"sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+  "digest":"sha256:018f6444077deb39eac7c549a0ffe68d75da71751dd19899e05d3b60e1c2476f",
   "image_spec":"quay.io/argoproj/argocd:v2.14.2",
-  "image_id":"quay.io/argoproj/argocd@sha256:b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3"
+  "image_id":"quay.io/argoproj/argocd@sha256:018f6444077deb39eac7c549a0ffe68d75da71751dd19899e05d3b60e1c2476f"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: vaultwarden
@@ -49,9 +49,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"vaultwarden-5f6d7e8c9-k4m2n","pod_labels":{"app":"vaultwarden"},
   "container_kind":"main","container":"vaultwarden",
   "registry":"docker.io","image":"vaultwarden/server","tag":"1.35.4",
-  "digest":"sha256:c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+  "digest":"sha256:43498a94b22f9563f2a94b53760ab3e710eefc0d0cac2efda4b12b9eb8690664",
   "image_spec":"vaultwarden/server:1.35.4",
-  "image_id":"docker.io/vaultwarden/server@sha256:c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4"
+  "image_id":"docker.io/vaultwarden/server@sha256:43498a94b22f9563f2a94b53760ab3e710eefc0d0cac2efda4b12b9eb8690664"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: postgres (for vaultwarden)
@@ -63,9 +63,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"vaultwarden-db-0","pod_labels":{"app":"vaultwarden-db"},
   "container_kind":"main","container":"postgres",
   "registry":"docker.io","image":"postgres","tag":"17.4",
-  "digest":"sha256:d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+  "digest":"sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad",
   "image_spec":"postgres:17.4",
-  "image_id":"docker.io/library/postgres@sha256:d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5"
+  "image_id":"docker.io/library/postgres@sha256:304ab813518754228f9f792f79d6da36359b82d8ecf418096c636725f8c930ad"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: grafana
@@ -77,9 +77,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"grafana-7c8d9e0f1-j5l3n","pod_labels":{"app.kubernetes.io/name":"grafana"},
   "container_kind":"main","container":"grafana",
   "registry":"docker.io","image":"grafana/grafana","tag":"11.6.0",
-  "digest":"sha256:e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+  "digest":"sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb",
   "image_spec":"grafana/grafana:11.6.0",
-  "image_id":"docker.io/grafana/grafana@sha256:e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6"
+  "image_id":"docker.io/grafana/grafana@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: prometheus
@@ -91,9 +91,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"prometheus-0","pod_labels":{"app.kubernetes.io/name":"prometheus"},
   "container_kind":"main","container":"prometheus",
   "registry":"quay.io","image":"prometheus/prometheus","tag":"v3.3.0",
-  "digest":"sha256:f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7",
+  "digest":"sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1",
   "image_spec":"quay.io/prometheus/prometheus:v3.3.0",
-  "image_id":"quay.io/prometheus/prometheus@sha256:f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7"
+  "image_id":"quay.io/prometheus/prometheus@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: spam (this app, running in-cluster)
@@ -105,9 +105,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"spam-5d6e7f8a9-b2c3d","pod_labels":{"app.kubernetes.io/name":"spam"},
   "container_kind":"main","container":"spam",
   "registry":"ghcr.io","image":"norskhelsenett/spam","tag":"latest",
-  "digest":"sha256:a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+  "digest":"sha256:e9322615749a68ab71915401abc27969814d4dc6d8e49f195a463d5997de99ab",
   "image_spec":"ghcr.io/norskhelsenett/spam:latest",
-  "image_id":"ghcr.io/norskhelsenett/spam@sha256:a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8"
+  "image_id":"ghcr.io/norskhelsenett/spam@sha256:e9322615749a68ab71915401abc27969814d4dc6d8e49f195a463d5997de99ab"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Containers: scam agent
@@ -119,9 +119,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"scam-4c5d6e7f8-a9b0c","pod_labels":{"app.kubernetes.io/name":"scam"},
   "container_kind":"main","container":"scam",
   "registry":"ghcr.io","image":"norskhelsenett/scam","tag":"latest",
-  "digest":"sha256:b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
+  "digest":"sha256:ca58ba65cc5d35a8b6e5b55c4158189d739f9f531c2eeadbb9eaedab4d0ee6ab",
   "image_spec":"ghcr.io/norskhelsenett/scam:latest",
-  "image_id":"ghcr.io/norskhelsenett/scam@sha256:b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9"
+  "image_id":"ghcr.io/norskhelsenett/scam@sha256:ca58ba65cc5d35a8b6e5b55c4158189d739f9f531c2eeadbb9eaedab4d0ee6ab"
 }', NOW() - INTERVAL '5 minutes');
 
 -- Services: prod cluster
@@ -239,9 +239,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"traefik-6a7b8c9d0-e1f2g","pod_labels":{"app.kubernetes.io/name":"traefik"},
   "container_kind":"main","container":"traefik",
   "registry":"docker.io","image":"traefik","tag":"v3.3.5",
-  "digest":"sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+  "digest":"sha256:104204dadedf5d1284f8ef8f97f705649ac81aa6f7a6c9abf13e2c59245b8abc",
   "image_spec":"traefik:v3.3.5",
-  "image_id":"docker.io/library/traefik@sha256:1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+  "image_id":"docker.io/library/traefik@sha256:104204dadedf5d1284f8ef8f97f705649ac81aa6f7a6c9abf13e2c59245b8abc"
 }', NOW() - INTERVAL '2 minutes');
 
 -- Containers: dev app (frontend)
@@ -249,13 +249,13 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:02Z","level":"INFO","msg":"INITIAL","kind":"Container",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
   "namespace":"app","pod_uid":"aaaaaaaa-bbbb-cccc-dddd-aaaaaaaaaaaa","pod_phase":"Running",
-  "owner_kind":"Deployment","owner":"frontend",
-  "pod":"frontend-3b4c5d6e7-f8g9h","pod_labels":{"app":"frontend","version":"2.1.0"},
-  "container_kind":"main","container":"frontend",
-  "registry":"ghcr.io","image":"norskhelsenett/frontend","tag":"2.1.0",
-  "digest":"sha256:2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c",
-  "image_spec":"ghcr.io/norskhelsenett/frontend:2.1.0",
-  "image_id":"ghcr.io/norskhelsenett/frontend@sha256:2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c"
+  "owner_kind":"Deployment","owner":"paste",
+  "pod":"paste-3b4c5d6e7-f8g9h","pod_labels":{"app":"paste","version":"latest"},
+  "container_kind":"main","container":"paste",
+  "registry":"ghcr.io","image":"jonasbg/paste","tag":"latest",
+  "digest":"sha256:9388b6327d29fa0b5bf1bea24e3c2dee88166ee16547636fbc28438bd2fcd94b",
+  "image_spec":"ghcr.io/jonasbg/paste:latest",
+  "image_id":"ghcr.io/jonasbg/paste@sha256:9388b6327d29fa0b5bf1bea24e3c2dee88166ee16547636fbc28438bd2fcd94b"
 }', NOW() - INTERVAL '2 minutes');
 
 -- Containers: dev app (backend api)
@@ -263,13 +263,13 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:03Z","level":"INFO","msg":"INITIAL","kind":"Container",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
   "namespace":"app","pod_uid":"bbbbbbbb-cccc-dddd-eeee-bbbbbbbbbbbb","pod_phase":"Running",
-  "owner_kind":"Deployment","owner":"backend-api",
-  "pod":"backend-api-2a3b4c5d6-e7f8g","pod_labels":{"app":"backend-api","version":"3.8.1"},
-  "container_kind":"main","container":"api",
-  "registry":"ghcr.io","image":"norskhelsenett/backend-api","tag":"3.8.1",
-  "digest":"sha256:3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d",
-  "image_spec":"ghcr.io/norskhelsenett/backend-api:3.8.1",
-  "image_id":"ghcr.io/norskhelsenett/backend-api@sha256:3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d"
+  "owner_kind":"Deployment","owner":"chase",
+  "pod":"chase-2a3b4c5d6-e7f8g","pod_labels":{"app":"chase","version":"latest"},
+  "container_kind":"main","container":"chase",
+  "registry":"ghcr.io","image":"norskhelsenett/chase","tag":"latest",
+  "digest":"sha256:922de8f51c2d375c38e903e725e7e7fe690a75ad63bff8babcd4e8664cdbb259",
+  "image_spec":"ghcr.io/norskhelsenett/chase:latest",
+  "image_id":"ghcr.io/norskhelsenett/chase@sha256:922de8f51c2d375c38e903e725e7e7fe690a75ad63bff8babcd4e8664cdbb259"
 }', NOW() - INTERVAL '2 minutes');
 
 -- Containers: redis (sidecar cache)
@@ -281,9 +281,9 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"redis-1a2b3c4d5-e6f7g","pod_labels":{"app":"redis"},
   "container_kind":"main","container":"redis",
   "registry":"docker.io","image":"redis","tag":"7.4",
-  "digest":"sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e",
+  "digest":"sha256:24ea35ee039d7345bef2377611e3b1a615231746de4cfea74c1414575ee56167",
   "image_spec":"redis:7.4",
-  "image_id":"docker.io/library/redis@sha256:4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e"
+  "image_id":"docker.io/library/redis@sha256:24ea35ee039d7345bef2377611e3b1a615231746de4cfea74c1414575ee56167"
 }', NOW() - INTERVAL '2 minutes');
 
 -- Containers: scam agent (dev cluster)
@@ -295,29 +295,29 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "pod":"scam-8e9f0a1b2-c3d4e","pod_labels":{"app.kubernetes.io/name":"scam"},
   "container_kind":"main","container":"scam",
   "registry":"ghcr.io","image":"norskhelsenett/scam","tag":"latest",
-  "digest":"sha256:b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
+  "digest":"sha256:ca58ba65cc5d35a8b6e5b55c4158189d739f9f531c2eeadbb9eaedab4d0ee6ab",
   "image_spec":"ghcr.io/norskhelsenett/scam:latest",
-  "image_id":"ghcr.io/norskhelsenett/scam@sha256:b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9"
+  "image_id":"ghcr.io/norskhelsenett/scam@sha256:ca58ba65cc5d35a8b6e5b55c4158189d739f9f531c2eeadbb9eaedab4d0ee6ab"
 }', NOW() - INTERVAL '2 minutes');
 
 -- Services: dev cluster
 INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:10Z","level":"INFO","msg":"INITIAL","kind":"Service",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
-  "uid":"eeeeeeee-4444-5555-6666-eeeeeeeeeeee","namespace":"app","name":"frontend",
-  "labels":{"app":"frontend"},"service_type":"ClusterIP",
+  "uid":"eeeeeeee-4444-5555-6666-eeeeeeeeeeee","namespace":"app","name":"paste",
+  "labels":{"app":"paste"},"service_type":"ClusterIP",
   "cluster_ips":["10.96.50.10"],"external_ips":[],"external_name":"",
-  "selector":{"app":"frontend"},"ports":[{"name":"http","port":80,"target_port":"3000","protocol":"TCP"}],
+  "selector":{"app":"paste"},"ports":[{"name":"http","port":80,"target_port":"3000","protocol":"TCP"}],
   "lb_ips":[],"lb_hostnames":[]
 }', NOW() - INTERVAL '2 minutes');
 
 INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:11Z","level":"INFO","msg":"INITIAL","kind":"Service",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
-  "uid":"ffffffff-4444-5555-6666-ffffffffffff","namespace":"app","name":"backend-api",
-  "labels":{"app":"backend-api"},"service_type":"ClusterIP",
+  "uid":"ffffffff-4444-5555-6666-ffffffffffff","namespace":"app","name":"chase",
+  "labels":{"app":"chase"},"service_type":"ClusterIP",
   "cluster_ips":["10.96.50.20"],"external_ips":[],"external_name":"",
-  "selector":{"app":"backend-api"},"ports":[{"name":"http","port":8080,"target_port":"8080","protocol":"TCP"}],
+  "selector":{"app":"chase"},"ports":[{"name":"http","port":8080,"target_port":"8080","protocol":"TCP"}],
   "lb_ips":[],"lb_hostnames":[]
 }', NOW() - INTERVAL '2 minutes');
 
@@ -336,20 +336,20 @@ INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:20Z","level":"INFO","msg":"INITIAL","kind":"IngressRoute",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
   "api_version":"traefik.io/v1",
-  "uid":"bbbbbbbb-5555-6666-7777-222222222222","namespace":"app","name":"frontend",
-  "labels":{"app":"frontend"},"entry_points":["websecure"],
+  "uid":"bbbbbbbb-5555-6666-7777-222222222222","namespace":"app","name":"paste",
+  "labels":{"app":"paste"},"entry_points":["websecure"],
   "hosts":["dev.example.com"],
   "tls_secret":"dev-tls",
-  "backends":[{"namespace":"app","name":"frontend"}]
+  "backends":[{"namespace":"app","name":"paste"}]
 }', NOW() - INTERVAL '2 minutes');
 
 INSERT INTO cluster_record (id, data, received_at) VALUES (gen_random_uuid(), '{
   "time":"2026-04-16T08:01:21Z","level":"INFO","msg":"INITIAL","kind":"IngressRoute",
   "cluster":"t-dev-001","cluster_id":"d1e2f3a4-b5c6-7890-1234-abcdef123456","environment":"development",
   "api_version":"traefik.io/v1",
-  "uid":"cccccccc-5555-6666-7777-333333333333","namespace":"app","name":"backend-api",
-  "labels":{"app":"backend-api"},"entry_points":["websecure"],
+  "uid":"cccccccc-5555-6666-7777-333333333333","namespace":"app","name":"chase",
+  "labels":{"app":"chase"},"entry_points":["websecure"],
   "hosts":["api.dev.example.com"],
   "tls_secret":"dev-api-tls",
-  "backends":[{"namespace":"app","name":"backend-api"}]
+  "backends":[{"namespace":"app","name":"chase"}]
 }', NOW() - INTERVAL '2 minutes');
