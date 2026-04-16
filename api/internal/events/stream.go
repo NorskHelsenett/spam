@@ -15,6 +15,8 @@ const (
 	StreamEventProviderSyncFailed    = "provider_sync_failed"
 
 	StreamEventNewUser = "new_user"
+
+	StreamEventScamIngest = "scam_ingest"
 )
 
 type StreamEvent struct {
