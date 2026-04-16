@@ -316,21 +316,23 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'environment' AS environment,
 					jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
 					COALESCE(
-						(SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip),
+						(SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(COALESCE(data->'lb_ips', '[]'::jsonb)) AS ip),
 						''
 					) AS lb_ips,
 					COALESCE(data->>'ingress_class', '') AS ingress_class,
 					COALESCE(
 						(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
-						 FROM jsonb_array_elements(r->'paths') AS p
+						 FROM jsonb_array_elements(COALESCE(r->'paths', '[]'::jsonb)) AS p
 						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
 						''
 					) AS backends,
 					received_at AS last_seen
-				FROM cluster_record, jsonb_array_elements(data->'rules') AS r
+				FROM cluster_record
+				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
 				  AND data->>'msg' != 'DELETE'
 				  AND jsonb_typeof(data->'rules') = 'array'
+				  AND jsonb_array_length(data->'rules') > 0
 			),
 			route_hosts AS (
 				SELECT
@@ -366,7 +368,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					COALESCE(
 						(SELECT string_agg(DISTINCT b->>'name', ', ')
-						 FROM jsonb_array_elements(data->'backends') AS b
+						 FROM jsonb_array_elements(COALESCE(data->'backends', '[]'::jsonb)) AS b
 						 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
 						''
 					) AS backends,
