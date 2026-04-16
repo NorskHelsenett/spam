@@ -637,7 +637,7 @@
 
 				{#if clusterDrawerOpen && clusterDrawerRow}
 					<div
-						class="fixed inset-y-0 right-0 z-50 flex w-[780px] flex-col overflow-hidden rounded-l-[10px] border-l border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
+						class="fixed top-2 bottom-2 right-2 z-50 flex w-[780px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
 						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
 						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 					>
@@ -936,7 +936,7 @@
 
 				{#if chainDrawerOpen && chainDrawerRow}
 					<div
-						class="fixed inset-y-0 right-0 z-50 flex w-[780px] flex-col overflow-hidden rounded-l-[10px] border-l border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
+						class="fixed top-2 bottom-2 right-2 z-50 flex w-[780px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
 						in:fly={{ x: 780, duration: 240, easing: cubicOut, opacity: 1 }}
 						out:fly={{ x: 780, duration: 200, easing: cubicIn, opacity: 1 }}
 					>
