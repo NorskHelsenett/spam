@@ -164,11 +164,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
 
-				// SCAM query endpoints (authenticated)
-				api.Get("/scam/clusters", scam.ClusterSummaryHandler(db))
-				api.Get("/scam/registry-distribution", scam.RegistryDistributionHandler(db))
-				api.Get("/scam/exposure", scam.ExposureHandler(db))
-				api.Get("/scam/images/detail", scam.ImageDetailHandler(db))
+				// Cluster query endpoints (authenticated, data from SCAM agents)
+				api.Get("/clusters/summary", scam.ClusterSummaryHandler(db))
+				api.Get("/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
+				api.Get("/clusters/exposure", scam.ExposureHandler(db))
+				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
+				api.Get("/clusters/hosts", scam.HostsHandler(db))
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
