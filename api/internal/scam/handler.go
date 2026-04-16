@@ -287,25 +287,27 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 func HostsHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
-			Host        string    `json:"host"`
-			Kind        string    `json:"kind"`
-			Name        string    `json:"name"`
-			Namespace   string    `json:"namespace"`
-			Cluster     string    `json:"cluster"`
-			ClusterID   string    `json:"cluster_id"`
-			Environment string    `json:"environment"`
-			TLS         bool      `json:"tls"`
-			LBIPs       string    `json:"lb_ips"`
-			LastSeen    time.Time `json:"last_seen"`
+			Host         string    `json:"host"`
+			Kind         string    `json:"kind"`
+			Name         string    `json:"name"`
+			Namespace    string    `json:"namespace"`
+			Cluster      string    `json:"cluster"`
+			ClusterID    string    `json:"cluster_id"`
+			Environment  string    `json:"environment"`
+			TLS          bool      `json:"tls"`
+			LBIPs        string    `json:"lb_ips"`
+			IngressClass string    `json:"ingress_class"`
+			Backends     string    `json:"backends"`
+			LastSeen     time.Time `json:"last_seen"`
 		}
 		var rows []row
-		// Ingress: hosts from rules array
+		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
-		// IngressRoute/IngressRouteTCP: hosts from hosts array
+		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
 		err := db.Raw(`
 			WITH ingress_hosts AS (
 				SELECT
-					jsonb_array_elements(data->'rules')->>'host' AS host,
+					r->>'host' AS host,
 					data->>'kind' AS kind,
 					data->>'name' AS name,
 					data->>'namespace' AS namespace,
@@ -317,8 +319,15 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 						(SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip),
 						''
 					) AS lb_ips,
+					COALESCE(data->>'ingress_class', '') AS ingress_class,
+					COALESCE(
+						(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
+						 FROM jsonb_array_elements(r->'paths') AS p
+						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
+						''
+					) AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM cluster_record, jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
 				  AND data->>'msg' != 'DELETE'
 				  AND jsonb_typeof(data->'rules') = 'array'
@@ -334,6 +343,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'environment' AS environment,
 					FALSE AS tls,
 					'' AS lb_ips,
+					'' AS ingress_class,
+					'' AS backends,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
@@ -352,6 +363,13 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'environment' AS environment,
 					COALESCE(data->>'tls_secret', '') != '' AS tls,
 					'' AS lb_ips,
+					'' AS ingress_class,
+					COALESCE(
+						(SELECT string_agg(DISTINCT b->>'name', ', ')
+						 FROM jsonb_array_elements(data->'backends') AS b
+						 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
+						''
+					) AS backends,
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
@@ -359,7 +377,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
-			SELECT host, kind, name, namespace, cluster, cluster_id, environment, tls, lb_ips, last_seen
+			SELECT host, kind, name, namespace, cluster, cluster_id, environment,
+			       tls, lb_ips, ingress_class, backends, last_seen
 			FROM (
 				SELECT * FROM ingress_hosts
 				UNION ALL
