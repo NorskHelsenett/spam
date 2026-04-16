@@ -593,12 +593,12 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Registry string `json:"registry"`
 		}
 		type chainPodGroup struct {
-			Owner       string           `json:"owner"`
-			OwnerKind   string           `json:"owner_kind"`
-			PodCount    int64            `json:"pod_count"`
-			Phase       string           `json:"phase"`
-			Containers  []chainContainer `json:"containers"`
-			ServiceName string           `json:"service_name,omitempty"`
+			Owner        string           `json:"owner"`
+			OwnerKind    string           `json:"owner_kind"`
+			PodCount     int64            `json:"pod_count"`
+			Phase        string           `json:"phase"`
+			Containers   []chainContainer `json:"containers"`
+			ServiceNames []string         `json:"service_names"`
 		}
 		type chainSvc struct {
 			Name        string            `json:"name"`
@@ -658,14 +658,13 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			if pod.ContainersJSON != "" {
 				_ = json.Unmarshal([]byte(pod.ContainersJSON), &pg.Containers)
 			}
-			// Match this pod group to a service via selector containment
+			// Match this pod group to ALL services whose selectors match
 			if pod.LabelsJSON != "" {
 				var podLabels map[string]string
 				if json.Unmarshal([]byte(pod.LabelsJSON), &podLabels) == nil {
 					for _, svc := range c.Services {
 						if len(svc.Selector) > 0 && labelsMatch(podLabels, svc.Selector) {
-							pg.ServiceName = svc.Name
-							break
+							pg.ServiceNames = append(pg.ServiceNames, svc.Name)
 						}
 					}
 				}
@@ -745,12 +744,12 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Registry string `json:"registry"`
 		}
 		type chainPodGroup struct {
-			Owner       string           `json:"owner"`
-			OwnerKind   string           `json:"owner_kind"`
-			PodCount    int64            `json:"pod_count"`
-			Phase       string           `json:"phase"`
-			Containers  []chainContainer `json:"containers"`
-			ServiceName string           `json:"service_name"`
+			Owner        string           `json:"owner"`
+			OwnerKind    string           `json:"owner_kind"`
+			PodCount     int64            `json:"pod_count"`
+			Phase        string           `json:"phase"`
+			Containers   []chainContainer `json:"containers"`
+			ServiceName  string           `json:"service_name"`
 		}
 		type chainResponse struct {
 			Host      string          `json:"host"`
