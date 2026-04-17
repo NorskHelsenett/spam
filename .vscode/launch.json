@@ -10,7 +10,7 @@
             "cwd": "${workspaceFolder}/api/",
             "env": {
                 "HTTP_PORT": "8080",
-                "SPAM_SEED_SQL": "../seed/scam_seed.sql",
+                "SPAM_SEED_SQL": "../seed/scam_seed.sql,../seed/dev_seed.sql,../seed/image_scan_seed.sql",
                 "POSTGRES_HOST": "localhost",
                 "POSTGRES_PORT": "5432",
                 "POSTGRES_USER": "postgres",

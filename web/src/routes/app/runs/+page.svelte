@@ -74,14 +74,14 @@
 		{ id: 'error', label: 'Error', statuses: ['FAILED'] }
 	];
 
-	// Type filter sent as ?type= on the API. "repo" is the default on the
-	// server so omitting the param would preserve legacy behaviour, but we
-	// always send it so the UI state and request stay in lockstep.
+	// Type filter sent as ?type= on the API. "all" is the default on both
+	// the server and the UI so the runs page shows every job by default;
+	// operators pick Repos / Images to narrow.
 	type TypeFilter = { id: 'repo' | 'image' | 'all'; label: string };
 	const typeFilters: TypeFilter[] = [
+		{ id: 'all', label: 'All' },
 		{ id: 'repo', label: 'Repos' },
-		{ id: 'image', label: 'Images' },
-		{ id: 'all', label: 'All' }
+		{ id: 'image', label: 'Images' }
 	];
 
 	let runs: Run[] = $state([]);
