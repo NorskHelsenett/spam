@@ -303,7 +303,7 @@
 	</div>
 
 	<!-- Vulnerabilities -->
-	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
 		<header class="mb-3 flex flex-wrap items-center justify-between gap-3">
 			<div class="flex items-center gap-3">
 				<h2 class="text-sm font-semibold text-[var(--text-bright)]">Vulnerabilities</h2>
@@ -381,7 +381,7 @@
 	</section>
 
 	<!-- Secrets -->
-	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
 		<header class="mb-3 flex items-center gap-2">
 			<AlertTriangle size={16} class="text-[var(--warning)]" />
 			<h2 class="text-sm font-semibold text-[var(--text-bright)]">Secrets in image filesystem</h2>
@@ -418,7 +418,7 @@
 	</section>
 
 	<!-- OCI Labels -->
-	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+	<section class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
 		<header class="mb-3 flex items-center gap-2">
 			<Tag size={16} />
 			<h2 class="text-sm font-semibold text-[var(--text-bright)]">OCI labels</h2>
