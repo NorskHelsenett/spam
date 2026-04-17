@@ -25,13 +25,13 @@ COPY imagescan/ ./imagescan/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
     -o image-scanner ./cmd/image-scanner/
 
-# Scanner binaries — upstream images, pinned where digests are available.
-# Version tags should be SHA-pinned before promoting past staging; left
-# floating here so operators can verify against their internal mirror first.
+# Scanner binaries — all SHA-pinned to manifests at least one week old at
+# the time of selection so we're never racing an upstream release-day
+# regression. Refresh these during scheduled maintenance, not reactively.
 FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36 AS syft
-FROM anchore/grype:v0.100.0 AS grype
-FROM gcr.io/go-containerregistry/crane:v0.21.5 AS crane
-FROM gcr.io/projectsigstore/cosign:v2.6.2 AS cosign
+FROM anchore/grype:v0.111.0@sha256:af9f30d1de4ecfbbcd2b674371e8df787879e16832af8ab81551b0bf1ec0ad5b AS grype
+FROM gcr.io/go-containerregistry/crane:v0.21.4@sha256:acb1c5c819a62a89183c4688d3a4a6e0633df1ea2b6e41834f105e12417ac6c4 AS crane
+FROM gcr.io/projectsigstore/cosign:v2.6.3@sha256:4bedb8de1c5c1abd8dea60de704ba449402d238623fa8bb33d2ccaa9beffcbf5 AS cosign
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 # Trivy is opt-in per category (payload.scanners) — shipping the binary
 # keeps the opt-in one env flag away rather than a separate image.
