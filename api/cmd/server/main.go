@@ -19,6 +19,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/scam"
@@ -72,6 +73,12 @@ func run() error {
 		&runner.Run{},
 		&runner.RunLog{},
 		&runner.RunSecret{},
+		// Image-scan tables are also migrated by the worker, but the API
+		// server needs them too so local-dev seeding (image_scan_seed.sql)
+		// doesn't blow up when the worker isn't running.
+		&imagescan.ImageScanRun{},
+		&imagescan.ImageScanArtifact{},
+		&imagescan.ImageVulnFinding{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
 		&events.OutboxEvent{},
