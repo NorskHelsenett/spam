@@ -174,21 +174,28 @@ func (p Pipeline) runSignature(ctx context.Context, outDir string) (Artifact, er
 	switch name {
 	case "cosign":
 		// `cosign tree` lists what's attached without requiring a signer
-		// identity. Shipping this unconditionally gives the UI "signed /
-		// unsigned / partial" without an admin-config prerequisite. Once
-		// an identity policy exists, a separate `cosign verify` call can
-		// supplement this with a verdict field.
+		// identity. It returns non-empty output even for unsigned images
+		// (it prints a "No Supply Chain Security Related Artifacts found"
+		// banner), so "output exists" cannot be used as "image is signed".
+		// We parse the known marker explicitly.
+		//
+		// `verified` is deliberately NOT a claim we make here: cosign tree
+		// does not verify signatures against an identity policy. When admin
+		// config for keyless / key-based identity lands, a `cosign verify`
+		// call can supplement this with a real verdict.
 		raw, err := p.capture(ctx, "cosign", "tree", p.Ref.String())
 		payload := map[string]any{
 			"image":    p.Ref.String(),
 			"verifier": "cosign",
+			"verified": false, // no identity policy configured — always false today
 		}
 		if err != nil {
-			payload["verified"] = false
+			payload["signed"] = false
 			payload["error"] = err.Error()
 		} else {
-			payload["verified"] = len(raw) > 0
-			payload["tree_raw"] = string(raw)
+			rawStr := string(raw)
+			payload["signed"] = !strings.Contains(rawStr, "No Supply Chain Security Related Artifacts found")
+			payload["tree_raw"] = rawStr
 		}
 		if err := writeJSON(out, payload); err != nil {
 			return Artifact{}, err
