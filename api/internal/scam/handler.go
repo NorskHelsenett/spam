@@ -254,29 +254,47 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			Registry       string    `json:"registry"`
 			Image          string    `json:"image"`
 			Digest         string    `json:"digest"`
-			Tags           string    `json:"tags"` // comma-separated
+			DigestID       string    `json:"digest_id"` // image_digests.id — enables deep-link to /app/images/<id>
+			Tags           string    `json:"tags"`      // comma-separated
 			ClusterCount   int64     `json:"cluster_count"`
 			NamespaceCount int64     `json:"namespace_count"`
 			ContainerCount int64     `json:"container_count"`
 			LastSeen       time.Time `json:"last_seen"`
 		}
 		var rows []row
+		// Aggregate cluster observations first, then LEFT JOIN
+		// image_digests so rows get a digest_id when the reconciler has
+		// already harvested them (and empty otherwise — the page still
+		// renders, just without a clickable link).
 		err := db.Raw(`
+			WITH agg AS (
+			    SELECT
+			        data->>'registry' AS raw_registry,
+			        COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
+			        data->>'image' AS image,
+			        COALESCE(data->>'digest', '') AS digest,
+			        STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
+			        COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
+			        COUNT(DISTINCT data->>'namespace') AS namespace_count,
+			        COUNT(*) AS container_count,
+			        MAX(received_at) AS last_seen
+			    FROM cluster_record
+			    WHERE data->>'kind' = 'Container'
+			      AND data->>'msg' != 'DELETE'
+			      AND data->>'pod_phase' = 'Running'
+			    GROUP BY data->>'registry', data->>'image', data->>'digest'
+			)
 			SELECT
-				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-				data->>'image' AS image,
-				COALESCE(data->>'digest', '') AS digest,
-				STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
-				COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
-				COUNT(DISTINCT data->>'namespace') AS namespace_count,
-				COUNT(*) AS container_count,
-				MAX(received_at) AS last_seen
-			FROM cluster_record
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
-			  AND data->>'pod_phase' = 'Running'
-			GROUP BY data->>'registry', data->>'image', data->>'digest'
-			ORDER BY container_count DESC, data->>'image'
+			    agg.registry, agg.image, agg.digest,
+			    COALESCE(id.id, '') AS digest_id,
+			    agg.tags, agg.cluster_count, agg.namespace_count,
+			    agg.container_count, agg.last_seen
+			FROM agg
+			LEFT JOIN image_digests id
+			  ON id.registry   = agg.raw_registry
+			 AND id.repository = agg.image
+			 AND id.digest     = agg.digest
+			ORDER BY agg.container_count DESC, agg.image
 		`).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)

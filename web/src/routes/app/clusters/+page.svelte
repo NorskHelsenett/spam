@@ -48,6 +48,7 @@
 		registry: string;
 		image: string;
 		digest: string;
+		digest_id?: string; // image_digests.id — present once the reconciler has harvested this digest
 		tags: string;
 		cluster_count: number;
 		namespace_count: number;
@@ -768,9 +769,19 @@
 							<tbody class="text-[var(--text-secondary)]">
 								{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="7"></td></tr>{/if}
 								{#each sortedImages.slice(imageVirt.start, imageVirt.end) as img}
-									<tr class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]" style="height:{ROW_HEIGHT}px">
+									<tr
+										class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {img.digest_id ? 'cursor-pointer' : ''}"
+										style="height:{ROW_HEIGHT}px"
+										onclick={() => { if (img.digest_id) location.assign(`/app/images/${img.digest_id}`); }}
+									>
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
-										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{img.image}</td>
+										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
+											{#if img.digest_id}
+												<a class="hover:text-[var(--accent)] hover:underline" href={`/app/images/${img.digest_id}`} onclick={(e) => e.stopPropagation()}>{img.image}</a>
+											{:else}
+												{img.image}
+											{/if}
+										</td>
 										<td class="px-5 py-3">
 											{#if img.digest}
 												<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(img.digest)}</code>

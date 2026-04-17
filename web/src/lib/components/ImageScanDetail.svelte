@@ -481,6 +481,39 @@
 					Open repo →
 				</a>
 			</div>
+		{:else if run.image_labels?.['org.opencontainers.image.source']}
+			<!-- Image claims a source but we couldn't match it to a repo
+			     in our providers (either org/host mismatch or the repo
+			     simply isn't imported). Still surface the claim with an
+			     external link so the user can follow it out-of-app. -->
+			{@const src = run.image_labels['org.opencontainers.image.source']}
+			{@const rev = run.image_labels['org.opencontainers.image.revision']}
+			<div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/60 p-3">
+				<div class="min-w-0 flex-1">
+					<div class="mb-0.5 text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+						Claimed source (external)
+					</div>
+					<a href={src} target="_blank" rel="noopener"
+						class="break-all text-sm font-semibold text-[var(--accent)] hover:underline">
+						{src}
+					</a>
+					{#if rev}
+						<div class="mt-1 font-mono text-xs text-[var(--text-tertiary)]">
+							revision
+							<a href={`${src.replace(/\.git$/, '')}/commit/${rev}`} target="_blank" rel="noopener"
+								class="text-[var(--accent)] hover:underline">
+								{rev.slice(0, 10)}
+							</a>
+						</div>
+					{/if}
+					<div class="mt-1 text-[11px] text-[var(--text-tertiary)]">
+						Not in your providers — import the repo to get internal cross-links.
+					</div>
+				</div>
+				<a class="btn btn-ghost btn-sm" href={src} target="_blank" rel="noopener">
+					Open source ↗
+				</a>
+			</div>
 		{/if}
 
 		{#if !run.image_labels || Object.keys(run.image_labels).length === 0}
