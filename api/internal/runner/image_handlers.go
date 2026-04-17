@@ -2,6 +2,7 @@ package runner
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -139,6 +140,23 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 
 			// Category-specific parsers.
 			switch spec.category {
+			case "labels":
+				// Parse the OCI `image.source` label once and cache the
+				// resolved repo.id on image_digests. Later reads (image
+				// detail page, repo→images reverse lookup) avoid
+				// re-parsing labels on every request.
+				if source := extractSourceLabel(data); source != "" {
+					if repoID, err := imagescan.ResolveSourceRepoID(r.Context(), tx, source); err != nil {
+						log.Printf("resolve source repo for %s: %v", imageDigestID, err)
+					} else if repoID != "" {
+						if err := tx.Exec(
+							"UPDATE image_digests SET source_repo_id = ? WHERE id = ?",
+							repoID, imageDigestID,
+						).Error; err != nil {
+							log.Printf("update source_repo_id: %v", err)
+						}
+					}
+				}
 			case "sbom":
 				// SBOMs flow through the existing SBOM pipeline so the
 				// image shows up in /app/components immediately.
@@ -188,6 +206,24 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 func readAllAndClose(f multipart.File) ([]byte, error) {
 	defer f.Close()
 	return io.ReadAll(f)
+}
+
+// extractSourceLabel reads the OCI `image.source` label from a
+// `crane config` JSON blob. Returns "" when the label isn't present
+// or the blob doesn't parse.
+func extractSourceLabel(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var config struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Config.Labels["org.opencontainers.image.source"])
 }
 
 // detectSBOMFormat inspects the filename first, then falls back to a cheap

@@ -193,7 +193,13 @@
 					<span>Job ID: {run.id.slice(0, 8)}</span>
 				</div>
 				<h1 class="break-all text-xl font-semibold text-[var(--text-bright)]">
-					{run.image_registry}/{run.image_repository}
+					{#if run.image_digest_id}
+						<a class="hover:text-[var(--accent)] hover:underline" href={`/app/images/${run.image_digest_id}`}>
+							{run.image_registry}/{run.image_repository}
+						</a>
+					{:else}
+						{run.image_registry}/{run.image_repository}
+					{/if}
 				</h1>
 				<div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--text-tertiary)]">
 					<code class="rounded bg-[var(--hover-bg-subtle)] px-2 py-0.5 font-mono">{shortDigest(run.image_digest)}</code>
