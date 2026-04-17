@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
 # floating here so operators can verify against their internal mirror first.
 FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36 AS syft
 FROM anchore/grype:v0.100.0 AS grype
-FROM gcr.io/go-containerregistry/crane:v0.20.7 AS crane
+FROM gcr.io/go-containerregistry/crane:v0.21.5 AS crane
 FROM gcr.io/projectsigstore/cosign:v2.6.2 AS cosign
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 # Trivy is opt-in per category (payload.scanners) — shipping the binary
