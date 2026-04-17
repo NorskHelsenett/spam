@@ -49,6 +49,53 @@ type RunResponse struct {
 	ImageArtifacts  []ImageArtifactSummary  `json:"image_artifacts,omitempty"`
 	ImageScanners   map[string]string       `json:"image_scanners,omitempty"`
 	ImageVulnCounts *ImageVulnSeverityCount `json:"image_vuln_counts,omitempty"`
+
+	// Rich inline payloads — parsed once server-side so the detail page
+	// renders without follow-up fetches or file downloads.
+	ImageVulns          []ImageVulnListRow   `json:"image_vulns,omitempty"`
+	ImageLabels         map[string]string    `json:"image_labels,omitempty"`
+	ImageLabelsMetadata *ImageOCIMetadata    `json:"image_oci_metadata,omitempty"`
+	ImageSecrets        []ImageSecretListRow `json:"image_secrets,omitempty"`
+	ImageSignature      *ImageSignatureInfo  `json:"image_signature,omitempty"`
+	SBOMComponentCount  int                  `json:"sbom_component_count,omitempty"`
+}
+
+// ImageVulnListRow is a client-facing view of a grype/trivy finding.
+type ImageVulnListRow struct {
+	VulnID           string `json:"vuln_id"`
+	Severity         string `json:"severity"`
+	PkgName          string `json:"pkg_name"`
+	InstalledVersion string `json:"installed_version,omitempty"`
+	FixedVersion     string `json:"fixed_version,omitempty"`
+	Title            string `json:"title,omitempty"`
+	Target           string `json:"target,omitempty"`
+	Scanner          string `json:"scanner"`
+}
+
+// ImageOCIMetadata surfaces the high-signal fields from the OCI config —
+// created timestamp, architecture, os, and the raw JSON for operators who
+// want everything without downloading the artifact.
+type ImageOCIMetadata struct {
+	Created      string `json:"created,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	OS           string `json:"os,omitempty"`
+	Author       string `json:"author,omitempty"`
+}
+
+// ImageSecretListRow is one betterleaks finding.
+type ImageSecretListRow struct {
+	RuleID      string `json:"rule_id"`
+	Description string `json:"description,omitempty"`
+	File        string `json:"file,omitempty"`
+	StartLine   int    `json:"start_line,omitempty"`
+	Match       string `json:"match,omitempty"`
+}
+
+// ImageSignatureInfo is a client-facing view of cosign's verdict.
+type ImageSignatureInfo struct {
+	Signed   bool   `json:"signed"`
+	Verified bool   `json:"verified"`
+	Error    string `json:"error,omitempty"`
 }
 
 // ImageVulnSeverityCount aggregates CVE counts by severity for an image

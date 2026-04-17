@@ -117,7 +117,163 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		response.ImageVulnCounts = counts
 	}
 
+	// Full vuln list (capped at 1000 rows, severity-sorted). For larger
+	// findings the UI offers the raw artifact download.
+	var findings []imagescan.ImageVulnFinding
+	if err := db.WithContext(r.Context()).
+		Where("scan_run_id = ?", runID).
+		Order(`
+			CASE UPPER(severity)
+				WHEN 'CRITICAL' THEN 0
+				WHEN 'HIGH'     THEN 1
+				WHEN 'MEDIUM'   THEN 2
+				WHEN 'LOW'      THEN 3
+				ELSE 4
+			END,
+			vuln_id ASC
+		`).
+		Limit(1000).
+		Find(&findings).Error; err == nil {
+		response.ImageVulns = make([]ImageVulnListRow, 0, len(findings))
+		for _, f := range findings {
+			response.ImageVulns = append(response.ImageVulns, ImageVulnListRow{
+				VulnID:           f.VulnID,
+				Severity:         f.Severity,
+				PkgName:          f.PkgName,
+				InstalledVersion: f.InstalledVersion,
+				FixedVersion:     f.FixedVersion,
+				Title:            f.Title,
+				Target:           f.Target,
+				Scanner:          f.Scanner,
+			})
+		}
+	}
+
+	// Load raw artifact blobs in one round-trip and parse in-process.
+	// Small responses (labels, cosign) are fully inlined; secrets are
+	// capped at 500 rows (pathological images can have thousands).
+	var blobs []imagescan.ImageScanArtifact
+	_ = db.WithContext(r.Context()).
+		Select("category, scanner, content").
+		Where("scan_run_id = ?", runID).
+		Find(&blobs).Error
+
+	for _, b := range blobs {
+		switch b.Category {
+		case "labels":
+			response.ImageLabels, response.ImageLabelsMetadata = parseLabelsArtifact(b.Content)
+		case "signature":
+			response.ImageSignature = parseSignatureArtifact(b.Content)
+		case "secrets":
+			if b.Scanner == "betterleaks" {
+				response.ImageSecrets = parseBetterleaksArtifact(b.Content, 500)
+			}
+		}
+	}
+
+	// SBOM component count (cheap lookup; frontend can hit /api/sboms/{id}
+	// for the full list if the operator wants to drill in).
+	if response.SBOMID != "" {
+		var componentCount int64
+		if err := db.WithContext(r.Context()).
+			Table("sbom_component_view").
+			Where("sbom_id = ? AND is_root = false", response.SBOMID).
+			Count(&componentCount).Error; err == nil {
+			response.SBOMComponentCount = int(componentCount)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, response)
+}
+
+// parseLabelsArtifact extracts labels + OCI metadata from a raw
+// `crane config` JSON blob. Returns (nil, nil) when the blob can't be
+// parsed — we never want a bad artifact to sink the whole detail page.
+func parseLabelsArtifact(raw []byte) (map[string]string, *ImageOCIMetadata) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var config struct {
+		Architecture string `json:"architecture"`
+		OS           string `json:"os"`
+		Created      string `json:"created"`
+		Author       string `json:"author"`
+		Config       struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return nil, nil
+	}
+	meta := &ImageOCIMetadata{
+		Created:      config.Created,
+		Architecture: config.Architecture,
+		OS:           config.OS,
+		Author:       config.Author,
+	}
+	return config.Config.Labels, meta
+}
+
+// parseSignatureArtifact reads the JSON our runner writes for the cosign
+// category (see runner/imagescan/imagescan.go::runSignature).
+func parseSignatureArtifact(raw []byte) *ImageSignatureInfo {
+	if len(raw) == 0 {
+		return nil
+	}
+	var payload struct {
+		Signed   bool   `json:"signed"`
+		Verified bool   `json:"verified"`
+		Error    string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	return &ImageSignatureInfo{
+		Signed:   payload.Signed,
+		Verified: payload.Verified,
+		Error:    payload.Error,
+	}
+}
+
+// parseBetterleaksArtifact decodes the betterleaks JSON report, truncates
+// matches so one big payload doesn't balloon the response, and caps the
+// total returned row count. Field names follow betterleaks' gitleaks-
+// compatible schema.
+func parseBetterleaksArtifact(raw []byte, maxRows int) []ImageSecretListRow {
+	if len(raw) == 0 {
+		return nil
+	}
+	var entries []struct {
+		RuleID      string `json:"RuleID"`
+		Description string `json:"Description"`
+		File        string `json:"File"`
+		StartLine   int    `json:"StartLine"`
+		Match       string `json:"Match"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	if maxRows > 0 && len(entries) > maxRows {
+		entries = entries[:maxRows]
+	}
+	out := make([]ImageSecretListRow, 0, len(entries))
+	for _, e := range entries {
+		match := e.Match
+		if len(match) > 160 {
+			match = match[:160] + "…"
+		}
+		out = append(out, ImageSecretListRow{
+			RuleID:      e.RuleID,
+			Description: e.Description,
+			File:        e.File,
+			StartLine:   e.StartLine,
+			Match:       match,
+		})
+	}
+	return out
 }
 
 // ImageScanArtifactDownloadHandler streams the raw bytes of a single
