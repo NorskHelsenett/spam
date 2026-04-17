@@ -206,8 +206,14 @@ func run() error {
 	// Image-scan backfill reconciler. Periodically enqueues IMAGE_SCAN jobs
 	// for digests that don't have one — covers bulk imports, digests
 	// inserted before IMAGE_SCAN_ENABLED flipped on, and any trigger
-	// failures. No-op when image scanning is disabled.
-	imageScanReconciler := imagescan.NewReconciler(gormDB)
+	// failures. After reconciling it asks the burst trigger to spawn an
+	// adhoc scanner pod (subject to cooldown) so work doesn't sit until
+	// the next scheduled CronJob tick. No-op when image scanning is off.
+	var burstTrigger imagescan.BurstTrigger
+	if executor, ok := runExecutor.(imagescan.BurstTrigger); ok {
+		burstTrigger = executor
+	}
+	imageScanReconciler := imagescan.NewReconciler(gormDB, burstTrigger)
 	var imageScanTicker *time.Ticker
 	if imageScanReconciler.Enabled() {
 		// Run once on startup so a pod restart clears any backlog
@@ -216,6 +222,9 @@ func run() error {
 			log.Printf("image scan reconciler (startup): %v", err)
 		} else if n > 0 {
 			log.Printf("image scan reconciler: enqueued %d digest(s) on startup", n)
+		}
+		if err := imageScanReconciler.MaybeBurst(ctx); err != nil {
+			log.Printf("image scan burst (startup): %v", err)
 		}
 		imageScanTicker = time.NewTicker(imagescan.ReconcilerInterval)
 		defer imageScanTicker.Stop()
@@ -235,13 +244,18 @@ func run() error {
 			return nil
 
 		case <-imageScanTick:
-			// Backfill enqueue for digests without an IMAGE_SCAN job.
-			// Runs in its own case (not the 2-second fast ticker) so the
-			// query doesn't hammer the DB.
+			// Backfill enqueue for digests without an IMAGE_SCAN job, then
+			// ask the burst trigger to wake up a scanner pod if the queue
+			// has pending work (subject to a cooldown inside the trigger).
+			// Kept in its own case so the heavier queries don't run on the
+			// 2-second fast ticker.
 			if n, err := imageScanReconciler.Run(ctx); err != nil {
 				log.Printf("image scan reconciler: %v", err)
 			} else if n > 0 {
 				log.Printf("image scan reconciler: enqueued %d digest(s)", n)
+			}
+			if err := imageScanReconciler.MaybeBurst(ctx); err != nil {
+				log.Printf("image scan burst: %v", err)
 			}
 
 		case <-ticker.C:

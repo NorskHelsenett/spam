@@ -107,6 +107,10 @@ spec:
             {{- if .Values.imageScanner.enabled }}
             - name: IMAGE_SCAN_ENABLED
               value: "true"
+            # The worker's burst trigger clones this CronJob's pod template
+            # to spawn on-demand scanner pods when the queue has work.
+            - name: IMAGE_SCAN_CRONJOB_NAME
+              value: "{{ .Release.Name }}-image-scanner"
             {{- end }}
             {{- if .Values.runner.enabled }}
             - name: RUNNER_ENABLED

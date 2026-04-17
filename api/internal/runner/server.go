@@ -85,6 +85,7 @@ func (s *Server) Start(ctx context.Context) error {
 		// /runner/image-results (run-token-auth), and reports terminal
 		// status via /complete.
 		r.Get("/api/image-scans/next", s.handleImageScanNext)
+		r.Get("/api/image-scans/pending", s.handleImageScanPending)
 		r.Post("/api/image-scans/{job_id}/complete", s.handleImageScanComplete)
 	})
 

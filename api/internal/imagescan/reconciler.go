@@ -12,11 +12,24 @@ import (
 	"gorm.io/gorm"
 )
 
+// BurstTrigger spawns an adhoc scanner pod when the queue has pending
+// work. Implemented by the K8s-backed RunExecutor; nil when image
+// scanning is off or the worker isn't cluster-aware (tests).
+type BurstTrigger interface {
+	TriggerImageScanBurst(ctx context.Context) error
+}
+
 // Reconciler finds image digests that don't yet have an IMAGE_SCAN job and
 // enqueues one for each. It runs periodically inside the worker so bulk
 // pre-existing digests (inserted before IMAGE_SCAN_ENABLED flipped on, or
 // that slipped through a failed trigger) get scanned without manual
 // intervention.
+//
+// Once per tick, after reconciling the queue, it also asks the
+// BurstTrigger to spawn an adhoc scanner pod if (and only if) there are
+// claimable jobs. Combined with the scanner's pre-DB pending probe, this
+// means zero wasted runtime: no pod starts unless there's work, and if
+// one starts it proves its worth before the ~60s DB download.
 //
 // A successful or still-queued scan on a digest is enough to skip
 // enqueueing — the reconciler is about *backfill*, not periodic re-scans.
@@ -24,16 +37,20 @@ import (
 // admin-triggered.
 type Reconciler struct {
 	db        *gorm.DB
+	burst     BurstTrigger
 	batchSize int
 	enabled   bool
 }
 
 // NewReconciler constructs a reconciler gated by the same IMAGE_SCAN_ENABLED
 // env flag that gates the inline trigger in UpsertImageDigestTx, so
-// operators only have one knob to flip.
-func NewReconciler(db *gorm.DB) *Reconciler {
+// operators only have one knob to flip. The burst trigger is optional —
+// pass nil on workers without cluster access (tests) and the reconciler
+// degrades to enqueue-only behaviour.
+func NewReconciler(db *gorm.DB, burst BurstTrigger) *Reconciler {
 	return &Reconciler{
 		db:        db,
+		burst:     burst,
 		batchSize: 500,
 		enabled:   imageScanEnabled(),
 	}
@@ -107,6 +124,32 @@ func (r *Reconciler) Run(ctx context.Context) (int, error) {
 		enqueued++
 	}
 	return enqueued, nil
+}
+
+// MaybeBurst spawns an adhoc scanner pod if the queue has claimable jobs
+// and a BurstTrigger is configured. Separate from Run so the worker can
+// call it independently (e.g. right after a job is enqueued) without
+// doing a full digest sweep. Safe to call every tick — the K8s layer
+// de-dupes by fixed job name.
+func (r *Reconciler) MaybeBurst(ctx context.Context) error {
+	if !r.enabled || r.burst == nil {
+		return nil
+	}
+	var count int64
+	err := r.db.WithContext(ctx).
+		Table("jobs").
+		Where("type = ? AND status IN ? AND run_at <= ?",
+			jobs.JobTypeImageScan,
+			[]jobs.JobStatus{jobs.JobStatusQueued, jobs.JobStatusRetry},
+			time.Now()).
+		Count(&count).Error
+	if err != nil {
+		return fmt.Errorf("count pending image scans: %w", err)
+	}
+	if count == 0 {
+		return nil
+	}
+	return r.burst.TriggerImageScanBurst(ctx)
 }
 
 // imageScanEnabled mirrors the gate in internal/assets/image.go so the
