@@ -383,6 +383,19 @@ imageScanner:
   # against a single pathological image hanging the whole tick).
   scanDeadlineSeconds: 900
 
+  # On-demand burst behaviour. The worker checks the IMAGE_SCAN queue
+  # every 5 minutes and spawns an adhoc scanner pod (cloned from this
+  # CronJob's pod template) when there's work. Reduces latency from
+  # "digest inserted" to "scan starts" from up-to-$schedule down to
+  # at-most-5min, without changing the scheduled tick behaviour.
+  burst:
+    # Minimum gap between the END of a prior burst and the START of the
+    # next. Prevents thrashing when new digests trickle in mid-scan:
+    # rather than spawning a fresh pod (with a ~60s DB download) for
+    # each single digest, the queue batches up. Set to 0 to disable the
+    # cooldown (every 5-min tick spawns a pod if there's work).
+    minGapSinceCompletionSeconds: 1800  # 30 minutes
+
   # Extra env forwarded to each scan subprocess. Typical keys:
   #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
   #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY

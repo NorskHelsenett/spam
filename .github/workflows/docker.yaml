@@ -436,18 +436,31 @@ jobs:
 
           echo "Final version: $NEW_VERSION"
 
+          # Choose the tag prefix based on the branch the build ran on.
+          # metadata-action publishes the images as :latest on main and
+          # :dev elsewhere, so the chart needs to reference the matching
+          # tag. The digest pin is authoritative either way, but naming
+          # the correct tag means Kubernetes can fall back cleanly if the
+          # digest is later GC'd from the registry.
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            IMAGE_TAG="latest"
+          else
+            IMAGE_TAG="dev"
+          fi
+          echo "Using image tag prefix: $IMAGE_TAG"
+
           # Inject image repository and digest
           APP_DIGEST=${{ needs.build-app.outputs.digest }}
-          APP_TAG="latest@${APP_DIGEST}"
+          APP_TAG="${IMAGE_TAG}@${APP_DIGEST}"
           APP_REPO="${{ needs.build-app.outputs.repository }}"
           RUNNER_DIGEST=${{ needs.build-runner.outputs.digest }}
-          RUNNER_TAG="latest@${RUNNER_DIGEST}"
+          RUNNER_TAG="${IMAGE_TAG}@${RUNNER_DIGEST}"
           RUNNER_REPO="${{ needs.build-runner.outputs.repository }}"
           TRIVY_SCANNER_DIGEST=${{ needs.build-trivy-scanner.outputs.digest }}
-          TRIVY_SCANNER_TAG="latest@${TRIVY_SCANNER_DIGEST}"
+          TRIVY_SCANNER_TAG="${IMAGE_TAG}@${TRIVY_SCANNER_DIGEST}"
           TRIVY_SCANNER_REPO="${{ needs.build-trivy-scanner.outputs.repository }}"
           IMAGE_SCANNER_DIGEST=${{ needs.build-image-scanner.outputs.digest }}
-          IMAGE_SCANNER_TAG="latest@${IMAGE_SCANNER_DIGEST}"
+          IMAGE_SCANNER_TAG="${IMAGE_TAG}@${IMAGE_SCANNER_DIGEST}"
           IMAGE_SCANNER_REPO="${{ needs.build-image-scanner.outputs.repository }}"
 
           echo "Injecting app repository: $APP_REPO"
