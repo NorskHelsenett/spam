@@ -24,6 +24,9 @@
 
 BEGIN;
 
+TRUNCATE image_vuln_findings, image_scan_artifacts, image_scan_runs, image_digests CASCADE;
+DELETE FROM jobs WHERE type = 'IMAGE_SCAN';
+
 INSERT INTO image_digests (id, registry, repository, digest, created_at, created_by_user_id) VALUES ('478c676b-c286-485d-8d38-764f1f6ad808', 'quay.io', 'metallb/controller', 'sha256:417cdb6d6f9f2c410cceb84047d3a4da3bfb78b5ddfa30f4cf35ea5c667e8c2e', '2026-04-17 15:34:07.108258+00', 'cluster-ingest');
 INSERT INTO image_digests (id, registry, repository, digest, created_at, created_by_user_id) VALUES ('d76b66b3-91e8-44ba-8353-f22c5acbfc58', 'git.torden.tech', 'jonasbg/homelab', 'sha256:ef00ae830a3462065273ea9d51de06d51be50d4c7f041f1b302d36b562b748f1', '2026-04-17 15:34:07.108258+00', 'cluster-ingest');
 INSERT INTO image_digests (id, registry, repository, digest, created_at, created_by_user_id) VALUES ('ef65219d-8ffb-4e72-918e-edf1381bf39f', 'git.torden.tech', 'jonasbg/spam-operator', 'sha256:e021c9c261b5b2d2a2558ba371ec7d047a7cf625aa64996da6c43f0682d8797d', '2026-04-17 15:34:07.108258+00', 'cluster-ingest');
