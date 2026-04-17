@@ -159,10 +159,10 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
 		repoID := r.URL.Query().Get("repo_id")
-		// type filter: "repo" (default), "image", or "all"
+		// type filter: "all" (default), "repo", or "image"
 		typeFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
 		if typeFilter == "" {
-			typeFilter = "repo"
+			typeFilter = "all"
 		}
 
 		sortBy := r.URL.Query().Get("sort_by")
