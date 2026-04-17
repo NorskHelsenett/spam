@@ -1,0 +1,114 @@
+{{- if .Values.imageScanner.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-image-scanner
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-image-scanner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: image-scanner
+    app.kubernetes.io/managed-by: Helm
+spec:
+  schedule: {{ .Values.imageScanner.schedule | quote }}
+  concurrencyPolicy: Allow
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.imageScanner.activeDeadlineSeconds | default 10800 }}
+      ttlSecondsAfterFinished: 3600
+      parallelism: {{ .Values.imageScanner.parallelism | default 2 }}
+      completions: {{ .Values.imageScanner.parallelism | default 2 }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}-image-scanner
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            # Distinct component label so the trivy-scanner NetworkPolicy
+            # (which matches component=scanner) does not also apply here.
+            # The image-scanner NetworkPolicy matches this label exactly.
+            app.kubernetes.io/component: image-scanner
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          hostNetwork: false
+          hostPID: false
+          hostIPC: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: image-scanner
+              image: "{{ .Values.imageScanner.image.repository }}:{{ .Values.imageScanner.image.tag | default "latest" }}"
+              imagePullPolicy: {{ .Values.imageScanner.image.pullPolicy }}
+              command: ["/usr/local/bin/image-scanner"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+              env:
+                - name: SPAM_API_URL
+                  value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
+                - name: RUNNER_HMAC_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-runner
+                      key: RUNNER_HMAC_KEY
+                - name: WORK_DIR
+                  value: /work
+                - name: GRYPE_DB_CACHE_DIR
+                  value: /grype-cache
+                - name: TRIVY_CACHE_DIR
+                  value: /trivy-cache
+                - name: SCAN_DEADLINE_SECONDS
+                  value: {{ .Values.imageScanner.scanDeadlineSeconds | default 900 | quote }}
+                - name: TMPDIR
+                  value: /tmp
+                {{- range $key, $value := .Values.imageScanner.extraEnv }}
+                - name: {{ $key | quote }}
+                  value: {{ $value | quote }}
+                {{- end }}
+              volumeMounts:
+                - name: work
+                  mountPath: /work
+                - name: grype-cache
+                  mountPath: /grype-cache
+                - name: trivy-cache
+                  mountPath: /trivy-cache
+                - name: tmp
+                  mountPath: /tmp
+                - name: home
+                  mountPath: /home/scanner
+              {{- with .Values.imageScanner.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          volumes:
+            # Scratch space for the extracted image rootfs (filesystem
+            # scanners like betterleaks/trivy need real filesystem, not
+            # tmpfs — layers can be hundreds of MB).
+            - name: work
+              emptyDir: {}
+            - name: grype-cache
+              emptyDir: {}
+            - name: trivy-cache
+              emptyDir: {}
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 512Mi
+            - name: home
+              emptyDir:
+                medium: Memory
+                sizeLimit: 10Mi
+{{- end }}

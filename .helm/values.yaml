@@ -361,6 +361,42 @@ trivyScanner:
       cpu: "1"
       memory: 1Gi
 
+# Image scanner CronJob configuration
+# Leases IMAGE_SCAN jobs from the worker queue and scans container image
+# digests with grype / syft / cosign / crane / betterleaks (trivy is opt-in
+# per category via the job payload). CronJob-driven so the grype DB is
+# warmed once per tick and kept hot across all scans in that run.
+imageScanner:
+  enabled: false
+  schedule: "0 */6 * * *"       # every 6 hours
+  parallelism: 2                # concurrent scanner pods per tick
+  activeDeadlineSeconds: 10800  # 3h max per pod
+
+  # Dedicated image-scanner image (built from runner/Dockerfile.image-scanner).
+  # Contains grype/syft/cosign/crane/betterleaks + trivy; no git.
+  image:
+    repository: spam-image-scanner
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Per-scan deadline enforced by the scanner binary itself (protects
+  # against a single pathological image hanging the whole tick).
+  scanDeadlineSeconds: 900
+
+  # Extra env forwarded to each scan subprocess. Typical keys:
+  #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
+  #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY
+  # Leave empty to use upstream defaults (public CDN for grype / trivy DBs).
+  extraEnv: {}
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
 # When using external PostgreSQL, set these values
@@ -388,4 +424,13 @@ networkPolicy:
     # By default: DNS + worker API + HTTPS to public internet (for trivy
     # DB download from ghcr.io) are allowed.  All RFC 1918 private ranges
     # are blocked — the scanner cannot reach internal cluster services.
+    additionalEgressRules: []
+
+  imageScanner:
+    # Additional egress rules for image-scanner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for grype
+    # DB download and OCI registry pulls) are allowed. All RFC 1918
+    # private ranges are blocked — the scanner cannot reach internal
+    # cluster services. Operators who host images in an internal
+    # registry must add an allow rule here.
     additionalEgressRules: []
