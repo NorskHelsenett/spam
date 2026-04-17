@@ -62,14 +62,56 @@ func (r *Reconciler) Enabled() bool {
 	return r.enabled
 }
 
-// Run scans for digests without an IMAGE_SCAN job and enqueues jobs for
-// each. Returns the number of jobs created. Safe to call on every tick;
-// the WHERE NOT EXISTS clause makes it idempotent under concurrent
-// workers (the UNIQUE on ImageDigest.id prevents double-enqueue races
-// here, since we filter by digest ID).
+// Run enqueues IMAGE_SCAN jobs for every digest the system knows about
+// that isn't already being scanned. Two passes:
+//
+//	(1) Harvest distinct (registry, repository, digest) tuples from
+//	    cluster_record — the live view of what's actually running in
+//	    the cluster — and upsert them into image_digests. This makes
+//	    the cluster the source of truth for "what needs scanning"
+//	    without touching the ingest hot path in scam.CallcenterHandler.
+//
+//	(2) Find image_digests rows without any IMAGE_SCAN job and
+//	    enqueue one. Catches both the fresh rows from pass (1) and
+//	    any SBOM-uploaded digests that slipped through.
+//
+// Returns the number of jobs created. Safe to call on every tick; both
+// passes are idempotent under concurrent workers.
 func (r *Reconciler) Run(ctx context.Context) (int, error) {
 	if !r.enabled {
 		return 0, nil
+	}
+
+	// Pass 1 — cluster harvest. ON CONFLICT DO NOTHING makes it safe to
+	// run repeatedly; the unique index (registry, repository, digest)
+	// prevents duplicates. We don't care how many were actually inserted
+	// here — pass 2 will pick them up by the "no IMAGE_SCAN job" predicate.
+	if err := r.db.WithContext(ctx).Exec(`
+		INSERT INTO image_digests (id, registry, repository, digest, created_at, created_by_user_id)
+		SELECT gen_random_uuid()::text,
+		       c.registry,
+		       c.repository,
+		       c.digest,
+		       NOW(),
+		       'cluster-ingest'
+		FROM (
+		    SELECT DISTINCT
+		        data->>'registry' AS registry,
+		        data->>'image'    AS repository,
+		        data->>'digest'   AS digest
+		    FROM cluster_record
+		    WHERE data->>'kind' = 'Container'
+		      AND data->>'msg' != 'DELETE'
+		      AND COALESCE(data->>'registry','') != ''
+		      AND COALESCE(data->>'image','')    != ''
+		      AND COALESCE(data->>'digest','')   != ''
+		) c
+		ON CONFLICT (registry, repository, digest) DO NOTHING
+	`).Error; err != nil {
+		// Non-fatal — pass 2 still runs against whatever digests are
+		// already present. Cluster harvest failures tend to be
+		// constraint-name drift (migrations) and should surface loudly.
+		log.Printf("image scan reconciler: cluster harvest: %v", err)
 	}
 
 	type row struct {
