@@ -18,6 +18,7 @@
 		selector: Record<string, string>;
 		pod_count: number;
 		endpoint_ips?: string[];
+		endpoint_ports?: number[];
 	};
 	export type ChainPodGroup = {
 		owner: string;
@@ -225,15 +226,17 @@
 			}
 
 			// Position pods or endpoint IPs centered on this service row
-			let podY = curY + (row.rowH - (row.podSlots * POD_SLOT_H - (row.podSlots > 0 ? REPLICA_GAP : 0))) / 2 + SMALL_R;
 			if (row.hasEndpoints) {
-				// External service: show endpoint IPs instead of pods
+				const EP_SLOT_H = ICON_R * 2 + ROW_GAP;
 				const ips = row.svc.endpoint_ips ?? [];
+				const epCount = Math.min(ips.length, MAX_INDIVIDUAL_PODS);
+				let epY = curY + (row.rowH - (epCount * EP_SLOT_H - ROW_GAP)) / 2 + ICON_R;
 				for (const ip of ips.slice(0, MAX_INDIVIDUAL_PODS)) {
-					endpointNodes.push({ x: podX, y: podY, ip, svcName: row.svc.name });
-					podY += POD_SLOT_H;
+					endpointNodes.push({ x: podX, y: epY, ip, svcName: row.svc.name });
+					epY += EP_SLOT_H;
 				}
 			} else {
+				let podY = curY + (row.rowH - (row.podSlots * POD_SLOT_H - (row.podSlots > 0 ? REPLICA_GAP : 0))) / 2 + SMALL_R;
 				for (const pg of row.pods) {
 					const nodes: PodNode[] = [];
 					const slots = podSlotCount(pg);
@@ -294,7 +297,7 @@
 			// Edges to endpoint IP nodes
 			for (const ep of endpointNodes) {
 				if (ep.svcName === sp.svc.name) {
-					svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: ep.x - SMALL_R - 4, py: ep.y });
+					svcToPodEdges.push({ sx: sp.x + ICON_R + 4, sy: sp.y, px: ep.x - ICON_R - 4, py: ep.y });
 				}
 			}
 		}
@@ -456,15 +459,19 @@
 	<!-- Endpoint IP nodes (external services) -->
 	{#each layout.endpointNodes as ep}
 		{@const svc = chain.services?.find(s => s.name === ep.svcName)}
+		{@const ports = svc?.endpoint_ports?.length ? svc.endpoint_ports : svc?.ports?.map(p => p.port) ?? []}
 		<g>
-			<circle cx={ep.x} cy={ep.y} r={SMALL_R} fill="var(--orange)" opacity="0.15" stroke="var(--orange)" stroke-width="1.2" />
-			<g transform="translate({ep.x - 5}, {ep.y - 5})">
-				<rect x="1" y="0" width="8" height="10" rx="1" fill="none" stroke="var(--orange)" stroke-width="1" />
-				<line x1="1" y1="3" x2="9" y2="3" stroke="var(--orange)" stroke-width="0.7" />
-				<line x1="1" y1="6" x2="9" y2="6" stroke="var(--orange)" stroke-width="0.7" />
+			<circle cx={ep.x} cy={ep.y} r={ICON_R} fill="var(--orange)" opacity="0.15" stroke="var(--orange)" stroke-width="1.5" />
+			<!-- Server icon -->
+			<g transform="translate({ep.x - 7}, {ep.y - 7})">
+				<rect x="1" y="0" width="12" height="14" rx="2" fill="none" stroke="var(--orange)" stroke-width="1.2" />
+				<line x1="1" y1="5" x2="13" y2="5" stroke="var(--orange)" stroke-width="0.8" />
+				<line x1="1" y1="9" x2="13" y2="9" stroke="var(--orange)" stroke-width="0.8" />
+				<circle cx="10" cy="2.5" r="1" fill="var(--orange)" />
+				<circle cx="10" cy="7" r="1" fill="var(--orange)" />
 			</g>
-			<text x={ep.x + SMALL_R + 6} y={ep.y + 3} fill="var(--orange)" font-size="8" font-weight="500">{ep.ip}{svc?.ports?.length ? ':' + svc.ports.map(p => p.port).join(',') : ''}</text>
-			<text x={ep.x + SMALL_R + 6} y={ep.y + 13} fill="var(--fg4)" font-size="7">external</text>
+			<text x={ep.x} y={ep.y + LABEL_OFFSET} text-anchor="middle" fill="var(--orange)" font-size="9" font-weight="600">{ep.ip}</text>
+			<text x={ep.x} y={ep.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">external{ports.length ? ` · ${ports.join(',')}` : ''}</text>
 		</g>
 	{/each}
 

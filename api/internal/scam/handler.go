@@ -604,11 +604,12 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			ServiceNames []string         `json:"service_names"`
 		}
 		type chainSvc struct {
-			Name        string            `json:"name"`
-			ServiceType string            `json:"service_type"`
-			Ports       json.RawMessage   `json:"ports"`
-			Selector    map[string]string `json:"selector"`
-			EndpointIPs []string          `json:"endpoint_ips,omitempty"`
+			Name          string            `json:"name"`
+			ServiceType   string            `json:"service_type"`
+			Ports         json.RawMessage   `json:"ports"`
+			Selector      map[string]string `json:"selector"`
+			EndpointIPs   []string          `json:"endpoint_ips,omitempty"`
+			EndpointPorts []int             `json:"endpoint_ports,omitempty"`
 		}
 		type chainIng struct {
 			Host         string `json:"host"`
@@ -695,7 +696,25 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			  AND data->>'cluster_id' = ?
 		`, clusterID).Scan(&epIPs)
 
-		// Build a map: namespace/service_name → IPs
+		// Endpoint ports per service
+		type epPortRow struct {
+			Namespace   string `json:"namespace"`
+			ServiceName string `gorm:"column:service_name"`
+			Port        int    `gorm:"column:port"`
+		}
+		var epPortRows []epPortRow
+		db.Raw(liveCTE + `
+			SELECT DISTINCT
+				data->>'namespace' AS namespace,
+				data->>'service_name' AS service_name,
+				(p->>'port')::int AS port
+			FROM live, jsonb_array_elements(data->'ports') AS p
+			WHERE data->>'kind' = 'EndpointSlice'
+			  AND data->>'cluster_id' = ?
+			  AND p->>'port' IS NOT NULL
+		`, clusterID).Scan(&epPortRows)
+
+		// Build maps: namespace/service_name → IPs and ports
 		epMap := make(map[string][]string)
 		for _, ep := range epIPs {
 			key := ep.Namespace + "/" + ep.ServiceName
@@ -703,10 +722,14 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				epMap[key] = append(epMap[key], ep.Address)
 			}
 		}
+		epPortMap := make(map[string][]int)
+		for _, ep := range epPortRows {
+			key := ep.Namespace + "/" + ep.ServiceName
+			epPortMap[key] = append(epPortMap[key], ep.Port)
+		}
 
-		// Attach endpoint IPs to services that have no pods connected
+		// Attach endpoint IPs and ports to services that have no pods connected
 		for ns, chain := range nsMap {
-			// Collect pod owners connected to services in this namespace
 			connectedSvcs := make(map[string]bool)
 			for _, pg := range chain.Pods {
 				for _, sn := range pg.ServiceNames {
@@ -718,6 +741,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					key := ns + "/" + svc.Name
 					if ips, ok := epMap[key]; ok {
 						chain.Services[i].EndpointIPs = ips
+					}
+					if ports, ok := epPortMap[key]; ok {
+						chain.Services[i].EndpointPorts = ports
 					}
 				}
 			}
@@ -786,7 +812,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Ports       []chainPort       `json:"ports"`
 			Selector    map[string]string `json:"selector"`
 			PodCount    int64             `json:"pod_count"`
-			EndpointIPs []string          `json:"endpoint_ips,omitempty"`
+			EndpointIPs   []string `json:"endpoint_ips,omitempty"`
+			EndpointPorts []int    `json:"endpoint_ports,omitempty"`
 		}
 		type chainContainer struct {
 			Name     string `json:"name"`
@@ -1096,7 +1123,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
-		// --- Step 5: For services with no pods, look up EndpointSlice IPs ---
+		// --- Step 5: For services with no pods, look up EndpointSlice IPs and ports ---
 		for i := range resp.Services {
 			if resp.Services[i].PodCount == 0 {
 				type epRow struct {
@@ -1119,6 +1146,23 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						resp.Services[i].EndpointIPs = append(resp.Services[i].EndpointIPs, ep.Addresses)
 						seen[ep.Addresses] = true
 					}
+				}
+				// Get endpoint ports (from the EndpointSlice, not the Service)
+				type epPortRow struct {
+					Port int `gorm:"column:port"`
+				}
+				var epPorts []epPortRow
+				db.Raw(liveCTE+`
+					SELECT DISTINCT (p->>'port')::int AS port
+					FROM live, jsonb_array_elements(data->'ports') AS p
+					WHERE data->>'kind' = 'EndpointSlice'
+					  AND data->>'cluster_id' = ?
+					  AND data->>'namespace' = ?
+					  AND data->>'service_name' = ?
+					  AND p->>'port' IS NOT NULL
+				`, clusterID, namespace, resp.Services[i].Name).Scan(&epPorts)
+				for _, p := range epPorts {
+					resp.Services[i].EndpointPorts = append(resp.Services[i].EndpointPorts, p.Port)
 				}
 			}
 		}
