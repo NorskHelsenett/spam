@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -886,6 +887,12 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	return nil
 }
 
+// defaultImageScanBurstMinGap is the built-in cooldown between the end of
+// one adhoc image-scan burst and the start of the next. Operators can
+// override via IMAGE_SCAN_BURST_MIN_GAP_SECONDS (0 disables the cooldown;
+// negative or malformed values fall back to this default).
+const defaultImageScanBurstMinGap = 30 * time.Minute
+
 // TriggerImageScanBurst spawns an adhoc scanner pod when the queue has
 // pending work. Called by the reconciler every 5 min. No-op when the
 // image-scanner CronJob isn't configured, an adhoc pod is already active,
@@ -901,10 +908,8 @@ func (e *RunExecutor) TriggerImageScanBurst(ctx context.Context) error {
 		// No CronJob template configured — burst path is disabled.
 		return nil
 	}
-	const (
-		ttl     = int32(3600)      // 1h TTL on the adhoc job
-		minGap  = 30 * time.Minute // cooldown between bursts
-	)
+	const ttl = int32(3600) // 1h TTL on the adhoc job
+	minGap := imageScanBurstMinGap()
 	result, err := e.k8s.CreateImageScanAdhocJob(ctx, cronJobName, ttl, minGap)
 	if err != nil {
 		return fmt.Errorf("create adhoc image-scan job: %w", err)
@@ -916,6 +921,22 @@ func (e *RunExecutor) TriggerImageScanBurst(ctx context.Context) error {
 		log.Printf("image-scan burst skipped: cooldown active (min gap=%s)", minGap)
 	}
 	return nil
+}
+
+// imageScanBurstMinGap parses IMAGE_SCAN_BURST_MIN_GAP_SECONDS, falling
+// back to defaultImageScanBurstMinGap for empty / invalid / negative
+// values. Zero is allowed and disables the cooldown entirely (bursts
+// spawn back-to-back as long as the queue has work).
+func imageScanBurstMinGap() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("IMAGE_SCAN_BURST_MIN_GAP_SECONDS"))
+	if raw == "" {
+		return defaultImageScanBurstMinGap
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return defaultImageScanBurstMinGap
+	}
+	return time.Duration(n) * time.Second
 }
 
 // CreateTrivyAdhocJob implements jobs.TrivyJobCreator for the worker.

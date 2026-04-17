@@ -111,6 +111,10 @@ spec:
             # to spawn on-demand scanner pods when the queue has work.
             - name: IMAGE_SCAN_CRONJOB_NAME
               value: "{{ .Release.Name }}-image-scanner"
+            {{- with .Values.imageScanner.burst }}
+            - name: IMAGE_SCAN_BURST_MIN_GAP_SECONDS
+              value: {{ .minGapSinceCompletionSeconds | default 1800 | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.runner.enabled }}
             - name: RUNNER_ENABLED
