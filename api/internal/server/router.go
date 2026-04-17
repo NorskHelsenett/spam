@@ -191,6 +191,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/image-scans/{job_id}/artifacts/{artifact_id}/download",
 					uiapi.ImageScanArtifactDownloadHandler(db, authService))
 
+				// Image-as-first-class-entity routes: image profile page
+				// and the reverse lookup from a repo to all images built
+				// from it (matched via cached source_repo_id).
+				api.Get("/images/{id}", uiapi.ImageDetailHandler(db, authService))
+				api.Get("/repos/{repo_id}/images", uiapi.RepoImagesHandler(db, authService))
+
 				// Kubernetes integration endpoints (only available if runner is enabled)
 				if opts != nil && opts.K8sClient != nil {
 					api.Get("/runs/{id}/k8s-logs", uiapi.RunLogsHandler(db, authService, opts.K8sClient))

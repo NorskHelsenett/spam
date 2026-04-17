@@ -153,6 +153,19 @@
 	let resolvedRepoDbId = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
 	let totalRuns = $state(0);
+
+	// Images built from this repo (resolved from OCI image.source labels
+	// at scan-upload time, cached on image_digests.source_repo_id).
+	type RepoImageRow = {
+		id: string;
+		registry: string;
+		repository: string;
+		digest: string;
+		created_at: string;
+		latest_scan_at?: string;
+		vuln_count: number;
+	};
+	let repoImages: RepoImageRow[] = $state([]);
 	let securityData: SecurityData = $state({
 		vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0 },
 		secrets: 0,
@@ -268,6 +281,18 @@
 
 			// Fetch real security data
 			await fetchSecurityData(provider, path, data.details, data.readme);
+
+			// Images built from this repo — matched via cached
+			// source_repo_id so this is a fast single-index lookup.
+			if (resolvedRepoDbId) {
+				try {
+					const imagesRes = await fetch(`/api/repos/${resolvedRepoDbId}/images`, { credentials: 'include' });
+					if (imagesRes.ok) {
+						const body = await imagesRes.json();
+						repoImages = body.images ?? [];
+					}
+				} catch { /* ignore — page still renders without images */ }
+			}
 		} catch (err) {
 			error = 'Failed to connect to API.';
 		} finally {
@@ -988,6 +1013,50 @@
 						</div>
 				</div>
 			</article>
+
+		<!-- Images built from this repo. Resolved via the OCI
+		     image.source label at scan upload time; empty when no image
+		     has been scanned with a matching label. -->
+		{#if repoImages.length > 0}
+			<section class="panel-surface min-w-0 overflow-hidden px-6 py-6 sm:px-10">
+				<header class="mb-3 flex items-center gap-2">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+						Images built from this repo
+					</h3>
+					<span class="text-xs text-[var(--text-tertiary)]">({repoImages.length})</span>
+				</header>
+				<div class="overflow-hidden rounded-lg border border-[var(--border-color)]/40">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-xs">
+						<thead class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							<tr>
+								<th class="px-3 py-2 text-left">Image</th>
+								<th class="px-3 py-2 text-left">Digest</th>
+								<th class="px-3 py-2 text-right">Vulns</th>
+								<th class="px-3 py-2 text-left">Last scan</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
+							{#each repoImages as img}
+								<tr class="cursor-pointer hover:bg-[var(--hover-bg-subtle)]" onclick={() => location.assign(`/app/images/${img.id}`)}>
+									<td class="px-3 py-1.5 font-mono text-[var(--text-bright)]">
+										<a class="hover:underline" href={`/app/images/${img.id}`} onclick={(e) => e.stopPropagation()}>
+											{img.registry}/{img.repository}
+										</a>
+									</td>
+									<td class="px-3 py-1.5 font-mono text-[var(--text-tertiary)]">
+										{img.digest.slice(0, 18)}
+									</td>
+									<td class="px-3 py-1.5 text-right font-mono">{img.vuln_count}</td>
+									<td class="px-3 py-1.5">
+										{img.latest_scan_at ? new Date(img.latest_scan_at).toLocaleString() : '—'}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			</section>
+		{/if}
 
 		<!-- README -->
 		{#if readme}

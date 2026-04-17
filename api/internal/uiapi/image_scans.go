@@ -6,8 +6,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -174,15 +172,16 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		}
 	}
 
-	// If the image advertised a source repo via OCI labels and we have
-	// that repo in our providers, surface the link. Self-attested, so
-	// the UI renders it as a claim, not a verified fact.
-	if response.ImageLabels != nil {
-		if src := response.ImageLabels["org.opencontainers.image.source"]; src != "" {
-			if linked := lookupLinkedRepo(r.Context(), db, src); linked != nil {
+	// If the image has a cached source_repo_id (populated on scan upload
+	// from the OCI image.source label), resolve it into a client-facing
+	// summary. Self-attested — the UI frames it as a claim.
+	if payload.ImageDigestID != "" {
+		if linked := loadLinkedRepo(r.Context(), db, payload.ImageDigestID); linked != nil {
+			if response.ImageLabels != nil {
+				linked.Source = response.ImageLabels["org.opencontainers.image.source"]
 				linked.Revision = response.ImageLabels["org.opencontainers.image.revision"]
-				response.ImageLinkedRepo = linked
 			}
+			response.ImageLinkedRepo = linked
 		}
 	}
 
@@ -291,6 +290,205 @@ func parseBetterleaksArtifact(raw []byte, maxRows int) []ImageSecretListRow {
 	return out
 }
 
+// ImageDetailResponse aggregates everything the /app/images/{id} page
+// needs in one round-trip: image identity, the claimed source repo,
+// where the image is running in your clusters, and a scan-history
+// list. The latest successful scan's full findings live under its
+// dedicated run_id — the client follows that with a separate
+// /api/runs/{id} fetch so the existing RunResponse decoding (and
+// ImageScanDetail component) is reused as-is.
+type ImageDetailResponse struct {
+	ID         string    `json:"id"`
+	Registry   string    `json:"registry"`
+	Repository string    `json:"repository"`
+	Digest     string    `json:"digest"`
+	CreatedAt  time.Time `json:"created_at"`
+
+	LinkedRepo *LinkedRepoSummary `json:"linked_repo,omitempty"`
+
+	ScanHistory  []ImageScanHistoryRow `json:"scan_history,omitempty"`
+	LatestScanID string                `json:"latest_scan_id,omitempty"`
+
+	ClusterUsage []ImageClusterUsageRow `json:"cluster_usage,omitempty"`
+}
+
+// ImageScanHistoryRow is one row in the per-image scan history.
+type ImageScanHistoryRow struct {
+	JobID      string     `json:"job_id"`
+	Status     string     `json:"status"`
+	CreatedAt  time.Time  `json:"created_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	VulnCount  int        `json:"vuln_count"`
+}
+
+// ImageClusterUsageRow aggregates pod observations of a digest per
+// (cluster, namespace). Pulled from cluster_record so the page shows
+// *where* an image is actually deployed without needing a fresh K8s
+// query.
+type ImageClusterUsageRow struct {
+	Cluster   string    `json:"cluster"`
+	Namespace string    `json:"namespace"`
+	PodCount  int       `json:"pod_count"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// ImageDetailHandler returns the image-profile payload.
+// GET /api/images/{id}
+func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "image id required", http.StatusBadRequest)
+			return
+		}
+
+		var img struct {
+			ID         string
+			Registry   string
+			Repository string
+			Digest     string
+			CreatedAt  time.Time
+		}
+		if err := db.WithContext(r.Context()).
+			Table("image_digests").
+			Select("id, registry, repository, digest, created_at").
+			Where("id = ?", id).
+			First(&img).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "image not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		resp := ImageDetailResponse{
+			ID:         img.ID,
+			Registry:   img.Registry,
+			Repository: img.Repository,
+			Digest:     img.Digest,
+			CreatedAt:  img.CreatedAt,
+		}
+
+		// Linked source repo (cached at scan upload time).
+		resp.LinkedRepo = loadLinkedRepo(r.Context(), db, img.ID)
+
+		// Scan history — every IMAGE_SCAN job whose payload referenced
+		// this digest_id, newest first, with per-scan vuln counts.
+		type historyRow struct {
+			JobID      string     `gorm:"column:job_id"`
+			Status     string
+			CreatedAt  time.Time  `gorm:"column:created_at"`
+			FinishedAt *time.Time `gorm:"column:finished_at"`
+			VulnCount  int        `gorm:"column:vuln_count"`
+		}
+		var history []historyRow
+		_ = db.WithContext(r.Context()).Raw(`
+			SELECT j.id AS job_id, j.status, j.created_at, j.finished_at,
+			       COALESCE((
+			         SELECT COUNT(*) FROM image_vuln_findings f
+			         WHERE f.scan_run_id = j.id
+			       ), 0) AS vuln_count
+			FROM jobs j
+			WHERE j.type = 'IMAGE_SCAN'
+			  AND j.payload->>'image_digest_id' = ?
+			ORDER BY j.created_at DESC
+			LIMIT 50
+		`, id).Scan(&history).Error
+		resp.ScanHistory = make([]ImageScanHistoryRow, 0, len(history))
+		for _, h := range history {
+			resp.ScanHistory = append(resp.ScanHistory, ImageScanHistoryRow{
+				JobID:      h.JobID,
+				Status:     h.Status,
+				CreatedAt:  h.CreatedAt,
+				FinishedAt: h.FinishedAt,
+				VulnCount:  h.VulnCount,
+			})
+			if resp.LatestScanID == "" && h.Status == "SUCCEEDED" {
+				resp.LatestScanID = h.JobID
+			}
+		}
+
+		// Cluster usage from the live cluster_record feed.
+		type usageRow struct {
+			Cluster   string    `gorm:"column:cluster"`
+			Namespace string    `gorm:"column:namespace"`
+			PodCount  int       `gorm:"column:pod_count"`
+			FirstSeen time.Time `gorm:"column:first_seen"`
+			LastSeen  time.Time `gorm:"column:last_seen"`
+		}
+		var usage []usageRow
+		_ = db.WithContext(r.Context()).Raw(`
+			SELECT
+			  COALESCE(data->>'cluster', '') AS cluster,
+			  COALESCE(data->>'namespace', '') AS namespace,
+			  COUNT(DISTINCT data->>'pod_uid') AS pod_count,
+			  MIN(received_at) AS first_seen,
+			  MAX(received_at) AS last_seen
+			FROM cluster_record
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'msg' != 'DELETE'
+			  AND data->>'digest' = ?
+			GROUP BY 1, 2
+			ORDER BY last_seen DESC
+		`, img.Digest).Scan(&usage).Error
+		resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
+		for _, u := range usage {
+			resp.ClusterUsage = append(resp.ClusterUsage, ImageClusterUsageRow(u))
+		}
+
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// RepoImagesHandler lists image_digests whose cached source_repo_id
+// points at the given repo — the reverse of the image-scan→repo link.
+// GET /api/repos/{repo_id}/images
+func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		repoID := r.PathValue("repo_id")
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		type row struct {
+			ID         string    `json:"id"`
+			Registry   string    `json:"registry"`
+			Repository string    `json:"repository"`
+			Digest     string    `json:"digest"`
+			CreatedAt  time.Time `json:"created_at" gorm:"column:created_at"`
+			LatestScan *time.Time `json:"latest_scan_at,omitempty" gorm:"column:latest_scan_at"`
+			VulnCount  int        `json:"vuln_count" gorm:"column:vuln_count"`
+		}
+		var rows []row
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
+			       (SELECT MAX(finished_at) FROM jobs j
+			          WHERE j.type = 'IMAGE_SCAN'
+			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
+			          WHERE f.image_digest_id = id.id), 0) AS vuln_count
+			FROM image_digests id
+			WHERE id.source_repo_id = ?
+			ORDER BY id.created_at DESC
+		`, repoID).Scan(&rows).Error; err != nil {
+			log.Printf("repo images handler: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{"images": rows})
+	}
+}
+
 // ImageScanArtifactDownloadHandler streams the raw bytes of a single
 // image-scan artifact by ID. The job ID path component is validated so a
 // guessed artifact UUID from another scan isn't accessible here.
@@ -329,98 +527,38 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 	}
 }
 
-// parseSourceURL extracts (host, org, slug) from an OCI
-// `image.source` label. Handles https URLs and the scp-style git SSH
-// form (`git@host:org/slug.git`). Returns ok=false on anything we
-// can't normalize — the caller falls through to showing the raw URL.
-func parseSourceURL(raw string) (host, org, slug string, ok bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", "", "", false
-	}
-
-	// scp-style SSH: git@github.com:org/repo.git
-	if strings.HasPrefix(raw, "git@") {
-		rest := strings.TrimPrefix(raw, "git@")
-		if colon := strings.Index(rest, ":"); colon > 0 {
-			host = rest[:colon]
-			path := strings.Trim(rest[colon+1:], "/")
-			parts := strings.SplitN(path, "/", 2)
-			if len(parts) == 2 {
-				return host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
-			}
-		}
-		return "", "", "", false
-	}
-
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return "", "", "", false
-	}
-	path := strings.Trim(u.Path, "/")
-	parts := strings.SplitN(path, "/", 2)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", "", false
-	}
-	return u.Host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
-}
-
-// lookupLinkedRepo resolves an OCI source label to a repo row. Matches
-// (org, slug) in SQL, then filters by host in Go: for managed Git hosts
-// the provider column carries the hint (`github`/`gitlab`); for
-// self-hosted Gitea / GitLab the provider_instance.base_url is compared
-// to the label's host. Returns nil when nothing matches — the caller
-// treats that as "no link" and falls through to the raw URL.
-func lookupLinkedRepo(ctx context.Context, db *gorm.DB, sourceURL string) *LinkedRepoSummary {
-	host, org, slug, ok := parseSourceURL(sourceURL)
-	if !ok {
-		return nil
-	}
-
-	var rows []struct {
-		RepoID     string `gorm:"column:repo_id"`
-		Provider   string
-		Org        string
-		Slug       string
-		BaseURL    string `gorm:"column:base_url"`
-		ProviderID string `gorm:"column:provider_id"`
+// loadLinkedRepo reads the cached image_digests.source_repo_id +
+// associated repo row and composes a LinkedRepoSummary. Returns nil
+// when the image has no cached link (either no source label was set,
+// or no matching repo in our providers).
+func loadLinkedRepo(ctx context.Context, db *gorm.DB, imageDigestID string) *LinkedRepoSummary {
+	var row struct {
+		SourceRepoID string `gorm:"column:source_repo_id"`
+		RepoID       string `gorm:"column:repo_id"`
+		Provider     string
+		Org          string
+		Slug         string
+		BaseURL      string `gorm:"column:base_url"`
+		ProviderID   string `gorm:"column:provider_id"`
 	}
 	err := db.WithContext(ctx).Raw(`
-		SELECT r.id AS repo_id, r.provider, r.org, r.slug,
+		SELECT id.source_repo_id AS source_repo_id,
+		       r.id AS repo_id, r.provider, r.org, r.slug,
 		       COALESCE(pi.base_url, '') AS base_url,
 		       r.provider_instance_id AS provider_id
-		FROM repos r
+		FROM image_digests id
+		JOIN repos r ON r.id = id.source_repo_id
 		LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-		WHERE lower(r.org) = lower(?) AND lower(r.slug) = lower(?)
-		LIMIT 10
-	`, org, slug).Scan(&rows).Error
-	if err != nil || len(rows) == 0 {
+		WHERE id.id = ?
+		LIMIT 1
+	`, imageDigestID).Scan(&row).Error
+	if err != nil || row.RepoID == "" {
 		return nil
 	}
-
-	lowerHost := strings.ToLower(host)
-	for _, row := range rows {
-		if baseURL := strings.TrimSpace(row.BaseURL); baseURL != "" {
-			if u, err := url.Parse(baseURL); err == nil && strings.EqualFold(u.Host, lowerHost) {
-				return &LinkedRepoSummary{
-					RepoID: row.RepoID, Provider: row.Provider,
-					Org: row.Org, Slug: row.Slug,
-					BaseURL: row.BaseURL, ProviderID: row.ProviderID,
-					Source: sourceURL,
-				}
-			}
-		}
-		// No base_url (or different host) — fall back to conventional
-		// hosted-provider mapping.
-		if (lowerHost == "github.com" && row.Provider == "github") ||
-			(lowerHost == "gitlab.com" && row.Provider == "gitlab") {
-			return &LinkedRepoSummary{
-				RepoID: row.RepoID, Provider: row.Provider,
-				Org: row.Org, Slug: row.Slug,
-				BaseURL: row.BaseURL, ProviderID: row.ProviderID,
-				Source: sourceURL,
-			}
-		}
+	return &LinkedRepoSummary{
+		RepoID: row.RepoID, Provider: row.Provider,
+		Org: row.Org, Slug: row.Slug,
+		BaseURL: row.BaseURL, ProviderID: row.ProviderID,
 	}
-	return nil
 }
+

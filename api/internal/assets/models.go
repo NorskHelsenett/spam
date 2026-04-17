@@ -48,11 +48,17 @@ type RepoCommit struct {
 }
 
 // ImageDigest identifies a container image by digest.
+//
+// SourceRepoID is a cached back-link to the repo the image claims to be
+// built from, populated from the OCI org.opencontainers.image.source
+// label at scan upload time. Indexed so the repo page's "images built
+// from this repo" query stays cheap.
 type ImageDigest struct {
 	ID              string `gorm:"primaryKey;size:36"`
 	Registry        string `gorm:"size:255;not null;uniqueIndex:ux_image_digest_identity"`
 	Repository      string `gorm:"size:512;not null;uniqueIndex:ux_image_digest_identity"`
 	Digest          string `gorm:"size:255;not null;uniqueIndex:ux_image_digest_identity"`
+	SourceRepoID    string `gorm:"size:36;index"`
 	CreatedAt       time.Time
 	CreatedByUserID string `gorm:"size:36"`
 }
