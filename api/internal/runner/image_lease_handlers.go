@@ -89,6 +89,29 @@ func (s *Server) handleImageScanNext(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// handleImageScanPending returns the count of IMAGE_SCAN jobs that are
+// ready to be claimed (QUEUED or RETRY with run_at <= now). The scanner
+// pod calls this on startup BEFORE downloading the grype DB so it can
+// short-circuit and exit without ~60s of DB download when there's
+// nothing to scan. Non-claiming — this does not mark any job RUNNING.
+func (s *Server) handleImageScanPending(w http.ResponseWriter, r *http.Request) {
+	var count int64
+	err := s.db.WithContext(r.Context()).
+		Table("jobs").
+		Where("type = ? AND status IN ? AND run_at <= ?",
+			jobs.JobTypeImageScan,
+			[]jobs.JobStatus{jobs.JobStatusQueued, jobs.JobStatusRetry},
+			time.Now()).
+		Count(&count).Error
+	if err != nil {
+		log.Printf("image-scans/pending: count: %v", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]int64{"pending": count})
+}
+
 // imageScanCompleteRequest is the body of /api/image-scans/:job_id/complete.
 // Status is the terminal state ("succeeded" or "failed"). ErrorMessage is
 // only meaningful for "failed" but tolerated either way.

@@ -566,6 +566,108 @@ func (k *K8sClient) GetJobStatusString(ctx context.Context, jobName string) (str
 	}
 }
 
+// ImageScanAdhocResult tells the caller whether we spawned a new adhoc
+// scanner, skipped because one was already running, or waited because the
+// last burst completed too recently. Callers use this to produce
+// informative log lines without an extra round-trip.
+type ImageScanAdhocResult int
+
+const (
+	AdhocCreated      ImageScanAdhocResult = iota // new pod spawned
+	AdhocAlreadyRunning                           // prior burst still draining
+	AdhocCoolingDown                              // prior burst finished too recently
+)
+
+// CreateImageScanAdhocJob spawns a scanner pod on demand by cloning the
+// image-scanner CronJob's pod template.
+//
+// minGapSinceCompletion enforces a cooldown: if a prior adhoc burst
+// finished less than that long ago, we refuse to spawn a new one so
+// freshly-arriving digests have a chance to batch up instead of
+// immediately triggering another DB download.
+//
+// Naming: a fixed "<cronjob>-adhoc" name so only one adhoc scanner runs
+// at a time. Parallelism-per-burst stays controlled by the CronJob
+// template's parallelism setting.
+func (k *K8sClient) CreateImageScanAdhocJob(ctx context.Context, cronJobName string, ttlSecondsAfterFinished int32, minGapSinceCompletion time.Duration) (ImageScanAdhocResult, error) {
+	namespace := k.cfg.Namespace
+	jobName := cronJobName + "-adhoc"
+
+	// Check whether a prior adhoc job still exists.
+	existing, err := k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return AdhocAlreadyRunning, fmt.Errorf("check existing adhoc job: %w", err)
+	}
+	if err == nil {
+		if existing.Status.Active > 0 {
+			// Already draining the queue — don't spawn a duplicate.
+			return AdhocAlreadyRunning, nil
+		}
+		// Cooldown: if the prior burst finished too recently, wait.
+		// CompletionTime is set once the Job reaches Succeeded; for Failed
+		// jobs we fall back to the Job's UpdatedAt (approximated via the
+		// last condition's LastTransitionTime).
+		if minGapSinceCompletion > 0 {
+			var finishedAt time.Time
+			if existing.Status.CompletionTime != nil {
+				finishedAt = existing.Status.CompletionTime.Time
+			} else {
+				for _, c := range existing.Status.Conditions {
+					if c.Type == batchv1.JobFailed || c.Type == batchv1.JobComplete {
+						if c.LastTransitionTime.After(finishedAt) {
+							finishedAt = c.LastTransitionTime.Time
+						}
+					}
+				}
+			}
+			if !finishedAt.IsZero() && time.Since(finishedAt) < minGapSinceCompletion {
+				return AdhocCoolingDown, nil
+			}
+		}
+		// Cooldown cleared (or no gap requested) — delete so we can recreate.
+		propagation := metav1.DeletePropagationBackground
+		if delErr := k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
+			PropagationPolicy: &propagation,
+		}); delErr != nil {
+			return AdhocAlreadyRunning, fmt.Errorf("delete previous adhoc job: %w", delErr)
+		}
+	}
+
+	cronJob, err := k.clientset.BatchV1().CronJobs(namespace).Get(ctx, cronJobName, metav1.GetOptions{})
+	if err != nil {
+		return AdhocAlreadyRunning, fmt.Errorf("get cronjob %s: %w", cronJobName, err)
+	}
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: namespace,
+			Labels: map[string]string{
+				"app.kubernetes.io/name":      "spam-image-scanner",
+				"app.kubernetes.io/component": "image-scanner",
+				"spam.io/adhoc-image-scan":    "true",
+			},
+			Annotations: map[string]string{
+				"spam.io/created-by": "worker-burst-trigger",
+			},
+		},
+		Spec: cronJob.Spec.JobTemplate.Spec,
+	}
+	job.Spec.TTLSecondsAfterFinished = &ttlSecondsAfterFinished
+	if job.Spec.Template.Labels == nil {
+		job.Spec.Template.Labels = make(map[string]string)
+	}
+	// Carry the same component label the CronJob-spawned pods use so the
+	// image-scanner NetworkPolicy matches.
+	job.Spec.Template.Labels["app.kubernetes.io/component"] = "image-scanner"
+
+	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
+		return AdhocAlreadyRunning, fmt.Errorf("create adhoc job: %w", err)
+	}
+	log.Printf("created adhoc image-scan job: %s/%s", namespace, jobName)
+	return AdhocCreated, nil
+}
+
 // CreateTrivyAdhocJob creates an ad-hoc K8s Job from an existing CronJob's template.
 // If a job with the given name already exists and is still running, it returns an error.
 // If it has finished (succeeded or failed), the old job is deleted before creating a new one.
@@ -781,6 +883,38 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	}
 
 	log.Printf("created run job: run_id=%s job=%s/%s", runID, namespace, jobName)
+	return nil
+}
+
+// TriggerImageScanBurst spawns an adhoc scanner pod when the queue has
+// pending work. Called by the reconciler every 5 min. No-op when the
+// image-scanner CronJob isn't configured, an adhoc pod is already active,
+// or the cooldown since the previous burst hasn't elapsed.
+//
+// The cooldown prevents a pathological case where a scanner pod finishes
+// draining, a new digest arrives seconds later, and we immediately spawn
+// another pod (including its ~60s DB download) to scan that single
+// digest. Allowing the queue to batch for a bit amortises the DB cost.
+func (e *RunExecutor) TriggerImageScanBurst(ctx context.Context) error {
+	cronJobName := strings.TrimSpace(os.Getenv("IMAGE_SCAN_CRONJOB_NAME"))
+	if cronJobName == "" {
+		// No CronJob template configured — burst path is disabled.
+		return nil
+	}
+	const (
+		ttl     = int32(3600)      // 1h TTL on the adhoc job
+		minGap  = 30 * time.Minute // cooldown between bursts
+	)
+	result, err := e.k8s.CreateImageScanAdhocJob(ctx, cronJobName, ttl, minGap)
+	if err != nil {
+		return fmt.Errorf("create adhoc image-scan job: %w", err)
+	}
+	switch result {
+	case AdhocAlreadyRunning:
+		log.Printf("image-scan burst skipped: adhoc pod already running")
+	case AdhocCoolingDown:
+		log.Printf("image-scan burst skipped: cooldown active (min gap=%s)", minGap)
+	}
 	return nil
 }
 

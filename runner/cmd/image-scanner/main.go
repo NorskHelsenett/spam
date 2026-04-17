@@ -71,6 +71,22 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Probe the worker BEFORE the 30–60s grype DB download so a cron tick
+	// into an empty queue exits in seconds instead of minutes. The count
+	// is allowed to drift — if work arrives between probe and exit the
+	// next worker-triggered burst (or the next cron tick) picks it up.
+	pending, err := fetchPending(ctx, apiURL, hmacKey)
+	if err != nil {
+		// Don't treat a probe failure as fatal — log and proceed as if
+		// work exists. Worst case: one wasted DB download.
+		log.Printf("WARN: pending probe failed: %v (proceeding anyway)", err)
+	} else if pending == 0 {
+		log.Printf("queue empty — nothing to scan, exiting before DB download")
+		return nil
+	} else {
+		log.Printf("queue has %d pending scan(s) — downloading DB", pending)
+	}
+
 	log.Printf("downloading vulnerability database (grype) …")
 	if err := grypeDBUpdate(ctx); err != nil {
 		return fail(3, "grype db update: %v", err)
@@ -124,6 +140,33 @@ type lease struct {
 	Scanners      map[string]string `json:"scanners,omitempty"`
 	RunToken      string            `json:"run_token"`
 	WorkerURL     string            `json:"worker_url"`
+}
+
+// fetchPending is a cheap non-claiming probe of the queue. Returns the
+// count of IMAGE_SCAN jobs ready to be claimed (QUEUED or RETRY with
+// run_at <= now). Used to short-circuit DB download on empty queues.
+func fetchPending(ctx context.Context, apiURL string, hmacKey []byte) (int64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL+"/api/image-scans/pending", nil)
+	if err != nil {
+		return 0, err
+	}
+	signRequest(req, nil, hmacKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
+		return 0, fmt.Errorf("pending probe failed: %d %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+	}
+	var body struct {
+		Pending int64 `json:"pending"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, fmt.Errorf("decode pending: %w", err)
+	}
+	return body.Pending, nil
 }
 
 func fetchNext(ctx context.Context, apiURL string, hmacKey []byte) (*lease, error) {
