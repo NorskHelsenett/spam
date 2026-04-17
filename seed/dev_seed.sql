@@ -1,16 +1,25 @@
 BEGIN;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Idempotent: remove any prior copies of these seed rows before
+-- re-inserting. Ordered bottom-up so FKs don't block the deletes.
+-- Safer than relying on ON CONFLICT, which requires specific named
+-- constraints that may not exist in every schema revision.
+DELETE FROM run_secrets   WHERE id = '66666666-6666-6666-6666-666666666666';
+DELETE FROM jobs          WHERE id = '55555555-5555-5555-5555-555555555555';
+DELETE FROM sbom_bindings WHERE id = '44444444-4444-4444-4444-444444444444';
+DELETE FROM sboms         WHERE id = '33333333-3333-3333-3333-333333333333';
+DELETE FROM repo_commits  WHERE id = '22222222-2222-2222-2222-222222222222';
+DELETE FROM repos         WHERE id = '11111111-1111-1111-1111-111111111111';
+
 WITH repo AS (
   INSERT INTO repos (id, provider, org, slug, created_at, created_by_user_id)
   VALUES ('11111111-1111-1111-1111-111111111111', 'github', 'NorskHelsenett', 'spam', NOW(), 'system')
-  ON CONFLICT (provider, org, slug) DO UPDATE SET provider = EXCLUDED.provider
   RETURNING id
 ),
 repo_commit AS (
   INSERT INTO repo_commits (id, repo_id, commit_sha, ref, created_at)
   SELECT '22222222-2222-2222-2222-222222222222', repo.id, '3f4c2a1b9d6e7f8a0b1c2d3e4f5a6b7c8d9e0f1a', 'main', NOW() FROM repo
-  ON CONFLICT (repo_id, commit_sha) DO UPDATE SET ref = EXCLUDED.ref
   RETURNING id, repo_id
 ),
 sbom_payload AS (
@@ -1229,14 +1238,12 @@ sbom AS (
     convert_to(sbom_payload.payload, 'UTF8'),
     NOW(), 'system'
   FROM sbom_payload
-  ON CONFLICT (content_hash) DO UPDATE SET format = EXCLUDED.format
   RETURNING id
 ),
 binding AS (
   INSERT INTO sbom_bindings (id, asset_type, asset_ref_id, sbom_id, source, created_at, created_by_user_id)
   SELECT '44444444-4444-4444-4444-444444444444', 'REPO_COMMIT', repo_commit.id, sbom.id, 'seed', NOW(), 'system'
   FROM repo_commit, sbom
-  ON CONFLICT (asset_type, asset_ref_id) DO UPDATE SET sbom_id = EXCLUDED.sbom_id
   RETURNING id
 )
 SELECT 1;
@@ -2472,13 +2479,7 @@ $$, 'UTF8'), 'sha256')),
   NOW(),
   NOW(),
   '3f4c2a1b9d6e7f8a0b1c2d3e4f5a6b7c8d9e0f1a'
-)
-ON CONFLICT (id) DO UPDATE SET
-  status = EXCLUDED.status,
-  result = EXCLUDED.result,
-  finished_at = EXCLUDED.finished_at,
-  updated_at = EXCLUDED.updated_at,
-  commit_hash = EXCLUDED.commit_hash;
+);
 
 INSERT INTO run_secrets (id, run_id, repo_id, findings, finding_count, created_at)
 VALUES (
@@ -2488,10 +2489,6 @@ VALUES (
   '[{"description": "Hardcoded token", "severity": "HIGH", "file": "config.yml", "line": 42}]',
   1,
   NOW()
-)
-ON CONFLICT (id) DO UPDATE SET
-  findings = EXCLUDED.findings,
-  finding_count = EXCLUDED.finding_count,
-  created_at = EXCLUDED.created_at;
+);
 
 COMMIT;
