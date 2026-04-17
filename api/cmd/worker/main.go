@@ -203,6 +203,29 @@ func run() error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	// Image-scan backfill reconciler. Periodically enqueues IMAGE_SCAN jobs
+	// for digests that don't have one — covers bulk imports, digests
+	// inserted before IMAGE_SCAN_ENABLED flipped on, and any trigger
+	// failures. No-op when image scanning is disabled.
+	imageScanReconciler := imagescan.NewReconciler(gormDB)
+	var imageScanTicker *time.Ticker
+	if imageScanReconciler.Enabled() {
+		// Run once on startup so a pod restart clears any backlog
+		// immediately instead of waiting 5 minutes.
+		if n, err := imageScanReconciler.Run(ctx); err != nil {
+			log.Printf("image scan reconciler (startup): %v", err)
+		} else if n > 0 {
+			log.Printf("image scan reconciler: enqueued %d digest(s) on startup", n)
+		}
+		imageScanTicker = time.NewTicker(imagescan.ReconcilerInterval)
+		defer imageScanTicker.Stop()
+	}
+	// Select-compatible channel that fires only when the ticker exists.
+	var imageScanTick <-chan time.Time
+	if imageScanTicker != nil {
+		imageScanTick = imageScanTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -210,6 +233,16 @@ func run() error {
 			wg.Wait()
 			log.Printf("all jobs completed, shutting down")
 			return nil
+
+		case <-imageScanTick:
+			// Backfill enqueue for digests without an IMAGE_SCAN job.
+			// Runs in its own case (not the 2-second fast ticker) so the
+			// query doesn't hammer the DB.
+			if n, err := imageScanReconciler.Run(ctx); err != nil {
+				log.Printf("image scan reconciler: %v", err)
+			} else if n > 0 {
+				log.Printf("image scan reconciler: enqueued %d digest(s)", n)
+			}
 
 		case <-ticker.C:
 			now := time.Now()
