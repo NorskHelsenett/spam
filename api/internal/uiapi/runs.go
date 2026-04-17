@@ -20,10 +20,12 @@ import (
 
 // RunResponse represents a run in the API response.
 type RunResponse struct {
-	ID         string     `json:"id"`
+	ID   string `json:"id"`
+	Type string `json:"type"` // "CREATE_RUN" (repo) or "IMAGE_SCAN" (image)
+
 	Status     string     `json:"status"`
-	CloneURL   string     `json:"clone_url"`
-	Provider   string     `json:"provider"`
+	CloneURL   string     `json:"clone_url,omitempty"`
+	Provider   string     `json:"provider,omitempty"`
 	ProviderID string     `json:"provider_id,omitempty"`
 	RepoID     string     `json:"repo_id,omitempty"`
 	BaseURL    string     `json:"base_url,omitempty"`
@@ -38,6 +40,40 @@ type RunResponse struct {
 	K8sJobName string     `json:"k8s_job_name,omitempty"`
 	SBOMID     string     `json:"sbom_id,omitempty"`
 	SecretID   string     `json:"secret_id,omitempty"`
+
+	// Image-scan specific. Empty for CREATE_RUN rows.
+	ImageRegistry   string                  `json:"image_registry,omitempty"`
+	ImageRepository string                  `json:"image_repository,omitempty"`
+	ImageDigest     string                  `json:"image_digest,omitempty"`
+	ImageDigestID   string                  `json:"image_digest_id,omitempty"`
+	ImageArtifacts  []ImageArtifactSummary  `json:"image_artifacts,omitempty"`
+	ImageScanners   map[string]string       `json:"image_scanners,omitempty"`
+	ImageVulnCounts *ImageVulnSeverityCount `json:"image_vuln_counts,omitempty"`
+}
+
+// ImageVulnSeverityCount aggregates CVE counts by severity for an image
+// scan, so the detail view can render severity-colored chips without
+// having to stream the full finding list.
+type ImageVulnSeverityCount struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
+	Total    int `json:"total"`
+}
+
+// ImageArtifactSummary is the lightweight descriptor of one scanner output
+// produced by an image scan. Clients render these as cards linking to the
+// raw download; the heavy blob lives in image_scan_artifacts.content and is
+// fetched on demand.
+type ImageArtifactSummary struct {
+	ID        string    `json:"id"`
+	Category  string    `json:"category"`
+	Scanner   string    `json:"scanner"`
+	Filename  string    `json:"filename,omitempty"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // RunsListResponse is the response for listing runs.
@@ -76,6 +112,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
 		repoID := r.URL.Query().Get("repo_id")
+		// type filter: "repo" (default), "image", or "all"
+		typeFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+		if typeFilter == "" {
+			typeFilter = "repo"
+		}
 
 		sortBy := r.URL.Query().Get("sort_by")
 		sortDir := r.URL.Query().Get("sort_dir")
@@ -98,7 +139,15 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var total int64
-		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
+		query := db.WithContext(r.Context()).Table("jobs")
+		switch typeFilter {
+		case "image":
+			query = query.Where("type = ?", jobs.JobTypeImageScan)
+		case "all":
+			query = query.Where("type IN ?", []string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan})
+		default: // "repo"
+			query = query.Where("type = ?", jobs.JobTypeCreateRun)
+		}
 		if len(statuses) == 1 {
 			query = query.Where("status = ?", statuses[0])
 		} else if len(statuses) > 1 {
@@ -114,6 +163,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		var jobRecords []struct {
 			ID         string
+			Type       string
 			Status     string
 			Payload    []byte
 			Error      string
@@ -127,7 +177,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
+		if err := query.Select("id, type, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
 			Order(orderClause).
 			Offset(offset).
 			Limit(pageSize).
@@ -137,13 +187,25 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		// Payloads differ by job type. We decode both shapes lazily in the
+		// render loop below; here we only collect provider IDs from
+		// CREATE_RUN rows so we can batch-resolve display names.
 		parsedPayloads := make([]jobs.CreateRunPayload, len(jobRecords))
+		imagePayloads := make([]jobs.ImageScanPayload, len(jobRecords))
 		providerIDs := make([]string, 0, len(jobRecords))
 		seenProviderIDs := make(map[string]struct{}, len(jobRecords))
 		for i, job := range jobRecords {
+			if job.Type == jobs.JobTypeImageScan {
+				var p jobs.ImageScanPayload
+				if len(job.Payload) > 0 {
+					_ = json.Unmarshal(job.Payload, &p)
+				}
+				imagePayloads[i] = p
+				continue
+			}
 			var payload jobs.CreateRunPayload
 			if len(job.Payload) > 0 {
-				json.Unmarshal(job.Payload, &payload)
+				_ = json.Unmarshal(job.Payload, &payload)
 			}
 			parsedPayloads[i] = payload
 			if payload.ProviderID == "" {
@@ -182,8 +244,6 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		runs := make([]RunResponse, 0, len(jobRecords))
 		for i, job := range jobRecords {
-			payload := parsedPayloads[i]
-
 			status := job.Status
 			errorText := job.Error
 			var retryAt *time.Time
@@ -191,7 +251,10 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				t := job.RunAt
 				retryAt = &t
 			}
-			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+			// K8s-failure inference is CREATE_RUN-specific (the result JSON
+			// layout is different for image scans).
+			if job.Type == jobs.JobTypeCreateRun &&
+				(status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued)) {
 				if resultMap, err := parseRunResultMap(job.Result); err == nil {
 					events, podStatus, ok, _ := loadPersistedK8sSnapshotFromResult(resultMap)
 					if ok {
@@ -206,8 +269,30 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				}
 			}
 
+			if job.Type == jobs.JobTypeImageScan {
+				p := imagePayloads[i]
+				runs = append(runs, RunResponse{
+					ID:              job.ID,
+					Type:            job.Type,
+					Status:          status,
+					RepoPath:        imageRefShortDisplay(p.Registry, p.Repository, p.Digest),
+					Error:           errorText,
+					CreatedAt:       job.CreatedAt,
+					StartedAt:       job.LockedAt,
+					FinishedAt:      job.FinishedAt,
+					RetryAt:         retryAt,
+					ImageRegistry:   p.Registry,
+					ImageRepository: p.Repository,
+					ImageDigest:     p.Digest,
+					ImageDigestID:   p.ImageDigestID,
+				})
+				continue
+			}
+
+			payload := parsedPayloads[i]
 			runs = append(runs, RunResponse{
 				ID:         job.ID,
+				Type:       job.Type,
 				Status:     status,
 				CloneURL:   payload.CloneURL,
 				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
@@ -233,6 +318,34 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			PageSize:   pageSize,
 		})
 	}
+}
+
+// imageRefShortDisplay renders a compact label for an image scan's RepoPath
+// field so the runs table shows something readable like
+// "docker.io/library/alpine@sha256:0123abcd" rather than a full 64-char
+// digest. The full digest is available via ImageDigest on the row.
+func imageRefShortDisplay(registry, repository, digest string) string {
+	ref := ""
+	switch {
+	case registry != "" && repository != "":
+		ref = registry + "/" + repository
+	case repository != "":
+		ref = repository
+	case registry != "":
+		ref = registry
+	}
+	if digest == "" {
+		return ref
+	}
+	short := digest
+	// "sha256:abcd..." → first 8 hex chars is enough to disambiguate in a list
+	if idx := strings.IndexByte(digest, ':'); idx > 0 && idx+9 <= len(digest) {
+		short = digest[:idx+9]
+	}
+	if ref == "" {
+		return short
+	}
+	return ref + "@" + short
 }
 
 func displayProviderName(providerType string, providerID string, providerNames map[string]string) string {
@@ -422,6 +535,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		var job struct {
 			ID         string
+			Type       string
 			Status     string
 			Payload    []byte
 			Error      string
@@ -433,13 +547,21 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		if err := db.WithContext(r.Context()).Table("jobs").
-			Where("id = ? AND type = ?", runID, jobs.JobTypeCreateRun).
+			Where("id = ? AND type IN ?", runID, []string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan}).
 			First(&job).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				http.Error(w, "run not found", http.StatusNotFound)
 				return
 			}
 			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		// Image scans short-circuit the repo-specific branches below. Their
+		// detail payload is assembled from image_scan_artifacts + SBOM
+		// binding on the image digest.
+		if job.Type == jobs.JobTypeImageScan {
+			writeImageScanRunResponse(w, r, db, job, runID)
 			return
 		}
 
@@ -476,6 +598,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		response := RunResponse{
 			ID:         job.ID,
+			Type:       job.Type,
 			Status:     job.Status,
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,

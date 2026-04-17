@@ -137,10 +137,11 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 			}
 			storedCount++
 
-			// SBOMs flow through the existing SBOM pipeline so the image
-			// shows up in /app/components immediately. Other categories
-			// wait for dedicated parsers.
-			if spec.category == "sbom" {
+			// Category-specific parsers.
+			switch spec.category {
+			case "sbom":
+				// SBOMs flow through the existing SBOM pipeline so the
+				// image shows up in /app/components immediately.
 				hash := sha256.Sum256(data)
 				binding := &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeImageDigest,
@@ -156,6 +157,19 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 				}, binding); err != nil {
 					return fmt.Errorf("store image sbom: %w", err)
 				}
+			case "vuln":
+				if spec.scanner == "grype" {
+					n, err := imagescan.ParseAndStoreGrype(r.Context(), tx, imageDigestID, scanRunID, data)
+					if err != nil {
+						// Parse failures shouldn't abort the whole upload
+						// — the raw artifact is still stored so the user
+						// can download + retry parsing later.
+						log.Printf("grype parse for %s: %v", scanRunID, err)
+					} else {
+						log.Printf("grype parsed %d finding(s) for %s", n, scanRunID)
+					}
+				}
+				// TODO: trivy_vuln parser goes here once we commit to that format.
 			}
 		}
 		return nil

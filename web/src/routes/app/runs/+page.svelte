@@ -9,9 +9,10 @@
 
 	type Run = {
 		id: string;
+		type?: string; // "CREATE_RUN" | "IMAGE_SCAN"
 		status: string;
-		clone_url: string;
-		provider: string;
+		clone_url?: string;
+		provider?: string;
 		provider_id?: string;
 		repo_id?: string;
 		repo_path: string;
@@ -22,7 +23,14 @@
 		finished_at?: string;
 		retry_at?: string;
 		k8s_job_name?: string;
+		// Image-scan specific
+		image_registry?: string;
+		image_repository?: string;
+		image_digest?: string;
+		image_digest_id?: string;
 	};
+
+	const isImageScan = (run: Run) => run.type === 'IMAGE_SCAN';
 
 	const getRepoUrl = (run: Run): string => {
 		if (run.repo_id) {
@@ -66,6 +74,16 @@
 		{ id: 'error', label: 'Error', statuses: ['FAILED'] }
 	];
 
+	// Type filter sent as ?type= on the API. "repo" is the default on the
+	// server so omitting the param would preserve legacy behaviour, but we
+	// always send it so the UI state and request stay in lockstep.
+	type TypeFilter = { id: 'repo' | 'image' | 'all'; label: string };
+	const typeFilters: TypeFilter[] = [
+		{ id: 'repo', label: 'Repos' },
+		{ id: 'image', label: 'Images' },
+		{ id: 'all', label: 'All' }
+	];
+
 	let runs: Run[] = $state([]);
 	let loading = $state(true);
 	let refreshing = $state(false);
@@ -74,6 +92,7 @@
 	let page = $state(1);
 	let pageSize = $state(20);
 	let selectedFilter = $state(runFilters[0]);
+	let selectedTypeFilter = $state<TypeFilter>(typeFilters[0]);
 	let searchInput = $state('');
 	let searchTerm = $state('');
 	let searchDebounce: ReturnType<typeof setTimeout> | null = null;
@@ -104,6 +123,7 @@
 	const getRepoQuery = () =>
 		searchTerm.trim().length > 0 ? `&repo_path=${encodeURIComponent(searchTerm.trim())}` : '';
 	const getSortQuery = () => `&sort_by=${sortField}&sort_dir=${sortDirection}`;
+	const getTypeQuery = () => `&type=${selectedTypeFilter.id}`;
 
 	const loadRuns = async () => {
 		if (loadRunsInFlight) {
@@ -116,7 +136,7 @@
 		error = '';
 		try {
 			const response = await fetch(
-				`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}${getRepoQuery()}${getSortQuery()}`,
+				`/api/runs?page=${page}&page_size=${pageSize}${getStatusQuery()}${getRepoQuery()}${getSortQuery()}${getTypeQuery()}`,
 				{ credentials: 'include' }
 			);
 			if (!response.ok) throw new Error('Failed to load runs');
@@ -140,6 +160,13 @@
 	const setFilter = (filter: RunFilter) => {
 		if (selectedFilter.id === filter.id) return;
 		selectedFilter = filter;
+		page = 1;
+		loadRuns();
+	};
+
+	const setTypeFilter = (filter: TypeFilter) => {
+		if (selectedTypeFilter.id === filter.id) return;
+		selectedTypeFilter = filter;
 		page = 1;
 		loadRuns();
 	};
@@ -358,12 +385,22 @@
 		{/if}
 
 		<div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-			<div class="flex flex-wrap gap-2">
+			<div class="flex flex-wrap items-center gap-2">
 				{#each runFilters as filter}
 					<button
 						type="button"
 						class={`btn ${selectedFilter.id === filter.id ? 'btn-secondary filter-active' : 'btn-ghost'}`}
 						onclick={() => setFilter(filter)}
+					>
+						{filter.label}
+					</button>
+				{/each}
+				<span class="mx-1 h-6 w-px bg-[var(--border-color)]/60" aria-hidden="true"></span>
+				{#each typeFilters as filter}
+					<button
+						type="button"
+						class={`btn ${selectedTypeFilter.id === filter.id ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+						onclick={() => setTypeFilter(filter)}
 					>
 						{filter.label}
 					</button>
@@ -431,14 +468,22 @@
 									</span>
 								</td>
 								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
-									<a
-										href={getRepoUrl(run)}
-										class="hover:text-[var(--accent)] hover:underline"
-										onclick={(event) => handleRepoLinkClick(event, getRepoUrl(run))}
-									>{run.repo_path || run.clone_url}</a>
+									<span class="flex items-center gap-2">
+										{#if isImageScan(run)}
+											<span
+												class="rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)]"
+												title="Container image scan"
+											>Image</span>
+										{/if}
+										<a
+											href={getRepoUrl(run)}
+											class="hover:text-[var(--accent)] hover:underline"
+											onclick={(event) => handleRepoLinkClick(event, getRepoUrl(run))}
+										>{run.repo_path || run.clone_url}</a>
+									</span>
 								</td>
-								<td class="px-5 py-3">{run.provider || '-'}</td>
-								<td class="px-5 py-3">{run.ref || 'default'}</td>
+								<td class="px-5 py-3">{isImageScan(run) ? 'OCI' : (run.provider || '-')}</td>
+								<td class="px-5 py-3">{isImageScan(run) ? '-' : (run.ref || 'default')}</td>
 								<td class="px-5 py-3 font-mono text-xs">
 									{formatDuration(run.started_at, run.finished_at)}
 								</td>

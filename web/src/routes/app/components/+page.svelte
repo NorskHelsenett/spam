@@ -3,7 +3,7 @@
 	import { browser } from '$app/environment';
 	import { fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download, ChevronDown } from 'lucide-svelte';
+	import { Search, Package, GitBranch, FileCode, Microscope, CheckCircle, Download, ChevronDown, Container } from 'lucide-svelte';
 	import DependencyDrawer from '$lib/components/DependencyDrawer.svelte';
 	import Select from '$lib/components/Select.svelte';
 
@@ -15,6 +15,7 @@
 		version_count: number;
 		sbom_count: number;
 		repo_count: number;
+		image_count?: number;
 		has_direct?: boolean;
 		scopes?: string[];
 	};
@@ -451,14 +452,23 @@
 									{/if}
 								</td>
 								<td class="px-5 py-3 text-center">
-									{#if dep.repo_count > 0}
-										<span class="inline-flex items-center gap-1">
-											<GitBranch class="h-3 w-3" />
-											{dep.repo_count}
-										</span>
-									{:else}
-										—
-									{/if}
+									<span class="inline-flex items-center gap-2">
+										{#if dep.repo_count > 0}
+											<span class="inline-flex items-center gap-1" title="Repositories using this component">
+												<GitBranch class="h-3 w-3" />
+												{dep.repo_count}
+											</span>
+										{/if}
+										{#if (dep.image_count ?? 0) > 0}
+											<span class="inline-flex items-center gap-1 text-[var(--accent)]" title="Container images using this component">
+												<Container class="h-3 w-3" />
+												{dep.image_count}
+											</span>
+										{/if}
+										{#if dep.repo_count === 0 && (dep.image_count ?? 0) === 0}
+											—
+										{/if}
+									</span>
 								</td>
 								<td class="px-5 py-3 text-center">
 									{#if dep.sbom_count > 0}

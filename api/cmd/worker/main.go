@@ -135,6 +135,7 @@ func run() error {
 		if err := gormDB.AutoMigrate(
 			&runner.RunLog{}, &runner.RunSecret{}, &runner.ScannerVersion{},
 			&imagescan.ImageScanRun{}, &imagescan.ImageScanArtifact{},
+			&imagescan.ImageVulnFinding{},
 		); err != nil {
 			return fmt.Errorf("migrate runner tables: %w", err)
 		}
