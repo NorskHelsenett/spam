@@ -51,6 +51,17 @@
 		author?: string;
 	};
 
+	type LinkedRepo = {
+		repo_id: string;
+		provider: string;
+		org: string;
+		slug: string;
+		base_url?: string;
+		provider_id?: string;
+		source: string;
+		revision?: string;
+	};
+
 	type ImageScanRun = {
 		id: string;
 		type?: string;
@@ -73,6 +84,7 @@
 		image_oci_metadata?: OCIMetadata;
 		image_secrets?: SecretRow[];
 		image_signature?: SignatureInfo;
+		image_linked_repo?: LinkedRepo;
 		sbom_component_count?: number;
 	};
 
@@ -426,6 +438,45 @@
 				{Object.keys(run.image_labels ?? {}).length} label{Object.keys(run.image_labels ?? {}).length === 1 ? '' : 's'}
 			</span>
 		</header>
+
+		{#if run.image_linked_repo}
+			<!-- Source repo link resolved from org.opencontainers.image.source.
+			     Labels are self-attested, hence the "Claimed" framing. -->
+			<div class="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/10 p-3">
+				<div class="min-w-0 flex-1">
+					<div class="mb-0.5 text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+						Claimed source repository
+					</div>
+					<div class="flex flex-wrap items-center gap-2 text-sm font-semibold text-[var(--text-bright)]">
+						<span class="font-mono">{run.image_linked_repo.org}/{run.image_linked_repo.slug}</span>
+						<span class="rounded border border-[var(--border-color)]/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--text-tertiary)]">
+							{run.image_linked_repo.provider}
+						</span>
+					</div>
+					{#if run.image_linked_repo.revision}
+						<div class="mt-1 font-mono text-xs text-[var(--text-tertiary)]">
+							revision
+							{#if isURL(run.image_linked_repo.source)}
+								<a href={`${run.image_linked_repo.source.replace(/\.git$/, '')}/commit/${run.image_linked_repo.revision}`}
+									target="_blank" rel="noopener"
+									class="text-[var(--accent)] hover:underline">
+									{run.image_linked_repo.revision.slice(0, 10)}
+								</a>
+							{:else}
+								{run.image_linked_repo.revision.slice(0, 10)}
+							{/if}
+						</div>
+					{/if}
+				</div>
+				<a
+					class="btn btn-secondary btn-sm"
+					href={`/app/providers/repo?repo_id=${run.image_linked_repo.repo_id}${run.image_linked_repo.provider_id ? `&provider_id=${run.image_linked_repo.provider_id}` : ''}`}
+				>
+					Open repo →
+				</a>
+			</div>
+		{/if}
+
 		{#if !run.image_labels || Object.keys(run.image_labels).length === 0}
 			<p class="py-4 text-center text-sm text-[var(--text-tertiary)]">No labels set on this image.</p>
 		{:else}

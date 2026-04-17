@@ -57,6 +57,7 @@ type RunResponse struct {
 	ImageLabelsMetadata *ImageOCIMetadata    `json:"image_oci_metadata,omitempty"`
 	ImageSecrets        []ImageSecretListRow `json:"image_secrets,omitempty"`
 	ImageSignature      *ImageSignatureInfo  `json:"image_signature,omitempty"`
+	ImageLinkedRepo     *LinkedRepoSummary   `json:"image_linked_repo,omitempty"`
 	SBOMComponentCount  int                  `json:"sbom_component_count,omitempty"`
 }
 
@@ -96,6 +97,21 @@ type ImageSignatureInfo struct {
 	Signed   bool   `json:"signed"`
 	Verified bool   `json:"verified"`
 	Error    string `json:"error,omitempty"`
+}
+
+// LinkedRepoSummary connects an image scan to the source repository the
+// image claims to be built from, based on the OCI `image.source` label.
+// Labels are self-attested — the "claimed" wording in the UI reflects
+// that until cosign attestations give us provenance-grade proof.
+type LinkedRepoSummary struct {
+	RepoID     string `json:"repo_id"`
+	Provider   string `json:"provider"`
+	Org        string `json:"org"`
+	Slug       string `json:"slug"`
+	BaseURL    string `json:"base_url,omitempty"`
+	ProviderID string `json:"provider_id,omitempty"`
+	Source     string `json:"source"`             // raw label value
+	Revision   string `json:"revision,omitempty"` // org.opencontainers.image.revision
 }
 
 // ImageVulnSeverityCount aggregates CVE counts by severity for an image
