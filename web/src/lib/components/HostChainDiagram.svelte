@@ -49,7 +49,8 @@
 	const REPLICA_GAP = 32;
 	const PAD = { top: 28, left: 70, right: 44, bottom: 28 };
 	const LABEL_OFFSET = 28;
-	const SUBLABEL_OFFSET = 42;
+	const SUBLABEL_OFFSET = 40;
+	const PORT_OFFSET = 51;
 	const MAX_INDIVIDUAL_PODS = 4;
 
 	function truncate(s: string, max: number): string {
@@ -403,8 +404,11 @@
 			</g>
 			<text x={ip.x} y={ip.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(ip.ing.host ?? ip.ing.name, 22)}</text>
 			<text x={ip.x} y={ip.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
-				{ip.ing.kind}{ip.ing.ingress_class ? ` · ${ip.ing.ingress_class}` : ''}{ip.ing.lb_ips ? ` · ${ip.ing.lb_ips}` : ''}
+				{ip.ing.kind}{ip.ing.ingress_class ? ` · ${ip.ing.ingress_class}` : ''}
 			</text>
+			{#if ip.ing.lb_ips}
+				<text x={ip.x} y={ip.y + PORT_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="7">{ip.ing.lb_ips}</text>
+			{/if}
 		</g>
 	{/each}
 
@@ -418,9 +422,10 @@
 				<circle cx="7" cy="7" r="2" fill="var(--blue)" opacity="0.6" />
 			</g>
 			<text x={sp.x} y={sp.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(sp.svc.name, 22)}</text>
-			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
-				{sp.svc.service_type || 'ClusterIP'}{sp.svc.ports?.length ? ` · ${sp.svc.ports.map((p) => `${p.port}`).join(',')}` : ''}
-			</text>
+			<text x={sp.x} y={sp.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">{sp.svc.service_type || 'ClusterIP'}</text>
+			{#if sp.svc.ports?.length}
+				<text x={sp.x} y={sp.y + PORT_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="7">{sp.svc.ports.map((p) => `${p.port}/${p.protocol || 'TCP'}`).join(', ')}</text>
+			{/if}
 		</g>
 	{/each}
 
@@ -471,7 +476,10 @@
 				<circle cx="10" cy="7" r="1" fill="var(--orange)" />
 			</g>
 			<text x={ep.x} y={ep.y + LABEL_OFFSET} text-anchor="middle" fill="var(--orange)" font-size="9" font-weight="600">{ep.ip}</text>
-			<text x={ep.x} y={ep.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">external{ports.length ? ` · ${ports.join(',')}` : ''}</text>
+			<text x={ep.x} y={ep.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">external</text>
+			{#if ports.length}
+				<text x={ep.x} y={ep.y + PORT_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="7">{ports.join(', ')}</text>
+			{/if}
 		</g>
 	{/each}
 
