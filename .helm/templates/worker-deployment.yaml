@@ -104,6 +104,10 @@ spec:
             - name: TRIVY_SCANNER_CRONJOB_NAME
               value: "{{ .Release.Name }}-trivy-scanner"
             {{- end }}
+            {{- if .Values.imageScanner.enabled }}
+            - name: IMAGE_SCAN_ENABLED
+              value: "true"
+            {{- end }}
             {{- if .Values.runner.enabled }}
             - name: RUNNER_ENABLED
               value: "true"

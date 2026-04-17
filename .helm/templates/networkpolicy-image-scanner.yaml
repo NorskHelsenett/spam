@@ -1,0 +1,60 @@
+{{- if .Values.imageScanner.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-image-scanner
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-image-scanner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: image-scanner
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Match only image-scanner pods (distinct component label keeps this
+  # policy and the trivy-scanner policy from cross-matching).
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: image-scanner
+  policyTypes:
+    - Ingress
+    - Egress
+  # Deny all inbound traffic — scanner pods expose no services.
+  ingress: []
+  egress:
+    # Allow DNS resolution (kube-dns / CoreDNS).
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow traffic to the worker service for lease / upload / complete.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}-worker
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.runner.httpPort | default 8081 }}
+    # Allow HTTPS to the public internet for:
+    #   - grype/trivy vuln DB downloads (ghcr.io / public CDNs)
+    #   - OCI registry pulls for the images being scanned
+    # All RFC 1918 private ranges stay blocked — the scanner cannot
+    # reach internal cluster services, databases, or other pods
+    # outside of the worker. If you host images in an internal
+    # registry, add an allow rule via
+    # networkPolicy.imageScanner.additionalEgressRules.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 443
+    {{- with .Values.networkPolicy.imageScanner.additionalEgressRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
