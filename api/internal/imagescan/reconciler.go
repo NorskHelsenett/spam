@@ -160,7 +160,16 @@ func imageScanEnabled() bool {
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
-// ReconcilerInterval is the default cadence recommended for callers. Short
-// enough that a bulk-imported batch of digests gets picked up in minutes;
-// long enough that we're not hammering the DB on every tick.
+// ReconcilerInterval is the default cadence recommended for callers.
+// Short enough that a bulk-imported batch of digests gets picked up in
+// minutes; long enough that we're not hammering the DB on every tick.
+//
+// This is the *check* interval: every tick we enqueue missing digests
+// AND call MaybeBurst. The burst cooldown (configured on the K8s side
+// via IMAGE_SCAN_BURST_MIN_GAP_SECONDS, default 30 min) is independent —
+// it gates whether an actual scanner pod spawns. So with defaults we
+// CHECK every 5 min but SPAWN at most every 30 min (plus however long
+// the currently-running pod takes). A tick where the cooldown hasn't
+// cleared is a no-op — the reconciler still enqueues, the burst just
+// doesn't fire until the gap is satisfied.
 const ReconcilerInterval = 5 * time.Minute
