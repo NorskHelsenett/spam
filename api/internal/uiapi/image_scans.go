@@ -1,10 +1,13 @@
 package uiapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -171,6 +174,18 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		}
 	}
 
+	// If the image advertised a source repo via OCI labels and we have
+	// that repo in our providers, surface the link. Self-attested, so
+	// the UI renders it as a claim, not a verified fact.
+	if response.ImageLabels != nil {
+		if src := response.ImageLabels["org.opencontainers.image.source"]; src != "" {
+			if linked := lookupLinkedRepo(r.Context(), db, src); linked != nil {
+				linked.Revision = response.ImageLabels["org.opencontainers.image.revision"]
+				response.ImageLinkedRepo = linked
+			}
+		}
+	}
+
 	// SBOM component count (cheap lookup; frontend can hit /api/sboms/{id}
 	// for the full list if the operator wants to drill in).
 	if response.SBOMID != "" {
@@ -312,4 +327,100 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 		_, _ = w.Write(art.Content)
 	}
+}
+
+// parseSourceURL extracts (host, org, slug) from an OCI
+// `image.source` label. Handles https URLs and the scp-style git SSH
+// form (`git@host:org/slug.git`). Returns ok=false on anything we
+// can't normalize — the caller falls through to showing the raw URL.
+func parseSourceURL(raw string) (host, org, slug string, ok bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", "", false
+	}
+
+	// scp-style SSH: git@github.com:org/repo.git
+	if strings.HasPrefix(raw, "git@") {
+		rest := strings.TrimPrefix(raw, "git@")
+		if colon := strings.Index(rest, ":"); colon > 0 {
+			host = rest[:colon]
+			path := strings.Trim(rest[colon+1:], "/")
+			parts := strings.SplitN(path, "/", 2)
+			if len(parts) == 2 {
+				return host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
+			}
+		}
+		return "", "", "", false
+	}
+
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", "", "", false
+	}
+	path := strings.Trim(u.Path, "/")
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", false
+	}
+	return u.Host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
+}
+
+// lookupLinkedRepo resolves an OCI source label to a repo row. Matches
+// (org, slug) in SQL, then filters by host in Go: for managed Git hosts
+// the provider column carries the hint (`github`/`gitlab`); for
+// self-hosted Gitea / GitLab the provider_instance.base_url is compared
+// to the label's host. Returns nil when nothing matches — the caller
+// treats that as "no link" and falls through to the raw URL.
+func lookupLinkedRepo(ctx context.Context, db *gorm.DB, sourceURL string) *LinkedRepoSummary {
+	host, org, slug, ok := parseSourceURL(sourceURL)
+	if !ok {
+		return nil
+	}
+
+	var rows []struct {
+		RepoID     string `gorm:"column:repo_id"`
+		Provider   string
+		Org        string
+		Slug       string
+		BaseURL    string `gorm:"column:base_url"`
+		ProviderID string `gorm:"column:provider_id"`
+	}
+	err := db.WithContext(ctx).Raw(`
+		SELECT r.id AS repo_id, r.provider, r.org, r.slug,
+		       COALESCE(pi.base_url, '') AS base_url,
+		       r.provider_instance_id AS provider_id
+		FROM repos r
+		LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+		WHERE lower(r.org) = lower(?) AND lower(r.slug) = lower(?)
+		LIMIT 10
+	`, org, slug).Scan(&rows).Error
+	if err != nil || len(rows) == 0 {
+		return nil
+	}
+
+	lowerHost := strings.ToLower(host)
+	for _, row := range rows {
+		if baseURL := strings.TrimSpace(row.BaseURL); baseURL != "" {
+			if u, err := url.Parse(baseURL); err == nil && strings.EqualFold(u.Host, lowerHost) {
+				return &LinkedRepoSummary{
+					RepoID: row.RepoID, Provider: row.Provider,
+					Org: row.Org, Slug: row.Slug,
+					BaseURL: row.BaseURL, ProviderID: row.ProviderID,
+					Source: sourceURL,
+				}
+			}
+		}
+		// No base_url (or different host) — fall back to conventional
+		// hosted-provider mapping.
+		if (lowerHost == "github.com" && row.Provider == "github") ||
+			(lowerHost == "gitlab.com" && row.Provider == "gitlab") {
+			return &LinkedRepoSummary{
+				RepoID: row.RepoID, Provider: row.Provider,
+				Org: row.Org, Slug: row.Slug,
+				BaseURL: row.BaseURL, ProviderID: row.ProviderID,
+				Source: sourceURL,
+			}
+		}
+	}
+	return nil
 }
