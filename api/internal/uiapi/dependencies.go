@@ -22,10 +22,11 @@ type UnifiedDependency struct {
 	Name         string   `json:"name"`
 	Ecosystem    string   `json:"ecosystem"`
 	PURL         string   `json:"purl,omitempty"`   // PURL without version
-	Sources      []string `json:"sources"`          // ["sbom", "manifest", "both"]
+	Sources      []string `json:"sources"`          // ["sbom", "manifest", "image"]
 	VersionCount int      `json:"version_count"`    // How many different versions
 	SBOMCount    int      `json:"sbom_count"`       // How many SBOMs contain this
 	RepoCount    int      `json:"repo_count"`       // How many repos use this
+	ImageCount   int      `json:"image_count"`      // How many container images use this
 	HasDirect    bool     `json:"has_direct"`       // At least one version is direct
 	Scopes       []string `json:"scopes,omitempty"` // All unique scopes across versions
 }
@@ -1131,6 +1132,16 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			deps = append(deps, dep)
 		}
 
+		// Enrich with per-component image counts. Image-sourced SBOM
+		// components already live in sbom_component_view alongside
+		// repo-sourced ones; a small secondary aggregate tells us how many
+		// distinct image digests carry each (name, ecosystem) that's
+		// already in the result set. Keeping this as a second query avoids
+		// invasive surgery on the FULL OUTER JOIN above.
+		if len(deps) > 0 {
+			enrichWithImageCounts(r.Context(), db, deps)
+		}
+
 		totalPages := int(total) / perPage
 		if int(total)%perPage > 0 {
 			totalPages++
@@ -1144,6 +1155,52 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			PerPage:      perPage,
 			TotalPages:   totalPages,
 		})
+	}
+}
+
+// enrichWithImageCounts fills UnifiedDependency.ImageCount in place. The
+// query buckets distinct image_digest asset refs per (name, ecosystem) and
+// joins to the passed-in rows. Only components already in deps get a
+// non-zero count — image-only components are intentionally NOT added here,
+// since /app/components is framed around "things repos depend on" and
+// flooding the list with OS packages from alpine base images would be
+// noise. That data is still reachable via /app/runs/{id} and
+// /app/clusters.
+func enrichWithImageCounts(ctx context.Context, db *gorm.DB, deps []UnifiedDependency) {
+	type row struct {
+		Name       string
+		Ecosystem  string
+		ImageCount int `gorm:"column:image_count"`
+	}
+	var rows []row
+	err := db.WithContext(ctx).Raw(`
+		SELECT
+			COALESCE(s.package_name, s.normalized_name, s.name) AS name,
+			s.kind AS ecosystem,
+			COUNT(DISTINCT s.asset_ref_id) AS image_count
+		FROM sbom_component_view s
+		WHERE s.is_root = false
+		  AND s.purl IS NOT NULL
+		  AND s.asset_type = 'IMAGE_DIGEST'
+		  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+		GROUP BY 1, 2
+	`).Scan(&rows).Error
+	if err != nil {
+		log.Printf("enrichWithImageCounts: %v", err)
+		return
+	}
+	index := make(map[string]int, len(rows))
+	for _, r := range rows {
+		index[r.Name+"\x00"+r.Ecosystem] = r.ImageCount
+	}
+	for i := range deps {
+		if c := index[deps[i].Name+"\x00"+deps[i].Ecosystem]; c > 0 {
+			deps[i].ImageCount = c
+			// Promote 'image' into the sources list so the UI can render
+			// a third badge. Existing sources[0] ("sbom"/"manifest"/"both")
+			// stays first for back-compat.
+			deps[i].Sources = append(deps[i].Sources, "image")
+		}
 	}
 }
 

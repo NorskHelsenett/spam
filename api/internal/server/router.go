@@ -185,6 +185,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
+				// Image-scan artifact download — per-artifact raw bytes.
+				// The /runs/{id} endpoint already returns summaries as part
+				// of the RunResponse for IMAGE_SCAN jobs.
+				api.Get("/image-scans/{job_id}/artifacts/{artifact_id}/download",
+					uiapi.ImageScanArtifactDownloadHandler(db, authService))
+
 				// Kubernetes integration endpoints (only available if runner is enabled)
 				if opts != nil && opts.K8sClient != nil {
 					api.Get("/runs/{id}/k8s-logs", uiapi.RunLogsHandler(db, authService, opts.K8sClient))

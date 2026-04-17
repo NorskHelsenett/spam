@@ -8,12 +8,14 @@
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import SecretsDialog from '$lib/components/SecretsDialog.svelte';
 	import DependenciesDialog from '$lib/components/DependenciesDialog.svelte';
+	import ImageScanDetail from '$lib/components/ImageScanDetail.svelte';
 
 	type Run = {
 		id: string;
+		type?: string; // "CREATE_RUN" | "IMAGE_SCAN"
 		status: string;
-		clone_url: string;
-		provider: string;
+		clone_url?: string;
+		provider?: string;
 		provider_id?: string;
 		repo_id?: string;
 		base_url?: string;
@@ -27,7 +29,23 @@
 		k8s_job_name?: string;
 		sbom_id?: string;
 		secret_id?: string;
+		// Image scan fields
+		image_registry?: string;
+		image_repository?: string;
+		image_digest?: string;
+		image_digest_id?: string;
+		image_artifacts?: Array<{
+			id: string;
+			category: string;
+			scanner: string;
+			filename?: string;
+			size: number;
+			created_at: string;
+		}>;
+		image_scanners?: Record<string, string>;
 	};
+
+	const runIsImageScan = (r: Run | null) => !!r && r.type === 'IMAGE_SCAN';
 
 	type Artifact = {
 		type: string;
@@ -169,8 +187,10 @@
 			run = newRun;
 			lastStatus = newRun.status;
 			
-			// Load artifacts after getting run details, or when status changes to completed
-			if (shouldLoadArtifacts && run && (run.status === 'SUCCEEDED' || run.status === 'FAILED' || statusChanged)) {
+			// Load artifacts after getting run details, or when status changes
+			// to completed. Image scans carry their artifact list inline
+			// (run.image_artifacts) so the repo-specific loader is skipped.
+			if (shouldLoadArtifacts && run && !runIsImageScan(run) && (run.status === 'SUCCEEDED' || run.status === 'FAILED' || statusChanged)) {
 				await loadArtifacts(id, run);
 			}
 		} catch (e) {
@@ -475,6 +495,13 @@
 		// Initial load - wait for it to complete before connecting SSE
 		await loadRun(true);
 
+		// Image scans render via <ImageScanDetail> and don't need any of the
+		// repo-specific K8s / SSE plumbing below. Bail out early.
+		if (runIsImageScan(run)) {
+			ticker = setInterval(() => { now = Date.now(); }, 1000);
+			return;
+		}
+
 		// Load K8s events if the run has a K8s job
 		if (run?.k8s_job_name) {
 			await loadK8sEvents(id);
@@ -581,7 +608,7 @@
 			if (run.provider_id) params.set('provider_id', run.provider_id);
 			return `/app/providers/repo?${params}`;
 		}
-		const repoPath = run.repo_path || extractRepoPath(run.clone_url);
+		const repoPath = run.repo_path || extractRepoPath(run.clone_url ?? '');
 		if (!repoPath) return null;
 		const provider = run.provider?.toLowerCase() || 'github';
 		const params = new URLSearchParams({ provider, path: repoPath });
@@ -622,6 +649,8 @@
 			<XCircle class="mx-auto h-12 w-12 text-[var(--error)]" />
 			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
 		</div>
+	{:else if run && runIsImageScan(run)}
+		<ImageScanDetail {run} />
 	{:else if run}
 		{@const StatusIcon = getStatusIcon(run.status)}
 
@@ -664,7 +693,7 @@
 							{/if}
 						</a>
 						{#if run.commit_sha}
-							{@const commitUrl = getCommitUrl(run.clone_url, run.provider, run.commit_sha)}
+							{@const commitUrl = getCommitUrl(run.clone_url ?? '', run.provider ?? '', run.commit_sha)}
 							<a
 								href={commitUrl || '#'}
 								target="_blank"
