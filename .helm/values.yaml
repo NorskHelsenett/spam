@@ -388,12 +388,37 @@ imageScanner:
   # CronJob's pod template) when there's work. Reduces latency from
   # "digest inserted" to "scan starts" from up-to-$schedule down to
   # at-most-5min, without changing the scheduled tick behaviour.
+  #
+  # Two cadences are at play and they are independent:
+  #
+  #   1. Check interval (hard-coded 5 min). Every 5 min the worker
+  #      enqueues missing digests AND considers spawning a scanner pod.
+  #      A tick is a no-op if the cooldown hasn't cleared yet.
+  #
+  #   2. Burst cooldown (minGapSinceCompletionSeconds, default 30 min).
+  #      The minimum gap between the END of a prior burst and the
+  #      START of the next. Prevents a pathological loop where a
+  #      scanner drains the queue, a single new digest arrives seconds
+  #      later, and we immediately spawn another pod (paying ~60s of
+  #      grype-DB download) to scan that one digest.
+  #
+  # Put together: the worker CHECKS every 5 min, but SPAWNS at most
+  # every 30 min (plus any time the currently-running pod takes). If
+  # the cooldown isn't satisfied yet, the 5-min tick is a no-op.
+  #
+  # Worst-case latency from "digest inserted" to "scan starts":
+  #   - no recent burst:         up to 5 min   (next reconciler tick)
+  #   - a burst is still active: 0             (its pod picks up the new digest)
+  #   - burst finished recently: up to 30 min  (cooldown)
+  #
+  # The scheduled CronJob (imageScanner.schedule) is a belt-and-braces
+  # fallback that runs independently of the burst cooldown; it pays
+  # no DB-download cost on empty queues because the scanner probes
+  # /api/image-scans/pending before deciding to download.
   burst:
-    # Minimum gap between the END of a prior burst and the START of the
-    # next. Prevents thrashing when new digests trickle in mid-scan:
-    # rather than spawning a fresh pod (with a ~60s DB download) for
-    # each single digest, the queue batches up. Set to 0 to disable the
-    # cooldown (every 5-min tick spawns a pod if there's work).
+    # Cooldown in seconds. Set to 0 to disable entirely (every 5-min
+    # tick spawns a pod if there's work — highest latency wins, but
+    # highest DB-download cost too).
     minGapSinceCompletionSeconds: 1800  # 30 minutes
 
   # Extra env forwarded to each scan subprocess. Typical keys:
