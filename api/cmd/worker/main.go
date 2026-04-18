@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
@@ -134,6 +135,12 @@ func run() error {
 	if cfg.Runner.Enabled {
 		if err := gormDB.AutoMigrate(
 			&runner.RunLog{}, &runner.RunSecret{}, &runner.ScannerVersion{},
+			// Also migrate the ImageDigest model the API server owns — this
+			// avoids a race where the worker's startup backfill queries
+			// source_label (or future columns) before the API server's
+			// AutoMigrate has added them. Both pods then converge on the
+			// same schema regardless of deploy order.
+			&assets.ImageDigest{},
 			&imagescan.ImageScanRun{}, &imagescan.ImageScanArtifact{},
 			&imagescan.ImageVulnFinding{},
 		); err != nil {
