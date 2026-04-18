@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -384,6 +385,29 @@ type UploadOpts struct {
 	HTTPClient    *http.Client // optional; defaults to http.DefaultClient
 }
 
+// UploadErrorKind classifies upload failures so callers can decide
+// between "mark the job FAILED" (permanent — 4xx, malformed payload,
+// corrupt token) and "retry the whole job later" (transient — network
+// timeout, 5xx, connection refused).
+type UploadErrorKind int
+
+const (
+	UploadOK UploadErrorKind = iota
+	UploadTransient
+	UploadPermanent
+)
+
+// UploadError is returned from Upload alongside a regular error so the
+// caller can check .Kind() without string-sniffing.
+type UploadError struct {
+	Err  error
+	kind UploadErrorKind
+}
+
+func (e *UploadError) Error() string       { return e.Err.Error() }
+func (e *UploadError) Unwrap() error       { return e.Err }
+func (e *UploadError) Kind() UploadErrorKind { return e.kind }
+
 // Upload POSTs all artifacts to /runner/image-results as one multipart
 // request. Returns the count of files sent.
 func Upload(ctx context.Context, opts UploadOpts, artifacts []Artifact) (int, error) {
@@ -433,14 +457,62 @@ func Upload(ctx context.Context, opts UploadOpts, artifacts []Artifact) (int, er
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return sent, err
+		// Network-level failure (timeout, connection refused, DNS, TLS).
+		// All transient from our POV — the worker may be rolling, a
+		// NetworkPolicy may not have propagated yet, etc.
+		return sent, &UploadError{Err: err, kind: UploadTransient}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return sent, fmt.Errorf("upload failed: %d %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		wrapped := fmt.Errorf("upload failed: %d %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		// 5xx and 429 are worth retrying; 4xx (except 429) signals a
+		// permanent problem with the request (bad token, bad payload).
+		kind := UploadPermanent
+		if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
+			kind = UploadTransient
+		}
+		return sent, &UploadError{Err: wrapped, kind: kind}
 	}
 	return sent, nil
+}
+
+// UploadWithRetry wraps Upload with exponential backoff for transient
+// failures. Permanent errors return immediately. Returns the final
+// (*UploadError) so the caller can still check .Kind().
+func UploadWithRetry(ctx context.Context, opts UploadOpts, artifacts []Artifact, attempts int, log LogFunc) (int, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if log == nil {
+		log = func(string) {}
+	}
+	var (
+		sent int
+		err  error
+	)
+	backoff := 2 * time.Second
+	for i := 1; i <= attempts; i++ {
+		sent, err = Upload(ctx, opts, artifacts)
+		if err == nil {
+			return sent, nil
+		}
+		var ue *UploadError
+		if errors.As(err, &ue) && ue.Kind() == UploadPermanent {
+			return sent, err
+		}
+		if i == attempts {
+			return sent, err
+		}
+		log(fmt.Sprintf("upload attempt %d/%d failed: %v — retrying in %s", i, attempts, err, backoff))
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return sent, ctx.Err()
+		}
+		backoff *= 2
+	}
+	return sent, err
 }
 
 // -----------------------------------------------------------------------------
