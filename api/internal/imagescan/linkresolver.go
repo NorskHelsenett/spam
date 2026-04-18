@@ -45,22 +45,122 @@ func parseSourceURL(raw string) (host, org, slug string, ok bool) {
 	return u.Host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
 }
 
-// BackfillSourceRepoIDs populates image_digests.source_repo_id for rows
-// that were scanned before the column existed. For each digest without
-// a link, it reads the most recent `labels` artifact, parses
-// org.opencontainers.image.source, resolves it against the providers
-// table, and writes the result back. Safe to call on every worker
-// startup — the query filters to only rows where the column is still
-// empty, so it's a no-op after the first pass.
+// RelinkRepoImages fires when a repo is inserted/updated, scanning
+// orphan image_digests whose cached source_label matches this repo's
+// (host, org, slug) and setting their source_repo_id. Lets "repo
+// imported after image was scanned" settle instantly without a
+// periodic sweep.
 //
-// Returns (scanned, linked) — how many digests were considered and how
-// many got a repo_id set.
+// The matcher mirrors ResolveSourceRepoID: host comparison uses the
+// provider_instance.base_url for self-hosted providers, or the
+// provider column for github.com / gitlab.com. Returns the number of
+// images that got newly linked.
+func RelinkRepoImages(ctx context.Context, db *gorm.DB, repoID string) (int, error) {
+	if strings.TrimSpace(repoID) == "" {
+		return 0, nil
+	}
+	type repoRow struct {
+		Provider string
+		Org      string
+		Slug     string
+		BaseURL  string `gorm:"column:base_url"`
+	}
+	var r repoRow
+	err := db.WithContext(ctx).Raw(`
+		SELECT r.provider, r.org, r.slug, COALESCE(pi.base_url, '') AS base_url
+		FROM repos r
+		LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+		WHERE r.id = ?
+	`, repoID).Scan(&r).Error
+	if err != nil || r.Org == "" || r.Slug == "" {
+		return 0, err
+	}
+
+	// Pull all orphan image_digests that have a non-empty source_label.
+	// We can't filter further in SQL cheaply because source_label is a
+	// full URL (needs parsing) — but the row count is tiny vs total
+	// images, and this runs only when a repo is created.
+	type orphan struct {
+		ID          string
+		SourceLabel string `gorm:"column:source_label"`
+	}
+	var orphans []orphan
+	err = db.WithContext(ctx).Raw(`
+		SELECT id, source_label
+		FROM image_digests
+		WHERE (source_repo_id IS NULL OR source_repo_id = '')
+		  AND source_label IS NOT NULL AND source_label <> '' AND source_label <> '-'
+	`).Scan(&orphans).Error
+	if err != nil {
+		return 0, err
+	}
+
+	linked := 0
+	for _, o := range orphans {
+		host, org, slug, ok := parseSourceURL(o.SourceLabel)
+		if !ok {
+			continue
+		}
+		if !strings.EqualFold(org, r.Org) || !strings.EqualFold(slug, r.Slug) {
+			continue
+		}
+		matched := false
+		if r.BaseURL != "" {
+			if u, err := url.Parse(r.BaseURL); err == nil && strings.EqualFold(u.Host, host) {
+				matched = true
+			}
+		}
+		if !matched {
+			switch {
+			case strings.EqualFold(host, "github.com") && r.Provider == "github":
+				matched = true
+			case strings.EqualFold(host, "gitlab.com") && r.Provider == "gitlab":
+				matched = true
+			}
+		}
+		if !matched {
+			continue
+		}
+		if err := db.WithContext(ctx).Exec(
+			"UPDATE image_digests SET source_repo_id = ? WHERE id = ?",
+			repoID, o.ID,
+		).Error; err != nil {
+			log.Printf("relink image %s -> %s: %v", o.ID, repoID, err)
+			continue
+		}
+		linked++
+	}
+	return linked, nil
+}
+
+// BackfillSourceRepoIDs converges image_digests.source_repo_id +
+// source_label with whatever labels + providers the database currently
+// holds. Runs in two passes:
+//
+//   Pass A (expensive, amortised): for digests whose source_label is
+//   still empty, read the most recent `labels` artifact, parse
+//   org.opencontainers.image.source, cache it on source_label. Each
+//   digest hits the artifacts table at most once.
+//
+//   Pass B (cheap, periodic): for digests with source_label set but
+//   source_repo_id empty, re-resolve against providers and update.
+//   This is what handles "repo imported AFTER image was scanned" — on
+//   each tick, newly-added repos get their orphan images linked. Uses
+//   only the short source_label column, no artifact reads.
+//
+// Both passes skip rows that are already fully linked, so converges
+// to O(net-new-rows) cost per tick.
+//
+// Returns (scanned, linked) where scanned counts pass-A rows visited
+// (including no-ops) and linked counts how many digests were newly
+// resolved to a repo across both passes.
 func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
-	type row struct {
+	// --- Pass A: populate source_label from labels artifacts ---
+	type labelRow struct {
 		ID      string
 		Content []byte
 	}
-	var rows []row
+	var labelRows []labelRow
 	err := db.WithContext(ctx).Raw(`
 		SELECT id.id, a.content
 		FROM image_digests id
@@ -73,19 +173,45 @@ func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
 		    ORDER BY a.created_at DESC
 		    LIMIT 1
 		) a ON true
-		WHERE id.source_repo_id IS NULL OR id.source_repo_id = ''
-	`).Scan(&rows).Error
+		WHERE id.source_label IS NULL OR id.source_label = ''
+	`).Scan(&labelRows).Error
 	if err != nil {
 		return 0, 0, err
 	}
-
-	linked := 0
-	for _, r := range rows {
+	for _, r := range labelRows {
 		source := extractSourceLabelFromConfig(r.Content)
 		if source == "" {
-			continue
+			// Write a marker so Pass A doesn't re-read this artifact
+			// every tick when the label is genuinely absent. A short
+			// non-URL sentinel keeps ResolveSourceRepoID a no-op.
+			source = "-"
 		}
-		repoID, err := ResolveSourceRepoID(ctx, db, source)
+		if err := db.WithContext(ctx).Exec(
+			"UPDATE image_digests SET source_label = ? WHERE id = ?",
+			source, r.ID,
+		).Error; err != nil {
+			log.Printf("backfill source_label for %s: %v", r.ID, err)
+		}
+	}
+
+	// --- Pass B: resolve source_label → source_repo_id ---
+	type resolveRow struct {
+		ID          string
+		SourceLabel string `gorm:"column:source_label"`
+	}
+	var resolveRows []resolveRow
+	err = db.WithContext(ctx).Raw(`
+		SELECT id, source_label
+		FROM image_digests
+		WHERE (source_repo_id IS NULL OR source_repo_id = '')
+		  AND source_label IS NOT NULL AND source_label <> '' AND source_label <> '-'
+	`).Scan(&resolveRows).Error
+	if err != nil {
+		return len(labelRows), 0, err
+	}
+	linked := 0
+	for _, r := range resolveRows {
+		repoID, err := ResolveSourceRepoID(ctx, db, r.SourceLabel)
 		if err != nil || repoID == "" {
 			continue
 		}
@@ -98,7 +224,7 @@ func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
 		}
 		linked++
 	}
-	return len(rows), linked, nil
+	return len(labelRows), linked, nil
 }
 
 // extractSourceLabelFromConfig mirrors the runner package helper; kept
