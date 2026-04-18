@@ -151,18 +151,32 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 	}
 
 	var status jobs.JobStatus
+	var nextRunAt *time.Time
 	switch body.Status {
 	case "succeeded":
 		status = jobs.JobStatusSucceeded
 	case "failed":
 		status = jobs.JobStatusFailed
+	case "retry":
+		// Transient scanner-side failure (upload timeout, 5xx). Push
+		// the job back into RETRY with exponential backoff so another
+		// scanner pod picks it up later. If we've exhausted
+		// max_attempts, honour that and mark FAILED so the queue
+		// doesn't thrash.
+		if job.Attempts >= job.MaxAttempts {
+			status = jobs.JobStatusFailed
+			break
+		}
+		status = jobs.JobStatusRetry
+		rt := jobs.NextRetryTime(job.Attempts, job.MaxAttempts, time.Now())
+		nextRunAt = &rt
 	default:
-		http.Error(w, "status must be 'succeeded' or 'failed'", http.StatusBadRequest)
+		http.Error(w, "status must be 'succeeded', 'failed', or 'retry'", http.StatusBadRequest)
 		return
 	}
 
 	result := map[string]string{"status": body.Status}
-	if _, err := jobs.UpdateJobStatus(r.Context(), s.db, jobID, status, result, body.ErrorMessage, nil); err != nil {
+	if _, err := jobs.UpdateJobStatus(r.Context(), s.db, jobID, status, result, body.ErrorMessage, nextRunAt); err != nil {
 		log.Printf("image-scans/complete: update status: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return

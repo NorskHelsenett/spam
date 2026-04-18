@@ -116,9 +116,19 @@ func run() error {
 
 		status, errMsg := "succeeded", ""
 		if scanErr != nil {
-			status = "failed"
+			// Classify: transient upload/network errors → ask the worker
+			// to requeue so a later tick (after the worker/NetworkPolicy
+			// has settled) picks it up again. Anything else is a
+			// permanent scan failure.
+			var upErr *imagescan.UploadError
+			if errors.As(scanErr, &upErr) && upErr.Kind() == imagescan.UploadTransient {
+				status = "retry"
+				log.Printf("scan %s transient — requesting requeue: %v", lease.JobID, scanErr)
+			} else {
+				status = "failed"
+				log.Printf("scan %s FAILED: %v", lease.JobID, scanErr)
+			}
 			errMsg = scanErr.Error()
-			log.Printf("scan %s FAILED: %v", lease.JobID, scanErr)
 		} else {
 			log.Printf("scan %s succeeded", lease.JobID)
 		}
@@ -228,12 +238,18 @@ func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string,
 		return errors.New("no artifacts produced")
 	}
 
-	sent, err := imagescan.Upload(ctx, imagescan.UploadOpts{
+	// Retry the upload for transient network / 5xx failures. Handles
+	// the common case where the worker Service is briefly unreachable
+	// (NetworkPolicy syncing, worker pod rolling, CNI hiccup). After
+	// all attempts fail, the returned *UploadError.Kind signals
+	// whether the outer scanner should ask the worker to requeue
+	// (transient) or give up for real (permanent).
+	sent, err := imagescan.UploadWithRetry(ctx, imagescan.UploadOpts{
 		WorkerURL:     l.WorkerURL,
 		RunToken:      l.RunToken,
 		JobID:         l.JobID,
 		ImageDigestID: l.ImageDigestID,
-	}, res.Artifacts)
+	}, res.Artifacts, 3, func(line string) { log.Println(line) })
 	if err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
