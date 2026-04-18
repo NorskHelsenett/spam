@@ -50,6 +50,7 @@ jobs:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}
           tags: |
               type=ref,event=branch
+              type=sha,format=short
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
@@ -136,6 +137,7 @@ jobs:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner
           tags: |
               type=ref,event=branch
+              type=sha,format=short
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
@@ -221,6 +223,7 @@ jobs:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/trivy-scanner
           tags: |
               type=ref,event=branch
+              type=sha,format=short
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
@@ -307,6 +310,7 @@ jobs:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner
           tags: |
               type=ref,event=branch
+              type=sha,format=short
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
