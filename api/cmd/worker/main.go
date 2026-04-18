@@ -216,6 +216,15 @@ func run() error {
 	imageScanReconciler := imagescan.NewReconciler(gormDB, burstTrigger)
 	var imageScanTicker *time.Ticker
 	if imageScanReconciler.Enabled() {
+		// One-shot backfill: populate source_repo_id on image_digests
+		// that were scanned before the column existed. Idempotent — the
+		// underlying SQL skips rows that already have the link set.
+		if scanned, linked, err := imagescan.BackfillSourceRepoIDs(ctx, gormDB); err != nil {
+			log.Printf("image scan source-repo backfill: %v", err)
+		} else if scanned > 0 {
+			log.Printf("image scan source-repo backfill: linked %d of %d digest(s)", linked, scanned)
+		}
+
 		// Run once on startup so a pod restart clears any backlog
 		// immediately instead of waiting 5 minutes.
 		if n, err := imageScanReconciler.Run(ctx); err != nil {
