@@ -2,6 +2,8 @@ package imagescan
 
 import (
 	"context"
+	"encoding/json"
+	"log"
 	"net/url"
 	"strings"
 
@@ -41,6 +43,80 @@ func parseSourceURL(raw string) (host, org, slug string, ok bool) {
 		return "", "", "", false
 	}
 	return u.Host, parts[0], strings.TrimSuffix(parts[1], ".git"), true
+}
+
+// BackfillSourceRepoIDs populates image_digests.source_repo_id for rows
+// that were scanned before the column existed. For each digest without
+// a link, it reads the most recent `labels` artifact, parses
+// org.opencontainers.image.source, resolves it against the providers
+// table, and writes the result back. Safe to call on every worker
+// startup — the query filters to only rows where the column is still
+// empty, so it's a no-op after the first pass.
+//
+// Returns (scanned, linked) — how many digests were considered and how
+// many got a repo_id set.
+func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
+	type row struct {
+		ID      string
+		Content []byte
+	}
+	var rows []row
+	err := db.WithContext(ctx).Raw(`
+		SELECT id.id, a.content
+		FROM image_digests id
+		JOIN LATERAL (
+		    SELECT a.content
+		    FROM image_scan_artifacts a
+		    JOIN jobs j ON j.id = a.scan_run_id
+		    WHERE j.payload->>'image_digest_id' = id.id
+		      AND a.category = 'labels'
+		    ORDER BY a.created_at DESC
+		    LIMIT 1
+		) a ON true
+		WHERE id.source_repo_id IS NULL OR id.source_repo_id = ''
+	`).Scan(&rows).Error
+	if err != nil {
+		return 0, 0, err
+	}
+
+	linked := 0
+	for _, r := range rows {
+		source := extractSourceLabelFromConfig(r.Content)
+		if source == "" {
+			continue
+		}
+		repoID, err := ResolveSourceRepoID(ctx, db, source)
+		if err != nil || repoID == "" {
+			continue
+		}
+		if err := db.WithContext(ctx).Exec(
+			"UPDATE image_digests SET source_repo_id = ? WHERE id = ?",
+			repoID, r.ID,
+		).Error; err != nil {
+			log.Printf("backfill source_repo_id for %s: %v", r.ID, err)
+			continue
+		}
+		linked++
+	}
+	return len(rows), linked, nil
+}
+
+// extractSourceLabelFromConfig mirrors the runner package helper; kept
+// here so the backfill doesn't need to import runner (which would be a
+// reversed layering).
+func extractSourceLabelFromConfig(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var config struct {
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &config); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(config.Config.Labels["org.opencontainers.image.source"])
 }
 
 // ResolveSourceRepoID turns an OCI source label into the internal
