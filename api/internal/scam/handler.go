@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"sort"
 	"net/http"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -114,6 +115,38 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// Integrity-validation bounds. Agents are unauthenticated, so every field that
+// flows into downstream SQL queries, cache keys, the HTTP client, or the image
+// scanner is shape-checked here before a row is stored.
+const (
+	maxFieldLen    = 512
+	maxHostnameLen = 253
+	maxDigestLen   = 128
+	maxArrayLen    = 256
+)
+
+var (
+	// DNS-1123 subdomain with optional wildcard prefix (Ingress hostnames).
+	hostnameRe = regexp.MustCompile(`^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
+	// OCI content digest — algorithm:hex, e.g. sha256:abcd...
+	digestRe = regexp.MustCompile(`^[a-zA-Z0-9]+:[a-fA-F0-9]{32,}$`)
+	// Container registry host — hostname[:port], no path segments.
+	registryRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$`)
+)
+
+func validHostname(h string) bool {
+	if h == "" || len(h) > maxHostnameLen {
+		return false
+	}
+	// Reject IP literals — cluster topology records should only carry DNS
+	// names. Storing IPs would let anonymous agents target internal or cloud
+	// metadata addresses that an authenticated UI session might later fetch.
+	if net.ParseIP(h) != nil {
+		return false
+	}
+	return hostnameRe.MatchString(h)
+}
+
 func validate(r Incoming) error {
 	if r.Kind == "" {
 		return fmt.Errorf("missing kind")
@@ -137,6 +170,61 @@ func validate(r Incoming) error {
 	} else {
 		if r.UID == "" {
 			return fmt.Errorf("%s record missing uid", r.Kind)
+		}
+	}
+
+	// Length caps on every free-form string that could reach SQL / cache /
+	// downstream fetches. Agents are anonymous; no field should be arbitrary.
+	fields := []struct {
+		name, val string
+	}{
+		{"cluster", r.Cluster}, {"cluster_id", r.ClusterID}, {"environment", r.Environment},
+		{"uid", r.UID}, {"pod_uid", r.PodUID}, {"container", r.Container},
+		{"name", r.Name}, {"namespace", r.Namespace},
+		{"owner", r.Owner}, {"owner_kind", r.OwnerKind},
+		{"pod_phase", r.PodPhase}, {"service_type", r.ServiceType},
+		{"ingress_class", r.IngressClass}, {"tls_secret", r.TLSSecret},
+		{"image", r.Image}, {"tag", r.Tag},
+	}
+	for _, f := range fields {
+		if len(f.val) > maxFieldLen {
+			return fmt.Errorf("%s too long", f.name)
+		}
+	}
+
+	if r.Registry != "" {
+		if len(r.Registry) > maxHostnameLen+6 || !registryRe.MatchString(r.Registry) {
+			return fmt.Errorf("invalid registry: %q", r.Registry)
+		}
+	}
+	if r.Digest != "" {
+		if len(r.Digest) > maxDigestLen || !digestRe.MatchString(r.Digest) {
+			return fmt.Errorf("invalid digest")
+		}
+	}
+
+	if len(r.Rules) > maxArrayLen || len(r.Hostnames) > maxArrayLen ||
+		len(r.Hosts) > maxArrayLen || len(r.LBIPs) > maxArrayLen {
+		return fmt.Errorf("array too large")
+	}
+	for _, rule := range r.Rules {
+		if rule.Host != "" && !validHostname(rule.Host) {
+			return fmt.Errorf("invalid rule host: %q", rule.Host)
+		}
+	}
+	for _, h := range r.Hostnames {
+		if !validHostname(h) {
+			return fmt.Errorf("invalid hostname: %q", h)
+		}
+	}
+	for _, h := range r.Hosts {
+		if !validHostname(h) {
+			return fmt.Errorf("invalid host: %q", h)
+		}
+	}
+	for _, ip := range r.LBIPs {
+		if net.ParseIP(ip) == nil {
+			return fmt.Errorf("invalid lb_ip: %q", ip)
 		}
 	}
 	return nil

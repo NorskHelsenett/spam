@@ -2,9 +2,9 @@ package scam
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -40,10 +40,43 @@ const (
 	maxFaviconBytes    = 512 << 10 // 512 KiB
 )
 
+var safeDialer = &net.Dialer{Timeout: fetchTimeout}
+
+// safeDialContext resolves the target hostname, rejects any address that
+// belongs to a private / loopback / link-local / metadata range, and dials
+// the resolved IP directly so DNS rebinding can't swap it after the check.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if network != "tcp" && network != "tcp4" && network != "tcp6" {
+		return nil, fmt.Errorf("unsupported network: %s", network)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			return nil, fmt.Errorf("blocked address: %s", ip)
+		}
+	}
+	return safeDialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+}
+
+func isBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
+}
+
 var httpClient = &http.Client{
 	Timeout: fetchTimeout,
 	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: safeDialContext,
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {
@@ -107,12 +140,18 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 			}
 		}
 
+		// Only serve content that DetectContentType classifies as a safe
+		// raster image type. SVG is rejected outright — it can carry
+		// inline script that executes when loaded as a top-level document
+		// from our origin.
 		contentType := http.DetectContentType(data)
-		// DetectContentType doesn't recognize SVG
-		if strings.Contains(string(data[:min(len(data), 512)]), "<svg") {
-			contentType = "image/svg+xml"
+		if !isSafeImageType(contentType) {
+			http.NotFound(w, r)
+			return
 		}
 		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
 		w.Header().Set("Cache-Control", "public, max-age=86400")
 		_, _ = w.Write(data)
 	}
@@ -155,13 +194,14 @@ func fetchHostMeta(ctx context.Context, host string) hostMeta {
 	// Build candidate URLs: parsed hrefs first, then common fallbacks
 	var candidates []string
 	for _, href := range faviconHrefs {
-		candidates = append(candidates, resolveURL(baseURL, href))
+		if u := resolveURL(baseURL, href); u != "" {
+			candidates = append(candidates, u)
+		}
 	}
 	// Always try common fallback paths
 	candidates = append(candidates,
 		baseURL+"/favicon.ico",
 		baseURL+"/favicon.png",
-		baseURL+"/favicon.svg",
 	)
 	// Deduplicate while preserving order
 	candidates = dedupStrings(candidates)
@@ -217,26 +257,29 @@ func extractFaviconHrefs(html string) []string {
 	return append(preferred, fallback...)
 }
 
-func looksLikeImage(data []byte) bool {
-	ct := http.DetectContentType(data)
-	if strings.HasPrefix(ct, "image/") {
+// isSafeImageType returns true for raster image types we are willing to
+// proxy through HostFaviconHandler. SVG is intentionally excluded — it is
+// an active content format (can contain <script>) and serving it at our
+// origin would expose us to stored XSS via attacker-controlled favicons.
+func isSafeImageType(ct string) bool {
+	switch strings.SplitN(ct, ";", 2)[0] {
+	case "image/png", "image/jpeg", "image/gif", "image/webp",
+		"image/x-icon", "image/vnd.microsoft.icon", "image/bmp":
 		return true
 	}
-	// DetectContentType misses SVGs (detected as text/xml or text/plain)
-	prefix := string(data[:min(len(data), 512)])
-	return strings.Contains(prefix, "<svg")
+	return false
+}
+
+func looksLikeImage(data []byte) bool {
+	return isSafeImageType(http.DetectContentType(data))
 }
 
 func detectImageType(data []byte) string {
 	ct := http.DetectContentType(data)
-	if strings.HasPrefix(ct, "image/") {
+	if isSafeImageType(ct) {
 		return ct
 	}
-	prefix := string(data[:min(len(data), 512)])
-	if strings.Contains(prefix, "<svg") {
-		return "image/svg+xml"
-	}
-	return ct
+	return ""
 }
 
 // fetchBody fetches a URL and returns the body bytes and the final URL after
@@ -266,17 +309,23 @@ func fetchBody(ctx context.Context, targetURL string, maxBytes int64) ([]byte, s
 	return body, finalURL, err
 }
 
+// resolveURL resolves a favicon href against the base URL. Absolute hrefs are
+// only honored when they point at the same host as the base, so a page served
+// by an attacker can't redirect our fetch to an arbitrary origin.
 func resolveURL(base, href string) string {
-	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
-		return href
-	}
 	baseURL, err := url.Parse(base)
 	if err != nil {
-		return href
+		return ""
 	}
 	ref, err := url.Parse(href)
 	if err != nil {
-		return href
+		return ""
+	}
+	if ref.IsAbs() {
+		if !strings.EqualFold(ref.Host, baseURL.Host) {
+			return ""
+		}
+		return ref.String()
 	}
 	return baseURL.ResolveReference(ref).String()
 }
