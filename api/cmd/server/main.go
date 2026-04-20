@@ -90,6 +90,7 @@ func run() error {
 		&secretprobe.ProbeAuditLog{},
 		&secretprobe.SecretDismissal{},
 		&scam.Record{},
+		&scam.ClusterSession{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}

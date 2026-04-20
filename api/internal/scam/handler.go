@@ -73,6 +73,11 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		if len(items) > 0 {
+			// Collect distinct cluster_ids for session-touch after
+			// the upsert. A batch commonly covers one cluster, but
+			// support multi-cluster batches cleanly.
+			clusterIDs := make(map[string]struct{}, 4)
+
 			for i := 0; i < len(items); i += 500 {
 				end := i + 500
 				if end > len(items) {
@@ -106,6 +111,27 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 				}
 			}
 
+			// Re-scan items to pick up cluster_ids for the session-touch.
+			// Parsed once at ingest time above via json.Unmarshal into
+			// Incoming; re-parse here is wasteful but narrow. Keeps
+			// the hot-path batch insert unchanged.
+			for _, item := range items {
+				var idOnly struct {
+					ClusterID string `json:"cluster_id"`
+				}
+				if err := json.Unmarshal(item.data, &idOnly); err == nil && idOnly.ClusterID != "" {
+					clusterIDs[idOnly.ClusterID] = struct{}{}
+				}
+			}
+			for clusterID := range clusterIDs {
+				if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
+					// Session-touch failure is non-fatal to the ingest
+					// (data is already persisted). Log so it's visible
+					// if it becomes chronic.
+					log.Printf("callcenter: touch session %s: %v", clusterID, err)
+				}
+			}
+
 			payload, _ := json.Marshal(map[string]any{
 				"accepted": len(items),
 				"rejected": rejected,
@@ -117,6 +143,44 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 			Accepted: len(items),
 			Rejected: rejected,
 		})
+	}
+}
+
+// HeartbeatHandler lets agents say "still alive, no news" without
+// sending data. Needed because quiet clusters can legitimately go hours
+// with no state changes — under a pure-data liveness check those
+// clusters would falsely go dark in the UI.
+//
+// Protocol: POST /api/scam/heartbeat with body {"cluster_id": "..."}.
+// Extends the current session's last_push_at without rolling the
+// session boundary (a heartbeat within an existing session doesn't
+// clear stale state). Recommended cadence: every 60s from the agent.
+//
+// Unauthenticated like the callcenter endpoint — same threat model.
+func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB is plenty
+		var body struct {
+			ClusterID string `json:"cluster_id"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if body.ClusterID == "" || len(body.ClusterID) > maxFieldLen {
+			http.Error(w, "cluster_id required", http.StatusBadRequest)
+			return
+		}
+		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC()); err != nil {
+			log.Printf("heartbeat: touch session %s: %v", body.ClusterID, err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -257,20 +321,20 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 				data->>'cluster_id'  AS cluster_id,
 				data->>'environment' AS environment,
 				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'msg' != 'DELETE'
+					AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 					AND data->>'pod_phase' = 'Running') AS containers,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE'
+						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						AND data->>'pod_phase' = 'Running'
 						AND COALESCE(data->>'digest','') != '') AS images,
 				COUNT(DISTINCT data->>'namespace')
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE'
+						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						AND data->>'pod_phase' = 'Running') AS namespaces,
 				COUNT(DISTINCT data->>'uid')
 					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-						AND data->>'msg' != 'DELETE') AS ingress_count,
+						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')) AS ingress_count,
 				MAX(received_at) AS last_seen
 			FROM cluster_record
 			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
@@ -298,7 +362,7 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
+			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'pod_phase' = 'Running'
 			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
@@ -324,11 +388,11 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 			SELECT
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-					  AND data->>'msg' != 'DELETE'
+					  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				) AS internet_exposed,
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' = 'Service'
-					  AND data->>'msg' != 'DELETE'
+					  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				) AS internal_services
 			FROM cluster_record
 		`).Scan(&res).Error
@@ -373,7 +437,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			        MAX(received_at) AS last_seen
 			    FROM cluster_record
 			    WHERE data->>'kind' = 'Container'
-			      AND data->>'msg' != 'DELETE'
+			      AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			      AND data->>'pod_phase' = 'Running'
 			    GROUP BY data->>'registry', data->>'image', data->>'digest'
 			)
@@ -447,7 +511,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				FROM cluster_record
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'rules') = 'array'
 				  AND jsonb_array_length(data->'rules') > 0
 			),
@@ -467,7 +531,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 				  AND jsonb_array_length(data->'hostnames') > 0
 			),
@@ -493,7 +557,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					received_at AS last_seen
 				FROM cluster_record
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
@@ -511,7 +575,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				SELECT COUNT(*) AS cnt
 				FROM cluster_record c
 				WHERE c.data->>'kind' = 'Container'
-				  AND c.data->>'msg' != 'DELETE'
+				  AND c.data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = c.data->>'cluster_id' AND c.received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND c.data->>'pod_phase' = 'Running'
 				  AND c.data->>'cluster_id' = h.cluster_id
 				  AND c.data->>'namespace' = h.namespace
@@ -519,7 +583,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				  AND EXISTS (
 				    SELECT 1 FROM cluster_record s
 				    WHERE s.data->>'kind' = 'Service'
-				      AND s.data->>'msg' != 'DELETE'
+				      AND s.data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = s.data->>'cluster_id' AND s.received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				      AND s.data->>'cluster_id' = h.cluster_id
 				      AND s.data->>'namespace' = h.namespace
 				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
@@ -612,7 +676,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM cluster_record
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				UNION ALL
@@ -631,7 +695,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM cluster_record,
 				     jsonb_array_elements_text(data->'hosts') AS h
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				UNION ALL
@@ -646,7 +710,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM cluster_record,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 			) sub WHERE host IS NOT NULL AND host != ''
@@ -664,7 +728,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				COALESCE(data->'selector'::text, '{}') AS selector_json
 			FROM cluster_record
 			WHERE data->>'kind' = 'Service'
-			  AND data->>'msg' != 'DELETE'
+			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'cluster_id' = ?
 			ORDER BY data->>'namespace', data->>'name'
 		`, clusterID).Scan(&services)
@@ -688,7 +752,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				(array_agg(data->'pod_labels'))[1] AS labels_json
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
+			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'pod_phase' = 'Running'
 			  AND data->>'cluster_id' = ?
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
@@ -824,6 +888,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			  AND data->>'msg' != 'DELETE'
 			  AND (data->>'pod_phase' IS NULL OR data->>'pod_phase' != 'Running')
 			  AND data->>'cluster_id' = ?
+			  -- Transient query intentionally spans the last 24h so
+			  -- recently-completed Jobs surface in the chain drawer,
+			  -- even after the current agent session boundary.
 			  AND received_at >= NOW() - INTERVAL '24 hours'
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
 			ORDER BY data->>'namespace', data->>'owner'
@@ -988,7 +1055,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						'[]') AS paths_json
 				FROM cluster_record
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
@@ -1014,7 +1081,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM cluster_record
 				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
@@ -1034,7 +1101,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM cluster_record
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
@@ -1085,7 +1152,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(data->'selector'::text, '{}') AS selector_json
 				FROM cluster_record
 				WHERE data->>'kind' = 'Service'
-				  AND data->>'msg' != 'DELETE'
+				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND data->>'name' IN (?)
@@ -1131,7 +1198,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 							)) AS containers_json
 						FROM cluster_record
 						WHERE data->>'kind' = 'Container'
-						  AND data->>'msg' != 'DELETE'
+						  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						  AND data->>'pod_phase' = 'Running'
 						  AND data->>'cluster_id' = ?
 						  AND data->>'namespace' = ?
