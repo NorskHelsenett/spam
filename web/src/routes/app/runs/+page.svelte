@@ -237,6 +237,7 @@
 			case 'RUNNING': return 'var(--info)';
 			case 'SUCCEEDED': return 'var(--success)';
 			case 'FAILED': return 'var(--error)';
+			case 'RETRY': return 'var(--warning)';
 			case 'CANCELLED': return 'var(--warning)';
 			default: return 'var(--text-secondary)';
 		}

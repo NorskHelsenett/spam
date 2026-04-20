@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1086,7 +1087,11 @@ func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 	}
 }
 
-// RunsRescheduleFailedHandler resets failed runs to QUEUED for repos that have no newer non-failed run.
+// RunsRescheduleFailedHandler resets failed runs to QUEUED. Covers both
+// CREATE_RUN (repo) and IMAGE_SCAN jobs; the "skip if a newer run exists"
+// dedup is keyed on the job type's identity field (repo_id for CREATE_RUN,
+// image_digest_id for IMAGE_SCAN) so re-running doesn't double-queue work
+// that the system already has a fresher copy of.
 // POST /api/runs/failed/reschedule
 func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1096,10 +1101,13 @@ func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.Ha
 
 		var totalFailed int64
 		db.WithContext(r.Context()).Table("jobs").
-			Where("type = ? AND status = ?", jobs.JobTypeCreateRun, jobs.JobStatusFailed).
+			Where("type IN ? AND status = ?",
+				[]string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan},
+				jobs.JobStatusFailed).
 			Count(&totalFailed)
 
-		result := db.WithContext(r.Context()).Exec(`
+		// CREATE_RUN branch — dedup on repo_id.
+		createRunResult := db.WithContext(r.Context()).Exec(`
 			UPDATE jobs
 			SET status = 'QUEUED', attempts = 0, error = '',
 			    locked_at = NULL, locked_by = '', finished_at = NULL,
@@ -1116,15 +1124,109 @@ func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			  )`,
 			jobs.JobTypeCreateRun, jobs.JobStatusFailed, jobs.JobTypeCreateRun,
 		)
-		if result.Error != nil {
-			log.Printf("failed to reschedule failed runs: %v", result.Error)
+		if createRunResult.Error != nil {
+			log.Printf("failed to reschedule CREATE_RUN runs: %v", createRunResult.Error)
 			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
 			return
 		}
 
+		// IMAGE_SCAN branch — dedup on image_digest_id.
+		imageScanResult := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE type = ? AND status = ?
+			  AND payload->>'image_digest_id' != ''
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs j2
+			      WHERE j2.type = ?
+			        AND j2.status IN ('QUEUED', 'RUNNING', 'SUCCEEDED')
+			        AND j2.payload->>'image_digest_id' = jobs.payload->>'image_digest_id'
+			        AND j2.created_at > jobs.created_at
+			  )`,
+			jobs.JobTypeImageScan, jobs.JobStatusFailed, jobs.JobTypeImageScan,
+		)
+		if imageScanResult.Error != nil {
+			log.Printf("failed to reschedule IMAGE_SCAN runs: %v", imageScanResult.Error)
+			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		rescheduled := createRunResult.RowsAffected + imageScanResult.RowsAffected
 		writeJSON(w, http.StatusOK, map[string]int64{
-			"rescheduled": result.RowsAffected,
-			"skipped":     totalFailed - result.RowsAffected,
+			"rescheduled": rescheduled,
+			"skipped":     totalFailed - rescheduled,
+		})
+	}
+}
+
+// RunRetryHandler re-queues a single failed (or cancelled) job by ID.
+// Unlike the bulk handler this skips the "newer run exists" check —
+// when the user explicitly clicks "Run again" on a specific run, they
+// want that run to fire again regardless of what's happened since.
+// Works for both CREATE_RUN and IMAGE_SCAN.
+// POST /api/runs/{id}/retry
+func RunRetryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		var job struct {
+			ID     string
+			Type   string
+			Status string
+		}
+		if err := db.WithContext(r.Context()).Table("jobs").
+			Where("id = ?", runID).
+			First(&job).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to read run", http.StatusInternalServerError)
+			return
+		}
+		if job.Type != jobs.JobTypeCreateRun && job.Type != jobs.JobTypeImageScan {
+			http.Error(w, "run type cannot be retried", http.StatusBadRequest)
+			return
+		}
+		// Don't re-queue a run that already succeeded, is currently
+		// running, or is already sitting in the queue. Anything else —
+		// FAILED, RETRY (backoff), cancelled-but-not-reaped — is fair
+		// game; the user explicitly asked for it to fire again.
+		switch jobs.JobStatus(job.Status) {
+		case jobs.JobStatusSucceeded, jobs.JobStatusRunning, jobs.JobStatusQueued:
+			http.Error(w, "run is already "+strings.ToLower(job.Status)+"; not re-queueing", http.StatusBadRequest)
+			return
+		}
+
+		result := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    cancelled_at = NULL, cancelled_by = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE id = ?
+		`, runID)
+		if result.Error != nil {
+			log.Printf("retry run %s: %v", runID, result.Error)
+			http.Error(w, "failed to re-queue run", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "QUEUED",
+			"id":       runID,
+			"requeued": result.RowsAffected,
 		})
 	}
 }

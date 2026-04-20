@@ -183,6 +183,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Delete("/runs/failed", uiapi.RunsDeleteFailedHandler(db, authService))
 				// scan-all is registered in the no-timeout SSE group above
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
+				api.Post("/runs/{id}/retry", uiapi.RunRetryHandler(db, authService))
 				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
 				// Image-scan artifact download — per-artifact raw bytes.
