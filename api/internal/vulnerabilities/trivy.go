@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +23,11 @@ type TrivyScanLease struct {
 
 func (TrivyScanLease) TableName() string { return "trivy_scan_leases" }
 
-// TrivyScanResult stores the processed output of a single Trivy SBOM scan.
+// TrivyScanResult stores the processed output of a single SBOM vulnerability
+// scan. Historically populated by trivy; now the primary producer is grype
+// against stored SBOMs. The `format` column records which tool emitted the
+// raw_json so downstream readers that parse the JSON (advanced_search) can
+// dispatch on it.
 type TrivyScanResult struct {
 	ID            string          `gorm:"primaryKey;size:36"`
 	SBOMID        string          `gorm:"column:sbom_id;index:idx_trivy_scan_results_sbom_scanned_at,priority:1;size:36;not null"`
@@ -35,6 +40,7 @@ type TrivyScanResult struct {
 	MediumCount   int             `gorm:"column:medium_count"`
 	LowCount      int             `gorm:"column:low_count"`
 	UnknownCount  int             `gorm:"column:unknown_count"`
+	Format        string          `gorm:"column:format;size:16;default:'trivy'"`
 	RawJSON       json.RawMessage `gorm:"column:raw_json;type:jsonb"`
 	CreatedAt     time.Time       `gorm:"column:created_at;autoCreateTime"`
 }
@@ -193,6 +199,7 @@ func StoreScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, re
 		MediumCount:   counts[2],
 		LowCount:      counts[3],
 		UnknownCount:  counts[4],
+		Format:        "trivy",
 		RawJSON:       raw,
 	}
 
@@ -205,6 +212,78 @@ func StoreScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, re
 		}
 		return nil
 	})
+}
+
+// GrypeReport is the subset of grype's JSON output we consume for severity
+// counting. The full raw document is stored in raw_json so downstream
+// consumers (advanced_search) can introspect individual matches.
+type GrypeReport struct {
+	Matches []struct {
+		Vulnerability struct {
+			ID       string `json:"id"`
+			Severity string `json:"severity"`
+		} `json:"vulnerability"`
+	} `json:"matches"`
+	Source struct {
+		Target json.RawMessage `json:"target"`
+	} `json:"source"`
+}
+
+// StoreGrypeScanResult persists a grype scan result and removes the lease.
+// Mirrors StoreScanResult for the trivy path but dispatches on the grype
+// JSON shape so advanced_search / vulnmetrics keep seeing a single
+// trivy_scan_results row per scan, just with format='grype'.
+func StoreGrypeScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, report GrypeReport, raw json.RawMessage) error {
+	counts := countGrypeSeverities(report)
+
+	result := TrivyScanResult{
+		ID:            uuid.NewString(),
+		SBOMID:        sbomID,
+		RepoID:        repoID,
+		ScannedAt:     time.Now().UTC(),
+		SchemaVersion: 0, // grype doesn't expose a schema version in the report root
+		ArtifactName:  "",
+		CriticalCount: counts[0],
+		HighCount:     counts[1],
+		MediumCount:   counts[2],
+		LowCount:      counts[3],
+		UnknownCount:  counts[4],
+		Format:        "grype",
+		RawJSON:       raw,
+	}
+
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&result).Error; err != nil {
+			return fmt.Errorf("create grype result: %w", err)
+		}
+		if err := tx.Delete(&TrivyScanLease{}, "sbom_id = ?", sbomID).Error; err != nil {
+			return fmt.Errorf("delete lease: %w", err)
+		}
+		return nil
+	})
+}
+
+// countGrypeSeverities tallies [critical, high, medium, low, unknown]
+// across grype matches. Grype uses Titlecase ("Critical") while trivy uses
+// UPPERCASE; normalize before bucketing so the two pipelines produce
+// comparable counts.
+func countGrypeSeverities(report GrypeReport) [5]int {
+	var counts [5]int
+	for _, m := range report.Matches {
+		switch strings.ToLower(m.Vulnerability.Severity) {
+		case "critical":
+			counts[0]++
+		case "high":
+			counts[1]++
+		case "medium":
+			counts[2]++
+		case "low":
+			counts[3]++
+		default:
+			counts[4]++
+		}
+	}
+	return counts
 }
 
 // CleanExpiredLeases removes leases whose expiry has passed.

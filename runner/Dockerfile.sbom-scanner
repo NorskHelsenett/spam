@@ -1,11 +1,11 @@
 # SBOM vulnerability scanner — minimal, dedicated image.
-# Runs a single scanner (trivy today; grype pluggable via SBOM_SCANNER once
-# the backend grype ingest lands) against stored SBOMs and uploads the
-# vulnerability report to the worker API. No git, no syft, no betterleaks —
-# reduced attack surface.
+# Runs grype against stored SBOMs (produced by syft via the image-scanner
+# and create-run pipelines) and uploads findings to the worker API. Grype
+# is the single scanner today; trivy was removed once the server-side
+# ingest learned to dispatch on root-shape of the JSON payload.
 #
-# The scanner's vuln DB is downloaded at container startup so the image
-# stays small and always uses a fresh database. Egress is restricted via
+# The grype DB is downloaded at container startup so the image stays
+# small and always uses a fresh database. Egress is restricted via
 # NetworkPolicy to public HTTPS (for DB download) + the worker API only.
 # All private/internal ranges (RFC 1918) are blocked.
 
@@ -19,12 +19,8 @@ RUN go mod download
 COPY cmd/sbom-scanner/ ./cmd/sbom-scanner/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o sbom-scanner ./cmd/sbom-scanner/main.go
 
-# Get trivy binary (pinned digest for reproducibility)
-FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
-
-# Get grype binary — used for IMAGE_DIGEST-bound SBOMs where we run
-# against a stored syft-generated SBOM (same toolchain → zero format
-# translation). Trivy continues to handle REPO_COMMIT SBOMs for now.
+# Grype — same Anchore toolchain as syft (which generates our SBOMs), so
+# we feed its output directly without any format translation.
 FROM anchore/grype:latest AS grype
 
 # Runtime stage — minimal
@@ -32,13 +28,12 @@ FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates
 
-COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=grype /grype /usr/local/bin/grype
 COPY --from=builder /build/sbom-scanner /usr/local/bin/sbom-scanner
 
-RUN mkdir -p /home/scanner /trivy-cache /grype-cache /tmp && \
+RUN mkdir -p /home/scanner /grype-cache /tmp && \
     adduser -D -u 1000 scanner && \
-    chown -R 1000:1000 /home/scanner /trivy-cache /grype-cache
+    chown -R 1000:1000 /home/scanner /grype-cache
 
 USER 1000:1000
 ENV HOME=/home/scanner

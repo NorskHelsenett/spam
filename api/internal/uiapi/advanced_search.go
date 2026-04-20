@@ -347,7 +347,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 	case "vulnerability":
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT * FROM (
-				-- Trivy results
+				-- Trivy results (format='trivy' or pre-format-column rows)
 				SELECT
 					'vulnerability' AS type,
 					'trivy/' || tsr.id || '/' || (vuln->>'VulnerabilityID') AS source_ref,
@@ -368,10 +368,43 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
 				WHERE
-					vuln->>'VulnerabilityID' ILIKE ?
-					OR vuln->>'PkgName' ILIKE ?
-					OR vuln->>'Title' ILIKE ?
-					OR vuln->>'Description' ILIKE ?
+					COALESCE(tsr.format, 'trivy') = 'trivy'
+					AND (
+					  vuln->>'VulnerabilityID' ILIKE ?
+					  OR vuln->>'PkgName' ILIKE ?
+					  OR vuln->>'Title' ILIKE ?
+					  OR vuln->>'Description' ILIKE ?
+					)
+
+				UNION ALL
+
+				-- Grype results (format='grype') — sbom-scanner emits this
+				-- shape; fields are lowercased and sit under matches[].
+				SELECT
+					'vulnerability' AS type,
+					'grype/' || tsr.id || '/' || (m->'vulnerability'->>'id') AS source_ref,
+					r.id AS repo_id,
+					r.provider,
+					COALESCE(pi.id, '') AS provider_id,
+					COALESCE(pi.base_url, '') AS base_url,
+					COALESCE(pi.owner_path, '') AS owner_path,
+					r.org,
+					r.slug,
+					m->'vulnerability'->>'id' AS title,
+					COALESCE(UPPER(m->'vulnerability'->>'severity'), 'UNKNOWN') AS value,
+					(COALESCE(m->'artifact'->>'name', '') || ' ' || COALESCE(m->'artifact'->>'version', '') || ' - ' || COALESCE(m->'vulnerability'->>'description', '')) AS source_text,
+					tsr.scanned_at AS created_at
+				FROM trivy_scan_results tsr
+				JOIN repos r ON r.id = tsr.repo_id
+				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'matches', '[]'::jsonb)) AS m(m)
+				WHERE
+					tsr.format = 'grype'
+					AND (
+					  m->'vulnerability'->>'id' ILIKE ?
+					  OR m->'artifact'->>'name' ILIKE ?
+					  OR m->'vulnerability'->>'description' ILIKE ?
+					)
 
 				UNION ALL
 
@@ -405,7 +438,15 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			) combined
 			ORDER BY created_at DESC
 			LIMIT ?
-		`, like, like, like, like, like, like, like, like, perTargetLimit).Scan(&rows).Error
+		`,
+			// trivy branch (4 placeholders)
+			like, like, like, like,
+			// grype branch (3 placeholders)
+			like, like, like,
+			// OSV branch (4 placeholders)
+			like, like, like, like,
+			perTargetLimit,
+		).Scan(&rows).Error
 		return rows, err
 	default:
 		return []advancedSearchDBRow{}, nil
@@ -751,7 +792,10 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Metadata["repo"] = row.Org + "/" + row.Slug
 			resp.Metadata["provider"] = row.Provider
 		case "vulnerability":
-		// source_ref is "trivy/{tsr_id}/{vuln_id}" or "osv/{vuln_id}/{repo_id}"
+		// source_ref is one of:
+		//   trivy/{tsr_id}/{vuln_id}   — trivy_scan_results row (trivy format)
+		//   grype/{tsr_id}/{vuln_id}   — trivy_scan_results row (grype format)
+		//   osv/{vuln_id}/{repo_id}    — component_vulnerabilities (OSV lookup)
 		parts := strings.SplitN(sourceRef, "/", 3)
 		if len(parts) != 3 {
 			http.Error(w, "invalid source_ref for vulnerability", http.StatusBadRequest)
@@ -760,6 +804,42 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 		vulnSource, id1, id2 := parts[0], parts[1], parts[2]
 
 		switch vulnSource {
+		case "grype":
+			tsrID, vulnID := id1, id2
+			var vulnRow struct {
+				RepoID   string
+				Provider string
+				Org      string
+				Slug     string
+				MatchJSON string `gorm:"column:match_json"`
+				Target    string
+			}
+			err := db.WithContext(r.Context()).Raw(`
+				SELECT
+					r.id AS repo_id,
+					r.provider,
+					r.org,
+					r.slug,
+					m::text AS match_json,
+					COALESCE(tsr.raw_json->'source'->'target'->>'userInput', '') AS target
+				FROM trivy_scan_results tsr
+				JOIN repos r ON r.id = tsr.repo_id
+				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'matches', '[]'::jsonb)) AS m(m)
+				WHERE tsr.id = ? AND m->'vulnerability'->>'id' = ?
+				LIMIT 1
+			`, tsrID, vulnID).Scan(&vulnRow).Error
+			if err != nil || vulnRow.RepoID == "" {
+				http.Error(w, "preview not found", http.StatusNotFound)
+				return
+			}
+			resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
+			resp.Raw = vulnRow.MatchJSON
+			resp.Metadata["vuln_id"] = vulnID
+			resp.Metadata["scan_id"] = tsrID
+			resp.Metadata["source"] = "grype"
+			if vulnRow.Target != "" {
+				resp.Metadata["target"] = vulnRow.Target
+			}
 		case "trivy":
 			tsrID, vulnID := id1, id2
 			var vulnRow struct {
