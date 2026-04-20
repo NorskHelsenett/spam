@@ -14,10 +14,13 @@ FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY cmd/sbom-scanner/ ./cmd/sbom-scanner/
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o sbom-scanner ./cmd/sbom-scanner/main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o sbom-scanner ./cmd/sbom-scanner/main.go
 
 # Grype — same Anchore toolchain as syft (which generates our SBOMs), so
 # we feed its output directly without any format translation.

@@ -18,11 +18,14 @@ FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 
 COPY cmd/image-scanner/ ./cmd/image-scanner/
 COPY imagescan/ ./imagescan/
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" \
     -o image-scanner ./cmd/image-scanner/
 
 # Scanner binaries — all SHA-pinned to manifests at least one week old at
