@@ -96,6 +96,11 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 					DO UPDATE SET data = EXCLUDED.data, received_at = EXCLUDED.received_at`)
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
+					// Surface the real error so agents hitting 500s in the
+					// wild can be diagnosed without re-deploying. We don't
+					// echo it back to the caller (it may reveal schema
+					// detail) but we do log it locally.
+					log.Printf("callcenter: upsert batch failed (%d rows): %v", len(batch), err)
 					http.Error(w, "database error", http.StatusInternalServerError)
 					return
 				}
