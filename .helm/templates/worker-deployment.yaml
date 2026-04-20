@@ -112,9 +112,9 @@ spec:
             - name: POSTGRES_SSLMODE
               value: {{ .Values.postgresqlConnection.sslmode | quote }}
             {{- end }}
-            {{- if .Values.trivyScanner.enabled }}
+            {{- if .Values.sbomScanner.enabled }}
             - name: TRIVY_SCANNER_CRONJOB_NAME
-              value: "{{ .Release.Name }}-trivy-scanner"
+              value: "{{ .Release.Name }}-sbom-scanner"
             {{- end }}
             {{- if .Values.imageScanner.enabled }}
             - name: IMAGE_SCAN_ENABLED

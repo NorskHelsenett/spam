@@ -384,19 +384,22 @@ runner:
     url: "https://example.com"
     timeoutSeconds: 5
 
-# Trivy scanner CronJob configuration
+# SBOM scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.
-trivyScanner:
+# Named "sbom-scanner" because the tool inside is interchangeable (trivy today;
+# grype once the backend grype-result ingest lands) — the input is always an
+# SBOM, so the scanner's identity is the input shape, not the binary.
+sbomScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
   parallelism: 3               # Number of concurrent scanner pods
   activeDeadlineSeconds: 14400  # 4h max runtime
 
-  # Dedicated trivy-scanner image (built from runner/Dockerfile.trivy-scanner).
+  # Dedicated sbom-scanner image (built from runner/Dockerfile.sbom-scanner).
   # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
   image:
-    repository: spam-trivy-scanner
+    repository: spam-sbom-scanner
     tag: ""
     pullPolicy: IfNotPresent
 
@@ -492,8 +495,8 @@ postgresqlConnection:
   sslmode: disable
 
 # Network Policy configuration
-# Network policies are automatically applied when runner or trivyScanner is enabled.
-# Restricts egress from runner and trivy-scanner pods to prevent data exfiltration.
+# Network policies are automatically applied when runner or sbomScanner is enabled.
+# Restricts egress from runner and sbom-scanner pods to prevent data exfiltration.
 # Pods can ONLY reach the worker service and DNS by default.
 # All other outbound traffic (internet) is blocked unless explicitly allowed.
 networkPolicy:
@@ -504,11 +507,12 @@ networkPolicy:
     # By default: DNS + worker API only. Public internet egress is blocked.
     additionalEgressRules: []
 
-  trivyScanner:
-    # Additional egress rules for trivy-scanner pods.
-    # By default: DNS + worker API + HTTPS to public internet (for trivy
-    # DB download from ghcr.io) are allowed.  All RFC 1918 private ranges
-    # are blocked — the scanner cannot reach internal cluster services.
+  sbomScanner:
+    # Additional egress rules for sbom-scanner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for scanner
+    # DB download from ghcr.io / anchore.io) are allowed. All RFC 1918
+    # private ranges are blocked — the scanner cannot reach internal
+    # cluster services.
     additionalEgressRules: []
 
   imageScanner:

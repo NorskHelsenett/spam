@@ -1,7 +1,7 @@
 // spam-image-scanner leases IMAGE_SCAN jobs from the worker API, runs a
 // pluggable set of scanners (grype, syft, cosign, crane, betterleaks;
 // trivy opt-in per category) against each image digest, and uploads the
-// results. It mirrors the trivy-scanner's "init-container downloads DB once,
+// results. It mirrors the sbom-scanner's "init-container downloads DB once,
 // main loops until queue empty" shape so the vuln DB stays warm across all
 // scans in a single CronJob tick.
 //
