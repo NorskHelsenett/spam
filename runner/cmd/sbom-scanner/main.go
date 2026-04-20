@@ -62,6 +62,15 @@ func run() error {
 		return fmt.Errorf("trivy db download: %w", err)
 	}
 
+	// Warm the grype DB so the IMAGE_DIGEST branch doesn't pay the
+	// download cost on its first scan. Non-fatal if it fails — the repo
+	// branch (trivy) still works and grype will retry on-demand when it
+	// actually gets called.
+	log.Printf("downloading grype vulnerability database …")
+	if err := grypeDBUpdate(); err != nil {
+		log.Printf("WARNING: grype db update failed: %v (IMAGE_DIGEST scans may be delayed)", err)
+	}
+
 	log.Printf("starting scan loop …")
 	for {
 		job, ok, err := fetchNextJob(apiURL, hmacKey, runStartedAt)
@@ -73,7 +82,11 @@ func run() error {
 			return nil
 		}
 
-		log.Printf("scanning sbom_id=%s repo=%s", job.SBOMID, job.RepoSlug)
+		assetLabel := job.RepoSlug
+		if job.AssetType == "IMAGE_DIGEST" {
+			assetLabel = "image:" + job.AssetRefID
+		}
+		log.Printf("scanning sbom_id=%s asset_type=%s target=%s", job.SBOMID, job.AssetType, assetLabel)
 		if err := scanSBOM(apiURL, hmacKey, cacheDir, job); err != nil {
 			log.Printf("WARNING: scan failed sbom_id=%s: %v (continuing)", job.SBOMID, err)
 		}
@@ -82,10 +95,12 @@ func run() error {
 
 // nextJobResponse mirrors the JSON returned by GET /api/trivy/next.
 type nextJobResponse struct {
-	SBOMID   string `json:"sbom_id"`
-	RepoID   string `json:"repo_id"`
-	Format   string `json:"format"`
-	RepoSlug string `json:"repo_slug"`
+	SBOMID     string `json:"sbom_id"`
+	RepoID     string `json:"repo_id"`
+	Format     string `json:"format"`
+	RepoSlug   string `json:"repo_slug"`
+	AssetType  string `json:"asset_type"`
+	AssetRefID string `json:"asset_ref_id"`
 }
 
 func fetchNextJob(apiURL string, hmacKey []byte, runStartedAt time.Time) (*nextJobResponse, bool, error) {
@@ -120,7 +135,7 @@ func fetchNextJob(apiURL string, hmacKey []byte, runStartedAt time.Time) (*nextJ
 
 func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobResponse) error {
 	// Create temp directory for this scan.
-	tmpDir, err := os.MkdirTemp("", "trivy-scan-*")
+	tmpDir, err := os.MkdirTemp("", "sbom-scan-*")
 	if err != nil {
 		return err
 	}
@@ -133,6 +148,19 @@ func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobRespon
 		return fmt.Errorf("download sbom: %w", err)
 	}
 
+	// Branch by asset type. IMAGE_DIGEST bindings go through grype (same
+	// Anchore toolchain as the syft-generated SBOM — zero format mismatch)
+	// and upload to the image-result endpoint. REPO_COMMIT bindings keep
+	// using trivy and the existing result path.
+	switch job.AssetType {
+	case "IMAGE_DIGEST":
+		return scanImageSBOM(apiURL, hmacKey, tmpDir, sbomPath, job)
+	default:
+		return scanRepoSBOM(apiURL, hmacKey, cacheDir, tmpDir, sbomBytes, sbomPath, job)
+	}
+}
+
+func scanRepoSBOM(apiURL string, hmacKey []byte, cacheDir, tmpDir string, sbomBytes []byte, sbomPath string, job *nextJobResponse) error {
 	// Run trivy — fall back to filesystem scan when the SBOM is a leaf (0 or 1 components).
 	resultPath := filepath.Join(tmpDir, "result.json")
 	if countSBOMComponents(sbomBytes) <= 1 && job.RepoID != "" {
@@ -178,7 +206,42 @@ func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobRespon
 		return fmt.Errorf("upload result: status %d: %s", resp.StatusCode, body)
 	}
 
-	log.Printf("stored result for sbom_id=%s", job.SBOMID)
+	log.Printf("stored trivy result for sbom_id=%s repo=%s", job.SBOMID, job.RepoSlug)
+	return nil
+}
+
+func scanImageSBOM(apiURL string, hmacKey []byte, tmpDir, sbomPath string, job *nextJobResponse) error {
+	resultPath := filepath.Join(tmpDir, "grype.json")
+	if err := grypeScanSBOM(sbomPath, resultPath); err != nil {
+		return fmt.Errorf("grype scan: %w", err)
+	}
+
+	resultBytes, err := os.ReadFile(resultPath)
+	if err != nil {
+		return fmt.Errorf("read grype result: %w", err)
+	}
+
+	url := fmt.Sprintf("%s/api/sbom-scan/image-result/%s", apiURL, job.SBOMID)
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(resultBytes))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	signRequest(req, resultBytes, hmacKey)
+
+	client := &http.Client{Timeout: 2 * time.Minute}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload grype result: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload grype result: status %d: %s", resp.StatusCode, body)
+	}
+
+	log.Printf("stored grype result for image sbom_id=%s image_digest_id=%s", job.SBOMID, job.AssetRefID)
 	return nil
 }
 
@@ -332,6 +395,13 @@ func fetchAndWriteManifests(apiURL string, hmacKey []byte, repoID, dir string) e
 	return nil
 }
 
+func grypeDBUpdate() error {
+	cmd := exec.Command("grype", "db", "update")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func trivyDownloadDB(cacheDir string) error {
 	cmd := exec.Command("trivy", "image", "--download-db-only", "--cache-dir", cacheDir)
 	cmd.Stdout = os.Stdout
@@ -350,6 +420,22 @@ func trivyScanSBOM(cacheDir, sbomPath, resultPath string) error {
 		"--output", resultPath,
 	)
 	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// grypeScanSBOM runs grype against a stored SBOM and writes the JSON
+// result to resultPath. No image pull, no network call to a registry —
+// all grype needs is the vuln DB (grype db update runs at container
+// startup) and the SBOM file.
+func grypeScanSBOM(sbomPath, resultPath string) error {
+	out, err := os.OpenFile(resultPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	cmd := exec.Command("grype", "sbom:"+sbomPath, "-o", "json")
+	cmd.Stdout = out
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }

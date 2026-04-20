@@ -22,17 +22,23 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o sbom-scanner ./cmd/sbo
 # Get trivy binary (pinned digest for reproducibility)
 FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
 
+# Get grype binary — used for IMAGE_DIGEST-bound SBOMs where we run
+# against a stored syft-generated SBOM (same toolchain → zero format
+# translation). Trivy continues to handle REPO_COMMIT SBOMs for now.
+FROM anchore/grype:latest AS grype
+
 # Runtime stage — minimal
 FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates
 
 COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+COPY --from=grype /grype /usr/local/bin/grype
 COPY --from=builder /build/sbom-scanner /usr/local/bin/sbom-scanner
 
-RUN mkdir -p /home/scanner /trivy-cache /tmp && \
+RUN mkdir -p /home/scanner /trivy-cache /grype-cache /tmp && \
     adduser -D -u 1000 scanner && \
-    chown -R 1000:1000 /home/scanner /trivy-cache
+    chown -R 1000:1000 /home/scanner /trivy-cache /grype-cache
 
 USER 1000:1000
 ENV HOME=/home/scanner
