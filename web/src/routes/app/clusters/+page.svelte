@@ -862,8 +862,7 @@
 											</div>
 										</td>
 										<td class="px-5 py-3">
-											{@const total = img.vuln_critical + img.vuln_high + img.vuln_medium + img.vuln_low + img.vuln_unknown}
-											{#if total === 0}
+											{#if (img.vuln_critical + img.vuln_high + img.vuln_medium + img.vuln_low + img.vuln_unknown) === 0}
 												<span class="text-xs text-[var(--text-muted)]">—</span>
 											{:else}
 												<div
