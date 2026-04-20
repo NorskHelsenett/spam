@@ -170,6 +170,36 @@ Implementation path:
 
 ---
 
+## Session tracking follow-ups
+
+### SCAM agent must emit heartbeats
+
+Server now expects `POST /api/scam/heartbeat` with body
+`{"cluster_id": "..."}` every **60 s** when the cluster is quiet. Without
+it, `last_push_at` ages out → cluster shows dark in the UI even though
+the agent is alive and watching (example: a stable cluster with no pod
+churn for 9 hours).
+
+Server thresholds:
+
+- `sessionIdleGap = 2 min` — any silence longer than this on the next
+  push rolls the session (stale state cleared).
+- `sessionLiveWindow = 15 min` — cluster is "dark" after this much
+  silence; UI shows nothing.
+
+Agent-side work: spawn a goroutine alongside the event watchers that
+ticks every 60s and POSTs `/api/scam/heartbeat` with the cluster_id.
+~10 lines of code, no state.
+
+### Fast-restart rollover
+
+If the agent crashes + restarts in <2 min (fast liveness probe or
+systemd restart), `touchClusterSession` won't detect the gap and the
+prior session's stale rows linger. Proper fix: agent emits a
+`session_id` (random UUID per process start) in each record; server
+detects session_id change → roll over unconditionally. Until then,
+stale state clears on the next genuine >2 min gap.
+
 ## Smaller follow-ups (from recent work)
 
 ### SBOM_SCANNER: grype → component_vulnerabilities

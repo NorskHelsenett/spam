@@ -47,8 +47,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// Health check endpoint without middleware to avoid noise in logs
 	r.Get("/api/healthz", health.Handler(db))
 
-	// SCAM ingest — open endpoint, no auth. Agents POST records here.
+	// SCAM ingest — open endpoints, no auth. Agents POST records to
+	// /callcenter; heartbeats (quiet-but-alive pings) go to /heartbeat
+	// so clusters with no state changes for hours don't falsely go
+	// dark in the UI.
 	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db))
+	r.Post("/api/scam/heartbeat", scam.HeartbeatHandler(db))
 
 	// SSE / long-lived streaming endpoints — registered without the 60 s timeout
 	// so the server doesn't kill the connection mid-stream.
