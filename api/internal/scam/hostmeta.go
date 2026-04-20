@@ -43,8 +43,17 @@ const (
 var safeDialer = &net.Dialer{Timeout: fetchTimeout}
 
 // safeDialContext resolves the target hostname, rejects any address that
-// belongs to a private / loopback / link-local / metadata range, and dials
-// the resolved IP directly so DNS rebinding can't swap it after the check.
+// belongs to a loopback / link-local / multicast / unspecified range, and
+// dials the resolved IP directly so DNS rebinding can't swap it after the
+// check.
+//
+// RFC 1918 / RFC 4193 private addresses are intentionally *not* blocked —
+// on-prem and homelab deployments keep every Ingress host on an internal
+// subnet, so refusing those would break the common case. The real SSRF
+// defence is callcenter hostname validation (rejects IP literals and
+// malformed names before they hit the DB). If you run SPAM on a cloud
+// platform where reaching internal 10.x/192.168.x services is a concern,
+// add egress NetworkPolicies on the spam deployment instead.
 func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	if network != "tcp" && network != "tcp4" && network != "tcp6" {
 		return nil, fmt.Errorf("unsupported network: %s", network)
@@ -72,8 +81,11 @@ func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
+	// IsLinkLocalUnicast covers 169.254/16 including the cloud metadata
+	// service; IsLoopback covers 127.0.0.0/8 and ::1. Private ranges are
+	// deliberately excluded — see safeDialContext for the rationale.
 	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate()
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 var httpClient = &http.Client{
