@@ -6,6 +6,7 @@
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
 	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
+	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
 
 	// --- Virtual scroll helpers for tables ---
 	const ROW_HEIGHT = 48;
@@ -110,6 +111,18 @@
 	let hostViewH = $state(600);
 	let clusterDrawerOpen = $state(false);
 	let clusterDrawerRow: ClusterRow | null = $state(null);
+	let imageDrawerOpen = $state(false);
+	let imageDrawerId: string | null = $state(null);
+
+	function openImageDrawer(digestId: string) {
+		if (imageDrawerOpen && imageDrawerId === digestId) {
+			imageDrawerOpen = false;
+			imageDrawerId = null;
+		} else {
+			imageDrawerId = digestId;
+			imageDrawerOpen = true;
+		}
+	}
 
 	function openClusterDrawer(row: ClusterRow) {
 		if (clusterDrawerOpen && clusterDrawerRow?.cluster_id === row.cluster_id) {
@@ -770,9 +783,9 @@
 								{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="7"></td></tr>{/if}
 								{#each sortedImages.slice(imageVirt.start, imageVirt.end) as img}
 									<tr
-										class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {img.digest_id ? 'cursor-pointer' : ''}"
+										class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
 										style="height:{ROW_HEIGHT}px"
-										onclick={() => { if (img.digest_id) location.assign(`/app/images/${img.digest_id}`); }}
+										onclick={() => { if (img.digest_id) openImageDrawer(img.digest_id); }}
 									>
 										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
 										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
@@ -999,6 +1012,18 @@
 							kind={chainDrawerRow.kind}
 							name={chainDrawerRow.name}
 							onClose={() => { chainDrawerOpen = false; chainDrawerRow = null; }}
+						/>
+					</div>
+				{/if}
+
+				{#if imageDrawerOpen && imageDrawerId}
+					<div
+						class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
+						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
+					>
+						<ImageDrawer
+							imageId={imageDrawerId}
+							onClose={() => { imageDrawerOpen = false; imageDrawerId = null; }}
 						/>
 					</div>
 				{/if}
