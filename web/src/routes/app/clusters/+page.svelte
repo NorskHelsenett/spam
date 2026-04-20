@@ -702,7 +702,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'images'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8">
+			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
 				{#if imageDetails.length === 0}
 					<div class="flex flex-col items-center justify-center gap-3 py-16">
 						<Container class="h-10 w-10 text-[var(--yellow)]" />
@@ -817,6 +817,18 @@
 								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="7"></td></tr>{/if}
 							</tbody>
 						</table>
+					</div>
+				{/if}
+
+				{#if imageDrawerOpen && imageDrawerId}
+					<div
+						class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
+						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
+					>
+						<ImageDrawer
+							imageId={imageDrawerId}
+							onClose={() => { imageDrawerOpen = false; imageDrawerId = null; }}
+						/>
 					</div>
 				{/if}
 			</section>
@@ -1019,18 +1031,6 @@
 		{/if}
 	{/if}
 
-	<!-- Image drawer — top-level so it renders regardless of active tab. -->
-	{#if imageDrawerOpen && imageDrawerId}
-		<div
-			class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
-			transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
-		>
-			<ImageDrawer
-				imageId={imageDrawerId}
-				onClose={() => { imageDrawerOpen = false; imageDrawerId = null; }}
-			/>
-		</div>
-	{/if}
 </div>
 
 <style>
