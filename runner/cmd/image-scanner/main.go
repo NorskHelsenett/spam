@@ -93,6 +93,17 @@ func run() error {
 	}
 	log.Printf("grype DB ready; entering lease loop")
 
+	// Linger behaviour: instead of exiting on the first empty-queue poll,
+	// stay alive and poll with a short backoff for up to lingerIdleMax
+	// wall time. With the scanner operator controlling how many pods
+	// exist, we'd rather amortise the ~60s grype DB download across a
+	// whole burst of work than tear down and respawn per digest. Every
+	// lease reset the deadline, so an active pod never hits the idle cap.
+	lingerIdleMax := parseDuration("SCANNER_LINGER_IDLE_MAX", 30*time.Minute)
+	pollInterval := parseDuration("SCANNER_POLL_INTERVAL", 15*time.Second)
+	idleUntil := time.Now().Add(lingerIdleMax)
+	log.Printf("scanner lingering for up to %s of idle before exit (poll every %s)", lingerIdleMax, pollInterval)
+
 	scans := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -105,10 +116,22 @@ func run() error {
 			return fmt.Errorf("fetch next: %w", err)
 		}
 		if lease == nil {
-			log.Printf("queue drained after %d scan(s) — exiting", scans)
-			return nil
+			if time.Now().After(idleUntil) {
+				log.Printf("idle for %s with no work — exiting after %d scan(s)", lingerIdleMax, scans)
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(pollInterval):
+			}
+			continue
 		}
 		scans++
+		// Reset the idle deadline whenever we pick up work — an active
+		// pod keeps running until its activeDeadlineSeconds or the
+		// operator stops spawning replacements.
+		idleUntil = time.Now().Add(lingerIdleMax)
 
 		scanCtx, cancel := context.WithTimeout(ctx, scanDeadline)
 		partial, scanErr := runOne(scanCtx, apiURL, hmacKey, workDir, lease)
@@ -364,6 +387,20 @@ func parseIntEnv(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+// parseDuration reads an env var formatted like "30m" / "15s" / "2h".
+// Falls back on empty / malformed / non-positive values.
+func parseDuration(key string, fallback time.Duration) time.Duration {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
 
 func fail(code int, format string, args ...any) error {

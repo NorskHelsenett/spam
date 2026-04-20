@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -131,15 +130,28 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	runAsNonRoot := true
 	runAsUser := int64(1000)
 
+	// Labels carry Helm + ArgoCD tracking metadata so the dynamically
+	// created Job shows up as part of the parent Application rather than
+	// as an orphaned resource. ReleaseName/ChartName come from Helm via
+	// SPAM_RELEASE_NAME / SPAM_CHART_NAME env vars.
+	runLabels := map[string]string{
+		"app.kubernetes.io/name":      "spam-runner",
+		"app.kubernetes.io/component": "runner",
+		"spam.io/run-id":              runID,
+	}
+	if k.cfg.ReleaseName != "" {
+		runLabels["app.kubernetes.io/instance"] = k.cfg.ReleaseName
+		runLabels["app.kubernetes.io/managed-by"] = "Helm"
+	}
+	if k.cfg.ChartName != "" {
+		runLabels["helm.sh/chart"] = k.cfg.ChartName
+	}
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
 			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "spam-runner",
-				"app.kubernetes.io/component": "runner",
-				"spam.io/run-id":              runID,
-			},
+			Labels:    runLabels,
 		},
 		Spec: batchv1.JobSpec{
 			TTLSecondsAfterFinished: &ttlSeconds,
@@ -147,11 +159,7 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 			ActiveDeadlineSeconds:   &activeDeadline,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app.kubernetes.io/name":      "spam-runner",
-						"app.kubernetes.io/component": "runner",
-						"spam.io/run-id":              runID,
-					},
+					Labels:      runLabels,
 					Annotations: k.cfg.PodAnnotations,
 				},
 				Spec: corev1.PodSpec{
@@ -579,107 +587,127 @@ func (k *K8sClient) GetJobStatusString(ctx context.Context, jobName string) (str
 	}
 }
 
-// ImageScanAdhocResult tells the caller whether we spawned a new adhoc
-// scanner, skipped because one was already running, or waited because the
-// last burst completed too recently. Callers use this to produce
-// informative log lines without an extra round-trip.
-type ImageScanAdhocResult int
+// scannerOperatorLabel marks pods the operator spawned. Used for
+// CountActiveScannerPods — Jobs themselves don't need it, only the pod
+// template. Distinct from the legacy adhoc label so an in-place upgrade
+// can tell old bursts apart from new operator-managed pods.
+const scannerOperatorLabel = "spam.io/controller"
+const scannerOperatorValue = "scanner-operator"
 
-const (
-	AdhocCreated      ImageScanAdhocResult = iota // new pod spawned
-	AdhocAlreadyRunning                           // prior burst still draining
-	AdhocCoolingDown                              // prior burst finished too recently
-)
+// CountActiveScannerPods returns the count of operator-spawned scanner
+// pods currently Pending or Running. Feeds the operator's desired-vs-
+// observed comparison. Jobs aren't counted — each operator Job has
+// parallelism=1 completions=1 so 1 Job = 1 pod; counting pods directly
+// is more accurate than counting Jobs (pod scheduling failures still
+// count).
+func (k *K8sClient) CountActiveScannerPods(ctx context.Context) (int, error) {
+	pods, err := k.clientset.CoreV1().Pods(k.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: scannerOperatorLabel + "=" + scannerOperatorValue,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("list scanner pods: %w", err)
+	}
+	n := 0
+	for _, p := range pods.Items {
+		switch p.Status.Phase {
+		case corev1.PodPending, corev1.PodRunning:
+			n++
+		}
+	}
+	return n, nil
+}
 
-// CreateImageScanAdhocJob spawns a scanner pod on demand by cloning the
-// image-scanner CronJob's pod template.
+// CreateScannerJob spawns a single scanner pod by cloning the
+// image-scanner CronJob's pod template. Jobs get a random suffix so
+// back-to-back creates never collide and finished Jobs age out via TTL
+// without blocking future spawns.
 //
-// minGapSinceCompletion enforces a cooldown: if a prior adhoc burst
-// finished less than that long ago, we refuse to spawn a new one so
-// freshly-arriving digests have a chance to batch up instead of
-// immediately triggering another DB download.
+// parallelism: 1 completions: 1 is forced regardless of what the
+// CronJob template says — the operator does the scale-out by spawning
+// N Jobs, not by letting one Job run N pods. That way a pod that
+// fails to schedule is one thing the operator observes and corrects,
+// not an opaque in-Job failure.
 //
-// Naming: a fixed "<cronjob>-adhoc" name so only one adhoc scanner runs
-// at a time. Parallelism-per-burst stays controlled by the CronJob
-// template's parallelism setting.
-func (k *K8sClient) CreateImageScanAdhocJob(ctx context.Context, cronJobName string, ttlSecondsAfterFinished int32, minGapSinceCompletion time.Duration) (ImageScanAdhocResult, error) {
+// Labels + annotations are inherited from the parent CronJob so that
+// tools tracking resource ownership by chart (ArgoCD groups by
+// app.kubernetes.io/instance; helm by app.kubernetes.io/managed-by)
+// see the operator-spawned Jobs as part of the same Application, not
+// as orphans. The operator adds its own discriminator label on top.
+func (k *K8sClient) CreateScannerJob(ctx context.Context) error {
+	cronJobName := strings.TrimSpace(os.Getenv("IMAGE_SCAN_CRONJOB_NAME"))
+	if cronJobName == "" {
+		return fmt.Errorf("IMAGE_SCAN_CRONJOB_NAME not configured")
+	}
+
 	namespace := k.cfg.Namespace
-	jobName := cronJobName + "-adhoc"
-
-	// Check whether a prior adhoc job still exists.
-	existing, err := k.clientset.BatchV1().Jobs(namespace).Get(ctx, jobName, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return AdhocAlreadyRunning, fmt.Errorf("check existing adhoc job: %w", err)
-	}
-	if err == nil {
-		if existing.Status.Active > 0 {
-			// Already draining the queue — don't spawn a duplicate.
-			return AdhocAlreadyRunning, nil
-		}
-		// Cooldown: if the prior burst finished too recently, wait.
-		// CompletionTime is set once the Job reaches Succeeded; for Failed
-		// jobs we fall back to the Job's UpdatedAt (approximated via the
-		// last condition's LastTransitionTime).
-		if minGapSinceCompletion > 0 {
-			var finishedAt time.Time
-			if existing.Status.CompletionTime != nil {
-				finishedAt = existing.Status.CompletionTime.Time
-			} else {
-				for _, c := range existing.Status.Conditions {
-					if c.Type == batchv1.JobFailed || c.Type == batchv1.JobComplete {
-						if c.LastTransitionTime.After(finishedAt) {
-							finishedAt = c.LastTransitionTime.Time
-						}
-					}
-				}
-			}
-			if !finishedAt.IsZero() && time.Since(finishedAt) < minGapSinceCompletion {
-				return AdhocCoolingDown, nil
-			}
-		}
-		// Cooldown cleared (or no gap requested) — delete so we can recreate.
-		propagation := metav1.DeletePropagationBackground
-		if delErr := k.clientset.BatchV1().Jobs(namespace).Delete(ctx, jobName, metav1.DeleteOptions{
-			PropagationPolicy: &propagation,
-		}); delErr != nil {
-			return AdhocAlreadyRunning, fmt.Errorf("delete previous adhoc job: %w", delErr)
-		}
-	}
-
 	cronJob, err := k.clientset.BatchV1().CronJobs(namespace).Get(ctx, cronJobName, metav1.GetOptions{})
 	if err != nil {
-		return AdhocAlreadyRunning, fmt.Errorf("get cronjob %s: %w", cronJobName, err)
+		return fmt.Errorf("get cronjob %s: %w", cronJobName, err)
+	}
+
+	// 8-hex-char suffix is plenty to avoid collisions across the
+	// 5-minute TTL window while keeping Job names readable.
+	suffix := fmt.Sprintf("%08x", time.Now().UnixNano()&0xffffffff)
+	jobName := cronJobName + "-op-" + suffix
+
+	ttl := int32(600) // 10 min — enough to grab logs post-mortem, short enough to not clutter
+	spec := cronJob.Spec.JobTemplate.Spec
+	one := int32(1)
+	spec.Parallelism = &one
+	spec.Completions = &one
+	spec.TTLSecondsAfterFinished = &ttl
+
+	// Start from the CronJob's labels/annotations so downstream tooling
+	// (ArgoCD, helm, k8s metadata selectors) sees a consistent chain of
+	// ownership. Then layer on what the operator needs.
+	labels := copyStringMap(cronJob.Labels)
+	labels[scannerOperatorLabel] = scannerOperatorValue
+	annotations := copyStringMap(cronJob.Annotations)
+	annotations["spam.io/created-by"] = "scanner-operator"
+	annotations["spam.io/source-cronjob"] = cronJobName
+
+	// Pod template labels: start from whatever the CronJob declared,
+	// add the operator + component labels so NetworkPolicy selectors
+	// and CountActiveScannerPods match.
+	if spec.Template.Labels == nil {
+		spec.Template.Labels = make(map[string]string)
+	} else {
+		spec.Template.Labels = copyStringMap(spec.Template.Labels)
+	}
+	spec.Template.Labels[scannerOperatorLabel] = scannerOperatorValue
+	spec.Template.Labels["app.kubernetes.io/component"] = "image-scanner"
+	// Preserve instance label on pods if it's only on the CronJob.
+	if spec.Template.Labels["app.kubernetes.io/instance"] == "" {
+		if inst := cronJob.Labels["app.kubernetes.io/instance"]; inst != "" {
+			spec.Template.Labels["app.kubernetes.io/instance"] = inst
+		}
 	}
 
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "spam-image-scanner",
-				"app.kubernetes.io/component": "image-scanner",
-				"spam.io/adhoc-image-scan":    "true",
-			},
-			Annotations: map[string]string{
-				"spam.io/created-by": "worker-burst-trigger",
-			},
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
-		Spec: cronJob.Spec.JobTemplate.Spec,
+		Spec: spec,
 	}
-	job.Spec.TTLSecondsAfterFinished = &ttlSecondsAfterFinished
-	if job.Spec.Template.Labels == nil {
-		job.Spec.Template.Labels = make(map[string]string)
-	}
-	// Carry the same component label the CronJob-spawned pods use so the
-	// image-scanner NetworkPolicy matches.
-	job.Spec.Template.Labels["app.kubernetes.io/component"] = "image-scanner"
 
 	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
-		return AdhocAlreadyRunning, fmt.Errorf("create adhoc job: %w", err)
+		return fmt.Errorf("create scanner job %s: %w", jobName, err)
 	}
-	log.Printf("created adhoc image-scan job: %s/%s", namespace, jobName)
-	return AdhocCreated, nil
+	log.Printf("scanner operator: spawned %s/%s", namespace, jobName)
+	return nil
 }
+
+func copyStringMap(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src)+2)
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
 
 // CreateTrivyAdhocJob creates an ad-hoc K8s Job from an existing CronJob's template.
 // If a job with the given name already exists and is still running, it returns an error.
@@ -712,18 +740,21 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 		return fmt.Errorf("get cronjob %s: %w", cronJobName, err)
 	}
 
+	// Inherit labels/annotations from the parent CronJob so ArgoCD +
+	// helm see the adhoc Job as part of the same Application and don't
+	// flag it as an orphan.
+	labels := copyStringMap(cronJob.Labels)
+	labels["spam.io/adhoc-trivy-scan"] = "true"
+	annotations := copyStringMap(cronJob.Annotations)
+	annotations["spam.io/created-by"] = "admin-adhoc"
+	annotations["spam.io/source-cronjob"] = cronJobName
+
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      jobName,
-			Namespace: namespace,
-			Labels: map[string]string{
-				"app.kubernetes.io/name":      "spam-runner",
-				"app.kubernetes.io/component": "scanner",
-				"spam.io/adhoc-trivy-scan":    "true",
-			},
-			Annotations: map[string]string{
-				"spam.io/created-by": "admin-adhoc",
-			},
+			Name:        jobName,
+			Namespace:   namespace,
+			Labels:      labels,
+			Annotations: annotations,
 		},
 		Spec: cronJob.Spec.JobTemplate.Spec,
 	}
@@ -731,8 +762,13 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 	// Ensure pod template has the sbom-scanner component label so the network policy applies.
 	if job.Spec.Template.Labels == nil {
 		job.Spec.Template.Labels = make(map[string]string)
+	} else {
+		job.Spec.Template.Labels = copyStringMap(job.Spec.Template.Labels)
 	}
 	job.Spec.Template.Labels["app.kubernetes.io/component"] = "sbom-scanner"
+	if inst := cronJob.Labels["app.kubernetes.io/instance"]; inst != "" {
+		job.Spec.Template.Labels["app.kubernetes.io/instance"] = inst
+	}
 
 	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create job: %w", err)
@@ -899,64 +935,23 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	return nil
 }
 
-// defaultImageScanBurstMinGap is the built-in cooldown between the end of
-// one adhoc image-scan burst and the start of the next. Operators can
-// override via IMAGE_SCAN_BURST_MIN_GAP_SECONDS (0 disables the cooldown;
-// negative or malformed values fall back to this default).
-const defaultImageScanBurstMinGap = 30 * time.Minute
-
-// TriggerImageScanBurst spawns an adhoc scanner pod when the queue has
-// pending work. Called by the reconciler every 5 min. No-op when the
-// image-scanner CronJob isn't configured, an adhoc pod is already active,
-// or the cooldown since the previous burst hasn't elapsed.
-//
-// The cooldown prevents a pathological case where a scanner pod finishes
-// draining, a new digest arrives seconds later, and we immediately spawn
-// another pod (including its ~60s DB download) to scan that single
-// digest. Allowing the queue to batch for a bit amortises the DB cost.
-func (e *RunExecutor) TriggerImageScanBurst(ctx context.Context) error {
-	cronJobName := strings.TrimSpace(os.Getenv("IMAGE_SCAN_CRONJOB_NAME"))
-	if cronJobName == "" {
-		// No CronJob template configured — burst path is disabled.
-		return nil
-	}
-	const ttl = int32(3600) // 1h TTL on the adhoc job
-	minGap := imageScanBurstMinGap()
-	result, err := e.k8s.CreateImageScanAdhocJob(ctx, cronJobName, ttl, minGap)
-	if err != nil {
-		return fmt.Errorf("create adhoc image-scan job: %w", err)
-	}
-	switch result {
-	case AdhocAlreadyRunning:
-		log.Printf("image-scan burst skipped: adhoc pod already running")
-	case AdhocCoolingDown:
-		log.Printf("image-scan burst skipped: cooldown active (min gap=%s)", minGap)
-	}
-	return nil
-}
-
-// imageScanBurstMinGap parses IMAGE_SCAN_BURST_MIN_GAP_SECONDS, falling
-// back to defaultImageScanBurstMinGap for empty / invalid / negative
-// values. Zero is allowed and disables the cooldown entirely (bursts
-// spawn back-to-back as long as the queue has work).
-func imageScanBurstMinGap() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("IMAGE_SCAN_BURST_MIN_GAP_SECONDS"))
-	if raw == "" {
-		return defaultImageScanBurstMinGap
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 0 {
-		return defaultImageScanBurstMinGap
-	}
-	return time.Duration(n) * time.Second
-}
-
 // CreateTrivyAdhocJob implements jobs.TrivyJobCreator for the worker.
 // It creates an ad-hoc trivy scanner K8s Job from the given CronJob template,
 // with a fixed 12-hour TTL so it cleans itself up.
 func (e *RunExecutor) CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error {
 	const ttl = int32(12 * 3600)
 	return e.k8s.CreateTrivyAdhocJob(ctx, cronJobName, "trivy-adhoc", ttl)
+}
+
+// CountActiveScannerPods + CreateScannerJob satisfy imagescan.PodController
+// so the worker can hand a *RunExecutor to the scanner operator without
+// plumbing the raw *K8sClient through. Thin passthroughs.
+func (e *RunExecutor) CountActiveScannerPods(ctx context.Context) (int, error) {
+	return e.k8s.CountActiveScannerPods(ctx)
+}
+
+func (e *RunExecutor) CreateScannerJob(ctx context.Context) error {
+	return e.k8s.CreateScannerJob(ctx)
 }
 
 // CancelRun cancels a running job.

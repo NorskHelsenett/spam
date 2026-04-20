@@ -111,6 +111,15 @@ type RunnerConfig struct {
 	// RUNNER_IMAGE_SCAN_ENV (same format as RUNNER_POD_ANNOTATIONS:
 	// "KEY1=VAL1,KEY2=VAL2").
 	ImageScanEnv map[string]string
+	// ReleaseName mirrors the Helm release name so dynamically-created
+	// K8s Jobs can carry `app.kubernetes.io/instance` and be tracked by
+	// ArgoCD as part of the same Application as the worker. Set via
+	// SPAM_RELEASE_NAME (Helm injects this into the worker deployment).
+	ReleaseName string
+	// ChartName mirrors the Helm chart name (same purpose as above).
+	// Set via SPAM_CHART_NAME. Empty string is fine — the label is
+	// omitted rather than set to "".
+	ChartName string
 }
 
 type RunnerEgressSelfTestConfig struct {
@@ -187,6 +196,8 @@ func loadRunnerConfig() (RunnerConfig, error) {
 			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
 		},
 		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
+		ReleaseName:  strings.TrimSpace(os.Getenv("SPAM_RELEASE_NAME")),
+		ChartName:    strings.TrimSpace(os.Getenv("SPAM_CHART_NAME")),
 	}
 
 	// HMAC key is required when runner is enabled
@@ -239,6 +250,8 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
 		},
 		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
+		ReleaseName:  strings.TrimSpace(os.Getenv("SPAM_RELEASE_NAME")),
+		ChartName:    strings.TrimSpace(os.Getenv("SPAM_CHART_NAME")),
 	}
 
 	// HMAC key is optional for read-only access
