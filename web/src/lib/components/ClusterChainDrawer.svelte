@@ -17,7 +17,7 @@
 		namespace: string;
 		ingresses: { host: string; kind: string; name: string; ingress_class: string; tls: boolean; backends: string }[];
 		services: { name: string; service_type: string; ports: any[]; selector: Record<string, string> }[];
-		pods: { owner: string; owner_kind: string; pod_count: number; phase: string; containers: { name: string; image: string; tag: string; digest?: string; registry: string }[]; service_names?: string[] }[];
+		pods: { owner: string; owner_kind: string; pod_count: number; phase: string; containers: { name: string; image: string; tag: string; digest?: string; registry: string }[]; service_names?: string[]; transient?: boolean; last_seen?: string }[];
 	};
 
 	type ClusterChainData = {
@@ -56,7 +56,9 @@
 			})) ?? [],
 			pods: ns.pods?.map(p => ({
 				...p,
-				service_names: p.service_names ?? []
+				service_names: p.service_names ?? [],
+				transient: p.transient ?? false,
+				last_seen: p.last_seen
 			})) ?? []
 		};
 	}

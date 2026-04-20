@@ -1015,20 +1015,21 @@
 						/>
 					</div>
 				{/if}
-
-				{#if imageDrawerOpen && imageDrawerId}
-					<div
-						class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
-						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
-					>
-						<ImageDrawer
-							imageId={imageDrawerId}
-							onClose={() => { imageDrawerOpen = false; imageDrawerId = null; }}
-						/>
-					</div>
-				{/if}
 			</section>
 		{/if}
+	{/if}
+
+	<!-- Image drawer — top-level so it renders regardless of active tab. -->
+	{#if imageDrawerOpen && imageDrawerId}
+		<div
+			class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl"
+			transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
+		>
+			<ImageDrawer
+				imageId={imageDrawerId}
+				onClose={() => { imageDrawerOpen = false; imageDrawerId = null; }}
+			/>
+		</div>
 	{/if}
 </div>
 
