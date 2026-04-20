@@ -57,6 +57,9 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	if err != nil {
 		return nil, err
 	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no addresses for %s", host)
+	}
 	for _, ip := range ips {
 		if isBlockedIP(ip) {
 			return nil, fmt.Errorf("blocked address: %s", ip)

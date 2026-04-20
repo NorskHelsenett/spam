@@ -184,12 +184,15 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 
 	// Mark ImageScanRun finished if a row exists (the scanner creates
 	// one on first artifact upload; an empty-result scan may not have
-	// uploaded anything, so this is best-effort).
+	// uploaded anything, so this is best-effort — but surface errors so a
+	// broken UPDATE doesn't silently leave rows with finished_at IS NULL).
 	now := time.Now().UTC()
-	_ = s.db.WithContext(r.Context()).Exec(
+	if err := s.db.WithContext(r.Context()).Exec(
 		"UPDATE image_scan_runs SET finished_at = ?, updated_at = ? WHERE id = ? AND finished_at IS NULL",
 		now, now, jobID,
-	).Error
+	).Error; err != nil {
+		log.Printf("image-scans/complete: mark finished %s: %v", jobID, err)
+	}
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))

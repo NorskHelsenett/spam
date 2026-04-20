@@ -145,15 +145,22 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 				// resolved repo.id on image_digests. Later reads (image
 				// detail page, repo→images reverse lookup) avoid
 				// re-parsing labels on every request.
+				//
+				// Resolution or UPDATE failures are logged rather than
+				// failing the whole upload — the artifact bytes are fine,
+				// only the repo link is missing, and BackfillSourceRepoIDs
+				// in the worker picks up any image_digests row with a
+				// NULL source_repo_id on its next tick. The log lines
+				// below include both IDs so orphaned scans are grep-able.
 				if source := extractSourceLabel(data); source != "" {
 					if repoID, err := imagescan.ResolveSourceRepoID(r.Context(), tx, source); err != nil {
-						log.Printf("resolve source repo for %s: %v", imageDigestID, err)
+						log.Printf("image results: resolve source_repo_id failed (will retry via backfill): image_digest_id=%s source=%s err=%v", imageDigestID, source, err)
 					} else if repoID != "" {
 						if err := tx.Exec(
 							"UPDATE image_digests SET source_repo_id = ? WHERE id = ?",
 							repoID, imageDigestID,
 						).Error; err != nil {
-							log.Printf("update source_repo_id: %v", err)
+							log.Printf("image results: update source_repo_id failed (will retry via backfill): image_digest_id=%s repo_id=%s err=%v", imageDigestID, repoID, err)
 						}
 					}
 				}
