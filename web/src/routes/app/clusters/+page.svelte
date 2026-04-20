@@ -194,8 +194,18 @@
 		}
 	});
 
+	// In-flight trackers. The cached-result dedup (`if (hostMetas[host])
+	// return`) doesn't cover the window between request-start and
+	// response-resolve: a rapid sequence of $effect ticks sees
+	// hostMetas[host] === undefined and fires duplicate requests for
+	// the same host. With the trackers, only one request per host is
+	// ever in flight; subsequent calls no-op until the response lands.
+	const inFlightResolve = new Set<string>();
+	const inFlightMeta = new Set<string>();
+
 	const fetchHostResolve = (host: string) => {
-		if (hostResolutions[host]) return;
+		if (hostResolutions[host] || inFlightResolve.has(host)) return;
+		inFlightResolve.add(host);
 		fetch(`/api/clusters/hosts/resolve?host=${encodeURIComponent(host)}`, { credentials: 'include' })
 			.then((r) => r.json())
 			.then((data: HostResolve) => {
@@ -203,11 +213,15 @@
 			})
 			.catch(() => {
 				hostResolutions = { ...hostResolutions, [host]: { ips: [], is_local: false, error: 'failed' } };
+			})
+			.finally(() => {
+				inFlightResolve.delete(host);
 			});
 	};
 
 	const fetchHostMeta = (host: string) => {
-		if (hostMetas[host]) return;
+		if (hostMetas[host] || inFlightMeta.has(host)) return;
+		inFlightMeta.add(host);
 		fetch(`/api/clusters/hosts/meta?host=${encodeURIComponent(host)}`, { credentials: 'include' })
 			.then((r) => r.json())
 			.then((data: HostMeta) => {
@@ -215,6 +229,9 @@
 			})
 			.catch(() => {
 				hostMetas = { ...hostMetas, [host]: { title: '', has_favicon: false } };
+			})
+			.finally(() => {
+				inFlightMeta.delete(host);
 			});
 	};
 
