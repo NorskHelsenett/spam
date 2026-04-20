@@ -486,6 +486,25 @@
 		}, 5000);
 	};
 
+	let retrying = $state(false);
+	const runAgain = async () => {
+		if (!run || retrying) return;
+		retrying = true;
+		try {
+			const res = await fetch(`/api/runs/${run.id}/retry`, {
+				method: 'POST', credentials: 'include'
+			});
+			if (!res.ok) {
+				const text = await res.text();
+				alert(`Failed to re-queue: ${text || res.status}`);
+				return;
+			}
+			await loadRun(true);
+		} finally {
+			retrying = false;
+		}
+	};
+
 	onMount(async () => {
 		if (!browser) return;
 
@@ -555,6 +574,8 @@
 				return 'var(--success)';
 			case 'FAILED':
 				return 'var(--error)';
+			case 'RETRY':
+				return 'var(--warning)';
 			case 'CANCELLED':
 				return 'var(--warning)';
 			default:
@@ -650,6 +671,25 @@
 			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
 		</div>
 	{:else if run && runIsImageScan(run)}
+		{#if run.status === 'FAILED' || run.status === 'RETRY'}
+			<div class="mb-3 flex items-center justify-between rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
+				<div>
+					<p class="text-xs uppercase tracking-wider text-[var(--error)]">
+						{run.status === 'RETRY' ? 'Scheduled for retry' : 'Scan failed'}
+					</p>
+					<p class="mt-0.5 text-sm text-[var(--text-secondary)] break-words">{run.error || 'No error message recorded.'}</p>
+				</div>
+				<button
+					type="button"
+					class="rounded-lg border border-[var(--error)]/60 bg-[var(--error)]/10 px-3 py-1.5 text-sm text-[var(--error)] transition hover:bg-[var(--error)]/20 disabled:opacity-50"
+					disabled={retrying}
+					onclick={runAgain}
+					title={run.status === 'RETRY' ? 'Force re-queue now instead of waiting for the backoff timer' : 'Re-queue this failed job'}
+				>
+					{retrying ? 'Re-queueing…' : run.status === 'RETRY' ? 'Retry this job now' : 'Retry this failed job'}
+				</button>
+			</div>
+		{/if}
 		<ImageScanDetail {run} />
 	{:else if run}
 		{@const StatusIcon = getStatusIcon(run.status)}
@@ -667,10 +707,21 @@
 						</h1>
 						<span
 							class="rounded-full px-3 py-1 text-xs font-semibold uppercase"
-							style="color: {getStatusColor(run.status)}; background: {getStatusColor(run.status)}20;"
+							style="color: {getStatusColor(run.status)}; background: color-mix(in srgb, {getStatusColor(run.status)} 15%, transparent);"
 						>
 							{run.status}
 						</span>
+						{#if run.status === 'FAILED' || run.status === 'RETRY'}
+							<button
+								type="button"
+								class="rounded-lg border border-[var(--error)]/60 bg-[var(--error)]/10 px-3 py-1 text-xs font-medium text-[var(--error)] transition hover:bg-[var(--error)]/20 disabled:opacity-50"
+								disabled={retrying}
+								onclick={runAgain}
+								title={run.status === 'RETRY' ? 'Force re-queue now instead of waiting for the backoff timer' : 'Re-queue this failed job'}
+							>
+								{retrying ? 'Re-queueing…' : run.status === 'RETRY' ? 'Retry this job now' : 'Retry this failed job'}
+							</button>
+						{/if}
 					</div>
 					{#if run.error}
 						<div class="mt-4 flex items-start gap-3 rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
