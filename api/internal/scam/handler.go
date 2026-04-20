@@ -421,12 +421,19 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			NamespaceCount int64     `json:"namespace_count"`
 			ContainerCount int64     `json:"container_count"`
 			LastSeen       time.Time `json:"last_seen"`
+			VulnCritical   int       `json:"vuln_critical"`
+			VulnHigh       int       `json:"vuln_high"`
+			VulnMedium     int       `json:"vuln_medium"`
+			VulnLow        int       `json:"vuln_low"`
+			VulnUnknown    int       `json:"vuln_unknown"`
 		}
 		var rows []row
 		// Aggregate cluster observations first, then LEFT JOIN
 		// image_digests so rows get a digest_id when the reconciler has
 		// already harvested them (and empty otherwise — the page still
-		// renders, just without a clickable link).
+		// renders, just without a clickable link). When the digest is
+		// linked, fold in severity counts from image_vuln_findings for
+		// that digest's latest SUCCEEDED scan.
 		err := db.Raw(`
 			WITH agg AS (
 			    SELECT
@@ -444,17 +451,43 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			      AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			      AND data->>'pod_phase' = 'Running'
 			    GROUP BY data->>'registry', data->>'image', data->>'digest'
+			),
+			latest_scan AS (
+			    -- Latest SUCCEEDED IMAGE_SCAN per image_digest_id.
+			    SELECT DISTINCT ON (payload->>'image_digest_id')
+			           payload->>'image_digest_id' AS image_digest_id,
+			           id AS scan_run_id
+			    FROM jobs
+			    WHERE type = 'IMAGE_SCAN' AND status = 'SUCCEEDED'
+			    ORDER BY payload->>'image_digest_id', created_at DESC
+			),
+			vuln_counts AS (
+			    SELECT image_digest_id,
+			        COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
+			        COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
+			        COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
+			        COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS vuln_low,
+			        COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
+			    FROM image_vuln_findings f
+			    JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
+			    GROUP BY image_digest_id
 			)
 			SELECT
 			    agg.registry, agg.image, agg.digest,
 			    COALESCE(id.id, '') AS digest_id,
 			    agg.tags, agg.cluster_count, agg.namespace_count,
-			    agg.container_count, agg.last_seen
+			    agg.container_count, agg.last_seen,
+			    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
+			    COALESCE(vc.vuln_high, 0)     AS vuln_high,
+			    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
+			    COALESCE(vc.vuln_low, 0)      AS vuln_low,
+			    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
 			FROM agg
 			LEFT JOIN image_digests id
 			  ON id.registry   = agg.raw_registry
 			 AND id.repository = agg.image
 			 AND id.digest     = agg.digest
+			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
 			ORDER BY agg.container_count DESC, agg.image
 		`).Scan(&rows).Error
 		if err != nil {

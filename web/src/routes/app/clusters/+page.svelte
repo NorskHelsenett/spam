@@ -55,7 +55,33 @@
 		namespace_count: number;
 		container_count: number;
 		last_seen: string;
+		vuln_critical: number;
+		vuln_high: number;
+		vuln_medium: number;
+		vuln_low: number;
+		vuln_unknown: number;
 	};
+	// Composite severity sort key. Maps each image to a single number where
+	// higher = more severe overall, so table sort puts the nastiest images
+	// on top. Weights (1e9, 1e6, 1e3, 1) keep higher severities strictly
+	// dominant — one Critical always outranks any number of Highs, etc.
+	function vulnSortKey(img: ImageDetail): number {
+		return img.vuln_critical * 1e9
+		     + img.vuln_high     * 1e6
+		     + img.vuln_medium   * 1e3
+		     + img.vuln_low;
+	}
+
+	// Custom tooltip for the vuln cell — positioned above the cell and
+	// themed to match the rest of the panels. Tiny state footprint; shown
+	// via onmouseenter / hidden via onmouseleave on the cell.
+	type VulnTooltip = { x: number; y: number; img: ImageDetail } | null;
+	let vulnTooltip: VulnTooltip = $state(null);
+	function vulnTooltipFromCell(el: HTMLElement, img: ImageDetail) {
+		const rect = el.getBoundingClientRect();
+		vulnTooltip = { x: rect.left + rect.width / 2, y: rect.top, img };
+	}
+	function hideVulnTooltip() { vulnTooltip = null; }
 
 	type HostRow = {
 		host: string;
@@ -457,7 +483,10 @@
 	type SortDir = 'asc' | 'desc';
 	let clusterSortKey = $state<keyof ClusterRow>('cluster');
 	let clusterSortDir = $state<SortDir>('asc');
-	let imageSortKey = $state<keyof ImageDetail>('container_count');
+	// 'vulns' is synthetic — sorted via vulnSortKey rather than a
+	// direct column access (keyof ImageDetail).
+	type ImageSortKey = keyof ImageDetail | 'vulns';
+	let imageSortKey = $state<ImageSortKey>('container_count');
 	let imageSortDir = $state<SortDir>('desc');
 	let hostSortKey = $state<keyof HostRow>('cluster');
 	let hostSortDir = $state<SortDir>('asc');
@@ -475,7 +504,7 @@
 		else { clusterSortKey = k; clusterSortDir = 'desc'; }
 	};
 
-	const si = (k: keyof ImageDetail) => () => {
+	const si = (k: ImageSortKey) => () => {
 		if (imageSortKey === k) { imageSortDir = imageSortDir === 'asc' ? 'desc' : 'asc'; }
 		else { imageSortKey = k; imageSortDir = 'desc'; }
 	};
@@ -490,7 +519,12 @@
 	);
 
 	const sortedImages = $derived(
-		[...filteredImages].sort((a, b) => cmp(a[imageSortKey], b[imageSortKey], imageSortDir))
+		[...filteredImages].sort((a, b) => {
+			if (imageSortKey === 'vulns') {
+				return cmp(vulnSortKey(a), vulnSortKey(b), imageSortDir);
+			}
+			return cmp(a[imageSortKey], b[imageSortKey], imageSortDir);
+		})
 	);
 
 	const sortedHosts = $derived(
@@ -787,13 +821,14 @@
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
-									<th class="sortable-th w-[14%] px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th w-[24%] px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="w-[14%] px-5 py-3 text-left">Digest</th>
-									<th class="w-[15%] px-5 py-3 text-left">Tags</th>
-									<th class="sortable-th w-[10%] px-5 py-3 text-right" onclick={si('cluster_count')}>Clusters <ChevronDown class="sort-icon {imageSortKey === 'cluster_count' ? 'active' : ''} {imageSortKey === 'cluster_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th w-[11%] px-5 py-3 text-right" onclick={si('container_count')}>Containers <ChevronDown class="sort-icon {imageSortKey === 'container_count' ? 'active' : ''} {imageSortKey === 'container_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th w-[12%] px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[12%] px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[22%] px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="w-[12%] px-5 py-3 text-left">Digest</th>
+									<th class="w-[12%] px-5 py-3 text-left">Tags</th>
+									<th class="sortable-th w-[12%] px-5 py-3 text-left" onclick={si('vulns')}>Vulns <ChevronDown class="sort-icon {imageSortKey === 'vulns' ? 'active' : ''} {imageSortKey === 'vulns' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[9%] px-5 py-3 text-right" onclick={si('cluster_count')}>Clusters <ChevronDown class="sort-icon {imageSortKey === 'cluster_count' ? 'active' : ''} {imageSortKey === 'cluster_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[10%] px-5 py-3 text-right" onclick={si('container_count')}>Containers <ChevronDown class="sort-icon {imageSortKey === 'container_count' ? 'active' : ''} {imageSortKey === 'container_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[11%] px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
 							<tbody class="text-[var(--text-secondary)]">
@@ -825,6 +860,26 @@
 													<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">{tag}</span>
 												{/each}
 											</div>
+										</td>
+										<td class="px-5 py-3">
+											{@const total = img.vuln_critical + img.vuln_high + img.vuln_medium + img.vuln_low + img.vuln_unknown}
+											{#if total === 0}
+												<span class="text-xs text-[var(--text-muted)]">—</span>
+											{:else}
+												<div
+													class="vuln-cell inline-flex items-center gap-1.5 font-mono tabular-nums text-xs"
+													onmouseenter={(e) => vulnTooltipFromCell(e.currentTarget as HTMLElement, img)}
+													onmouseleave={hideVulnTooltip}
+												>
+													<span class={img.vuln_critical > 0 ? 'text-red-400 font-semibold' : 'text-[var(--text-muted)]'}>{img.vuln_critical}</span>
+													<span class="text-[var(--text-muted)]">·</span>
+													<span class={img.vuln_high > 0 ? 'text-orange-400 font-semibold' : 'text-[var(--text-muted)]'}>{img.vuln_high}</span>
+													<span class="text-[var(--text-muted)]">·</span>
+													<span class={img.vuln_medium > 0 ? 'text-amber-400' : 'text-[var(--text-muted)]'}>{img.vuln_medium}</span>
+													<span class="text-[var(--text-muted)]">·</span>
+													<span class={img.vuln_low > 0 ? 'text-sky-400' : 'text-[var(--text-muted)]'}>{img.vuln_low}</span>
+												</div>
+											{/if}
 										</td>
 										<td class="px-5 py-3 text-right">{img.cluster_count}</td>
 										<td class="px-5 py-3 text-right font-semibold">{img.container_count}</td>
@@ -1049,6 +1104,27 @@
 	{/if}
 
 </div>
+
+<!-- Vuln tooltip. Top-level so it escapes the scroll overflow of the
+     images table; position:fixed anchored to the hovered cell. -->
+{#if vulnTooltip}
+	{@const t = vulnTooltip}
+	<div
+		class="pointer-events-none fixed z-[60] -translate-x-1/2 -translate-y-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-soft)] px-3 py-2 shadow-xl"
+		style="left: {t.x}px; top: {t.y - 8}px;"
+	>
+		<div class="mb-1 text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Vulnerabilities</div>
+		<div class="grid grid-cols-[auto_auto] gap-x-3 gap-y-0.5 font-mono text-xs tabular-nums">
+			<span class="text-red-400">Critical</span><span class="text-right text-[var(--text-bright)]">{t.img.vuln_critical}</span>
+			<span class="text-orange-400">High</span><span class="text-right text-[var(--text-bright)]">{t.img.vuln_high}</span>
+			<span class="text-amber-400">Medium</span><span class="text-right text-[var(--text-bright)]">{t.img.vuln_medium}</span>
+			<span class="text-sky-400">Low</span><span class="text-right text-[var(--text-bright)]">{t.img.vuln_low}</span>
+			{#if t.img.vuln_unknown > 0}
+				<span class="text-[var(--text-secondary)]">Unknown</span><span class="text-right text-[var(--text-bright)]">{t.img.vuln_unknown}</span>
+			{/if}
+		</div>
+	</div>
+{/if}
 
 <style>
 	.sortable-th {
