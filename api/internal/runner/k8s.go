@@ -309,7 +309,10 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 		return existing.Name, namespace, nil
 	}
 
-	// If the K8s job has failed, delete it and create a new one
+	// If the K8s job has failed, delete it and create a new one. Deletion is
+	// asynchronous — the API server may return before the object is gone —
+	// so poll Create until AlreadyExists stops firing or the context expires
+	// instead of sleeping a fixed 2s.
 	if existing.Status.Failed > 0 {
 		log.Printf("replacing failed k8s job: job=%s/%s failed=%d", namespace, jobName, existing.Status.Failed)
 		propagationPolicy := metav1.DeletePropagationBackground
@@ -319,13 +322,22 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 			return "", "", fmt.Errorf("failed to delete old job: %w", delErr)
 		}
 
-		// Brief wait for deletion to propagate, then retry creation
-		time.Sleep(2 * time.Second)
-		retried, retryErr := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{})
-		if retryErr != nil {
-			return "", "", fmt.Errorf("failed to recreate job after deletion: %w", retryErr)
+		retryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		for {
+			retried, retryErr := k.clientset.BatchV1().Jobs(namespace).Create(retryCtx, job, metav1.CreateOptions{})
+			if retryErr == nil {
+				return retried.Name, namespace, nil
+			}
+			if !apierrors.IsAlreadyExists(retryErr) {
+				return "", "", fmt.Errorf("failed to recreate job after deletion: %w", retryErr)
+			}
+			select {
+			case <-retryCtx.Done():
+				return "", "", fmt.Errorf("timed out waiting for old job %s/%s to be deleted", namespace, jobName)
+			case <-time.After(200 * time.Millisecond):
+			}
 		}
-		return retried.Name, namespace, nil
 	}
 
 	// Job exists but has no active/succeeded/failed pods (e.g. just created) — adopt it
