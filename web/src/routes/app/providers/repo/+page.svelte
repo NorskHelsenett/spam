@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, Server
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -436,12 +436,18 @@
 
 	// Scan functionality
 	let activeTab = $state('contributors');
-	// Promote Workloads to the default tab once workloads load with content —
-	// it's the most load-bearing view when a repo actually ships images.
-	// Don't override a user-chosen tab; only flip on the initial 'contributors'.
+	// One-shot flag: the initial "promote Workloads" flip happens at most
+	// once per page load. Without it, $effect would re-trigger every time
+	// the user clicks Contributors back, bouncing them to Workloads on
+	// every tab click.
+	let defaultTabResolved = $state(false);
 	$effect(() => {
-		if (workloadsLoaded && workloadImages.length > 0 && activeTab === 'contributors') {
-			activeTab = 'workloads';
+		if (defaultTabResolved) return;
+		if (workloadsLoaded) {
+			if (workloadImages.length > 0 && activeTab === 'contributors') {
+				activeTab = 'workloads';
+			}
+			defaultTabResolved = true;
 		}
 	});
 	let scanning = $state(false);
@@ -794,6 +800,29 @@
 					{resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
 				</span>
 				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Last activity {formatDate(details.updated_at)}</span>
+				{#if workloadImages.length > 0}
+					{@const clusterCount = new Set(workloadImages.flatMap((i) => i.clusters.map((c) => c.cluster_id))).size}
+					<button
+						type="button"
+						class="flex items-center gap-1.5 hover:text-[var(--accent)]"
+						onclick={() => (activeTab = 'workloads')}
+						title="Jump to Workloads tab"
+					>
+						<Package class="h-4 w-4" />
+						{workloadImages.length} image{workloadImages.length === 1 ? '' : 's'}
+					</button>
+					{#if clusterCount > 0}
+						<button
+							type="button"
+							class="flex items-center gap-1.5 hover:text-[var(--accent)]"
+							onclick={() => (activeTab = 'workloads')}
+							title="Jump to Workloads tab"
+						>
+							<Server class="h-4 w-4" />
+							{clusterCount} cluster{clusterCount === 1 ? '' : 's'}
+						</button>
+					{/if}
+				{/if}
 			</div>
 
 			<!-- Stats grid -->
