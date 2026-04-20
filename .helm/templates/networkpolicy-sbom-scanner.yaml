@@ -1,10 +1,10 @@
-{{- if .Values.trivyScanner.enabled }}
+{{- if .Values.sbomScanner.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-trivy-scanner
+  name: {{ .Release.Name }}-sbom-scanner
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-trivy-scanner
+    app.kubernetes.io/name: {{ .Chart.Name }}-sbom-scanner
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
     app.kubernetes.io/component: scanner
@@ -34,9 +34,9 @@ spec:
       ports:
         - protocol: TCP
           port: {{ .Values.runner.httpPort | default 8081 }}
-    # Allow HTTPS to public internet for trivy DB download (ghcr.io).
-    # All RFC 1918 private ranges are BLOCKED — the scanner cannot
-    # reach any internal cluster services, databases, or other pods
+    # Allow HTTPS to public internet for scanner DB download (ghcr.io,
+    # anchore.io). All RFC 1918 private ranges are BLOCKED — the scanner
+    # cannot reach any internal cluster services, databases, or other pods
     # outside of the worker.
     - to:
         - ipBlock:
@@ -48,7 +48,7 @@ spec:
       ports:
         - protocol: TCP
           port: 443
-    {{- with .Values.networkPolicy.trivyScanner.additionalEgressRules }}
+    {{- with .Values.networkPolicy.sbomScanner.additionalEgressRules }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 {{- end }}

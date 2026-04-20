@@ -728,11 +728,11 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 		Spec: cronJob.Spec.JobTemplate.Spec,
 	}
 	job.Spec.TTLSecondsAfterFinished = &ttlSecondsAfterFinished
-	// Ensure pod template has the trivy-scanner component label so the network policy applies.
+	// Ensure pod template has the sbom-scanner component label so the network policy applies.
 	if job.Spec.Template.Labels == nil {
 		job.Spec.Template.Labels = make(map[string]string)
 	}
-	job.Spec.Template.Labels["app.kubernetes.io/component"] = "trivy-scanner"
+	job.Spec.Template.Labels["app.kubernetes.io/component"] = "sbom-scanner"
 
 	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create job: %w", err)

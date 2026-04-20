@@ -11,7 +11,7 @@ import (
 
 // ScannerVersion stores the reported tool versions for a scanner component.
 type ScannerVersion struct {
-	Source    string          `gorm:"primaryKey;size:64" json:"source"` // e.g. "runner", "trivy-scanner"
+	Source    string          `gorm:"primaryKey;size:64" json:"source"` // e.g. "runner", "sbom-scanner"
 	Versions json.RawMessage `gorm:"type:jsonb;not null" json:"versions"`
 	UpdatedAt time.Time      `json:"updated_at"`
 }

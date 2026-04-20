@@ -121,7 +121,7 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 }
 
 // AdminTrivyScanHandler enqueues a TRIVY_ADHOC_SCAN job.
-// The worker picks it up and creates a K8s Job from the trivy-scanner CronJob.
+// The worker picks it up and creates a K8s Job from the sbom-scanner CronJob.
 // Returns 409 if a job is already active.
 //
 // POST /api/admin/trivy/scan

@@ -8,7 +8,7 @@ echo "git:          $(git --version 2>/dev/null || echo 'not found')"
 echo "syft:         $(syft version 2>/dev/null | head -1 || echo 'not found')"
 echo "trivy:        $(trivy --version 2>/dev/null | head -1 || echo 'not found')"
 echo "betterleaks:  $(betterleaks --version 2>/dev/null | head -1 || echo 'not found')"
-echo "trivy-scanner: $(trivy-scanner --version 2>/dev/null || echo 'unknown')"
+echo "sbom-scanner: $(sbom-scanner --version 2>/dev/null || echo 'unknown')"
 echo "===================="
 
 # Required env: WORKER_URL, RUN_ID, RUN_TOKEN, REPO_CLONE_URL

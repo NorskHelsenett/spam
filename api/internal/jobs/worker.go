@@ -82,7 +82,7 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 
 // ClaimNextJobOfType is the inclusive counterpart to ClaimNextJob: it only
 // claims jobs of the given type. Used by dedicated scanner pods
-// (image-scanner, trivy-scanner) that own a specific job type end-to-end and
+// (image-scanner, sbom-scanner) that own a specific job type end-to-end and
 // should not accidentally pick up unrelated work.
 func ClaimNextJobOfType(ctx context.Context, db *gorm.DB, workerID string, now time.Time, jobType JobType) (*Job, error) {
 	var claimed *Job

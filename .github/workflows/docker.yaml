@@ -190,10 +190,10 @@ jobs:
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
 
-  build-trivy-scanner:
+  build-sbom-scanner:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.build-trivy-scanner-image.outputs.digest }}
+      digest: ${{ steps.build-sbom-scanner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
@@ -216,11 +216,11 @@ jobs:
           repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
 
-      - name: Docker Metadata action for trivy-scanner
+      - name: Docker Metadata action for sbom-scanner
         uses: docker/metadata-action@v4.3.0
-        id: trivy-scanner-meta
+        id: sbom-scanner-meta
         with:
-          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/trivy-scanner
+          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner
           tags: |
               type=ref,event=branch
               type=raw,value={{date 'YYYY.MM.DD.HHmm' tz='UTC'}}
@@ -251,7 +251,7 @@ jobs:
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/trivy-scanner" >> $GITHUB_OUTPUT
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner" >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -260,18 +260,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ env.REGISTRY_ACCESS_TOKEN }}
 
-      - name: Build and push trivy-scanner image
+      - name: Build and push sbom-scanner image
         uses: docker/build-push-action@v6
-        id: build-trivy-scanner-image
+        id: build-sbom-scanner-image
         with:
           context: ./runner
-          file: ./runner/Dockerfile.trivy-scanner
+          file: ./runner/Dockerfile.sbom-scanner
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.trivy-scanner-meta.outputs.tags }}
-          labels: ${{ steps.trivy-scanner-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/trivy-scanner:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/trivy-scanner:buildcache,mode=max
+          tags: ${{ steps.sbom-scanner-meta.outputs.tags }}
+          labels: ${{ steps.sbom-scanner-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:buildcache,mode=max
           provenance: false
           sbom: false
           build-args: |
@@ -366,7 +366,7 @@ jobs:
 
   deploy-helm:
     runs-on: ubuntu-latest
-    needs: [build-app, build-runner, build-trivy-scanner, build-image-scanner]
+    needs: [build-app, build-runner, build-sbom-scanner, build-image-scanner]
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
@@ -460,9 +460,9 @@ jobs:
           RUNNER_DIGEST=${{ needs.build-runner.outputs.digest }}
           RUNNER_TAG="${IMAGE_TAG}@${RUNNER_DIGEST}"
           RUNNER_REPO="${{ needs.build-runner.outputs.repository }}"
-          TRIVY_SCANNER_DIGEST=${{ needs.build-trivy-scanner.outputs.digest }}
-          TRIVY_SCANNER_TAG="${IMAGE_TAG}@${TRIVY_SCANNER_DIGEST}"
-          TRIVY_SCANNER_REPO="${{ needs.build-trivy-scanner.outputs.repository }}"
+          SBOM_SCANNER_DIGEST=${{ needs.build-sbom-scanner.outputs.digest }}
+          SBOM_SCANNER_TAG="${IMAGE_TAG}@${SBOM_SCANNER_DIGEST}"
+          SBOM_SCANNER_REPO="${{ needs.build-sbom-scanner.outputs.repository }}"
           IMAGE_SCANNER_DIGEST=${{ needs.build-image-scanner.outputs.digest }}
           IMAGE_SCANNER_TAG="${IMAGE_TAG}@${IMAGE_SCANNER_DIGEST}"
           IMAGE_SCANNER_REPO="${{ needs.build-image-scanner.outputs.repository }}"
@@ -471,8 +471,8 @@ jobs:
           echo "Injecting app tag with digest: $APP_TAG"
           echo "Injecting runner repository: $RUNNER_REPO"
           echo "Injecting runner tag with digest: $RUNNER_TAG"
-          echo "Injecting trivy-scanner repository: $TRIVY_SCANNER_REPO"
-          echo "Injecting trivy-scanner tag with digest: $TRIVY_SCANNER_TAG"
+          echo "Injecting sbom-scanner repository: $SBOM_SCANNER_REPO"
+          echo "Injecting sbom-scanner tag with digest: $SBOM_SCANNER_TAG"
           echo "Injecting image-scanner repository: $IMAGE_SCANNER_REPO"
           echo "Injecting image-scanner tag with digest: $IMAGE_SCANNER_TAG"
 
@@ -483,8 +483,8 @@ jobs:
           app_repo = "${APP_REPO}"
           runner_tag = "${RUNNER_TAG}"
           runner_repo = "${RUNNER_REPO}"
-          trivy_scanner_tag = "${TRIVY_SCANNER_TAG}"
-          trivy_scanner_repo = "${TRIVY_SCANNER_REPO}"
+          sbom_scanner_tag = "${SBOM_SCANNER_TAG}"
+          sbom_scanner_repo = "${SBOM_SCANNER_REPO}"
           image_scanner_tag = "${IMAGE_SCANNER_TAG}"
           image_scanner_repo = "${IMAGE_SCANNER_REPO}"
           path = pathlib.Path(".helm/values.yaml")
@@ -493,8 +493,8 @@ jobs:
           in_image_section = False
           in_runner_section = False
           in_runner_image_section = False
-          in_trivy_scanner_section = False
-          in_trivy_scanner_image_section = False
+          in_sbom_scanner_section = False
+          in_sbom_scanner_image_section = False
           in_image_scanner_section = False
           in_image_scanner_image_section = False
           for idx, line in enumerate(lines):
@@ -505,8 +505,8 @@ jobs:
                   in_image_section = True
                   in_runner_section = False
                   in_runner_image_section = False
-                  in_trivy_scanner_section = False
-                  in_trivy_scanner_image_section = False
+                  in_sbom_scanner_section = False
+                  in_sbom_scanner_image_section = False
                   in_image_scanner_section = False
                   in_image_scanner_image_section = False
                   continue
@@ -515,15 +515,15 @@ jobs:
               if line.startswith("runner:") and not line.startswith((" ", "\t")):
                   in_runner_section = True
                   in_image_section = False
-                  in_trivy_scanner_section = False
-                  in_trivy_scanner_image_section = False
+                  in_sbom_scanner_section = False
+                  in_sbom_scanner_image_section = False
                   in_image_scanner_section = False
                   in_image_scanner_image_section = False
                   continue
 
-              # Detect if we're in the trivyScanner section
-              if line.startswith("trivyScanner:") and not line.startswith((" ", "\t")):
-                  in_trivy_scanner_section = True
+              # Detect if we're in the sbomScanner section
+              if line.startswith("sbomScanner:") and not line.startswith((" ", "\t")):
+                  in_sbom_scanner_section = True
                   in_image_section = False
                   in_runner_section = False
                   in_runner_image_section = False
@@ -537,8 +537,8 @@ jobs:
                   in_image_section = False
                   in_runner_section = False
                   in_runner_image_section = False
-                  in_trivy_scanner_section = False
-                  in_trivy_scanner_image_section = False
+                  in_sbom_scanner_section = False
+                  in_sbom_scanner_image_section = False
                   continue
 
               # Detect runner.image subsection
@@ -546,9 +546,9 @@ jobs:
                   in_runner_image_section = True
                   continue
 
-              # Detect trivyScanner.image subsection
-              if in_trivy_scanner_section and stripped.startswith("image:") and line.startswith(" "):
-                  in_trivy_scanner_image_section = True
+              # Detect sbomScanner.image subsection
+              if in_sbom_scanner_section and stripped.startswith("image:") and line.startswith(" "):
+                  in_sbom_scanner_image_section = True
                   continue
 
               # Detect imageScanner.image subsection
@@ -565,10 +565,10 @@ jobs:
                   in_runner_section = False
                   in_runner_image_section = False
 
-              # Exit trivyScanner section when we hit another top-level key
-              if in_trivy_scanner_section and stripped and not line.startswith((" ", "\t")):
-                  in_trivy_scanner_section = False
-                  in_trivy_scanner_image_section = False
+              # Exit sbomScanner section when we hit another top-level key
+              if in_sbom_scanner_section and stripped and not line.startswith((" ", "\t")):
+                  in_sbom_scanner_section = False
+                  in_sbom_scanner_image_section = False
 
               # Exit imageScanner section when we hit another top-level key
               if in_image_scanner_section and stripped and not line.startswith((" ", "\t")):
@@ -579,9 +579,9 @@ jobs:
               if in_runner_image_section and stripped and len(line) - len(stripped) < 4:
                   in_runner_image_section = False
 
-              # Exit trivyScanner.image section when indentation decreases
-              if in_trivy_scanner_image_section and stripped and len(line) - len(stripped) < 4:
-                  in_trivy_scanner_image_section = False
+              # Exit sbomScanner.image section when indentation decreases
+              if in_sbom_scanner_image_section and stripped and len(line) - len(stripped) < 4:
+                  in_sbom_scanner_image_section = False
 
               # Exit imageScanner.image section when indentation decreases
               if in_image_scanner_image_section and stripped and len(line) - len(stripped) < 4:
@@ -605,14 +605,14 @@ jobs:
                       indent = line[:len(line) - len(stripped)]
                       lines[idx] = f'{indent}tag: "{runner_tag}"'
 
-              # Update repository and tag within trivyScanner.image section
-              if in_trivy_scanner_image_section:
+              # Update repository and tag within sbomScanner.image section
+              if in_sbom_scanner_image_section:
                   if stripped.startswith("repository:"):
                       indent = line[:len(line) - len(stripped)]
-                      lines[idx] = f'{indent}repository: {trivy_scanner_repo}'
+                      lines[idx] = f'{indent}repository: {sbom_scanner_repo}'
                   elif stripped.startswith("tag:"):
                       indent = line[:len(line) - len(stripped)]
-                      lines[idx] = f'{indent}tag: "{trivy_scanner_tag}"'
+                      lines[idx] = f'{indent}tag: "{sbom_scanner_tag}"'
 
               # Update repository and tag within imageScanner.image section
               if in_image_scanner_image_section:

@@ -25,7 +25,7 @@ spec:
           labels:
             app.kubernetes.io/name: {{ .Chart.Name }}-image-scanner
             app.kubernetes.io/instance: {{ .Release.Name }}
-            # Distinct component label so the trivy-scanner NetworkPolicy
+            # Distinct component label so the sbom-scanner NetworkPolicy
             # (which matches component=scanner) does not also apply here.
             # The image-scanner NetworkPolicy matches this label exactly.
             app.kubernetes.io/component: image-scanner

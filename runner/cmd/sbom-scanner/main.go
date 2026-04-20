@@ -1,4 +1,7 @@
-// trivy-scanner loops through unscanned SBOMs and uploads Trivy results.
+// sbom-scanner loops through unscanned SBOMs and uploads vulnerability
+// results. Today the only tool wired in is trivy; grype support is planned
+// and will be selected at runtime via SBOM_SCANNER once the backend
+// ingest can parse grype output.
 //
 // Environment variables:
 //
@@ -34,7 +37,7 @@ type toolVersion struct {
 
 func main() {
 	if err := run(); err != nil {
-		log.Fatalf("trivy-scanner: %v", err)
+		log.Fatalf("sbom-scanner: %v", err)
 	}
 }
 
@@ -403,7 +406,7 @@ func reportToolVersion(apiURL string, hmacKey []byte) {
 	log.Printf("Tool: trivy | %s | %s", version, digest)
 
 	payload, _ := json.Marshal(map[string]interface{}{
-		"source": "trivy-scanner",
+		"source": "sbom-scanner",
 		"versions": []toolVersion{
 			{Name: "trivy", Version: version, BinaryDigest: digest},
 		},

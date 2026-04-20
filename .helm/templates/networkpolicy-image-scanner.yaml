@@ -11,7 +11,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
 spec:
   # Match only image-scanner pods (distinct component label keeps this
-  # policy and the trivy-scanner policy from cross-matching).
+  # policy and the sbom-scanner policy from cross-matching).
   podSelector:
     matchLabels:
       app.kubernetes.io/component: image-scanner
