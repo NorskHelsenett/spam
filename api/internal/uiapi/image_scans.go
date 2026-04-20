@@ -28,6 +28,7 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 	LockedAt   *time.Time
 	FinishedAt *time.Time
 	K8sJobName string `gorm:"column:k8s_job_name"`
+	Result     []byte
 }, runID string) {
 	var payload jobs.ImageScanPayload
 	if len(job.Payload) > 0 {
@@ -48,6 +49,18 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		ImageDigest:     payload.Digest,
 		ImageDigestID:   payload.ImageDigestID,
 		ImageScanners:   payload.Scanners,
+	}
+
+	// Surface per-category scanner failures recorded on the job so the UI
+	// can flag runs where SBOM/vuln/etc. silently skipped even though the
+	// overall status is SUCCEEDED.
+	if len(job.Result) > 0 {
+		var rm struct {
+			PartialFailures map[string]string `json:"partial_failures"`
+		}
+		if err := json.Unmarshal(job.Result, &rm); err == nil && len(rm.PartialFailures) > 0 {
+			response.PartialFailures = rm.PartialFailures
+		}
 	}
 
 	// Artifact summaries. Content is served on demand via
@@ -486,6 +499,195 @@ func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{"images": rows})
+	}
+}
+
+// RepoWorkloadsHandler returns the live "where is this repo running"
+// view for /app/providers/repo's Workloads tab. For every image_digests
+// row whose source_repo_id points at this repo we attach the clusters +
+// per-namespace workloads currently running that digest, aggregated from
+// cluster_record. Empty `images` means no OCI image.source label on any
+// built image has matched a known repo — the UI uses that signal to show
+// the onboarding guide for the OCI label stack.
+//
+// `vms` is always [] today; reserved for when agents start shipping VM
+// records. Keeping it in the response shape now means the UI doesn't
+// need a breaking change later.
+//
+// GET /api/repos/{repo_id}/workloads
+func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		repoID := r.PathValue("repo_id")
+		if repoID == "" {
+			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+
+		type imageHeader struct {
+			ID         string     `gorm:"column:id"`
+			Registry   string     `gorm:"column:registry"`
+			Repository string     `gorm:"column:repository"`
+			Digest     string     `gorm:"column:digest"`
+			CreatedAt  time.Time  `gorm:"column:created_at"`
+			LatestScan *time.Time `gorm:"column:latest_scan_at"`
+			VulnCount  int        `gorm:"column:vuln_count"`
+			HasSBOM    bool       `gorm:"column:has_sbom"`
+			SBOMID     string     `gorm:"column:sbom_id"`
+		}
+		var headers []imageHeader
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
+			       (SELECT MAX(finished_at) FROM jobs j
+			          WHERE j.type = 'IMAGE_SCAN'
+			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
+			          WHERE f.image_digest_id = id.id), 0) AS vuln_count,
+			       EXISTS (SELECT 1 FROM sbom_bindings b
+			          WHERE b.asset_type = 'IMAGE_DIGEST'
+			            AND b.asset_ref_id = id.id) AS has_sbom,
+			       COALESCE((SELECT b.sbom_id FROM sbom_bindings b
+			          WHERE b.asset_type = 'IMAGE_DIGEST'
+			            AND b.asset_ref_id = id.id
+			          LIMIT 1), '') AS sbom_id
+			FROM image_digests id
+			WHERE id.source_repo_id = ?
+			ORDER BY id.created_at DESC
+		`, repoID).Scan(&headers).Error; err != nil {
+			log.Printf("repo workloads handler (images): %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Per-image cluster / namespace / owner aggregation, pulled in a
+		// single grouped query so the UI doesn't fan out N requests. Joined
+		// back in Go to avoid a JSONB build in SQL that'd be awkward under
+		// cluster_record's loose schema.
+		type workloadRow struct {
+			Digest    string `gorm:"column:digest"`
+			ClusterID string `gorm:"column:cluster_id"`
+			Cluster   string `gorm:"column:cluster"`
+			Namespace string `gorm:"column:namespace"`
+			Owner     string `gorm:"column:owner"`
+			OwnerKind string `gorm:"column:owner_kind"`
+			Pods      int    `gorm:"column:pods"`
+		}
+		type WorkloadJSON struct {
+			Namespace string `json:"namespace"`
+			Owner     string `json:"owner"`
+			OwnerKind string `json:"owner_kind"`
+			Pods      int    `json:"pods"`
+		}
+		type ClusterJSON struct {
+			ClusterID string         `json:"cluster_id"`
+			Cluster   string         `json:"cluster"`
+			Workloads []WorkloadJSON `json:"workloads"`
+		}
+		type ImageJSON struct {
+			ID         string        `json:"id"`
+			Registry   string        `json:"registry"`
+			Repository string        `json:"repository"`
+			Digest     string        `json:"digest"`
+			CreatedAt  time.Time     `json:"created_at"`
+			LatestScan *time.Time    `json:"latest_scan_at,omitempty"`
+			VulnCount  int           `json:"vuln_count"`
+			HasSBOM    bool          `json:"has_sbom"`
+			SBOMID     string        `json:"sbom_id,omitempty"`
+			Clusters   []ClusterJSON `json:"clusters"`
+		}
+
+		resp := struct {
+			Images []ImageJSON `json:"images"`
+			VMs    []any       `json:"vms"`
+		}{
+			Images: make([]ImageJSON, 0, len(headers)),
+			VMs:    []any{},
+		}
+
+		if len(headers) == 0 {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+
+		digests := make([]string, 0, len(headers))
+		for _, h := range headers {
+			digests = append(digests, h.Digest)
+		}
+
+		var wlRows []workloadRow
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT data->>'digest'     AS digest,
+			       data->>'cluster_id' AS cluster_id,
+			       COALESCE(data->>'cluster','')     AS cluster,
+			       COALESCE(data->>'namespace','')   AS namespace,
+			       COALESCE(data->>'owner','')       AS owner,
+			       COALESCE(data->>'owner_kind','')  AS owner_kind,
+			       COUNT(DISTINCT data->>'pod_uid')  AS pods
+			FROM cluster_record
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'msg' != 'DELETE'
+			  AND data->>'pod_phase' = 'Running'
+			  AND data->>'digest' IN ?
+			GROUP BY 1, 2, 3, 4, 5, 6
+			ORDER BY cluster, namespace, owner
+		`, digests).Scan(&wlRows).Error; err != nil {
+			log.Printf("repo workloads handler (cluster usage): %v", err)
+			// Non-fatal — fall through with empty clusters[] so the list
+			// still shows the images themselves.
+		}
+
+		// Group workloads by (digest, cluster_id) in one pass.
+		type clusterKey struct{ digest, clusterID string }
+		byDigest := make(map[string]map[string]*ClusterJSON, len(headers))
+		for _, h := range headers {
+			byDigest[h.Digest] = make(map[string]*ClusterJSON)
+		}
+		for _, w := range wlRows {
+			clusters, ok := byDigest[w.Digest]
+			if !ok {
+				continue
+			}
+			c, ok := clusters[w.ClusterID]
+			if !ok {
+				c = &ClusterJSON{
+					ClusterID: w.ClusterID,
+					Cluster:   w.Cluster,
+					Workloads: []WorkloadJSON{},
+				}
+				clusters[w.ClusterID] = c
+			}
+			c.Workloads = append(c.Workloads, WorkloadJSON{
+				Namespace: w.Namespace,
+				Owner:     w.Owner,
+				OwnerKind: w.OwnerKind,
+				Pods:      w.Pods,
+			})
+			_ = clusterKey{}
+		}
+
+		for _, h := range headers {
+			clustersMap := byDigest[h.Digest]
+			clusters := make([]ClusterJSON, 0, len(clustersMap))
+			for _, c := range clustersMap {
+				clusters = append(clusters, *c)
+			}
+			resp.Images = append(resp.Images, ImageJSON{
+				ID:         h.ID,
+				Registry:   h.Registry,
+				Repository: h.Repository,
+				Digest:     h.Digest,
+				CreatedAt:  h.CreatedAt,
+				LatestScan: h.LatestScan,
+				VulnCount:  h.VulnCount,
+				HasSBOM:    h.HasSBOM,
+				SBOMID:     h.SBOMID,
+				Clusters:   clusters,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 

@@ -196,6 +196,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// from it (matched via cached source_repo_id).
 				api.Get("/images/{id}", uiapi.ImageDetailHandler(db, authService))
 				api.Get("/repos/{repo_id}/images", uiapi.RepoImagesHandler(db, authService))
+				api.Get("/repos/{repo_id}/workloads", uiapi.RepoWorkloadsHandler(db, authService))
 
 				// Kubernetes integration endpoints (only available if runner is enabled)
 				if opts != nil && opts.K8sClient != nil {

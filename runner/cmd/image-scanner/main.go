@@ -111,7 +111,7 @@ func run() error {
 		scans++
 
 		scanCtx, cancel := context.WithTimeout(ctx, scanDeadline)
-		scanErr := runOne(scanCtx, apiURL, hmacKey, workDir, lease)
+		partial, scanErr := runOne(scanCtx, apiURL, hmacKey, workDir, lease)
 		cancel()
 
 		status, errMsg := "succeeded", ""
@@ -129,10 +129,12 @@ func run() error {
 				log.Printf("scan %s FAILED: %v", lease.JobID, scanErr)
 			}
 			errMsg = scanErr.Error()
+		} else if len(partial) > 0 {
+			log.Printf("scan %s succeeded with partial failures: %v", lease.JobID, partial)
 		} else {
 			log.Printf("scan %s succeeded", lease.JobID)
 		}
-		if err := postComplete(ctx, apiURL, hmacKey, lease.JobID, status, errMsg); err != nil {
+		if err := postComplete(ctx, apiURL, hmacKey, lease.JobID, status, errMsg, partial); err != nil {
 			// We don't abort the loop for completion failures — the worker's
 			// stale-job timer will eventually reclaim the job. Log and move on.
 			log.Printf("WARN: mark complete %s failed: %v", lease.JobID, err)
@@ -212,10 +214,10 @@ func fetchNext(ctx context.Context, apiURL string, hmacKey []byte) (*lease, erro
 	return &l, nil
 }
 
-func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string, l *lease) error {
+func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string, l *lease) (map[string]string, error) {
 	scanWorkDir, cleanup, err := imagescan.NewWorkDir(workBase, l.JobID)
 	if err != nil {
-		return fmt.Errorf("new work dir: %w", err)
+		return nil, fmt.Errorf("new work dir: %w", err)
 	}
 	defer cleanup()
 
@@ -227,15 +229,15 @@ func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string,
 		imagescan.StdoutLogger(),
 	)
 	if err != nil {
-		return fmt.Errorf("scan pipeline: %w", err)
+		return nil, fmt.Errorf("scan pipeline: %w", err)
 	}
 	if len(res.Artifacts) == 0 {
 		// If everything failed, surface the *first* category error so the
 		// job's error field is actionable rather than a generic "no output".
 		for cat, e := range res.Failed {
-			return fmt.Errorf("no artifacts produced; %s: %v", cat, e)
+			return nil, fmt.Errorf("no artifacts produced; %s: %v", cat, e)
 		}
-		return errors.New("no artifacts produced")
+		return nil, errors.New("no artifacts produced")
 	}
 
 	// Retry the upload for transient network / 5xx failures. Handles
@@ -251,22 +253,31 @@ func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string,
 		ImageDigestID: l.ImageDigestID,
 	}, res.Artifacts, 3, func(line string) { log.Println(line) })
 	if err != nil {
-		return fmt.Errorf("upload: %w", err)
+		return nil, fmt.Errorf("upload: %w", err)
 	}
 	log.Printf("uploaded %d artifact(s) for job %s", sent, l.JobID)
 
+	// Collect per-category failures so the server can record them on the
+	// job — otherwise the scan looks fully successful in the DB even when
+	// syft or grype silently crashed, and the rescan sweep has no signal
+	// to re-enqueue it. Empty map == clean run.
+	var partial map[string]string
 	if len(res.Failed) > 0 {
-		// Partial success — log warnings but don't fail the job. Artifacts
-		// that did upload are still useful downstream.
+		partial = make(map[string]string, len(res.Failed))
 		for cat, e := range res.Failed {
+			partial[string(cat)] = e.Error()
 			log.Printf("WARN: %s: %v", cat, e)
 		}
 	}
-	return nil
+	return partial, nil
 }
 
-func postComplete(ctx context.Context, apiURL string, hmacKey []byte, jobID, status, errMsg string) error {
-	body, err := json.Marshal(map[string]string{"status": status, "error": errMsg})
+func postComplete(ctx context.Context, apiURL string, hmacKey []byte, jobID, status, errMsg string, partialFailures map[string]string) error {
+	payload := map[string]any{"status": status, "error": errMsg}
+	if len(partialFailures) > 0 {
+		payload["partial_failures"] = partialFailures
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}

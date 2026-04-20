@@ -50,6 +50,13 @@ type RunResponse struct {
 	ImageScanners   map[string]string       `json:"image_scanners,omitempty"`
 	ImageVulnCounts *ImageVulnSeverityCount `json:"image_vuln_counts,omitempty"`
 
+	// PartialFailures maps a scan category ("sbom","vuln","secrets",…) to the
+	// scanner error text when that category exited non-zero during an
+	// otherwise-successful run. Present only on IMAGE_SCAN rows where some
+	// categories failed; absent means clean run or categories simply weren't
+	// configured.
+	PartialFailures map[string]string `json:"partial_failures,omitempty"`
+
 	// Rich inline payloads — parsed once server-side so the detail page
 	// renders without follow-up fetches or file downloads.
 	ImageVulns          []ImageVulnListRow   `json:"image_vulns,omitempty"`
@@ -607,6 +614,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			LockedAt   *time.Time
 			FinishedAt *time.Time
 			K8sJobName string `gorm:"column:k8s_job_name"`
+			Result     []byte
 		}
 
 		if err := db.WithContext(r.Context()).Table("jobs").
