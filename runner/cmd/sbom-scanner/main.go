@@ -49,26 +49,12 @@ func run() error {
 	hmacKey := parseHMACKey(os.Getenv("RUNNER_HMAC_KEY"))
 	runStartedAt := time.Now().UTC()
 
-	cacheDir := os.Getenv("TRIVY_CACHE_DIR")
-	if cacheDir == "" {
-		cacheDir = "/trivy-cache"
-	}
-
 	// Report tool version + binary digest for auditability
 	reportToolVersion(apiURL, hmacKey)
 
-	log.Printf("downloading trivy vulnerability database …")
-	if err := trivyDownloadDB(cacheDir); err != nil {
-		return fmt.Errorf("trivy db download: %w", err)
-	}
-
-	// Warm the grype DB so the IMAGE_DIGEST branch doesn't pay the
-	// download cost on its first scan. Non-fatal if it fails — the repo
-	// branch (trivy) still works and grype will retry on-demand when it
-	// actually gets called.
 	log.Printf("downloading grype vulnerability database …")
 	if err := grypeDBUpdate(); err != nil {
-		log.Printf("WARNING: grype db update failed: %v (IMAGE_DIGEST scans may be delayed)", err)
+		return fmt.Errorf("grype db download: %w", err)
 	}
 
 	log.Printf("starting scan loop …")
@@ -87,7 +73,7 @@ func run() error {
 			assetLabel = "image:" + job.AssetRefID
 		}
 		log.Printf("scanning sbom_id=%s asset_type=%s target=%s", job.SBOMID, job.AssetType, assetLabel)
-		if err := scanSBOM(apiURL, hmacKey, cacheDir, job); err != nil {
+		if err := scanSBOM(apiURL, hmacKey, job); err != nil {
 			log.Printf("WARNING: scan failed sbom_id=%s: %v (continuing)", job.SBOMID, err)
 		}
 	}
@@ -133,7 +119,7 @@ func fetchNextJob(apiURL string, hmacKey []byte, runStartedAt time.Time) (*nextJ
 	return &job, true, nil
 }
 
-func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobResponse) error {
+func scanSBOM(apiURL string, hmacKey []byte, job *nextJobResponse) error {
 	// Create temp directory for this scan.
 	tmpDir, err := os.MkdirTemp("", "sbom-scan-*")
 	if err != nil {
@@ -143,49 +129,38 @@ func scanSBOM(apiURL string, hmacKey []byte, cacheDir string, job *nextJobRespon
 
 	// Download the SBOM content.
 	sbomPath := filepath.Join(tmpDir, "sbom.json")
-	sbomBytes, err := downloadSBOM(apiURL, hmacKey, job.SBOMID, sbomPath)
-	if err != nil {
+	if _, err := downloadSBOM(apiURL, hmacKey, job.SBOMID, sbomPath); err != nil {
 		return fmt.Errorf("download sbom: %w", err)
 	}
 
-	// Branch by asset type. IMAGE_DIGEST bindings go through grype (same
-	// Anchore toolchain as the syft-generated SBOM — zero format mismatch)
-	// and upload to the image-result endpoint. REPO_COMMIT bindings keep
-	// using trivy and the existing result path.
+	// Grype handles both paths — same tool, different upload endpoint.
+	// IMAGE_DIGEST writes image_vuln_findings; REPO_COMMIT writes
+	// trivy_scan_results (with format=grype) for the dashboard.
 	switch job.AssetType {
 	case "IMAGE_DIGEST":
 		return scanImageSBOM(apiURL, hmacKey, tmpDir, sbomPath, job)
 	default:
-		return scanRepoSBOM(apiURL, hmacKey, cacheDir, tmpDir, sbomBytes, sbomPath, job)
+		return scanRepoSBOM(apiURL, hmacKey, tmpDir, sbomPath, job)
 	}
 }
 
-func scanRepoSBOM(apiURL string, hmacKey []byte, cacheDir, tmpDir string, sbomBytes []byte, sbomPath string, job *nextJobResponse) error {
-	// Run trivy — fall back to filesystem scan when the SBOM is a leaf (0 or 1 components).
-	resultPath := filepath.Join(tmpDir, "result.json")
-	if countSBOMComponents(sbomBytes) <= 1 && job.RepoID != "" {
-		log.Printf("sbom_id=%s has ≤1 components, fetching manifests for fs scan", job.SBOMID)
-		manifestDir := filepath.Join(tmpDir, "manifests")
-		if err := fetchAndWriteManifests(apiURL, hmacKey, job.RepoID, manifestDir); err != nil {
-			log.Printf("WARNING: could not fetch manifests, falling back to sbom scan: %v", err)
-			if err := trivyScanSBOM(cacheDir, sbomPath, resultPath); err != nil {
-				return fmt.Errorf("trivy scan: %w", err)
-			}
-		} else if err := trivyScanFS(cacheDir, manifestDir, resultPath); err != nil {
-			return fmt.Errorf("trivy fs scan: %w", err)
-		}
-	} else {
-		if err := trivyScanSBOM(cacheDir, sbomPath, resultPath); err != nil {
-			return fmt.Errorf("trivy scan: %w", err)
-		}
+func scanRepoSBOM(apiURL string, hmacKey []byte, tmpDir, sbomPath string, job *nextJobResponse) error {
+	// Grype against the SBOM. Dropped the previous "fs manifest fallback"
+	// for ≤1-component SBOMs — that was trivy-specific. A hollow SBOM
+	// yields zero findings, which is the honest answer; the upstream fix
+	// is better SBOM generation, not re-scanning manifests on every tick.
+	resultPath := filepath.Join(tmpDir, "grype.json")
+	if err := grypeScanSBOM(sbomPath, resultPath); err != nil {
+		return fmt.Errorf("grype scan: %w", err)
 	}
 
-	// Upload result.
 	resultBytes, err := os.ReadFile(resultPath)
 	if err != nil {
-		return fmt.Errorf("read result: %w", err)
+		return fmt.Errorf("read grype result: %w", err)
 	}
 
+	// The /api/trivy/result endpoint dispatches on root shape (Results[]
+	// for trivy, matches[] for grype) so the legacy path name stays.
 	url := fmt.Sprintf("%s/api/trivy/result/%s?repo_id=%s", apiURL, job.SBOMID, job.RepoID)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(resultBytes))
 	if err != nil {
@@ -206,7 +181,7 @@ func scanRepoSBOM(apiURL string, hmacKey []byte, cacheDir, tmpDir string, sbomBy
 		return fmt.Errorf("upload result: status %d: %s", resp.StatusCode, body)
 	}
 
-	log.Printf("stored trivy result for sbom_id=%s repo=%s", job.SBOMID, job.RepoSlug)
+	log.Printf("stored grype result for sbom_id=%s repo=%s", job.SBOMID, job.RepoSlug)
 	return nil
 }
 
@@ -274,151 +249,9 @@ func downloadSBOM(apiURL string, hmacKey []byte, sbomID, destPath string) ([]byt
 	return data, nil
 }
 
-// countSBOMComponents returns the number of components in a CycloneDX or SPDX SBOM.
-func countSBOMComponents(data []byte) int {
-	var cdx struct {
-		Metadata struct {
-			Component struct {
-				BomRef string `json:"bom-ref"`
-				Purl   string `json:"purl"`
-			} `json:"component"`
-		} `json:"metadata"`
-		Components []struct {
-			BomRef string `json:"bom-ref"`
-			Purl   string `json:"purl"`
-		} `json:"components"`
-		Dependencies []struct {
-			Ref       string   `json:"ref"`
-			DependsOn []string `json:"dependsOn"`
-		} `json:"dependencies"`
-	}
-	if err := json.Unmarshal(data, &cdx); err == nil && cdx.Components != nil {
-		rootRef := firstNonEmpty(cdx.Metadata.Component.BomRef, cdx.Metadata.Component.Purl)
-		if rootRef == "" && isImplicitCycloneDXRoot(cdx.Components, cdx.Dependencies) {
-			rootRef = firstNonEmpty(cdx.Components[0].BomRef, cdx.Components[0].Purl)
-		}
-		count := 0
-		for _, component := range cdx.Components {
-			componentRef := firstNonEmpty(component.BomRef, component.Purl)
-			if rootRef == "" || componentRef != rootRef {
-				count++
-			}
-		}
-		return count
-	}
-	// SPDX fallback: count packages (excluding DESCRIBES relationship root)
-	var spdx struct {
-		Packages []json.RawMessage `json:"packages"`
-	}
-	if err := json.Unmarshal(data, &spdx); err == nil {
-		if len(spdx.Packages) > 0 {
-			return len(spdx.Packages) - 1
-		}
-		return 0
-	}
-	return 0
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func isImplicitCycloneDXRoot(
-	components []struct {
-		BomRef string `json:"bom-ref"`
-		Purl   string `json:"purl"`
-	},
-	dependencies []struct {
-		Ref       string   `json:"ref"`
-		DependsOn []string `json:"dependsOn"`
-	},
-) bool {
-	if len(components) != 1 || len(dependencies) != 1 {
-		return false
-	}
-	componentRef := firstNonEmpty(components[0].BomRef, components[0].Purl)
-	if componentRef == "" || dependencies[0].Ref != componentRef {
-		return false
-	}
-	return len(dependencies[0].DependsOn) == 0
-}
-
-type manifestFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-// fetchAndWriteManifests downloads the repo's manifest files from the API and
-// writes them into dir so Trivy can scan them with `trivy fs`.
-func fetchAndWriteManifests(apiURL string, hmacKey []byte, repoID, dir string) error {
-	url := apiURL + "/api/trivy/manifests/" + repoID
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	signRequest(req, nil, hmacKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
-
-	var files []manifestFile
-	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
-		return fmt.Errorf("decode manifests: %w", err)
-	}
-	if len(files) == 0 {
-		return fmt.Errorf("no manifest files available for repo %s", repoID)
-	}
-
-	for _, f := range files {
-		dest := filepath.Join(dir, f.Path)
-		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(dest, []byte(f.Content), 0644); err != nil {
-			return err
-		}
-	}
-	log.Printf("wrote %d manifest file(s) to %s", len(files), dir)
-	return nil
-}
 
 func grypeDBUpdate() error {
 	cmd := exec.Command("grype", "db", "update")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func trivyDownloadDB(cacheDir string) error {
-	cmd := exec.Command("trivy", "image", "--download-db-only", "--cache-dir", cacheDir)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func trivyScanSBOM(cacheDir, sbomPath, resultPath string) error {
-	cmd := exec.Command(
-		"trivy", "sbom", sbomPath,
-		"--skip-db-update",
-		"--skip-java-db-update",
-		"--offline-scan",
-		"--cache-dir", cacheDir,
-		"--format", "json",
-		"--output", resultPath,
-	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -436,21 +269,6 @@ func grypeScanSBOM(sbomPath, resultPath string) error {
 	defer out.Close()
 	cmd := exec.Command("grype", "sbom:"+sbomPath, "-o", "json")
 	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func trivyScanFS(cacheDir, dir, resultPath string) error {
-	cmd := exec.Command(
-		"trivy", "fs", dir,
-		"--skip-db-update",
-		"--skip-java-db-update",
-		"--offline-scan",
-		"--cache-dir", cacheDir,
-		"--format", "json",
-		"--output", resultPath,
-	)
-	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
@@ -481,20 +299,21 @@ func binaryDigest(path string) string {
 
 func reportToolVersion(apiURL string, hmacKey []byte) {
 	version := "unknown"
-	if out, err := exec.Command("trivy", "--version").Output(); err == nil {
+	if out, err := exec.Command("grype", "version", "-o", "text").Output(); err == nil {
+		// grype emits its version on the first line.
 		if idx := strings.IndexByte(string(out), '\n'); idx > 0 {
 			version = strings.TrimSpace(string(out[:idx]))
 		} else {
 			version = strings.TrimSpace(string(out))
 		}
 	}
-	digest := binaryDigest("/usr/local/bin/trivy")
-	log.Printf("Tool: trivy | %s | %s", version, digest)
+	digest := binaryDigest("/usr/local/bin/grype")
+	log.Printf("Tool: grype | %s | %s", version, digest)
 
 	payload, _ := json.Marshal(map[string]interface{}{
 		"source": "sbom-scanner",
 		"versions": []toolVersion{
-			{Name: "trivy", Version: version, BinaryDigest: digest},
+			{Name: "grype", Version: version, BinaryDigest: digest},
 		},
 	})
 

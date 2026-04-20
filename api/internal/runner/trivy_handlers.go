@@ -203,6 +203,14 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// trivyScanResultHandler ingests a scan result for a REPO_COMMIT-bound SBOM.
+// Accepts either trivy or grype JSON — format is inferred from the root
+// shape ({Results: [...]} = trivy, {matches: [...]} = grype) so the
+// scanner can switch tools without a new endpoint.
+//
+// The row is stored in trivy_scan_results with `format` recording which
+// tool produced it; advanced_search dispatches on that column when parsing
+// raw_json for full-text search.
 func trivyScanResultHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sbomID := r.PathValue("sbom_id")
@@ -222,18 +230,45 @@ func trivyScanResultHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
-		var report vulnerabilities.TrivyReport
-		if err := json.Unmarshal(body, &report); err != nil {
-			http.Error(w, "invalid trivy json: "+err.Error(), http.StatusBadRequest)
+		repoID := r.URL.Query().Get("repo_id")
+
+		// Shape-dispatch. Grype emits a top-level "matches" array; trivy
+		// emits "Results". The two formats are incompatible so we never
+		// need to parse both — pick one based on what's actually present.
+		var probe struct {
+			Matches []json.RawMessage `json:"matches"`
+			Results []json.RawMessage `json:"Results"`
+		}
+		if err := json.Unmarshal(body, &probe); err != nil {
+			http.Error(w, "invalid scan json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 
-		repoID := r.URL.Query().Get("repo_id")
-		if err := vulnerabilities.StoreScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
-			log.Printf("trivy/result: store %s: %v", sbomID, err)
-			http.Error(w, "failed to store result", http.StatusInternalServerError)
-			return
+		switch {
+		case len(probe.Matches) > 0 || (probe.Results == nil && probe.Matches != nil):
+			var report vulnerabilities.GrypeReport
+			if err := json.Unmarshal(body, &report); err != nil {
+				http.Error(w, "invalid grype json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := vulnerabilities.StoreGrypeScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
+				log.Printf("trivy/result (grype): store %s: %v", sbomID, err)
+				http.Error(w, "failed to store result", http.StatusInternalServerError)
+				return
+			}
+		default:
+			var report vulnerabilities.TrivyReport
+			if err := json.Unmarshal(body, &report); err != nil {
+				http.Error(w, "invalid trivy json: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := vulnerabilities.StoreScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
+				log.Printf("trivy/result: store %s: %v", sbomID, err)
+				http.Error(w, "failed to store result", http.StatusInternalServerError)
+				return
+			}
 		}
+
 		if _, err := vulnmetrics.Refresh(r.Context(), db, time.Now().UTC()); err != nil {
 			log.Printf("trivy/result: refresh dashboard metrics for %s: %v", sbomID, err)
 		}

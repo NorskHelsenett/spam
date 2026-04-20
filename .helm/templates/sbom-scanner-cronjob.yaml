@@ -61,13 +61,13 @@ spec:
                     secretKeyRef:
                       name: {{ .Release.Name }}-runner
                       key: RUNNER_HMAC_KEY
-                - name: TRIVY_CACHE_DIR
-                  value: /trivy-cache
+                - name: GRYPE_DB_CACHE_DIR
+                  value: /grype-cache
                 - name: TMPDIR
                   value: /tmp
               volumeMounts:
-                - name: trivy-cache
-                  mountPath: /trivy-cache
+                - name: grype-cache
+                  mountPath: /grype-cache
                 - name: tmp
                   mountPath: /tmp
                 - name: home
@@ -77,7 +77,7 @@ spec:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
           volumes:
-            - name: trivy-cache
+            - name: grype-cache
               emptyDir: {}
             - name: tmp
               emptyDir:
