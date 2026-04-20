@@ -26,6 +26,11 @@
 		containers: { name: string; image: string; tag: string; digest?: string; registry: string }[];
 		service_name?: string;
 		service_names?: string[];
+		// Transient groups aren't currently running but were observed in the
+		// last 24h (completed Jobs, CronJob-spawned pods, Failed replicas).
+		// The diagram styles their nodes muted to keep the eye on live work.
+		transient?: boolean;
+		last_seen?: string;
 	};
 	export type ChainData = {
 		host: string;
@@ -308,17 +313,18 @@
 	<!-- Pod owner groups -->
 	{#each layout.ownerGroups as og}
 
+		{@const isTransient = og.pg.transient === true}
 		{#each og.nodes as node}
 			<!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-			<g class="cursor-pointer" onclick={() => showPod(node.pg)}>
+			<g class="cursor-pointer" onclick={() => showPod(node.pg)} opacity={isTransient ? 0.45 : 1}>
 				{#if node.pg.pod_count > 0}
-					<circle cx={node.x} cy={node.y} r={SMALL_R} fill="var(--aqua)" opacity="0.15" stroke="var(--aqua)" stroke-width="1.2" />
+					<circle cx={node.x} cy={node.y} r={SMALL_R} fill={isTransient ? 'var(--bg2)' : 'var(--aqua)'} opacity={isTransient ? 0.25 : 0.15} stroke={isTransient ? 'var(--fg4)' : 'var(--aqua)'} stroke-width="1.2" stroke-dasharray={isTransient ? '3 2' : undefined} />
 					<g transform="translate({node.x - 5}, {node.y - 5})">
-						<rect x="0" y="2" width="10" height="7" rx="1" fill="none" stroke="var(--aqua)" stroke-width="1" />
-						<line x1="0" y1="5" x2="10" y2="5" stroke="var(--aqua)" stroke-width="0.7" />
+						<rect x="0" y="2" width="10" height="7" rx="1" fill="none" stroke={isTransient ? 'var(--fg4)' : 'var(--aqua)'} stroke-width="1" />
+						<line x1="0" y1="5" x2="10" y2="5" stroke={isTransient ? 'var(--fg4)' : 'var(--aqua)'} stroke-width="0.7" />
 					</g>
 					{#if node.isCollapsed}
-						<circle cx={node.x + SMALL_R - 2} cy={node.y - SMALL_R + 2} r="7" fill="var(--accent)" />
+						<circle cx={node.x + SMALL_R - 2} cy={node.y - SMALL_R + 2} r="7" fill={isTransient ? 'var(--fg4)' : 'var(--accent)'} />
 						<text x={node.x + SMALL_R - 2} y={node.y - SMALL_R + 5} text-anchor="middle" fill="var(--bg-hard)" font-size="8" font-weight="700">{node.pg.pod_count}</text>
 					{/if}
 				{:else}
@@ -330,9 +336,9 @@
 
 		<!-- Owner label below the group -->
 		{@const lastNode = og.nodes[og.nodes.length - 1]}
-		<text x={lastNode.x} y={lastNode.y + LABEL_OFFSET} text-anchor="middle" fill="var(--fg1)" font-size="9" font-weight="600">{truncate(og.owner, 22)}</text>
-		<text x={lastNode.x} y={lastNode.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8">
-			{og.ownerKind}{og.pg.containers?.length ? ` · ${og.pg.containers.map((c) => c.image.split('/').pop()).join(', ').slice(0, 28)}` : ''}
+		<text x={lastNode.x} y={lastNode.y + LABEL_OFFSET} text-anchor="middle" fill={isTransient ? 'var(--fg4)' : 'var(--fg1)'} font-size="9" font-weight="600" opacity={isTransient ? 0.75 : 1}>{truncate(og.owner, 22)}</text>
+		<text x={lastNode.x} y={lastNode.y + SUBLABEL_OFFSET} text-anchor="middle" fill="var(--fg4)" font-size="8" opacity={isTransient ? 0.75 : 1}>
+			{og.ownerKind}{isTransient ? ` · ${og.pg.phase || 'past'}` : ''}{og.pg.containers?.length ? ` · ${og.pg.containers.map((c) => c.image.split('/').pop()).join(', ').slice(0, 28)}` : ''}
 		</text>
 	{/each}
 

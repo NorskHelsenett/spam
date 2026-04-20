@@ -705,6 +705,13 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Phase        string           `json:"phase"`
 			Containers   []chainContainer `json:"containers"`
 			ServiceNames []string         `json:"service_names"`
+			// Transient marks pod groups that aren't currently Running but
+			// have been observed in the cluster recently (e.g. CronJob-spawned
+			// pods that finished, failed, or were evicted). UI renders these
+			// muted so operators see the recent-but-ephemeral workloads
+			// without losing focus on what's live.
+			Transient bool      `json:"transient,omitempty"`
+			LastSeen  time.Time `json:"last_seen,omitempty"`
 		}
 		type chainSvc struct {
 			Name        string            `json:"name"`
@@ -774,6 +781,67 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 						}
 					}
 				}
+			}
+			c.Pods = append(c.Pods, pg)
+		}
+
+		// Step 3b: Transient pod groups — non-Running container observations
+		// from the last 24h. Excludes owners we already rendered above (the
+		// Running row is authoritative) so we don't double-list a deployment
+		// that happens to have one crashed pod alongside healthy ones.
+		type transientPodRow struct {
+			Namespace      string    `gorm:"column:namespace"`
+			Owner          string    `gorm:"column:owner"`
+			OwnerKind      string    `gorm:"column:owner_kind"`
+			PodCount       int64     `gorm:"column:pod_count"`
+			Phase          string    `gorm:"column:phase"`
+			ContainersJSON string    `gorm:"column:containers_json"`
+			LastSeen       time.Time `gorm:"column:last_seen"`
+		}
+		var transientPods []transientPodRow
+		db.Raw(`
+			SELECT
+				data->>'namespace' AS namespace,
+				data->>'owner' AS owner,
+				data->>'owner_kind' AS owner_kind,
+				COUNT(DISTINCT data->>'pod_uid') AS pod_count,
+				(array_agg(data->>'pod_phase' ORDER BY received_at DESC))[1] AS phase,
+				jsonb_agg(DISTINCT jsonb_build_object(
+					'name', data->>'container',
+					'image', data->>'image',
+					'tag', data->>'tag',
+					'digest', data->>'digest',
+					'registry', data->>'registry'
+				)) AS containers_json,
+				MAX(received_at) AS last_seen
+			FROM cluster_record
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'msg' != 'DELETE'
+			  AND (data->>'pod_phase' IS NULL OR data->>'pod_phase' != 'Running')
+			  AND data->>'cluster_id' = ?
+			  AND received_at >= NOW() - INTERVAL '24 hours'
+			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
+			ORDER BY data->>'namespace', data->>'owner'
+		`, clusterID).Scan(&transientPods)
+
+		// De-dupe against the Running set — an owner that already appears in
+		// pg (Running) shouldn't also render as transient.
+		liveKeys := make(map[string]struct{}, len(pods))
+		for _, p := range pods {
+			liveKeys[p.Namespace+"/"+p.Owner+"/"+p.OwnerKind] = struct{}{}
+		}
+		for _, pod := range transientPods {
+			if _, dup := liveKeys[pod.Namespace+"/"+pod.Owner+"/"+pod.OwnerKind]; dup {
+				continue
+			}
+			c := getOrCreate(pod.Namespace)
+			pg := chainPodGroup{
+				Owner: pod.Owner, OwnerKind: pod.OwnerKind,
+				PodCount: pod.PodCount, Phase: pod.Phase,
+				Transient: true, LastSeen: pod.LastSeen,
+			}
+			if pod.ContainersJSON != "" {
+				_ = json.Unmarshal([]byte(pod.ContainersJSON), &pg.Containers)
 			}
 			c.Pods = append(c.Pods, pg)
 		}
