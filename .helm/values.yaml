@@ -411,16 +411,33 @@ sbomScanner:
       cpu: "1"
       memory: 1Gi
 
-# Image scanner CronJob configuration
-# Leases IMAGE_SCAN jobs from the worker queue and scans container image
-# digests with grype / syft / cosign / crane / betterleaks (trivy is opt-in
-# per category via the job payload). CronJob-driven so the grype DB is
-# warmed once per tick and kept hot across all scans in that run.
+# Image scanner configuration
+# Scans container-image digests with grype / syft / cosign / crane /
+# betterleaks (trivy opt-in per category via the job payload). Pod
+# lifecycle is driven by the worker's scanner-operator loop — the
+# CronJob below serves only as a pod-template source and is suspended.
 imageScanner:
   enabled: false
-  schedule: "0 */6 * * *"       # every 6 hours
-  parallelism: 2                # concurrent scanner pods per tick
-  activeDeadlineSeconds: 10800  # 3h max per pod
+  activeDeadlineSeconds: 10800  # 3h hard cap per pod
+
+  # Scanner operator — the worker-side controller that decides how many
+  # scanner pods exist at any moment. See api/internal/imagescan/operator.go.
+  operator:
+    # Upper bound on concurrent scanner pods. The operator scales up to
+    # this when the queue warrants; individual pods linger after draining
+    # (see lingerIdleMax below) so short bursts amortise one DB download.
+    maxParallelism: 2
+    # Time the operator waits between creating individual pods on a
+    # large backlog — rate-limits k8s API calls. Short is fine.
+    spawnSpacingSeconds: 2
+    # How long a scanner pod keeps polling an empty queue before it
+    # exits (Go duration: 30m / 45m / 2h). Active scans reset the timer.
+    # Longer = more DB-download amortisation, more idle resource; shorter
+    # = faster resource release, more DB-download cost. 30m is a sane
+    # middle for bursty arrival patterns.
+    lingerIdleMax: 30m
+    # Poll cadence while lingering on an empty queue.
+    pollInterval: 15s
 
   # Dedicated image-scanner image (built from runner/Dockerfile.image-scanner).
   # Contains grype/syft/cosign/crane/betterleaks + trivy; no git.
@@ -432,44 +449,6 @@ imageScanner:
   # Per-scan deadline enforced by the scanner binary itself (protects
   # against a single pathological image hanging the whole tick).
   scanDeadlineSeconds: 900
-
-  # On-demand burst behaviour. The worker checks the IMAGE_SCAN queue
-  # every 5 minutes and spawns an adhoc scanner pod (cloned from this
-  # CronJob's pod template) when there's work. Reduces latency from
-  # "digest inserted" to "scan starts" from up-to-$schedule down to
-  # at-most-5min, without changing the scheduled tick behaviour.
-  #
-  # Two cadences are at play and they are independent:
-  #
-  #   1. Check interval (hard-coded 5 min). Every 5 min the worker
-  #      enqueues missing digests AND considers spawning a scanner pod.
-  #      A tick is a no-op if the cooldown hasn't cleared yet.
-  #
-  #   2. Burst cooldown (minGapSinceCompletionSeconds, default 30 min).
-  #      The minimum gap between the END of a prior burst and the
-  #      START of the next. Prevents a pathological loop where a
-  #      scanner drains the queue, a single new digest arrives seconds
-  #      later, and we immediately spawn another pod (paying ~60s of
-  #      grype-DB download) to scan that one digest.
-  #
-  # Put together: the worker CHECKS every 5 min, but SPAWNS at most
-  # every 30 min (plus any time the currently-running pod takes). If
-  # the cooldown isn't satisfied yet, the 5-min tick is a no-op.
-  #
-  # Worst-case latency from "digest inserted" to "scan starts":
-  #   - no recent burst:         up to 5 min   (next reconciler tick)
-  #   - a burst is still active: 0             (its pod picks up the new digest)
-  #   - burst finished recently: up to 30 min  (cooldown)
-  #
-  # The scheduled CronJob (imageScanner.schedule) is a belt-and-braces
-  # fallback that runs independently of the burst cooldown; it pays
-  # no DB-download cost on empty queues because the scanner probes
-  # /api/image-scans/pending before deciding to download.
-  burst:
-    # Cooldown in seconds. Set to 0 to disable entirely (every 5-min
-    # tick spawns a pod if there's work — highest latency wins, but
-    # highest DB-download cost too).
-    minGapSinceCompletionSeconds: 1800  # 30 minutes
 
   # Extra env forwarded to each scan subprocess. Typical keys:
   #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE

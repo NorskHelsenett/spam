@@ -112,6 +112,14 @@ spec:
             - name: POSTGRES_SSLMODE
               value: {{ .Values.postgresqlConnection.sslmode | quote }}
             {{- end }}
+            # Tracking metadata so dynamically-created run/scanner Jobs
+            # carry ArgoCD + helm labels and appear as part of this
+            # Application instead of as orphans. Read by the Go config
+            # and stamped onto every Job the worker spawns.
+            - name: SPAM_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: SPAM_CHART_NAME
+              value: "{{ .Chart.Name }}-{{ .Chart.Version }}"
             {{- if .Values.sbomScanner.enabled }}
             - name: TRIVY_SCANNER_CRONJOB_NAME
               value: "{{ .Release.Name }}-sbom-scanner"
@@ -119,13 +127,16 @@ spec:
             {{- if .Values.imageScanner.enabled }}
             - name: IMAGE_SCAN_ENABLED
               value: "true"
-            # The worker's burst trigger clones this CronJob's pod template
-            # to spawn on-demand scanner pods when the queue has work.
+            # The scanner-operator loop in the worker clones this CronJob's
+            # pod template to spawn scanner pods on demand. The CronJob
+            # itself is suspended — schedule exists only to satisfy k8s.
             - name: IMAGE_SCAN_CRONJOB_NAME
               value: "{{ .Release.Name }}-image-scanner"
-            {{- with .Values.imageScanner.burst }}
-            - name: IMAGE_SCAN_BURST_MIN_GAP_SECONDS
-              value: {{ .minGapSinceCompletionSeconds | default 1800 | quote }}
+            {{- with .Values.imageScanner.operator }}
+            - name: IMAGE_SCAN_MAX_PARALLELISM
+              value: {{ .maxParallelism | default 2 | quote }}
+            - name: IMAGE_SCAN_SPAWN_SPACING_SECONDS
+              value: {{ .spawnSpacingSeconds | default 2 | quote }}
             {{- end }}
             {{- end }}
             {{- if .Values.runner.enabled }}

@@ -143,6 +143,7 @@ func run() error {
 			&assets.ImageDigest{},
 			&imagescan.ImageScanRun{}, &imagescan.ImageScanArtifact{},
 			&imagescan.ImageVulnFinding{},
+			&imagescan.ScannerControllerLease{},
 		); err != nil {
 			return fmt.Errorf("migrate runner tables: %w", err)
 		}
@@ -216,11 +217,7 @@ func run() error {
 	// failures. After reconciling it asks the burst trigger to spawn an
 	// adhoc scanner pod (subject to cooldown) so work doesn't sit until
 	// the next scheduled CronJob tick. No-op when image scanning is off.
-	var burstTrigger imagescan.BurstTrigger
-	if executor, ok := runExecutor.(imagescan.BurstTrigger); ok {
-		burstTrigger = executor
-	}
-	imageScanReconciler := imagescan.NewReconciler(gormDB, burstTrigger)
+	imageScanReconciler := imagescan.NewReconciler(gormDB, nil)
 	var imageScanTicker *time.Ticker
 	if imageScanReconciler.Enabled() {
 		// One-shot backfill: populate source_repo_id on image_digests
@@ -233,14 +230,11 @@ func run() error {
 		}
 
 		// Run once on startup so a pod restart clears any backlog
-		// immediately instead of waiting 5 minutes.
+		// immediately instead of waiting for the reconciler tick.
 		if n, err := imageScanReconciler.Run(ctx); err != nil {
 			log.Printf("image scan reconciler (startup): %v", err)
 		} else if n > 0 {
 			log.Printf("image scan reconciler: enqueued %d digest(s) on startup", n)
-		}
-		if err := imageScanReconciler.MaybeBurst(ctx); err != nil {
-			log.Printf("image scan burst (startup): %v", err)
 		}
 		imageScanTicker = time.NewTicker(imagescan.ReconcilerInterval)
 		defer imageScanTicker.Stop()
@@ -249,6 +243,29 @@ func run() error {
 	var imageScanTick <-chan time.Time
 	if imageScanTicker != nil {
 		imageScanTick = imageScanTicker.C
+	}
+
+	// Scanner operator — controller that reconciles running scanner pods
+	// against queue depth. Replaces the previous burst-trigger + cooldown +
+	// scheduled CronJob hacks with one observe/decide/act loop.
+	var scannerOperator *imagescan.Operator
+	var scannerOpTicker *time.Ticker
+	var scannerOpTick <-chan time.Time
+	if runExecutor != nil {
+		if podCtrl, ok := runExecutor.(imagescan.PodController); ok {
+			scannerOperator = imagescan.NewOperator(gormDB, podCtrl)
+		}
+	}
+	if scannerOperator != nil {
+		// Don't wait for the first 10s tick — reconcile once on startup so
+		// a worker restart mid-scan immediately accounts for the in-flight
+		// pods (no double-spawn) and spawns any missing ones.
+		if err := scannerOperator.Run(ctx); err != nil {
+			log.Printf("scanner operator (startup): %v", err)
+		}
+		scannerOpTicker = time.NewTicker(imagescan.OperatorInterval)
+		defer scannerOpTicker.Stop()
+		scannerOpTick = scannerOpTicker.C
 	}
 
 	for {
@@ -260,18 +277,22 @@ func run() error {
 			return nil
 
 		case <-imageScanTick:
-			// Backfill enqueue for digests without an IMAGE_SCAN job, then
-			// ask the burst trigger to wake up a scanner pod if the queue
-			// has pending work (subject to a cooldown inside the trigger).
-			// Kept in its own case so the heavier queries don't run on the
-			// 2-second fast ticker.
+			// Backfill enqueue for digests without an IMAGE_SCAN job.
+			// Pod spawning is the scanner operator's job now; this case
+			// only mutates the queue.
 			if n, err := imageScanReconciler.Run(ctx); err != nil {
 				log.Printf("image scan reconciler: %v", err)
 			} else if n > 0 {
 				log.Printf("image scan reconciler: enqueued %d digest(s)", n)
 			}
-			if err := imageScanReconciler.MaybeBurst(ctx); err != nil {
-				log.Printf("image scan burst: %v", err)
+
+		case <-scannerOpTick:
+			// Scanner-pod controller tick. Fast cadence (10s) so manual
+			// retries and user-visible actions see a pod running within
+			// seconds. The operator does its own DB-leader-lease so the
+			// other worker replica is idle on this path.
+			if err := scannerOperator.Run(ctx); err != nil {
+				log.Printf("scanner operator: %v", err)
 			}
 
 		case <-ticker.C:
