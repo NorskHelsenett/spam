@@ -63,7 +63,7 @@ func (r *Reconciler) Enabled() bool {
 }
 
 // Run enqueues IMAGE_SCAN jobs for every digest the system knows about
-// that isn't already being scanned. Two passes:
+// that isn't already being scanned. Three passes:
 //
 //	(1) Harvest distinct (registry, repository, digest) tuples from
 //	    cluster_record — the live view of what's actually running in
@@ -75,7 +75,12 @@ func (r *Reconciler) Enabled() bool {
 //	    enqueue one. Catches both the fresh rows from pass (1) and
 //	    any SBOM-uploaded digests that slipped through.
 //
-// Returns the number of jobs created. Safe to call on every tick; both
+//	(3) Re-enqueue IMAGE_SCAN for digests that HAVE been scanned but
+//	    are missing a bound SBOM (syft/trivy silently exited non-zero
+//	    inside the scanner pod). Bounded by rescanMaxAttempts so a
+//	    persistently-broken image doesn't thrash the queue.
+//
+// Returns the number of jobs created. Safe to call on every tick; all
 // passes are idempotent under concurrent workers.
 func (r *Reconciler) Run(ctx context.Context) (int, error) {
 	if !r.enabled {
@@ -165,6 +170,69 @@ func (r *Reconciler) Run(ctx context.Context) (int, error) {
 		}
 		enqueued++
 	}
+
+	// Pass 3 — rescan digests that completed a scan but still lack a bound
+	// SBOM. Bounded by (a) no currently-active job for the digest, (b)
+	// rescanCooldown since the last scan finished, (c) total attempts less
+	// than rescanMaxAttempts. Without these bounds a persistently-broken
+	// image would re-enqueue every tick.
+	var rescanRows []row
+	err = r.db.WithContext(ctx).Raw(`
+		SELECT id.id, id.registry, id.repository, id.digest
+		FROM image_digests id
+		WHERE NOT EXISTS (
+			SELECT 1 FROM sbom_bindings b
+			WHERE b.asset_type = 'IMAGE_DIGEST' AND b.asset_ref_id = id.id
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM jobs j
+			WHERE j.type = ?
+			  AND j.payload->>'image_digest_id' = id.id
+			  AND j.status IN ('QUEUED','RUNNING','RETRY')
+		)
+		AND (
+			SELECT COUNT(*) FROM jobs j
+			WHERE j.type = ?
+			  AND j.payload->>'image_digest_id' = id.id
+		) BETWEEN 1 AND ?
+		AND (
+			SELECT MAX(j.finished_at) FROM jobs j
+			WHERE j.type = ?
+			  AND j.payload->>'image_digest_id' = id.id
+		) < NOW() - (? || ' seconds')::interval
+		ORDER BY id.created_at ASC
+		LIMIT ?
+	`,
+		jobs.JobTypeImageScan,
+		jobs.JobTypeImageScan, rescanMaxAttempts-1,
+		jobs.JobTypeImageScan, int(rescanCooldown.Seconds()),
+		r.batchSize,
+	).Scan(&rescanRows).Error
+	if err != nil {
+		log.Printf("image scan reconciler: rescan query: %v", err)
+		return enqueued, nil
+	}
+	for _, d := range rescanRows {
+		if ctx.Err() != nil {
+			break
+		}
+		_, err := jobs.CreateJob(ctx, r.db, jobs.CreateJobInput{
+			Type: jobs.JobTypeImageScan,
+			Payload: jobs.ImageScanPayload{
+				ImageDigestID: d.ID,
+				Registry:      d.Registry,
+				Repository:    d.Repository,
+				Digest:        d.Digest,
+			},
+		})
+		if err != nil {
+			log.Printf("image scan reconciler: rescan enqueue %s: %v", d.ID, err)
+			continue
+		}
+		log.Printf("image scan reconciler: rescanning %s/%s (missing SBOM)", d.Registry, d.Repository)
+		enqueued++
+	}
+
 	return enqueued, nil
 }
 
@@ -201,6 +269,20 @@ func imageScanEnabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("IMAGE_SCAN_ENABLED")))
 	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
+
+// rescanCooldown is the minimum time between rescan attempts for a digest
+// that finished a scan without producing a bound SBOM. Long enough that a
+// transient syft/grype hiccup is retried on the next 6-hourly CronJob tick,
+// short enough that missing SBOMs don't linger for days.
+//
+// rescanMaxAttempts caps the total number of IMAGE_SCAN jobs (successful or
+// not) per digest so a persistently-unscannable image stops thrashing the
+// queue. 3 attempts over ~3 days is enough to distinguish "transient scanner
+// failure" from "this image will never produce an SBOM in our pipeline".
+const (
+	rescanCooldown    = 12 * time.Hour
+	rescanMaxAttempts = 3
+)
 
 // ReconcilerInterval is the default cadence recommended for callers.
 // Short enough that a bulk-imported batch of digests gets picked up in

@@ -114,10 +114,15 @@ func (s *Server) handleImageScanPending(w http.ResponseWriter, r *http.Request) 
 
 // imageScanCompleteRequest is the body of /api/image-scans/:job_id/complete.
 // Status is the terminal state ("succeeded" or "failed"). ErrorMessage is
-// only meaningful for "failed" but tolerated either way.
+// only meaningful for "failed" but tolerated either way. PartialFailures is
+// populated when the scanner ran but some categories (e.g. syft, grype)
+// exited non-zero — the job still counts as succeeded if at least one
+// artifact uploaded, but the rescan sweep and UI need the per-category
+// breakdown so missing SBOMs don't look like clean runs.
 type imageScanCompleteRequest struct {
-	Status       string `json:"status"`
-	ErrorMessage string `json:"error,omitempty"`
+	Status          string            `json:"status"`
+	ErrorMessage    string            `json:"error,omitempty"`
+	PartialFailures map[string]string `json:"partial_failures,omitempty"`
 }
 
 // handleImageScanComplete marks an IMAGE_SCAN job as terminal. The scanner
@@ -175,7 +180,10 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	result := map[string]string{"status": body.Status}
+	result := map[string]any{"status": body.Status}
+	if len(body.PartialFailures) > 0 {
+		result["partial_failures"] = body.PartialFailures
+	}
 	if _, err := jobs.UpdateJobStatus(r.Context(), s.db, jobID, status, result, body.ErrorMessage, nextRunAt); err != nil {
 		log.Printf("image-scans/complete: update status: %v", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
