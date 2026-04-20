@@ -53,7 +53,9 @@
 	const PAD = { top: 28, left: 70, right: 44, bottom: 28 };
 	const LABEL_OFFSET = 28;
 	const SUBLABEL_OFFSET = 42;
-	const MAX_INDIVIDUAL_PODS = 4;
+	// Replica display: show up to this many individual pod nodes per owner
+	// group; beyond that collapse to a single node with a counter badge.
+	const MAX_INDIVIDUAL_PODS = 3;
 
 	function truncate(s: string, max: number): string {
 		return s.length > max ? s.slice(0, max - 1) + '…' : s;
@@ -71,11 +73,31 @@
 		return [];
 	}
 
-	// --- Deduplicate pods by owner ---
+	// containerSignature produces a stable key from a pod group's
+	// container set — same images = same signature. Used to collapse
+	// identical CronJob-spawned Jobs: each Job firing has a unique
+	// owner name (suffix is timestamp/hash) but the containers they
+	// run are identical. Grouping by signature means all those Jobs
+	// render as one node with a pod counter, instead of 50 visually
+	// identical rows cluttering the diagram.
+	function containerSignature(pg: ChainPodGroup): string {
+		const parts = (pg.containers ?? [])
+			.map(c => `${c.registry ?? ''}/${c.image ?? ''}:${c.tag ?? ''}@${c.digest ?? ''}`)
+			.sort();
+		return parts.join('|');
+	}
+
+	// --- Deduplicate pods by owner (Jobs collapse by container signature) ---
 	let uniquePods = $derived.by(() => {
 		const seen = new Map<string, ChainPodGroup>();
 		for (const p of chain.pods ?? []) {
-			const key = `${p.owner_kind}/${p.owner}`;
+			// Jobs from a common CronJob (image-scanner-29611800,
+			// image-scanner-29611900, …) have distinct owner names but
+			// identical container specs. Key on container signature
+			// instead of owner for Job-kind pod groups so they merge.
+			const key = p.owner_kind === 'Job'
+				? `Job/${containerSignature(p)}`
+				: `${p.owner_kind}/${p.owner}`;
 			const existing = seen.get(key);
 			if (!existing) {
 				seen.set(key, { ...p });
@@ -83,7 +105,18 @@
 				// Merge service_names
 				const merged = new Set([...podServices(existing), ...podServices(p)]);
 				existing.service_names = [...merged];
-				if (p.pod_count > existing.pod_count) existing.pod_count = p.pod_count;
+				// For Jobs, sum pod_count across all merged firings so the
+				// counter badge reflects "how many total Job pods exist"
+				// not just the biggest single firing.
+				if (existing.owner_kind === 'Job') {
+					existing.pod_count += p.pod_count;
+					// Friendlier label for a collapsed Job group: strip
+					// the unique suffix (timestamp/hex). Matches
+					// "<base>-<digits-or-hex>" tails.
+					existing.owner = existing.owner.replace(/-[0-9a-f]+$/i, '-*');
+				} else if (p.pod_count > existing.pod_count) {
+					existing.pod_count = p.pod_count;
+				}
 			}
 		}
 		return [...seen.values()];

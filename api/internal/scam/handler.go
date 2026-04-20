@@ -20,10 +20,14 @@ import (
 const maxBodySize = 10 << 20 // 10 MiB
 
 // resourceKeyExpr is the PostgreSQL expression that computes the unique
-// resource+event identity from the JSONB data column. Matches the expression index.
-// Includes msg so each lifecycle event (INITIAL, UPDATE, DELETE) is a separate row.
+// resource identity from the JSONB data column. Matches ux_cluster_record_resource.
+//
+// One row per resource: an INITIAL followed by UPDATE / DELETE for the
+// same resource updates the single row in place (replacing `data` + bumping
+// received_at) rather than creating a lifecycle log. The `msg` column still
+// reflects the most recent event so queries can filter out DELETEd rows.
 const resourceKeyExpr = `(
-	(data->>'cluster_id') || ':' || (data->>'kind') || ':' || (data->>'msg') || ':' ||
+	(data->>'cluster_id') || ':' || (data->>'kind') || ':' ||
 	CASE WHEN data->>'kind' = 'Container'
 	     THEN (data->>'pod_uid') || '/' || (data->>'container')
 	     ELSE COALESCE(data->>'uid', '')
