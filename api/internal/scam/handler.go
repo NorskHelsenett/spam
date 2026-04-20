@@ -60,9 +60,16 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 		type upsertItem struct {
 			data datatypes.JSON
 		}
-		var items []upsertItem
 		var rejected int
 
+		// Dedupe by upsert key WITHIN the batch. Postgres disallows a
+		// single INSERT … ON CONFLICT DO UPDATE affecting the same row
+		// twice (SQLSTATE 21000), so a batch containing both an INITIAL
+		// and a later UPDATE for the same resource must collapse to the
+		// last one before we build the VALUES list. Last wins, which
+		// matches "most recent state".
+		keyed := make(map[string]upsertItem)
+		order := make([]string, 0, len(raw))
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -73,7 +80,20 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 				rejected++
 				continue
 			}
-			items = append(items, upsertItem{data: datatypes.JSON(item)})
+			key := incoming.ClusterID + ":" + incoming.Kind + ":"
+			if incoming.Kind == "Container" {
+				key += incoming.PodUID + "/" + incoming.Container
+			} else {
+				key += incoming.UID
+			}
+			if _, seen := keyed[key]; !seen {
+				order = append(order, key)
+			}
+			keyed[key] = upsertItem{data: datatypes.JSON(item)}
+		}
+		items := make([]upsertItem, 0, len(keyed))
+		for _, key := range order {
+			items = append(items, keyed[key])
 		}
 
 		if len(items) > 0 {
