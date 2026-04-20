@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -115,15 +116,17 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		counts := &ImageVulnSeverityCount{}
 		for _, row := range severityRows {
 			counts.Total += row.Count
-			switch row.Severity {
+			// Normalize — grype uppercases, trivy lowercases, NEGLIGIBLE
+			// is grype's info tier and rolls into Low.
+			switch strings.ToUpper(row.Severity) {
 			case "CRITICAL":
-				counts.Critical = row.Count
+				counts.Critical += row.Count
 			case "HIGH":
-				counts.High = row.Count
+				counts.High += row.Count
 			case "MEDIUM":
-				counts.Medium = row.Count
-			case "LOW":
-				counts.Low = row.Count
+				counts.Medium += row.Count
+			case "LOW", "NEGLIGIBLE":
+				counts.Low += row.Count
 			default:
 				counts.Unknown += row.Count
 			}
@@ -461,11 +464,16 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			}
 			_ = db.WithContext(r.Context()).Raw(`
 				SELECT
-				  COUNT(*) FILTER (WHERE severity = 'Critical') AS critical,
-				  COUNT(*) FILTER (WHERE severity = 'High')     AS high,
-				  COUNT(*) FILTER (WHERE severity = 'Medium')   AS medium,
-				  COUNT(*) FILTER (WHERE severity = 'Low')      AS low,
-				  COUNT(*) FILTER (WHERE severity NOT IN ('Critical','High','Medium','Low')) AS unknown
+				  -- grype stores severities UPPERCASE; trivy lowercases; normalize
+				  -- with UPPER() here so case inconsistencies don't quietly
+				  -- dump everything into the "Unknown" bucket.
+				  COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
+				  COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
+				  COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
+				  -- grype emits NEGLIGIBLE for info-grade findings (not a CVSS
+				  -- severity per se) — roll it into Low for the chip row.
+				  COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS low,
+				  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
 				FROM image_vuln_findings
 				WHERE scan_run_id = ?
 			`, resp.LatestScanID).Scan(&sev).Error
