@@ -317,12 +317,31 @@ type ImageDetailResponse struct {
 	Digest     string    `json:"digest"`
 	CreatedAt  time.Time `json:"created_at"`
 
-	LinkedRepo *LinkedRepoSummary `json:"linked_repo,omitempty"`
+	LinkedRepo             *LinkedRepoSummary       `json:"linked_repo,omitempty"`
+	LinkedRepoContributors []ImageRepoContributor   `json:"linked_repo_contributors,omitempty"`
 
 	ScanHistory  []ImageScanHistoryRow `json:"scan_history,omitempty"`
 	LatestScanID string                `json:"latest_scan_id,omitempty"`
 
+	// Severity breakdown for the latest successful scan's findings. Lets the
+	// drawer show a quick "critical / high / medium / low" badge row without
+	// pulling every finding.
+	VulnSeverity *ImageVulnSeverityCount `json:"vuln_severity,omitempty"`
+
 	ClusterUsage []ImageClusterUsageRow `json:"cluster_usage,omitempty"`
+}
+
+// ImageRepoContributor is a trimmed contributor entry pulled from the linked
+// repo's cached /providers/details response. Drives the "recent committers"
+// strip in the image drawer so operators can eyeball who's been touching the
+// source of a vulnerable image without navigating to the repo page.
+type ImageRepoContributor struct {
+	Login         string `json:"login,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Email         string `json:"email,omitempty"`
+	AvatarURL     string `json:"avatar_url,omitempty"`
+	ProfileURL    string `json:"profile_url,omitempty"`
+	Contributions int    `json:"contributions,omitempty"`
 }
 
 // ImageScanHistoryRow is one row in the per-image scan history.
@@ -389,6 +408,9 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 
 		// Linked source repo (cached at scan upload time).
 		resp.LinkedRepo = loadLinkedRepo(r.Context(), db, img.ID)
+		if resp.LinkedRepo != nil {
+			resp.LinkedRepoContributors = loadLinkedRepoContributors(r.Context(), db, resp.LinkedRepo.RepoID, 8)
+		}
 
 		// Scan history — every IMAGE_SCAN job whose payload referenced
 		// this digest_id, newest first, with per-scan vuln counts.
@@ -423,6 +445,36 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			})
 			if resp.LatestScanID == "" && h.Status == "SUCCEEDED" {
 				resp.LatestScanID = h.JobID
+			}
+		}
+
+		// Severity breakdown for the latest successful scan — drives the
+		// drawer's "critical/high/…" chip row without requiring the
+		// client to hit /api/runs/{id} and parse the full finding list.
+		if resp.LatestScanID != "" {
+			var sev struct {
+				Critical int
+				High     int
+				Medium   int
+				Low      int
+				Unknown  int
+			}
+			_ = db.WithContext(r.Context()).Raw(`
+				SELECT
+				  COUNT(*) FILTER (WHERE severity = 'Critical') AS critical,
+				  COUNT(*) FILTER (WHERE severity = 'High')     AS high,
+				  COUNT(*) FILTER (WHERE severity = 'Medium')   AS medium,
+				  COUNT(*) FILTER (WHERE severity = 'Low')      AS low,
+				  COUNT(*) FILTER (WHERE severity NOT IN ('Critical','High','Medium','Low')) AS unknown
+				FROM image_vuln_findings
+				WHERE scan_run_id = ?
+			`, resp.LatestScanID).Scan(&sev).Error
+			total := sev.Critical + sev.High + sev.Medium + sev.Low + sev.Unknown
+			if total > 0 {
+				resp.VulnSeverity = &ImageVulnSeverityCount{
+					Critical: sev.Critical, High: sev.High, Medium: sev.Medium,
+					Low: sev.Low, Unknown: sev.Unknown, Total: total,
+				}
 			}
 		}
 
@@ -727,6 +779,30 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 		w.Header().Set("Content-Disposition", "attachment; filename="+filename)
 		_, _ = w.Write(art.Content)
 	}
+}
+
+// loadLinkedRepoContributors pulls the top-N committers from the cached
+// /providers/details payload stashed in repo_caches. Returns nil when the
+// cache is empty or malformed — the drawer just hides the contributors
+// strip instead of blocking. Limit is applied in Go to keep the SQL simple.
+func loadLinkedRepoContributors(ctx context.Context, db *gorm.DB, repoID string, limit int) []ImageRepoContributor {
+	if repoID == "" || limit <= 0 {
+		return nil
+	}
+	var raw string
+	if err := db.WithContext(ctx).Raw(
+		`SELECT contributors_json FROM repo_caches WHERE repo_id = ? LIMIT 1`, repoID,
+	).Scan(&raw).Error; err != nil || raw == "" {
+		return nil
+	}
+	var parsed []ImageRepoContributor
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil
+	}
+	if len(parsed) > limit {
+		parsed = parsed[:limit]
+	}
+	return parsed
 }
 
 // loadLinkedRepo reads the cached image_digests.source_repo_id +
