@@ -41,12 +41,18 @@ type TrivyScanResult struct {
 
 func (TrivyScanResult) TableName() string { return "trivy_scan_results" }
 
-// SBOMScanJob is the data returned by GetNextSBOMToScan.
+// SBOMScanJob is the data returned by GetNextSBOMToScan. AssetType
+// tells the scanner which pipeline to run ("REPO_COMMIT" uses trivy →
+// component_vulnerabilities; "IMAGE_DIGEST" uses grype →
+// image_vuln_findings). AssetRefID points at the corresponding
+// repo_commits.id or image_digests.id depending on AssetType.
 type SBOMScanJob struct {
-	SBOMID   string
-	RepoID   string
-	Format   string
-	RepoSlug string
+	SBOMID     string
+	RepoID     string // empty when AssetType != REPO_COMMIT
+	Format     string
+	RepoSlug   string
+	AssetType  string
+	AssetRefID string
 }
 
 // TrivyReport is a minimal representation of Trivy JSON output used to
@@ -70,11 +76,18 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Find the oldest latest-per-repo SBOM that has not been scanned in this run.
+		// The last_scanned_at sub-query unions:
+		//   - trivy_scan_results for REPO_COMMIT bindings (existing trivy path)
+		//   - image_scan_runs for IMAGE_DIGEST bindings (new grype revuln path)
+		// so image SBOMs naturally participate in the "scan once per run" lease
+		// rhythm without a separate tracking table.
 		type row struct {
-			SBOMID   string
-			RepoID   string
-			Format   string
-			RepoSlug string
+			SBOMID     string
+			RepoID     string
+			Format     string
+			RepoSlug   string
+			AssetType  string
+			AssetRefID string
 		}
 		var r row
 		res := tx.Raw(`
@@ -82,18 +95,32 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 				s.id                                       AS sbom_id,
 				COALESCE(rc.repo_id, '')                   AS repo_id,
 				s.format,
-				COALESCE(repo.org || '/' || repo.slug, '') AS repo_slug
+				COALESCE(repo.org || '/' || repo.slug, '') AS repo_slug,
+				sb.asset_type                              AS asset_type,
+				sb.asset_ref_id                            AS asset_ref_id
 			FROM sboms s
 			INNER JOIN sbom_bindings sb  ON sb.sbom_id = s.id
 			LEFT JOIN repo_commits  rc  ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
 			LEFT JOIN repos         repo ON repo.id = rc.repo_id
 			LEFT JOIN (
-				SELECT sbom_id, MAX(scanned_at) AS last_scanned_at
-				FROM trivy_scan_results
+				SELECT sbom_id, MAX(last_scanned_at) AS last_scanned_at
+				FROM (
+					SELECT sbom_id, MAX(scanned_at) AS last_scanned_at
+					FROM trivy_scan_results
+					GROUP BY sbom_id
+					UNION ALL
+					SELECT sb3.sbom_id, MAX(isr.finished_at) AS last_scanned_at
+					FROM sbom_bindings sb3
+					JOIN image_scan_runs isr ON isr.image_digest_id = sb3.asset_ref_id
+					WHERE sb3.asset_type = 'IMAGE_DIGEST'
+					  AND isr.finished_at IS NOT NULL
+					GROUP BY sb3.sbom_id
+				) merged
 				GROUP BY sbom_id
 			) tsr ON tsr.sbom_id = s.id
 			LEFT JOIN trivy_scan_leases  tsl ON tsl.sbom_id = s.id AND tsl.expires_at > now()
 			WHERE tsl.sbom_id IS NULL
+			  AND sb.asset_type IN ('REPO_COMMIT','IMAGE_DIGEST')
 			  AND (
 			    tsr.last_scanned_at IS NULL
 			    OR tsr.last_scanned_at < ?
@@ -132,10 +159,12 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 		}
 
 		job = SBOMScanJob{
-			SBOMID:   r.SBOMID,
-			RepoID:   r.RepoID,
-			Format:   r.Format,
-			RepoSlug: r.RepoSlug,
+			SBOMID:     r.SBOMID,
+			RepoID:     r.RepoID,
+			Format:     r.Format,
+			RepoSlug:   r.RepoSlug,
+			AssetType:  r.AssetType,
+			AssetRefID: r.AssetRefID,
 		}
 		return nil
 	})

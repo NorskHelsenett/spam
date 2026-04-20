@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -69,10 +71,12 @@ func trivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{
-			"sbom_id":   job.SBOMID,
-			"repo_id":   job.RepoID,
-			"format":    job.Format,
-			"repo_slug": job.RepoSlug,
+			"sbom_id":      job.SBOMID,
+			"repo_id":      job.RepoID,
+			"format":       job.Format,
+			"repo_slug":    job.RepoSlug,
+			"asset_type":   job.AssetType,
+			"asset_ref_id": job.AssetRefID,
 		})
 	}
 }
@@ -111,6 +115,91 @@ func trivyManifestsHandler(db *gorm.DB) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
+// grypeImageResultHandler ingests a grype JSON scan result for an
+// IMAGE_DIGEST-bound SBOM. The sbom-scanner posts here when it ran grype
+// against a stored image SBOM (no image pull) to refresh findings against
+// a newer grype DB.
+//
+// Flow:
+//  1. Resolve image_digest_id from sbom_bindings (must be IMAGE_DIGEST).
+//  2. Create a new image_scan_runs row (scan_type inferred from presence
+//     of an sbom-revuln marker — just a normal run for now).
+//  3. Parse grype JSON via imagescan.ParseAndStoreGrype → image_vuln_findings.
+//  4. Release the trivy_scan_leases row so the next-SBOM query can advance.
+//
+// POST /api/sbom-scan/image-result/{sbom_id}
+func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		sbomID := r.PathValue("sbom_id")
+		if sbomID == "" {
+			http.Error(w, "sbom_id required", http.StatusBadRequest)
+			return
+		}
+
+		limited := io.LimitReader(r.Body, maxTrivyResultBytes+1)
+		body, err := io.ReadAll(limited)
+		if err != nil {
+			http.Error(w, "failed to read body", http.StatusBadRequest)
+			return
+		}
+		if int64(len(body)) > maxTrivyResultBytes {
+			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+
+		// Resolve image digest from the binding.
+		var binding struct {
+			AssetRefID string `gorm:"column:asset_ref_id"`
+			AssetType  string `gorm:"column:asset_type"`
+		}
+		err = db.WithContext(r.Context()).Raw(
+			`SELECT asset_ref_id, asset_type FROM sbom_bindings WHERE sbom_id = ? AND asset_type = 'IMAGE_DIGEST' LIMIT 1`,
+			sbomID,
+		).Scan(&binding).Error
+		if err != nil {
+			log.Printf("grype/image-result: lookup binding %s: %v", sbomID, err)
+			http.Error(w, "failed to resolve sbom binding", http.StatusInternalServerError)
+			return
+		}
+		if binding.AssetRefID == "" {
+			http.Error(w, "sbom is not bound to an image", http.StatusBadRequest)
+			return
+		}
+
+		now := time.Now().UTC()
+		scanRunID := uuid.NewString()
+		err = db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
+			// Insert a run row. finished_at is set immediately since this
+			// is a synchronous SBOM revuln (no separate complete step).
+			run := imagescan.ImageScanRun{
+				ID:            scanRunID,
+				ImageDigestID: binding.AssetRefID,
+				StartedAt:     &now,
+				FinishedAt:    &now,
+				CreatedAt:     now,
+			}
+			if err := tx.Create(&run).Error; err != nil {
+				return err
+			}
+			if _, err := imagescan.ParseAndStoreGrype(r.Context(), tx, binding.AssetRefID, scanRunID, body); err != nil {
+				return err
+			}
+			// Release the lease so the next-SBOM query can pick up the next one.
+			if err := tx.Exec(`DELETE FROM trivy_scan_leases WHERE sbom_id = ?`, sbomID).Error; err != nil {
+				return err
+			}
+			return nil
+		})
+		if err != nil {
+			log.Printf("grype/image-result: store %s: %v", sbomID, err)
+			http.Error(w, "failed to store result", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

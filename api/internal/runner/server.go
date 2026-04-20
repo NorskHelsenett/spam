@@ -79,6 +79,11 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
 		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
 		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
+		// Image-SBOM vuln revuln (grype). Scanner posts grype JSON here
+		// for IMAGE_DIGEST-bound SBOMs; the handler resolves the image
+		// digest from sbom_bindings and writes findings to
+		// image_vuln_findings via the existing grype parser.
+		r.Post("/api/sbom-scan/image-result/{sbom_id}", grypeImageResultHandler(s.db))
 		r.Post("/api/tool-versions", toolVersionsHandler(s.db))
 		// Image scanner endpoints — the dedicated spam-image-scanner pod
 		// leases IMAGE_SCAN jobs via /next, uploads artifacts via

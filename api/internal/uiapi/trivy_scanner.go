@@ -44,10 +44,12 @@ func TrivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, map[string]string{
-			"sbom_id":   job.SBOMID,
-			"repo_id":   job.RepoID,
-			"format":    job.Format,
-			"repo_slug": job.RepoSlug,
+			"sbom_id":      job.SBOMID,
+			"repo_id":      job.RepoID,
+			"format":       job.Format,
+			"repo_slug":    job.RepoSlug,
+			"asset_type":   job.AssetType,
+			"asset_ref_id": job.AssetRefID,
 		})
 	}
 }
