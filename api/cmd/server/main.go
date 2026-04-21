@@ -121,6 +121,7 @@ func run() error {
 		"migrations/20260317_add_repos_is_private.sql",
 		"migrations/20260416_create_scam_indexes.sql",
 		"migrations/20260420_dedupe_cluster_record_msg.sql",
+		"migrations/20260421_rename_trivy_adhoc_job_type.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
