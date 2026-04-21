@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope } from 'lucide-svelte';
+	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope, Container } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import VulnBadges from '$lib/components/VulnBadges.svelte';
 
@@ -27,9 +27,18 @@
 		has_direct: boolean;
 	};
 
+	type ImageResult = {
+		image_id: string;
+		title: string;   // "registry/repository"
+		value?: string;  // digest (sha256:…)
+		org?: string;    // registry (or linked repo org)
+		slug?: string;   // repository (or linked repo slug)
+	};
+
 	type SearchItem =
 		| { kind: 'repo'; data: RepoResult }
-		| { kind: 'component'; data: ComponentResult };
+		| { kind: 'component'; data: ComponentResult }
+		| { kind: 'image'; data: ImageResult };
 
 	type Contributor = {
 		login?: string;
@@ -54,6 +63,7 @@
 	let query = $state('');
 	let repoResults = $state<RepoResult[]>([]);
 	let componentResults = $state<ComponentResult[]>([]);
+	let imageResults = $state<ImageResult[]>([]);
 	let loading = $state(false);
 	let loadingMore = $state(false);
 	let hasMore = $state(false);
@@ -78,6 +88,9 @@
 				items.push({ kind: 'repo', data: r });
 			}
 		}
+		for (const img of imageResults) {
+			items.push({ kind: 'image', data: img });
+		}
 		for (const d of componentResults) {
 			items.push({ kind: 'component', data: d });
 		}
@@ -93,6 +106,7 @@
 		query = '';
 		repoResults = [];
 		componentResults = [];
+		imageResults = [];
 		repoPreview = null;
 		contributors = [];
 		selectedIndex = 0;
@@ -104,6 +118,7 @@
 		if (!q.trim()) {
 			repoResults = [];
 			componentResults = [];
+			imageResults = [];
 			repoPreview = null;
 			hasMore = false;
 			repoOffset = 0;
@@ -112,9 +127,13 @@
 		loading = true;
 		repoOffset = 0;
 		try {
-			const [repoRes, compRes] = await Promise.all([
+			const [repoRes, compRes, imgRes] = await Promise.all([
 				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=${LIMIT}&offset=0`),
-				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=20`)
+				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=20`),
+				// Reuse the advanced-search endpoint for images so the palette
+				// matches on registry, repository, or sha256 digest without
+				// a new backend route.
+				fetch(`/api/search/advanced?q=${encodeURIComponent(q)}&target=image&per_page=15`)
 			]);
 			if (repoRes.ok) {
 				const data = await repoRes.json();
@@ -125,6 +144,18 @@
 			if (compRes.ok) {
 				const data = await compRes.json();
 				componentResults = data.dependencies ?? [];
+			}
+			if (imgRes.ok) {
+				const data = await imgRes.json();
+				imageResults = (data.results ?? [])
+					.filter((r: { image_id?: string }) => !!r.image_id)
+					.map((r: { image_id: string; title: string; value?: string; org?: string; slug?: string }) => ({
+						image_id: r.image_id,
+						title: r.title,
+						value: r.value,
+						org: r.org,
+						slug: r.slug,
+					}));
 			}
 			selectedIndex = 0;
 		} finally {
@@ -226,6 +257,8 @@
 			if (d.provider_id) params.set('provider_id', d.provider_id);
 			else if (d.base_url) params.set('base_url', d.base_url);
 			goto(`/app/providers/repo?${params}`);
+		} else if (item.kind === 'image') {
+			goto(`/app/images/${item.data.image_id}`);
 		} else {
 			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
@@ -393,6 +426,32 @@
 										</span>
 									</button>
 								{/each}
+							{/each}
+						{/if}
+
+						{#if imageResults.length > 0}
+							<p class="px-4 pb-1 pt-3 text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-muted);">
+								Images
+							</p>
+							{#each imageResults as result}
+								{@const flatIdx = flatItems.findIndex(i => i.kind === 'image' && i.data === result)}
+								<button
+									type="button"
+									data-search-idx={flatIdx}
+									onclick={() => selectItem({ kind: 'image', data: result })}
+									onmouseenter={() => (selectedIndex = flatIdx)}
+									class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
+								>
+									<Container size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'};" />
+									<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
+										{result.title}
+									</span>
+									{#if result.value}
+										<span class="shrink-0 font-mono text-[10px]" style="color: var(--text-muted); opacity: 0.6;">
+											{result.value.startsWith('sha256:') ? result.value.slice(7, 19) : result.value.slice(0, 12)}
+										</span>
+									{/if}
+								</button>
 							{/each}
 						{/if}
 
@@ -603,6 +662,27 @@
 								style="color: var(--accent);"
 							>
 								View component <ArrowRight size={11} />
+							</button>
+
+						{:else if selectedItem?.kind === 'image'}
+							{@const img = selectedItem.data}
+							<div class="mb-4">
+								<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">Container image</p>
+								<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">{img.title}</p>
+							</div>
+							{#if img.value}
+								<div class="mb-3">
+									<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">Digest</p>
+									<p class="mt-0.5 truncate font-mono text-[11px]" style="color: var(--text-primary);">{img.value}</p>
+								</div>
+							{/if}
+							<button
+								type="button"
+								onclick={() => selectItem(selectedItem)}
+								class="mt-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
+								style="color: var(--accent);"
+							>
+								Open image <ArrowRight size={11} />
 							</button>
 
 						{:else}
