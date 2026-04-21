@@ -151,11 +151,22 @@
 		];
 	};
 
+	// Build the best label we can from whatever identity fields exist.
+	// Some image_digests rows have registry set but repository empty
+	// (scanner resolved the registry part but didn't parse a repo out of
+	// the ref) — don't let those collapse to the sbom_id prefix when we
+	// still have a registry + digest to show.
 	const imageName = (sbom: RecentSBOM) => {
-		if (sbom.image_registry && sbom.image_repository) {
-			return `${sbom.image_registry}/${sbom.image_repository}`;
-		}
-		return sbom.image_repository ?? '';
+		const registry = sbom.image_registry ?? '';
+		const repository = sbom.image_repository ?? '';
+		const digest = sbom.image_digest ?? '';
+		const shortDigest = digest.startsWith('sha256:') ? digest.slice(7, 19) : digest.slice(0, 12);
+
+		if (registry && repository) return `${registry}/${repository}`;
+		if (registry && shortDigest) return `${registry}@${shortDigest}`;
+		if (repository) return repository;
+		if (shortDigest) return `sha256:${shortDigest}`;
+		return '';
 	};
 
 	const sbomLabel = (sbom: RecentSBOM) =>
