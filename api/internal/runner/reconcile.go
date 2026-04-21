@@ -6,7 +6,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -135,75 +134,33 @@ func (e *RunExecutor) reconcileRun(ctx context.Context, db *gorm.DB, run *Run) e
 
 func (e *RunExecutor) requeueRun(ctx context.Context, db *gorm.DB, run *Run) error {
 	now := time.Now()
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
-			"status":     RunStatusQueued,
-			"locked_at":  nil,
-			"locked_by":  "",
-			"updated_at": now,
-		}).Error; err != nil {
-			return err
-		}
-
-		return events.EmitEvent(tx, events.EventJobStatusChanged, "job", run.ID, jobs.JobEventPayload{
-			JobID:       run.ID,
-			Type:        run.Type,
-			Status:      jobs.JobStatus(RunStatusQueued),
-			Previous:    jobs.JobStatus(RunStatusRunning),
-			Attempts:    run.Attempts,
-			MaxAttempts: run.MaxAttempts,
-			RunAt:       run.RunAt,
-		})
-	})
+	return db.WithContext(ctx).Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
+		"status":     RunStatusQueued,
+		"locked_at":  nil,
+		"locked_by":  "",
+		"updated_at": now,
+	}).Error
 }
 
 func (e *RunExecutor) markRunSucceeded(ctx context.Context, db *gorm.DB, run *Run) error {
 	now := time.Now()
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
-			"status":      RunStatusSucceeded,
-			"finished_at": now,
-			"locked_at":   nil,
-			"locked_by":   "",
-			"updated_at":  now,
-		}).Error; err != nil {
-			return err
-		}
-
-		return events.EmitEvent(tx, events.EventJobStatusChanged, "job", run.ID, jobs.JobEventPayload{
-			JobID:       run.ID,
-			Type:        run.Type,
-			Status:      jobs.JobStatus(RunStatusSucceeded),
-			Previous:    jobs.JobStatus(RunStatusRunning),
-			Attempts:    run.Attempts,
-			MaxAttempts: run.MaxAttempts,
-			RunAt:       run.RunAt,
-		})
-	})
+	return db.WithContext(ctx).Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
+		"status":      RunStatusSucceeded,
+		"finished_at": now,
+		"locked_at":   nil,
+		"locked_by":   "",
+		"updated_at":  now,
+	}).Error
 }
 
 func (e *RunExecutor) markRunFailed(ctx context.Context, db *gorm.DB, run *Run, errMsg string) error {
 	now := time.Now()
-	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
-			"status":      RunStatusFailed,
-			"error":       errMsg,
-			"finished_at": now,
-			"locked_at":   nil,
-			"locked_by":   "",
-			"updated_at":  now,
-		}).Error; err != nil {
-			return err
-		}
-
-		return events.EmitEvent(tx, events.EventJobStatusChanged, "job", run.ID, jobs.JobEventPayload{
-			JobID:       run.ID,
-			Type:        run.Type,
-			Status:      jobs.JobStatus(RunStatusFailed),
-			Previous:    jobs.JobStatus(RunStatusRunning),
-			Attempts:    run.Attempts,
-			MaxAttempts: run.MaxAttempts,
-			RunAt:       run.RunAt,
-		})
-	})
+	return db.WithContext(ctx).Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
+		"status":      RunStatusFailed,
+		"error":       errMsg,
+		"finished_at": now,
+		"locked_at":   nil,
+		"locked_by":   "",
+		"updated_at":  now,
+	}).Error
 }
