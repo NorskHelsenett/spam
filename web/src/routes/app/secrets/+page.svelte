@@ -3,7 +3,9 @@
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert } from 'lucide-svelte';
+	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert, Container } from 'lucide-svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
+	import { goto } from '$app/navigation';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -52,6 +54,50 @@
 	};
 
 	let probeStats: ProbeStats | null = $state(null);
+
+	type ImageSecretRow = {
+		image_id: string;
+		registry: string;
+		repository: string;
+		digest: string;
+		finding_count: number;
+		last_scanned_at?: string;
+	};
+
+	let activeTab = $state('repos');
+	let imageSecrets = $state<ImageSecretRow[]>([]);
+	let imageSecretsLoaded = $state(false);
+	let imageSecretsLoading = $state(false);
+
+	const loadImageSecrets = async () => {
+		if (imageSecretsLoaded) return;
+		imageSecretsLoading = true;
+		try {
+			const res = await fetch('/api/secrets/images', { credentials: 'include' });
+			if (res.ok) imageSecrets = (await res.json()) ?? [];
+			imageSecretsLoaded = true;
+		} catch {
+			// ignore — tab will show empty state
+		} finally {
+			imageSecretsLoading = false;
+		}
+	};
+
+	$effect(() => {
+		if (activeTab === 'images') loadImageSecrets();
+	});
+
+	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
+	const fmtDate = (iso: string | undefined) => {
+		if (!iso) return '—';
+		const diff = Date.now() - new Date(iso).getTime();
+		const days = Math.floor(diff / 86_400_000);
+		if (days === 0) return 'today';
+		if (days === 1) return 'yesterday';
+		if (days < 30) return `${days}d ago`;
+		return `${Math.floor(days / 30)}mo ago`;
+	};
+	const openImage = (id: string) => { if (id) goto(`/app/images/${id}`); };
 
 	const COLORS = [
 		'var(--red)',
@@ -366,9 +412,13 @@
 		<header class="flex items-start justify-between gap-4">
 			<div>
 				<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
-				<p class="text-sm text-[var(--text-tertiary)]">Per-repository secret findings from the latest scan.</p>
+				<p class="text-sm text-[var(--text-tertiary)]">
+					{activeTab === 'images'
+						? 'Betterleaks findings from the latest image scan per digest.'
+						: 'Per-repository secret findings from the latest scan.'}
+				</p>
 			</div>
-			{#if !loading && !error && tableRows.length > 0}
+			{#if activeTab === 'repos' && !loading && !error && tableRows.length > 0}
 				<button
 					type="button"
 					class="filter-toggle"
@@ -385,6 +435,18 @@
 				</button>
 			{/if}
 		</header>
+
+		<div>
+			<TabSelector
+				options={[
+					{ value: 'repos', label: 'Repositories' },
+					{ value: 'images', label: 'Images' }
+				]}
+				bind:value={activeTab}
+			/>
+		</div>
+
+		{#if activeTab === 'repos'}
 
 		<!-- Animated filter bar -->
 		{#if filterOpen && !loading && !error}
@@ -553,6 +615,63 @@
 							/>
 						</div>
 					{/if}
+				</div>
+			{/if}
+		{/if}
+		{/if}
+
+		{#if activeTab === 'images'}
+			{#if imageSecretsLoading}
+				<div class="flex flex-1 items-center justify-center">
+					<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+				</div>
+			{:else if imageSecrets.length === 0}
+				<div class="flex flex-1 items-center justify-center">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<Container class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-sm text-[var(--text-muted)]">No image secret findings.</p>
+						<p class="text-xs text-[var(--text-muted)]">Either no images have been scanned yet, or betterleaks returned empty arrays for every digest.</p>
+					</div>
+				</div>
+			{:else}
+				<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<div class="flex-1 overflow-y-auto [overflow-anchor:none]">
+						<table class="w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
+							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+								<tr>
+									<th class="w-[18%] px-5 py-3 text-left">Registry</th>
+									<th class="w-[38%] px-5 py-3 text-left">Image</th>
+									<th class="w-[16%] px-5 py-3 text-left">Digest</th>
+									<th class="w-[12%] px-5 py-3 text-right">Findings</th>
+									<th class="w-[16%] px-5 py-3 text-right">Last scanned</th>
+								</tr>
+							</thead>
+							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+								{#each imageSecrets as row}
+									<tr
+										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
+										onclick={() => openImage(row.image_id)}
+									>
+										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={row.registry}>{row.registry}</td>
+										<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={row.repository}>{row.repository}</td>
+										<td class="px-5 py-3">
+											{#if row.digest}
+												<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(row.digest)}</code>
+											{:else}
+												<span class="text-xs text-[var(--text-muted)]">—</span>
+											{/if}
+										</td>
+										<td class="px-5 py-3 text-right tabular-nums">
+											<span class="inline-flex items-center rounded-full bg-[var(--red)]/10 px-2.5 py-0.5 font-semibold text-xs text-[var(--red)]">{row.finding_count}</span>
+										</td>
+										<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]" title={row.last_scanned_at ?? ''}>
+											{fmtDate(row.last_scanned_at)}
+										</td>
+									</tr>
+								{/each}
+							</tbody>
+						</table>
+					</div>
 				</div>
 			{/if}
 		{/if}
