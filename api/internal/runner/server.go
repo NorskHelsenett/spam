@@ -76,9 +76,9 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))
 		r.Use(middleware.Timeout(60 * time.Second))
 		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
-		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
-		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
-		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
+		r.Get("/api/sbom-scan/next", sbomScanNextHandler(s.db))
+		r.Post("/api/sbom-scan/result/{sbom_id}", sbomScanResultHandler(s.db))
+		r.Get("/api/sbom-scan/manifests/{repo_id}", sbomScanManifestsHandler(s.db))
 		// Image-SBOM vuln revuln (grype). Scanner posts grype JSON here
 		// for IMAGE_DIGEST-bound SBOMs; the handler resolves the image
 		// digest from sbom_bindings and writes findings to

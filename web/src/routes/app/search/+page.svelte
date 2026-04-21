@@ -441,6 +441,18 @@
 									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">CVE-2021-44228</span>, <span class="font-mono">log4j</span>, <span class="font-mono">openssl</span></p>
 								</div>
 							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><span class="text-[var(--accent)]"><KubernetesIcon size={20} /></span> Clusters</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">prod</span>, <span class="font-mono">staging</span>, cluster name</p>
+								</div>
+							</div>
+							<div class="flex min-h-[3.6rem] items-center p-1">
+								<div>
+									<p class="flex items-center gap-2.5 text-[0.98rem] font-semibold text-[var(--text-bright)]"><Container class="h-5 w-5 text-[var(--accent)]" /> Images</p>
+									<p class="mt-1.5 text-[0.84rem] text-[var(--text-muted)]">Try: <span class="font-mono">ghcr.io</span>, image name, <span class="font-mono">sha256:...</span></p>
+								</div>
+							</div>
 						</div>
 					</div>
 					{:else if results.length === 0}

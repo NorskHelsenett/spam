@@ -230,19 +230,6 @@ Diagram hard-codes Ingress → Service → Pod. Parameterize
 One component, many views. Unblocks items 2 and the image drawer
 "where used" panel.
 
-### Remove dead trivy handlers in uiapi
-
-`uiapi.TrivyScanNextHandler` + `TrivyScanResultHandler` in
-`uiapi/trivy_scanner.go` are unreferenced (runner package owns the
-live route registrations). Delete the file.
-
-### /api/trivy/* path rename
-
-Cosmetic follow-up to the trivy-scanner → sbom-scanner rename. Endpoint
-paths (`/api/trivy/next`, `/api/trivy/result/...`) still carry the old
-name. Low priority — renaming is wire-level churn with no functional
-gain, and the scanner binary no longer depends on the name.
-
 ---
 
 ## Reference: recently shipped on `feat/job-kubernetes-scanner`

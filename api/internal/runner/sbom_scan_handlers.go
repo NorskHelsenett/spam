@@ -44,7 +44,7 @@ func sbomDownloadHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-func trivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
+func sbomScanNextHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		leasedBy, _ := os.Hostname()
 		runStartedAt := time.Now().UTC()
@@ -81,9 +81,9 @@ func trivyScanNextHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// trivyManifestsHandler returns the latest manifest files for a repo so the
+// sbomScanManifestsHandler returns the latest manifest files for a repo so the
 // scanner can fall back to filesystem scanning when the SBOM is a leaf.
-func trivyManifestsHandler(db *gorm.DB) http.HandlerFunc {
+func sbomScanManifestsHandler(db *gorm.DB) http.HandlerFunc {
 	type manifestFile struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -203,7 +203,7 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// trivyScanResultHandler ingests a scan result for a REPO_COMMIT-bound SBOM.
+// sbomScanResultHandler ingests a scan result for a REPO_COMMIT-bound SBOM.
 // Accepts either trivy or grype JSON — format is inferred from the root
 // shape ({Results: [...]} = trivy, {matches: [...]} = grype) so the
 // scanner can switch tools without a new endpoint.
@@ -211,7 +211,7 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 // The row is stored in trivy_scan_results with `format` recording which
 // tool produced it; advanced_search dispatches on that column when parsing
 // raw_json for full-text search.
-func trivyScanResultHandler(db *gorm.DB) http.HandlerFunc {
+func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sbomID := r.PathValue("sbom_id")
 		if sbomID == "" {

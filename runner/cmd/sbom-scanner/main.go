@@ -79,7 +79,7 @@ func run() error {
 	}
 }
 
-// nextJobResponse mirrors the JSON returned by GET /api/trivy/next.
+// nextJobResponse mirrors the JSON returned by GET /api/sbom-scan/next.
 type nextJobResponse struct {
 	SBOMID     string `json:"sbom_id"`
 	RepoID     string `json:"repo_id"`
@@ -92,7 +92,7 @@ type nextJobResponse struct {
 func fetchNextJob(apiURL string, hmacKey []byte, runStartedAt time.Time) (*nextJobResponse, bool, error) {
 	params := url.Values{}
 	params.Set("run_started_at", runStartedAt.Format(time.RFC3339))
-	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/trivy/next?"+params.Encode(), nil)
+	req, err := http.NewRequest(http.MethodGet, apiURL+"/api/sbom-scan/next?"+params.Encode(), nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -159,9 +159,10 @@ func scanRepoSBOM(apiURL string, hmacKey []byte, tmpDir, sbomPath string, job *n
 		return fmt.Errorf("read grype result: %w", err)
 	}
 
-	// The /api/trivy/result endpoint dispatches on root shape (Results[]
-	// for trivy, matches[] for grype) so the legacy path name stays.
-	url := fmt.Sprintf("%s/api/trivy/result/%s?repo_id=%s", apiURL, job.SBOMID, job.RepoID)
+	// The /api/sbom-scan/result endpoint dispatches on root shape
+	// (Results[] for trivy, matches[] for grype) so the same path
+	// accepts either tool's output.
+	url := fmt.Sprintf("%s/api/sbom-scan/result/%s?repo_id=%s", apiURL, job.SBOMID, job.RepoID)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(resultBytes))
 	if err != nil {
 		return err
