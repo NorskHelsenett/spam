@@ -437,37 +437,87 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// ImageDetailHandler returns images grouped by registry/image/digest with tags.
+// ImageDetailHandler returns images grouped by registry/image/digest with
+// tags, plus a digest_id (from image_digests) for drawer deep-linking
+// and severity counts from the latest SUCCEEDED IMAGE_SCAN for that
+// digest.
 func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
 			Registry       string    `json:"registry"`
 			Image          string    `json:"image"`
 			Digest         string    `json:"digest"`
-			Tags           string    `json:"tags"` // comma-separated
+			DigestID       string    `json:"digest_id"` // image_digests.id — enables the drawer row-click
+			Tags           string    `json:"tags"`      // comma-separated
 			ClusterCount   int64     `json:"cluster_count"`
 			NamespaceCount int64     `json:"namespace_count"`
 			ContainerCount int64     `json:"container_count"`
 			LastSeen       time.Time `json:"last_seen"`
+			VulnCritical   int       `json:"vuln_critical"`
+			VulnHigh       int       `json:"vuln_high"`
+			VulnMedium     int       `json:"vuln_medium"`
+			VulnLow        int       `json:"vuln_low"`
+			VulnUnknown    int       `json:"vuln_unknown"`
 		}
 		var rows []row
-		err := db.Raw(liveCTE + `
+		err := db.Raw(liveCTE + `,
+			agg AS (
+				SELECT
+					data->>'registry' AS raw_registry,
+					COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
+					data->>'image' AS image,
+					COALESCE(data->>'digest', '') AS digest,
+					STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
+					COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
+					COUNT(DISTINCT data->>'namespace') AS namespace_count,
+					COUNT(*) AS container_count,
+					MAX(received_at) AS last_seen
+				FROM live
+				WHERE data->>'kind' = 'Container'
+				  AND data->>'pod_phase' = 'Running'
+				GROUP BY data->>'registry', data->>'image', data->>'digest'
+			),
+			latest_scan AS (
+				SELECT DISTINCT ON (payload->>'image_digest_id')
+				       payload->>'image_digest_id' AS image_digest_id,
+				       id AS scan_run_id
+				FROM jobs
+				WHERE type = 'IMAGE_SCAN' AND status = 'SUCCEEDED'
+				ORDER BY payload->>'image_digest_id', created_at DESC
+			),
+			vuln_counts AS (
+				-- Qualify image_digest_id with f. — both tables expose it
+				-- after the JOIN; unqualified references are ambiguous.
+				SELECT f.image_digest_id,
+				    COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
+				    COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
+				    COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
+				    COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS vuln_low,
+				    COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
+				FROM image_vuln_findings f
+				JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
+				GROUP BY f.image_digest_id
+			)
 			SELECT
-				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-				data->>'image' AS image,
-				COALESCE(data->>'digest', '') AS digest,
-				STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
-				COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
-				COUNT(DISTINCT data->>'namespace') AS namespace_count,
-				COUNT(*) AS container_count,
-				MAX(received_at) AS last_seen
-			FROM live
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'pod_phase' = 'Running'
-			GROUP BY data->>'registry', data->>'image', data->>'digest'
-			ORDER BY container_count DESC, data->>'image'
+				agg.registry, agg.image, agg.digest,
+				COALESCE(id.id, '') AS digest_id,
+				agg.tags, agg.cluster_count, agg.namespace_count,
+				agg.container_count, agg.last_seen,
+				COALESCE(vc.vuln_critical, 0) AS vuln_critical,
+				COALESCE(vc.vuln_high, 0)     AS vuln_high,
+				COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
+				COALESCE(vc.vuln_low, 0)      AS vuln_low,
+				COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
+			FROM agg
+			LEFT JOIN image_digests id
+			  ON id.registry   = agg.raw_registry
+			 AND id.repository = agg.image
+			 AND id.digest     = agg.digest
+			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
+			ORDER BY agg.container_count DESC, agg.image
 		`).Scan(&rows).Error
 		if err != nil {
+			log.Printf("clusters/images/detail: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
@@ -778,6 +828,13 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Phase        string           `json:"phase"`
 			Containers   []chainContainer `json:"containers"`
 			ServiceNames []string         `json:"service_names"`
+			// Transient marks pod groups that aren't currently Running but
+			// have been observed in the cluster recently (Pending Jobs,
+			// Succeeded/Failed CronJob firings, crashed replicas). UI
+			// renders these muted so operators see what's happening in the
+			// cluster without losing focus on live work.
+			Transient bool      `json:"transient,omitempty"`
+			LastSeen  time.Time `json:"last_seen,omitempty"`
 		}
 		type chainSvc struct {
 			Name          string            `json:"name"`
@@ -849,6 +906,67 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 						}
 					}
 				}
+			}
+			c.Pods = append(c.Pods, pg)
+		}
+
+		// Transient pod groups — non-Running containers observed in the
+		// last 24h. Excludes owners already rendered above (Running row
+		// is authoritative). Bypasses the session-filtered `live` CTE on
+		// purpose: we want to surface recently-completed Jobs even after
+		// the current agent session's boundary, so operators see what
+		// happened in the cluster, not only what's alive this minute.
+		type transientPodRow struct {
+			Namespace      string    `gorm:"column:namespace"`
+			Owner          string    `gorm:"column:owner"`
+			OwnerKind      string    `gorm:"column:owner_kind"`
+			PodCount       int64     `gorm:"column:pod_count"`
+			Phase          string    `gorm:"column:phase"`
+			ContainersJSON string    `gorm:"column:containers_json"`
+			LastSeen       time.Time `gorm:"column:last_seen"`
+		}
+		var transientPods []transientPodRow
+		db.Raw(`
+			SELECT
+				data->>'namespace' AS namespace,
+				data->>'owner' AS owner,
+				data->>'owner_kind' AS owner_kind,
+				COUNT(DISTINCT data->>'pod_uid') AS pod_count,
+				(array_agg(data->>'pod_phase' ORDER BY received_at DESC))[1] AS phase,
+				jsonb_agg(DISTINCT jsonb_build_object(
+					'name', data->>'container',
+					'image', data->>'image',
+					'tag', data->>'tag',
+					'digest', data->>'digest',
+					'registry', data->>'registry'
+				)) AS containers_json,
+				MAX(received_at) AS last_seen
+			FROM cluster_record
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'msg' != 'DELETE'
+			  AND (data->>'pod_phase' IS NULL OR data->>'pod_phase' != 'Running')
+			  AND data->>'cluster_id' = ?
+			  AND received_at >= NOW() - INTERVAL '24 hours'
+			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
+			ORDER BY data->>'namespace', data->>'owner'
+		`, clusterID).Scan(&transientPods)
+
+		liveKeys := make(map[string]struct{}, len(pods))
+		for _, p := range pods {
+			liveKeys[p.Namespace+"/"+p.Owner+"/"+p.OwnerKind] = struct{}{}
+		}
+		for _, pod := range transientPods {
+			if _, dup := liveKeys[pod.Namespace+"/"+pod.Owner+"/"+pod.OwnerKind]; dup {
+				continue
+			}
+			c := getOrCreate(pod.Namespace)
+			pg := chainPodGroup{
+				Owner: pod.Owner, OwnerKind: pod.OwnerKind,
+				PodCount: pod.PodCount, Phase: pod.Phase,
+				Transient: true, LastSeen: pod.LastSeen,
+			}
+			if pod.ContainersJSON != "" {
+				_ = json.Unmarshal([]byte(pod.ContainersJSON), &pg.Containers)
 			}
 			c.Pods = append(c.Pods, pg)
 		}
