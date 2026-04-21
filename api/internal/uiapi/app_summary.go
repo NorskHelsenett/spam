@@ -286,9 +286,15 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			COALESCE(rc.repo_id::text, '') AS repo_id,
 			COALESCE(rp.org || '/' || rp.slug, '') AS repo_name,
 			COALESCE(rc.commit_sha, '') AS commit_sha,
-			COALESCE(imd.id::text, '') AS image_id,
-			COALESCE(imd.registry, '') AS image_registry,
-			COALESCE(imd.repository, '') AS image_repository,
+			-- Prefer direct image_digests lookup, but fall back to the
+			-- materialized view when the direct join misses (e.g. the
+			-- reconciler hasn't harvested this digest yet, or there's a
+			-- type cast quirk on asset_ref_id). Without the fallback the
+			-- Latest activity row goes blank and the UI collapses to the
+			-- first 8 chars of the sbom_id.
+			COALESCE(NULLIF(imd.id::text, ''), NULLIF(mv.image_id::text, ''), '') AS image_id,
+			COALESCE(NULLIF(imd.registry, ''), mv.image_registry, '') AS image_registry,
+			COALESCE(NULLIF(imd.repository, ''), mv.image_repository, '') AS image_repository,
 			COALESCE(imd.digest, '') AS image_digest,
 			COALESCE(lib.component_count, 0) AS component_count,
 			COALESCE(tv.total, iv.total, 0) AS vuln_count,
