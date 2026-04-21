@@ -354,7 +354,7 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			IngressCount int64     `json:"ingress_count"`
 			LastSeen     time.Time `json:"last_seen"`
 		}
-		var rows []row
+		rows := []row{}
 		err := db.Raw(liveCTE + `
 			SELECT
 				data->>'cluster'     AS cluster,
@@ -391,7 +391,7 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			Registry   string `json:"registry"`
 			ImageCount int64  `json:"image_count"`
 		}
-		var rows []row
+		rows := []row{}
 		err := db.Raw(liveCTE + `
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
@@ -459,7 +459,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			VulnLow        int       `json:"vuln_low"`
 			VulnUnknown    int       `json:"vuln_unknown"`
 		}
-		var rows []row
+		rows := []row{}
 		err := db.Raw(liveCTE + `,
 			agg AS (
 				SELECT
@@ -545,7 +545,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			WorkloadCount int64     `json:"workload_count"`
 			LastSeen      time.Time `json:"last_seen"`
 		}
-		var rows []row
+		rows := []row{}
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
 		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
