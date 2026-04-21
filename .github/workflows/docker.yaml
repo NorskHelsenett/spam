@@ -14,51 +14,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Buildah port — the previous workflow used docker/setup-buildx-action +
-# docker/build-push-action, which needs a reachable Docker daemon. Our
-# self-hosted Fedora runner runs Podman and doesn't expose /var/run/docker.sock
-# to the runner process, so every job was dying at "Set up Docker Buildx".
-# redhat-actions/buildah-build talks to buildah directly — no daemon, no
-# socket, nothing privileged. Multi-stage builds + RUN --mount=type=cache
-# from the Dockerfiles still work unchanged; buildah uses its local
-# containers/storage for layer cache (persistent on self-hosted runners).
-
 jobs:
   build-app:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.build-docker-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Ensure buildah is available
-        # Works whether the runner is Ubuntu (act's catthehacker image),
-        # Fedora (self-hosted), or already-provisioned. First-run cost is
-        # a package install; subsequent runs short-circuit on the which.
-        run: |
-          set -e
-          if command -v buildah >/dev/null 2>&1; then
-            buildah --version
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y buildah
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y buildah
-          else
-            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
-            exit 1
-          fi
-          buildah --version
-
       - name: Derive registry host
-        # Extract plain host (strip scheme) from server URL and export to environment.
-        # ghcr.io for GitHub.com, otherwise the server host (Gitea, etc).
+        # Extract plain host (strip scheme) from server URL and export to environment
+        # Use ghcr.io for GitHub.com, otherwise use the server host (for Gitea, etc.)
         run: |
           set -e
           host="${GITHUB_SERVER_URL#https://}"
@@ -82,100 +54,71 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Derive bare tags for buildah
-        # metadata-action emits fully-qualified image:tag strings. buildah-build
-        # wants just the tag portion (image name is passed separately), so
-        # strip the registry+repo prefix and collapse to a space-separated list.
-        id: bare-tags
-        run: |
-          bare=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | awk -F':' '{print $NF}' | tr '\n' ' ')
-          echo "tags=$bare" >> "$GITHUB_OUTPUT"
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Enable docker layer caching
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Get git commit timestamp for reproducible builds
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
 
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}" >> $GITHUB_OUTPUT
 
-      - name: Log in to container registry
-        # podman isn't installed inside this runner container, but buildah
-        # is — and they write the same auth.json so the next buildah build
-        # / push sees the creds automatically.
-        run: |
-          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
-            --username "${{ github.actor }}" \
-            --password-stdin \
-            "${{ env.REGISTRY_HOST }}"
-
-      - name: Build image with Buildah
-        uses: redhat-actions/buildah-build@v2
-        id: build
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          image: ${{ env.REPOSITORY_LOWER }}
-          tags: ${{ steps.bare-tags.outputs.tags }}
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        id: build-docker-image
+        with:
           context: .
-          containerfiles: |
-            ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:buildcache,mode=max
+          provenance: false
+          sbom: false
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-          extra-args: |
-            --layers
-
-      - name: Push to container registry
-        # push-to-registry uses `podman push` under the hood, which we
-        # don't have in this runner container. buildah push does the same
-        # thing and emits the pushed manifest digest via --digestfile.
-        id: push
-        run: |
-          set -euo pipefail
-          digest=""
-          for tag in ${{ steps.bare-tags.outputs.tags }}; do
-            digestfile=$(mktemp)
-            buildah push \
-              --digestfile "$digestfile" \
-              "${{ env.REPOSITORY_LOWER }}:$tag" \
-              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:$tag"
-            digest=$(cat "$digestfile")
-            rm -f "$digestfile"
-          done
-          # All tags point at the same manifest, so any one digest is THE digest.
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-runner:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.build-runner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Ensure buildah is available
-        # Works whether the runner is Ubuntu (act's catthehacker image),
-        # Fedora (self-hosted), or already-provisioned. First-run cost is
-        # a package install; subsequent runs short-circuit on the which.
-        run: |
-          set -e
-          if command -v buildah >/dev/null 2>&1; then
-            buildah --version
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y buildah
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y buildah
-          else
-            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
-            exit 1
-          fi
-          buildah --version
 
       - name: Derive registry host
         run: |
@@ -192,7 +135,7 @@ jobs:
 
       - name: Docker Metadata action for runner
         uses: docker/metadata-action@v4.3.0
-        id: meta
+        id: runner-meta
         with:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner
           tags: |
@@ -201,93 +144,70 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Derive bare tags for buildah
-        id: bare-tags
-        run: |
-          bare=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | awk -F':' '{print $NF}' | tr '\n' ' ')
-          echo "tags=$bare" >> "$GITHUB_OUTPUT"
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Get git commit timestamp for reproducible builds
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
 
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner" >> $GITHUB_OUTPUT
 
-      - name: Log in to container registry
-        # podman isn't installed inside this runner container, but buildah
-        # is — and they write the same auth.json so the next buildah build
-        # / push sees the creds automatically.
-        run: |
-          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
-            --username "${{ github.actor }}" \
-            --password-stdin \
-            "${{ env.REGISTRY_HOST }}"
-
-      - name: Build runner image with Buildah
-        uses: redhat-actions/buildah-build@v2
-        id: build
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          image: ${{ env.REPOSITORY_LOWER }}/runner
-          tags: ${{ steps.bare-tags.outputs.tags }}
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push runner image
+        uses: docker/build-push-action@v6
+        id: build-runner-image
+        with:
           context: ./runner
-          containerfiles: |
-            ./runner/Dockerfile
-          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64 #,linux/arm64
+          push: true
+          tags: ${{ steps.runner-meta.outputs.tags }}
+          labels: ${{ steps.runner-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache,mode=max
+          provenance: false
+          sbom: false
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-          extra-args: |
-            --layers
-
-      - name: Push runner to container registry
-        id: push
-        run: |
-          set -euo pipefail
-          digest=""
-          for tag in ${{ steps.bare-tags.outputs.tags }}; do
-            digestfile=$(mktemp)
-            buildah push \
-              --digestfile "$digestfile" \
-              "${{ env.REPOSITORY_LOWER }}/runner:$tag" \
-              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:$tag"
-            digest=$(cat "$digestfile")
-            rm -f "$digestfile"
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-sbom-scanner:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.build-sbom-scanner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Ensure buildah is available
-        # Works whether the runner is Ubuntu (act's catthehacker image),
-        # Fedora (self-hosted), or already-provisioned. First-run cost is
-        # a package install; subsequent runs short-circuit on the which.
-        run: |
-          set -e
-          if command -v buildah >/dev/null 2>&1; then
-            buildah --version
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y buildah
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y buildah
-          else
-            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
-            exit 1
-          fi
-          buildah --version
 
       - name: Derive registry host
         run: |
@@ -304,7 +224,7 @@ jobs:
 
       - name: Docker Metadata action for sbom-scanner
         uses: docker/metadata-action@v4.3.0
-        id: meta
+        id: sbom-scanner-meta
         with:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner
           tags: |
@@ -313,93 +233,71 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Derive bare tags for buildah
-        id: bare-tags
-        run: |
-          bare=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | awk -F':' '{print $NF}' | tr '\n' ' ')
-          echo "tags=$bare" >> "$GITHUB_OUTPUT"
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Get git commit timestamp for reproducible builds
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
 
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner" >> $GITHUB_OUTPUT
 
-      - name: Log in to container registry
-        # podman isn't installed inside this runner container, but buildah
-        # is — and they write the same auth.json so the next buildah build
-        # / push sees the creds automatically.
-        run: |
-          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
-            --username "${{ github.actor }}" \
-            --password-stdin \
-            "${{ env.REGISTRY_HOST }}"
-
-      - name: Build sbom-scanner image with Buildah
-        uses: redhat-actions/buildah-build@v2
-        id: build
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          image: ${{ env.REPOSITORY_LOWER }}/sbom-scanner
-          tags: ${{ steps.bare-tags.outputs.tags }}
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push sbom-scanner image
+        uses: docker/build-push-action@v6
+        id: build-sbom-scanner-image
+        with:
           context: ./runner
-          containerfiles: |
-            ./runner/Dockerfile.sbom-scanner
-          labels: ${{ steps.meta.outputs.labels }}
+          file: ./runner/Dockerfile.sbom-scanner
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.sbom-scanner-meta.outputs.tags }}
+          labels: ${{ steps.sbom-scanner-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:buildcache,mode=max
+          provenance: false
+          sbom: false
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-          extra-args: |
-            --layers
-
-      - name: Push sbom-scanner to container registry
-        id: push
-        run: |
-          set -euo pipefail
-          digest=""
-          for tag in ${{ steps.bare-tags.outputs.tags }}; do
-            digestfile=$(mktemp)
-            buildah push \
-              --digestfile "$digestfile" \
-              "${{ env.REPOSITORY_LOWER }}/sbom-scanner:$tag" \
-              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:$tag"
-            digest=$(cat "$digestfile")
-            rm -f "$digestfile"
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-image-scanner:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
+      digest: ${{ steps.build-image-scanner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
-
-      - name: Ensure buildah is available
-        # Works whether the runner is Ubuntu (act's catthehacker image),
-        # Fedora (self-hosted), or already-provisioned. First-run cost is
-        # a package install; subsequent runs short-circuit on the which.
-        run: |
-          set -e
-          if command -v buildah >/dev/null 2>&1; then
-            buildah --version
-            exit 0
-          fi
-          if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y buildah
-          elif command -v dnf >/dev/null 2>&1; then
-            sudo dnf install -y buildah
-          else
-            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
-            exit 1
-          fi
-          buildah --version
 
       - name: Derive registry host
         run: |
@@ -416,7 +314,7 @@ jobs:
 
       - name: Docker Metadata action for image-scanner
         uses: docker/metadata-action@v4.3.0
-        id: meta
+        id: image-scanner-meta
         with:
           images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner
           tags: |
@@ -425,61 +323,58 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Derive bare tags for buildah
-        id: bare-tags
-        run: |
-          bare=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | awk -F':' '{print $NF}' | tr '\n' ' ')
-          echo "tags=$bare" >> "$GITHUB_OUTPUT"
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+          buildkitd-flags: --debug
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Get git commit timestamp for reproducible builds
         run: |
-          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> $GITHUB_ENV
 
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner" >> "$GITHUB_OUTPUT"
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner" >> $GITHUB_OUTPUT
 
-      - name: Log in to container registry
-        # podman isn't installed inside this runner container, but buildah
-        # is — and they write the same auth.json so the next buildah build
-        # / push sees the creds automatically.
-        run: |
-          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
-            --username "${{ github.actor }}" \
-            --password-stdin \
-            "${{ env.REGISTRY_HOST }}"
-
-      - name: Build image-scanner image with Buildah
-        uses: redhat-actions/buildah-build@v2
-        id: build
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
         with:
-          image: ${{ env.REPOSITORY_LOWER }}/image-scanner
-          tags: ${{ steps.bare-tags.outputs.tags }}
+          registry: ${{ env.REGISTRY_HOST }}
+          username: ${{ github.actor }}
+          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+
+      - name: Build and push image-scanner image
+        uses: docker/build-push-action@v6
+        id: build-image-scanner-image
+        with:
           context: ./runner
-          containerfiles: |
-            ./runner/Dockerfile.image-scanner
-          labels: ${{ steps.meta.outputs.labels }}
+          file: ./runner/Dockerfile.image-scanner
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image-scanner-meta.outputs.tags }}
+          labels: ${{ steps.image-scanner-meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner:buildcache,mode=max
+          provenance: false
+          sbom: false
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
-          extra-args: |
-            --layers
-
-      - name: Push image-scanner to container registry
-        id: push
-        run: |
-          set -euo pipefail
-          digest=""
-          for tag in ${{ steps.bare-tags.outputs.tags }}; do
-            digestfile=$(mktemp)
-            buildah push \
-              --digestfile "$digestfile" \
-              "${{ env.REPOSITORY_LOWER }}/image-scanner:$tag" \
-              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner:$tag"
-            digest=$(cat "$digestfile")
-            rm -f "$digestfile"
-          done
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   deploy-helm:
     runs-on: ubuntu-latest
