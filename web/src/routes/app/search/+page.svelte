@@ -3,13 +3,14 @@
 	import { onMount } from 'svelte';
 	import { tick } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, X, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab, Bug } from 'lucide-svelte';
+	import { Search, SearchX, X, ArrowRight, GitBranch, FileCode2, ShieldAlert, Users, Braces, Hash, BookOpen, Boxes, FolderGit2, Eye, ChevronUp, ChevronDown, Github, Gitlab, Bug, Container } from 'lucide-svelte';
+	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import Select from '$lib/components/Select.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 
-	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme' | 'vulnerability';
+	type AdvancedSearchType = 'manifest' | 'sbom' | 'secret' | 'contributor' | 'language' | 'commit' | 'repo' | 'readme' | 'vulnerability' | 'cluster' | 'image';
 
 	type AdvancedSearchResult = {
 		type: AdvancedSearchType;
@@ -25,6 +26,8 @@
 		value?: string;
 		snippet?: string;
 		created_at?: string;
+		cluster_id?: string;
+		image_id?: string;
 	};
 
 	type AdvancedPreview = {
@@ -61,6 +64,8 @@
 	const targetOptions = [
 		{ value: 'all', label: 'All targets' },
 		{ value: 'repo', label: 'Repositories' },
+		{ value: 'cluster', label: 'Clusters' },
+		{ value: 'image', label: 'Images' },
 		{ value: 'commit', label: 'Commits' },
 		{ value: 'manifest', label: 'Manifest files' },
 		{ value: 'sbom', label: 'SBOM files' },
@@ -91,6 +96,10 @@
 				return BookOpen;
 			case 'vulnerability':
 				return Bug;
+			case 'cluster':
+				return KubernetesIcon;
+			case 'image':
+				return Container;
 			default:
 				return GitBranch;
 		}
@@ -107,6 +116,8 @@
 			case 'language': return 'Language';
 			case 'readme': return 'README';
 			case 'vulnerability': return 'Vulnerability';
+			case 'cluster': return 'Cluster';
+			case 'image': return 'Image';
 		}
 	};
 
@@ -186,6 +197,33 @@
 		searchTimeout = setTimeout(() => {
 			loadResults();
 		}, 220);
+	};
+
+	// openResult dispatches on entity type. Clusters and images aren't
+	// repo-scoped, so they route to their own pages instead of the
+	// /app/providers/repo page that the repo-centric types use.
+	const openResult = (r: AdvancedSearchResult) => {
+		if (r.type === 'cluster') {
+			goto('/app/clusters');
+			return;
+		}
+		if (r.type === 'image') {
+			if (r.image_id) {
+				goto(`/app/images/${r.image_id}`);
+			} else {
+				goto('/app/clusters');
+			}
+			return;
+		}
+		openRepo(r);
+	};
+
+	const openLabelForType = (type: AdvancedSearchType) => {
+		switch (type) {
+			case 'cluster': return 'Open cluster';
+			case 'image': return 'Open image';
+			default: return 'Open repository';
+		}
 	};
 
 	const openRepo = (r: AdvancedSearchResult) => {
@@ -432,13 +470,23 @@
 										</div>
 									</td>
 									<td class="px-5 py-3 align-top text-[var(--text-primary)]">
-										{#each splitHighlighted(`${r.org}/${r.slug}`, query) as part}
-											{#if part.match}
-												<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+										{#if r.type === 'cluster'}
+											{#if r.value}
+												<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-tertiary)]">{r.value}</span>
 											{:else}
-												{part.text}
+												<span class="text-xs text-[var(--text-muted)]">—</span>
 											{/if}
-										{/each}
+										{:else if r.type === 'image' && !r.repo_id}
+											<span class="text-xs text-[var(--text-muted)]">—</span>
+										{:else}
+											{#each splitHighlighted(`${r.org}/${r.slug}`, query) as part}
+												{#if part.match}
+													<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+												{:else}
+													{part.text}
+												{/if}
+											{/each}
+										{/if}
 									</td>
 									<td class="px-5 py-3 align-top">
 										<p class="font-semibold text-[var(--text-bright)]">
@@ -487,11 +535,11 @@
 												</button>
 											<button
 												type="button"
-												onclick={() => openRepo(r)}
+												onclick={() => openResult(r)}
 												class="inline-flex items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
 												style="color: var(--accent);"
 											>
-												Open repository <ArrowRight class="h-3.5 w-3.5" />
+												{openLabelForType(r.type)} <ArrowRight class="h-3.5 w-3.5" />
 											</button>
 										</div>
 									</td>

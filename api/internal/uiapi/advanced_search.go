@@ -24,6 +24,12 @@ type AdvancedSearchResult struct {
 	Value      string `json:"value,omitempty"`
 	Snippet    string `json:"snippet,omitempty"`
 	CreatedAt  string `json:"created_at,omitempty"`
+	// ClusterID is set for type=cluster. The UI uses it to link directly
+	// into /app/clusters pre-filtered on the target cluster.
+	ClusterID string `json:"cluster_id,omitempty"`
+	// ImageID is set for type=image. Populated from image_digests.id so
+	// the UI can navigate to /app/images/{id} for the detail page.
+	ImageID string `json:"image_id,omitempty"`
 }
 
 type AdvancedSearchResponse struct {
@@ -47,6 +53,8 @@ type advancedSearchDBRow struct {
 	Value      string
 	SourceText string
 	CreatedAt  time.Time
+	ClusterID  string
+	ImageID    string
 }
 
 var advancedSearchTargets = map[string]struct{}{
@@ -59,12 +67,14 @@ var advancedSearchTargets = map[string]struct{}{
 	"repo":          {},
 	"readme":        {},
 	"vulnerability": {},
+	"cluster":       {},
+	"image":         {},
 }
 
 func normalizeAdvancedTargets(target string) []string {
 	target = strings.TrimSpace(strings.ToLower(target))
 	if target == "" || target == "all" {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vulnerability"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "vulnerability", "cluster", "image"}
 	}
 	parts := strings.Split(target, ",")
 	out := make([]string, 0, len(parts))
@@ -84,7 +94,7 @@ func normalizeAdvancedTargets(target string) []string {
 		out = append(out, t)
 	}
 	if len(out) == 0 {
-		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret"}
+		return []string{"repo", "commit", "language", "contributor", "readme", "manifest", "sbom", "secret", "cluster", "image"}
 	}
 	return out
 }
@@ -448,6 +458,70 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			perTargetLimit,
 		).Scan(&rows).Error
 		return rows, err
+	case "cluster":
+		// Cluster inventory search. One row per distinct cluster_id
+		// observed in cluster_record; matches are on cluster name,
+		// cluster_id, or environment. Empty repo_* fields — clusters
+		// are not repo-scoped.
+		err := db.WithContext(r.Context()).Raw(`
+			SELECT
+				'cluster' AS type,
+				'' AS source_ref,
+				'' AS repo_id,
+				'' AS provider,
+				'' AS provider_id,
+				'' AS base_url,
+				'' AS owner_path,
+				'' AS org,
+				'' AS slug,
+				COALESCE(NULLIF(data->>'cluster', ''), data->>'cluster_id') AS title,
+				COALESCE(data->>'environment', '') AS value,
+				'' AS source_text,
+				MAX(received_at) AS created_at,
+				data->>'cluster_id' AS cluster_id,
+				'' AS image_id
+			FROM cluster_record
+			WHERE data->>'cluster'     ILIKE ?
+			   OR data->>'cluster_id'  ILIKE ?
+			   OR data->>'environment' ILIKE ?
+			GROUP BY data->>'cluster_id', data->>'cluster', data->>'environment'
+			ORDER BY MAX(received_at) DESC
+			LIMIT ?
+		`, like, like, like, perTargetLimit).Scan(&rows).Error
+		return rows, err
+	case "image":
+		// Image digest search. Matches on registry, repository, or the
+		// raw sha256 digest. Populates repo_* fields from the linked
+		// source repo when image_digests.source_repo_id is set, so the
+		// UI can offer an "Open repository" action alongside the image
+		// drawer link.
+		err := db.WithContext(r.Context()).Raw(`
+			SELECT
+				'image' AS type,
+				'' AS source_ref,
+				COALESCE(r.id, '') AS repo_id,
+				COALESCE(r.provider, '') AS provider,
+				COALESCE(pi.id, '') AS provider_id,
+				COALESCE(pi.base_url, '') AS base_url,
+				COALESCE(pi.owner_path, '') AS owner_path,
+				COALESCE(r.org, id.registry) AS org,
+				COALESCE(r.slug, id.repository) AS slug,
+				id.registry || '/' || id.repository AS title,
+				id.digest AS value,
+				'' AS source_text,
+				id.created_at,
+				'' AS cluster_id,
+				id.id AS image_id
+			FROM image_digests id
+			LEFT JOIN repos r ON r.id = id.source_repo_id
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+			WHERE id.registry   ILIKE ?
+			   OR id.repository ILIKE ?
+			   OR id.digest     ILIKE ?
+			ORDER BY id.created_at DESC
+			LIMIT ?
+		`, like, like, like, perTargetLimit).Scan(&rows).Error
+		return rows, err
 	default:
 		return []advancedSearchDBRow{}, nil
 	}
@@ -490,7 +564,11 @@ func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 				return
 			}
 			for _, row := range rows {
-				key := row.Type + "|" + row.RepoID + "|" + row.Title + "|" + row.Value
+				// Dedup key must distinguish non-repo entities (cluster,
+				// image) from repo-bound rows — a cluster and a repo can
+				// both have empty RepoID but different ClusterID/ImageID,
+				// so collapsing on RepoID alone would drop real results.
+				key := row.Type + "|" + row.RepoID + "|" + row.ClusterID + "|" + row.ImageID + "|" + row.Title + "|" + row.Value
 				if _, ok := seen[key]; ok {
 					continue
 				}
@@ -513,6 +591,8 @@ func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 					Value:      row.Value,
 					Snippet:    snippet,
 					CreatedAt:  row.CreatedAt.UTC().Format(time.RFC3339),
+					ClusterID:  row.ClusterID,
+					ImageID:    row.ImageID,
 				})
 			}
 		}
