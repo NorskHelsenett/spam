@@ -197,7 +197,8 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Server } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
+	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -208,7 +209,7 @@ let isAdmin = $state(false);
 		{ href: '/app/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
-		{ href: '/app/clusters', label: 'Clusters', icon: Server },
+		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon },
 		{ href: '/app/runs', label: 'Runs', icon: Play },
 		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound }
 	] as const;
