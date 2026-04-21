@@ -245,13 +245,16 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
-	// Recent SBOMs – join pre-aggregated library counts, per-repo trivy vuln counts
-	// and per-image grype vuln counts, plus latest per-repo secret findings.
+	// Recent SBOMs – resolve identity fields from live tables so the row
+	// doesn't go blank when sbom_metadata_view is stale. The materialized
+	// view is still used for scanner name/version (those require parsing
+	// the SBOM JSON and don't change after ingest).
 	if err := db.WithContext(ctx).Raw(`
 		WITH recent AS (
-			SELECT *
-			FROM sbom_metadata_view
-			ORDER BY created_at DESC
+			SELECT sb.sbom_id, sb.asset_type, sb.asset_ref_id, s.created_at
+			FROM sbom_bindings sb
+			JOIN sboms s ON s.id = sb.sbom_id
+			ORDER BY s.created_at DESC
 			LIMIT 8
 		),
 		trivy_latest AS (
@@ -275,32 +278,41 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			ORDER BY repo_id, created_at DESC
 		)
 		SELECT
-			m.sbom_id,
-			m.created_at,
-			m.scanner_name,
-			m.scanner_version,
-			m.asset_type,
-			COALESCE(m.repo_id::text, '') AS repo_id,
-			COALESCE(m.repo_name, '') AS repo_name,
-			COALESCE(m.commit_sha, '') AS commit_sha,
-			COALESCE(m.image_id::text, '') AS image_id,
-			COALESCE(m.image_registry, '') AS image_registry,
-			COALESCE(m.image_repository, '') AS image_repository,
-			COALESCE(m.image_digest, '') AS image_digest,
+			r.sbom_id,
+			r.created_at,
+			COALESCE(mv.scanner_name, '') AS scanner_name,
+			COALESCE(mv.scanner_version, '') AS scanner_version,
+			r.asset_type,
+			COALESCE(rc.repo_id::text, '') AS repo_id,
+			COALESCE(rp.org || '/' || rp.slug, '') AS repo_name,
+			COALESCE(rc.commit_sha, '') AS commit_sha,
+			COALESCE(imd.id::text, '') AS image_id,
+			COALESCE(imd.registry, '') AS image_registry,
+			COALESCE(imd.repository, '') AS image_repository,
+			COALESCE(imd.digest, '') AS image_digest,
 			COALESCE(lib.component_count, 0) AS component_count,
 			COALESCE(tv.total, iv.total, 0) AS vuln_count,
 			COALESCE(rs.total, 0) AS secret_count
-		FROM recent m
+		FROM recent r
+		LEFT JOIN sbom_metadata_view mv
+			ON mv.sbom_id = r.sbom_id
+			AND mv.asset_type = r.asset_type
+			AND mv.asset_ref_id = r.asset_ref_id
+		LEFT JOIN repo_commits rc
+			ON rc.id = r.asset_ref_id AND r.asset_type = 'REPO_COMMIT'
+		LEFT JOIN repos rp ON rp.id = rc.repo_id
+		LEFT JOIN image_digests imd
+			ON imd.id = r.asset_ref_id AND r.asset_type = 'IMAGE_DIGEST'
 		LEFT JOIN (
 			SELECT sbom_id, COUNT(*) AS component_count
 			FROM sbom_component_view
 			WHERE is_root = false
 			GROUP BY sbom_id
-		) lib ON lib.sbom_id = m.sbom_id
-		LEFT JOIN trivy_latest tv ON tv.repo_id::text = m.repo_id::text
-		LEFT JOIN image_vulns iv ON iv.image_id::text = m.image_id::text
-		LEFT JOIN repo_secret_latest rs ON rs.repo_id::text = m.repo_id::text
-		ORDER BY m.created_at DESC
+		) lib ON lib.sbom_id = r.sbom_id
+		LEFT JOIN trivy_latest tv ON tv.repo_id::text = rc.repo_id::text
+		LEFT JOIN image_vulns iv ON iv.image_id::text = imd.id::text
+		LEFT JOIN repo_secret_latest rs ON rs.repo_id::text = rc.repo_id::text
+		ORDER BY r.created_at DESC
 	`).Scan(&resp.RecentSBOMs).Error; err != nil {
 		return resp, err
 	}

@@ -291,7 +291,7 @@
 								>
 									<td class="px-5 py-3">
 										<div class="flex items-center gap-3">
-											<span class="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[var(--warning)]/15 text-[var(--warning)]" aria-hidden="true">
+											<span class="flex-shrink-0 text-[var(--warning)]" aria-hidden="true">
 												{#if sbom.asset_type === 'IMAGE_DIGEST'}
 													<Container size={16} stroke-width={1.8} />
 												{:else}
