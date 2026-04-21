@@ -59,6 +59,17 @@
 		vulnerabilities?: { summary?: { critical: number; high: number; medium: number; low: number } };
 	};
 
+	type ImagePreview = {
+		id: string;
+		registry: string;
+		repository: string;
+		digest: string;
+		linked_repo?: { provider?: string; org?: string; slug?: string };
+		vuln_severity?: { critical: number; high: number; medium: number; low: number; unknown: number; total: number };
+		secret_count: number;
+		cluster_usage?: { cluster: string }[];
+	};
+
 	let open = $state(false);
 	let query = $state('');
 	let repoResults = $state<RepoResult[]>([]);
@@ -71,15 +82,18 @@
 	let selectedIndex = $state(0);
 	let repoPreview = $state<RepoPreview | null>(null);
 	let contributors = $state<Contributor[]>([]);
+	let imagePreview = $state<ImagePreview | null>(null);
 	let previewLoading = $state(false);
 	let inputEl: HTMLInputElement | undefined = $state();
 	let resultsListEl: HTMLDivElement | undefined = $state();
 
 	const previewCache = new Map<string, RepoPreview>();
 	const contributorsCache = new Map<string, Contributor[]>();
+	const imagePreviewCache = new Map<string, ImagePreview>();
 	let searchTimer: ReturnType<typeof setTimeout>;
 	let previewTimer: ReturnType<typeof setTimeout>;
 	let contributorsTimer: ReturnType<typeof setTimeout>;
+	let imagePreviewTimer: ReturnType<typeof setTimeout>;
 
 	const flatItems = $derived.by<SearchItem[]>(() => {
 		const items: SearchItem[] = [];
@@ -109,6 +123,7 @@
 		imageResults = [];
 		repoPreview = null;
 		contributors = [];
+		imagePreview = null;
 		selectedIndex = 0;
 		hasMore = false;
 		repoOffset = 0;
@@ -232,11 +247,47 @@
 		}
 	};
 
+	const fetchImagePreview = (result: ImageResult) => {
+		const key = result.image_id;
+		if (imagePreviewCache.has(key)) {
+			imagePreview = imagePreviewCache.get(key)!;
+			return;
+		}
+		imagePreview = null;
+		clearTimeout(imagePreviewTimer);
+		previewLoading = true;
+		imagePreviewTimer = setTimeout(async () => {
+			try {
+				const res = await fetch(`/api/images/${encodeURIComponent(key)}`);
+				if (res.ok) {
+					const data = (await res.json()) as ImagePreview;
+					imagePreviewCache.set(key, data);
+					imagePreview = data;
+				}
+			} finally {
+				previewLoading = false;
+			}
+		}, 120);
+	};
+
 	$effect(() => {
 		const item = flatItems[selectedIndex];
-		if (!item) { repoPreview = null; contributors = []; return; }
-		if (item.kind === 'repo') fetchRepoPreview(item.data);
-		else { repoPreview = null; contributors = []; clearTimeout(previewTimer); clearTimeout(contributorsTimer); previewLoading = false; }
+		if (!item) {
+			repoPreview = null; contributors = []; imagePreview = null;
+			return;
+		}
+		if (item.kind === 'repo') {
+			imagePreview = null;
+			fetchRepoPreview(item.data);
+		} else if (item.kind === 'image') {
+			repoPreview = null; contributors = [];
+			clearTimeout(previewTimer); clearTimeout(contributorsTimer);
+			fetchImagePreview(item.data);
+		} else {
+			repoPreview = null; contributors = []; imagePreview = null;
+			clearTimeout(previewTimer); clearTimeout(contributorsTimer); clearTimeout(imagePreviewTimer);
+			previewLoading = false;
+		}
 	});
 
 	$effect(() => {
@@ -674,6 +725,55 @@
 								<div class="mb-3">
 									<p class="text-[10px] uppercase tracking-widest" style="color: var(--text-muted);">Digest</p>
 									<p class="mt-0.5 truncate font-mono text-[11px]" style="color: var(--text-primary);">{img.value}</p>
+								</div>
+							{/if}
+							{#if previewLoading && !imagePreview}
+								<div class="space-y-2">
+									{#each [1, 2, 3, 4] as _}
+										<div class="h-3 w-full rounded" style="background: var(--bg1);"></div>
+									{/each}
+								</div>
+							{:else if imagePreview}
+								{@const clusterCount = new Set((imagePreview.cluster_usage ?? []).map((c) => c.cluster)).size}
+								{@const repoCount = imagePreview.linked_repo ? 1 : 0}
+								{@const vulnTotal = imagePreview.vuln_severity?.total ?? 0}
+								<div class="space-y-2.5">
+									<div class="flex items-center gap-2.5">
+										<GitBranch size={13} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Linked repo</span>
+										<span class="ml-auto truncate text-[11px] font-medium" style="color: var(--text-primary);">
+											{#if repoCount > 0 && imagePreview.linked_repo?.org}
+												{imagePreview.linked_repo.org}/{imagePreview.linked_repo.slug}
+											{:else}
+												—
+											{/if}
+										</span>
+									</div>
+									<div class="flex items-center gap-2.5">
+										<Box size={13} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Clusters</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: {clusterCount > 0 ? 'var(--text-primary)' : 'var(--text-muted)'};">
+											{clusterCount > 0 ? clusterCount : '—'}
+										</span>
+									</div>
+									<div class="flex items-center gap-2.5">
+										<Microscope size={13} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Vulnerabilities</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: {vulnTotal > 0 ? 'var(--red)' : 'var(--text-muted)'};">
+											{#if vulnTotal > 0 && imagePreview.vuln_severity}
+												{imagePreview.vuln_severity.critical}C · {imagePreview.vuln_severity.high}H · {imagePreview.vuln_severity.medium}M · {imagePreview.vuln_severity.low}L
+											{:else}
+												—
+											{/if}
+										</span>
+									</div>
+									<div class="flex items-center gap-2.5">
+										<ShieldCheck size={13} style="color: var(--text-muted); flex-shrink:0;" />
+										<span class="text-[11px]" style="color: var(--text-muted);">Secrets</span>
+										<span class="ml-auto text-[11px] font-medium" style="color: {imagePreview.secret_count > 0 ? 'var(--red)' : 'var(--text-muted)'};">
+											{imagePreview.secret_count > 0 ? imagePreview.secret_count : '—'}
+										</span>
+									</div>
 								</div>
 							{/if}
 							<button

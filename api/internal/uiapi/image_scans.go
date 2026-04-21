@@ -331,6 +331,11 @@ type ImageDetailResponse struct {
 	// pulling every finding.
 	VulnSeverity *ImageVulnSeverityCount `json:"vuln_severity,omitempty"`
 
+	// SecretCount is the number of findings in the most recent betterleaks
+	// artifact for this digest. Drives the "secrets" chip on the image
+	// drawer + cmd+k preview without pulling the full JSON blob.
+	SecretCount int64 `json:"secret_count"`
+
 	ClusterUsage []ImageClusterUsageRow `json:"cluster_usage,omitempty"`
 }
 
@@ -485,6 +490,29 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 				}
 			}
 		}
+
+		// Secret-finding count from the most recent betterleaks artifact
+		// for this digest. Same query shape as /api/secrets/images but
+		// scoped to one image_digest_id. Non-fatal if the artifact JSON
+		// can't be parsed — we default to 0 rather than fail the page.
+		_ = db.WithContext(r.Context()).Raw(`
+			WITH latest AS (
+				SELECT isa.content
+				FROM image_scan_runs isr
+				JOIN image_scan_artifacts isa ON isa.scan_run_id = isr.id
+				WHERE isr.image_digest_id = ?
+				  AND isa.category = 'secrets'
+				  AND isa.scanner  = 'betterleaks'
+				ORDER BY isr.finished_at DESC NULLS LAST
+				LIMIT 1
+			)
+			SELECT COALESCE((
+				SELECT jsonb_array_length(convert_from(l.content, 'utf8')::jsonb)
+				FROM latest l
+				WHERE octet_length(l.content) > 2
+				  AND jsonb_typeof(convert_from(l.content, 'utf8')::jsonb) = 'array'
+			), 0)
+		`, id).Scan(&resp.SecretCount).Error
 
 		// Cluster usage from the live cluster_record feed.
 		type usageRow struct {
