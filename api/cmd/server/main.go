@@ -19,8 +19,10 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
@@ -71,9 +73,14 @@ func run() error {
 		&runner.Run{},
 		&runner.RunLog{},
 		&runner.RunSecret{},
+		// Image-scan tables are also migrated by the worker, but the API
+		// server needs them too so local-dev seeding (image_scan_seed.sql)
+		// doesn't blow up when the worker isn't running.
+		&imagescan.ImageScanRun{},
+		&imagescan.ImageScanArtifact{},
+		&imagescan.ImageVulnFinding{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
-		&events.OutboxEvent{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
 		&vulnerabilities.TrivyScanLease{},
@@ -81,6 +88,8 @@ func run() error {
 		&secretprobe.SecretProbe{},
 		&secretprobe.ProbeAuditLog{},
 		&secretprobe.SecretDismissal{},
+		&scam.Record{},
+		&scam.ClusterSession{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
@@ -110,6 +119,8 @@ func run() error {
 		"migrations/20260311_create_view_unified_repositories_vulnerabilities.sql",
 		"migrations/20260311_fix_sbom_component_view_implicit_root.sql",
 		"migrations/20260317_add_repos_is_private.sql",
+		"migrations/20260416_create_scam_indexes.sql",
+		"migrations/20260420_dedupe_cluster_record_msg.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

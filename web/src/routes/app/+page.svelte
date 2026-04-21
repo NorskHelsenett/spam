@@ -3,6 +3,7 @@
 	import { goto } from '$app/navigation';
 	import DonutChart, { type DonutSegment } from '$lib/components/DonutChart.svelte';
 	import Loading from '$lib/components/Loading.svelte';
+	import { Container, GitBranch } from 'lucide-svelte';
 
 	type SummaryCounts = {
 		sbom_count: number;
@@ -21,6 +22,7 @@
 
 	type ScannerCount = {
 		name: string;
+		version: string;
 		count: number;
 	};
 
@@ -33,10 +35,13 @@
 		repo_id?: string;
 		repo_name?: string;
 		commit_sha?: string;
+		image_id?: string;
 		image_registry?: string;
 		image_repository?: string;
 		image_digest?: string;
 		component_count: number;
+		vuln_count: number;
+		secret_count: number;
 	};
 
 	type TopComponent = {
@@ -146,13 +151,35 @@
 		];
 	};
 
-	const sbomLabel = (sbom: RecentSBOM) => sbom.repo_name || sbom.image_repository || sbom.sbom_id.slice(0, 8);
+	// Build the best label we can from whatever identity fields exist.
+	// Some image_digests rows have registry set but repository empty
+	// (scanner resolved the registry part but didn't parse a repo out of
+	// the ref) — don't let those collapse to the sbom_id prefix when we
+	// still have a registry + digest to show.
+	const imageName = (sbom: RecentSBOM) => {
+		const registry = sbom.image_registry ?? '';
+		const repository = sbom.image_repository ?? '';
+		const digest = sbom.image_digest ?? '';
+		const shortDigest = digest.startsWith('sha256:') ? digest.slice(7, 19) : digest.slice(0, 12);
+
+		if (registry && repository) return `${registry}/${repository}`;
+		if (registry && shortDigest) return `${registry}@${shortDigest}`;
+		if (repository) return repository;
+		if (shortDigest) return `sha256:${shortDigest}`;
+		return '';
+	};
+
+	const sbomLabel = (sbom: RecentSBOM) =>
+		sbom.repo_name || imageName(sbom) || sbom.sbom_id.slice(0, 8);
 
 	const sbomClickTarget = (sbom: RecentSBOM): string => {
 		if (sbom.asset_type === 'REPO_COMMIT' && sbom.repo_id) {
 			return `/app/providers/repo?repo_id=${encodeURIComponent(sbom.repo_id)}`;
 		}
-		return `/app/agents?sbom_id=${sbom.sbom_id}`;
+		if (sbom.asset_type === 'IMAGE_DIGEST' && sbom.image_id) {
+			return `/app/images/${sbom.image_id}`;
+		}
+		return '';
 	};
 
 	const licenseSegments = (): DonutSegment[] => {
@@ -186,7 +213,7 @@
 	const scannerSegments = (): DonutSegment[] => {
 		if (!summary) return [];
 		return (summary.scanners ?? []).map((scanner, index) => ({
-			label: scanner.name,
+			label: scanner.version ? `${scanner.name} ${scanner.version}` : scanner.name,
 			value: scanner.count,
 			color: scannerPalette[index % scannerPalette.length]
 		}));
@@ -252,7 +279,7 @@
 		<div class="grid gap-6 lg:grid-cols-3">
 			<section class="panel-surface flex flex-col rounded-2xl p-6 lg:col-span-2">
 				<div class="flex items-center justify-between">
-					<h2 class="text-lg font-semibold text-[var(--text-bright)]">SBOM activity</h2>
+					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Latest activity</h2>
 					<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">latest</span>
 				</div>
 				<div class="mt-4 min-h-0 flex-1 overflow-auto rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
@@ -260,27 +287,49 @@
 						<thead class="sticky top-0 bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
 								<th class="px-5 py-3 text-left">Asset</th>
-								<th class="px-5 py-3 text-left">Scanner</th>
 								<th class="px-5 py-3 text-left">Components</th>
+								<th class="px-5 py-3 text-left">Vulns</th>
+								<th class="px-5 py-3 text-left">Secrets</th>
 								<th class="px-5 py-3 text-left">Timestamp</th>
 							</tr>
 						</thead>
 						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 							{#each summary.recent_sboms ?? [] as sbom}
+								{@const target = sbomClickTarget(sbom)}
 								<tr
-									class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
-									on:click={() => goto(sbomClickTarget(sbom))}
+									class={`transition ${target ? 'cursor-pointer hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]' : ''}`}
+									on:click={() => target && goto(target)}
 								>
 									<td class="px-5 py-3">
-										<p class="font-semibold text-[var(--text-bright)]">{sbomLabel(sbom)}</p>
-										<p class="text-xs text-[var(--text-tertiary)]">
-											{sbom.commit_sha ? `commit ${shortSHA(sbom.commit_sha)}` : sbom.asset_type}
-										</p>
-									</td>
-									<td class="px-5 py-3 text-xs">
-										{sbom.scanner_name} {sbom.scanner_version}
+										<div class="flex items-center gap-3">
+											<span class="flex-shrink-0 text-[var(--warning)]" aria-hidden="true">
+												{#if sbom.asset_type === 'IMAGE_DIGEST'}
+													<Container size={16} stroke-width={1.8} />
+												{:else}
+													<GitBranch size={16} stroke-width={1.8} />
+												{/if}
+											</span>
+											<div class="min-w-0">
+												<p class="truncate font-semibold text-[var(--text-bright)]">{sbomLabel(sbom)}</p>
+												<p class="text-xs text-[var(--text-tertiary)]">
+													{sbom.commit_sha ? `commit ${shortSHA(sbom.commit_sha)}` : sbom.asset_type}
+												</p>
+											</div>
+										</div>
 									</td>
 									<td class="px-5 py-3">{sbom.component_count}</td>
+									<td
+										class="px-5 py-3 font-semibold"
+										style={`color: ${sbom.vuln_count > 0 ? 'var(--error)' : 'var(--text-tertiary)'}`}
+									>
+										{sbom.vuln_count}
+									</td>
+									<td
+										class="px-5 py-3 font-semibold"
+										style={`color: ${sbom.secret_count > 0 ? 'var(--warning)' : 'var(--text-tertiary)'}`}
+									>
+										{sbom.secret_count}
+									</td>
 									<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{formatDate(sbom.created_at)}</td>
 								</tr>
 							{/each}

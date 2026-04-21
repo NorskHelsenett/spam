@@ -15,86 +15,9 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
-	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
-
-// TokenExchangeRequest is the request body for token exchange.
-type TokenExchangeRequest struct {
-	RunID string `json:"run_id"`
-}
-
-// TokenExchangeResponse is the response for token exchange.
-type TokenExchangeResponse struct {
-	Token string `json:"token"`
-}
-
-// handleTokenExchange exchanges a run token for a PAT.
-// For now, this returns an empty token (public repos only).
-// Future: look up stored PAT for private repo access.
-func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
-	// Validate bearer token
-	token := extractBearerToken(r)
-	if token == "" {
-		http.Error(w, "missing authorization", http.StatusUnauthorized)
-		return
-	}
-
-	claims, err := ValidateRunToken(s.cfg.HMACKey, token)
-	if err != nil {
-		log.Printf("invalid token: %v", err)
-		http.Error(w, "invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Parse request
-	var req TokenExchangeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Verify run ID matches token
-	if req.RunID != claims.RunID {
-		http.Error(w, "run ID mismatch", http.StatusForbidden)
-		return
-	}
-
-	// Load run payload for provider metadata
-	var run Run
-	if err := s.db.WithContext(r.Context()).Where("id = ?", req.RunID).First(&run).Error; err != nil {
-		http.Error(w, "run not found", http.StatusNotFound)
-		return
-	}
-
-	var payload jobs.CreateRunPayload
-	if len(run.Payload) > 0 {
-		if err := json.Unmarshal(run.Payload, &payload); err != nil {
-			log.Printf("failed to unmarshal run payload: %v", err)
-			http.Error(w, "invalid run payload", http.StatusInternalServerError)
-			return
-		}
-	}
-
-	providerToken := ""
-	if payload.ProviderID != "" {
-		pat, err := providerconfig.GetActiveToken(r.Context(), s.db, payload.ProviderID, s.cfg.ProviderSecretsKey)
-		if err != nil {
-			log.Printf("token exchange failed: %v", err)
-			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
-			return
-		}
-		providerToken = pat
-	}
-
-	resp := TokenExchangeResponse{
-		Token: providerToken,
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
 
 // handleResults receives SBOM and secrets results from a runner.
 func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {

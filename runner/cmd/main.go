@@ -4,17 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -22,16 +27,19 @@ import (
 	"nhooyr.io/websocket"
 )
 
-type LogMessage struct {
-	Type       string `json:"type"`
-	Line       string `json:"line,omitempty"`
-	Ts         string `json:"ts,omitempty"`
-	ExitCode   int    `json:"exit_code,omitempty"`
-	CommitHash string `json:"commit_hash,omitempty"`
+type ToolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
 }
 
-type TokenResponse struct {
-	Token string `json:"token"`
+type LogMessage struct {
+	Type         string        `json:"type"`
+	Line         string        `json:"line,omitempty"`
+	Ts           string        `json:"ts,omitempty"`
+	ExitCode     int           `json:"exit_code,omitempty"`
+	CommitHash   string        `json:"commit_hash,omitempty"`
+	ToolVersions []ToolVersion `json:"tool_versions,omitempty"`
 }
 
 type Runner struct {
@@ -47,9 +55,9 @@ type Runner struct {
 	cancel        context.CancelFunc
 	wsConn        *websocket.Conn
 	logChan       chan string
-	localMode     bool
 	sbomScanner   string // "trivy" or "syft"
 	commitHash    string
+	runnerMode    string // "clone" or "scan"
 }
 
 func main() {
@@ -61,8 +69,17 @@ func main() {
 	repoCommitSHA := os.Getenv("REPO_COMMIT_SHA")
 	sbomScanner := os.Getenv("SBOM_SCANNER")
 
+	runnerMode := os.Getenv("RUNNER_MODE")
+
 	if workerURL == "" || runID == "" || repoCloneURL == "" {
 		log.Fatal("Missing required environment variables")
+	}
+
+	clearRunEnv()
+
+	// Clone mode: init container that clones the repo and exits
+	if runnerMode == "clone" {
+		os.Exit(runCloneMode(workerURL, runID, runToken, repoCloneURL, repoRef, repoCommitSHA))
 	}
 
 	// Default to syft if not specified
@@ -90,8 +107,8 @@ func main() {
 		ctx:           ctx,
 		cancel:        cancel,
 		logChan:       make(chan string, 100),
-		localMode:     workerURL == "local",
 		sbomScanner:   sbomScanner,
+		runnerMode:    runnerMode,
 	}
 
 	// Setup cleanup
@@ -106,18 +123,16 @@ func main() {
 		cancel()
 	}()
 
-	// Connect WebSocket if not in local mode
-	if !r.localMode {
-		if err := r.connectWebSocket(); err != nil {
-			log.Fatalf("Failed to connect WebSocket: %v", err)
-		}
-		defer r.wsConn.Close(websocket.StatusNormalClosure, "")
-
-		// Start log streaming goroutine
-		go r.streamLogs()
-		// Start cancellation monitor
-		go r.monitorCancellation()
+	// Connect WebSocket
+	if err := r.connectWebSocket(); err != nil {
+		log.Fatalf("Failed to connect WebSocket: %v", err)
 	}
+	defer r.wsConn.Close(websocket.StatusNormalClosure, "")
+
+	// Start log streaming goroutine
+	go r.streamLogs()
+	// Start cancellation monitor
+	go r.monitorCancellation()
 
 	r.log(fmt.Sprintf("Starting run: %s", runID))
 
@@ -131,8 +146,11 @@ func main() {
 }
 
 func (r *Runner) cleanup() {
-	if err := os.RemoveAll(r.workDir); err != nil {
-		log.Printf("Failed to clean work dir: %v", err)
+	// Work dir is read-only in scan mode (mounted from init container)
+	if r.runnerMode != "scan" {
+		if err := os.RemoveAll(r.workDir); err != nil {
+			log.Printf("Failed to clean work dir: %v", err)
+		}
 	}
 	if r.artifactDir != "" && r.artifactDir != "/" {
 		if err := os.RemoveAll(r.artifactDir); err != nil {
@@ -156,11 +174,9 @@ func (r *Runner) connectWebSocket() error {
 
 func (r *Runner) log(line string) {
 	fmt.Println(line)
-	if !r.localMode {
-		select {
-		case r.logChan <- line:
-		case <-r.ctx.Done():
-		}
+	select {
+	case r.logChan <- line:
+	case <-r.ctx.Done():
 	}
 }
 
@@ -202,9 +218,6 @@ func (r *Runner) monitorCancellation() {
 }
 
 func (r *Runner) sendDone(exitCode int) {
-	if r.localMode {
-		return
-	}
 	msg := LogMessage{
 		Type:     "done",
 		ExitCode: exitCode,
@@ -216,16 +229,10 @@ func (r *Runner) sendDone(exitCode int) {
 }
 
 func (r *Runner) runPipeline() int {
-	// Prepare work directory
-	if err := os.RemoveAll(r.workDir); err != nil {
-		r.log(fmt.Sprintf("Failed to clean work dir: %v", err))
-	}
-	if err := os.MkdirAll(r.workDir, 0755); err != nil {
-		r.log(fmt.Sprintf("Failed to create work dir: %v", err))
-		return 1
-	}
+	// Log tool versions and binary digests for auditability
+	r.logToolVersions()
 
-	// Prepare artifacts directory outside the repository clone.
+	// Prepare artifacts directory (on /tmp tmpfs, always writable)
 	if err := os.RemoveAll(r.artifactDir); err != nil {
 		r.log(fmt.Sprintf("Failed to clean artifact dir: %v", err))
 	}
@@ -235,58 +242,6 @@ func (r *Runner) runPipeline() int {
 	}
 	r.log(fmt.Sprintf("Artifact directory: %s", r.artifactDir))
 
-	// Request PAT for private repos
-	pat := ""
-	if !r.localMode {
-		r.log("Requesting access token...")
-		var err error
-		pat, err = r.requestToken()
-		if err != nil {
-			r.log(fmt.Sprintf("Failed to get token: %v", err))
-			// Continue anyway - might be public repo
-		}
-	}
-
-	// Build clone URL with auth if needed
-	cloneURL := r.repoCloneURL
-	if pat != "" {
-		cloneURL = strings.Replace(r.repoCloneURL, "https://", fmt.Sprintf("https://token:%s@", pat), 1)
-	}
-
-	// Clone repository
-	r.log(fmt.Sprintf("Cloning %s...", r.repoCloneURL))
-	if r.repoCommitSHA != "" {
-		// Pinned-commit mode: clone without --depth=1, then checkout exact SHA
-		cloneArgs := []string{"clone", "-c", "credential.helper=", "--no-tags"}
-		if r.repoRef != "" {
-			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
-		}
-		cloneArgs = append(cloneArgs, cloneURL, r.workDir)
-
-		if err := r.runCommand("git", cloneArgs...); err != nil {
-			r.log(fmt.Sprintf("Git clone failed: %v", err))
-			return 1
-		}
-		r.log(fmt.Sprintf("Checking out pinned commit %s...", r.repoCommitSHA))
-		checkoutCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "checkout", r.repoCommitSHA)
-		if out, err := checkoutCmd.CombinedOutput(); err != nil {
-			r.log(fmt.Sprintf("Git checkout failed: %v\n%s", err, string(out)))
-			return 1
-		}
-	} else {
-		// Standard shallow clone
-		cloneArgs := []string{"clone", "-c", "credential.helper=", "--depth=1"}
-		if r.repoRef != "" {
-			cloneArgs = append(cloneArgs, "--branch", r.repoRef)
-		}
-		cloneArgs = append(cloneArgs, cloneURL, r.workDir)
-
-		if err := r.runCommand("git", cloneArgs...); err != nil {
-			r.log(fmt.Sprintf("Git clone failed: %v", err))
-			return 1
-		}
-	}
-
 	// Capture the actual commit hash that was cloned
 	commitHashCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "rev-parse", "HEAD")
 	commitHashOut, commitErr := commitHashCmd.Output()
@@ -294,14 +249,12 @@ func (r *Runner) runPipeline() int {
 		r.commitHash = strings.TrimSpace(string(commitHashOut))
 		r.log(fmt.Sprintf("Commit hash: %s", r.commitHash))
 		// Send commit hash via WebSocket
-		if !r.localMode {
-			msg := LogMessage{
-				Type:       "commit_hash",
-				CommitHash: r.commitHash,
-			}
-			if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
-				r.log(fmt.Sprintf("Failed to send commit hash: %v", err))
-			}
+		msg := LogMessage{
+			Type:       "commit_hash",
+			CommitHash: r.commitHash,
+		}
+		if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
+			r.log(fmt.Sprintf("Failed to send commit hash: %v", err))
 		}
 	}
 
@@ -354,60 +307,25 @@ func (r *Runner) runPipeline() int {
 		}
 	}
 
-	// Upload results if not in local mode, otherwise copy to output dir
-	if !r.localMode {
-		r.log("Uploading SBOM...")
-		if err := r.uploadFile(sbomPath, "sbom"); err != nil {
-			r.log(fmt.Sprintf("Failed to upload SBOM: %v", err))
+	// Upload results
+	r.log("Uploading SBOM...")
+	if err := r.uploadFile(sbomPath, "sbom"); err != nil {
+		r.log(fmt.Sprintf("Failed to upload SBOM: %v", err))
+		return 1
+	}
+
+	r.log("Uploading BetterLeaks results...")
+	if err := r.uploadFile(betterleaksPath, "secrets"); err != nil {
+		r.log(fmt.Sprintf("Failed to upload BetterLeaks results: %v", err))
+		return 1
+	}
+
+	// Upload manifests if they exist
+	if _, err := os.Stat(manifestsPath); err == nil {
+		r.log("Uploading dependency manifests...")
+		if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
+			r.log(fmt.Sprintf("Failed to upload manifests: %v", err))
 			return 1
-		}
-
-		r.log("Uploading BetterLeaks results...")
-		if err := r.uploadFile(betterleaksPath, "secrets"); err != nil {
-			r.log(fmt.Sprintf("Failed to upload BetterLeaks results: %v", err))
-			return 1
-		}
-
-		// Upload manifests if they exist
-		if _, err := os.Stat(manifestsPath); err == nil {
-			r.log("Uploading dependency manifests...")
-			if err := r.uploadFile(manifestsPath, "manifests"); err != nil {
-				r.log(fmt.Sprintf("Failed to upload manifests: %v", err))
-				return 1
-			}
-		}
-	} else {
-		// Local mode: copy results to output directory
-		outputDir := os.Getenv("OUTPUT_DIR")
-		if outputDir != "" {
-			r.log(fmt.Sprintf("Copying results to %s...", outputDir))
-			if err := os.MkdirAll(outputDir, 0755); err != nil {
-				r.log(fmt.Sprintf("Failed to create output dir: %v", err))
-				return 1
-			}
-
-			// Copy SBOM
-			if err := r.copyFile(sbomPath, filepath.Join(outputDir, "sbom.json")); err != nil {
-				r.log(fmt.Sprintf("Failed to copy SBOM: %v", err))
-			} else {
-				r.log("✓ SBOM saved")
-			}
-
-			// Copy BetterLeaks results
-			if err := r.copyFile(betterleaksPath, filepath.Join(outputDir, "betterleaks.json")); err != nil {
-				r.log(fmt.Sprintf("Failed to copy BetterLeaks results: %v", err))
-			} else {
-				r.log("✓ BetterLeaks results saved")
-			}
-
-			// Copy manifests if they exist
-			if _, err := os.Stat(manifestsPath); err == nil {
-				if err := r.copyFile(manifestsPath, filepath.Join(outputDir, "manifests.json")); err != nil {
-					r.log(fmt.Sprintf("Failed to copy manifests: %v", err))
-				} else {
-					r.log("✓ Dependency manifests saved")
-				}
-			}
 		}
 	}
 
@@ -415,10 +333,77 @@ func (r *Runner) runPipeline() int {
 	return 0
 }
 
+// binaryDigest returns the SHA-256 digest of a file, or "unknown" on error.
+func binaryDigest(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "unknown"
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "unknown"
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// logToolVersions logs the version and binary digest of each tool and sends
+// structured tool_versions message via websocket for the API to serve.
+func (r *Runner) logToolVersions() {
+	tools := []struct {
+		name        string
+		path        string
+		versionArgs []string
+	}{
+		{"syft", "/usr/local/bin/syft", []string{"--version"}},
+		{"trivy", "/usr/local/bin/trivy", []string{"--version"}},
+		{"betterleaks", "/usr/local/bin/betterleaks", []string{"version"}},
+		{"git", "/usr/bin/git", []string{"--version"}},
+	}
+
+	var versions []ToolVersion
+	for _, t := range tools {
+		digest := binaryDigest(t.path)
+		version := "unknown"
+		if out, err := exec.CommandContext(r.ctx, t.path, t.versionArgs...).Output(); err == nil {
+			if idx := strings.IndexByte(string(out), '\n'); idx > 0 {
+				version = strings.TrimSpace(string(out[:idx]))
+			} else {
+				version = strings.TrimSpace(string(out))
+			}
+		}
+		versions = append(versions, ToolVersion{Name: t.name, Version: version, BinaryDigest: digest})
+		r.log(fmt.Sprintf("Tool: %s | %s | %s", t.name, version, digest))
+	}
+
+	// Send structured tool versions via websocket
+	if r.wsConn != nil {
+		msg := LogMessage{Type: "tool_versions", ToolVersions: versions}
+		if err := r.wsConn.Write(r.ctx, websocket.MessageText, mustJSON(msg)); err != nil {
+			r.log(fmt.Sprintf("Failed to send tool versions: %v", err))
+		}
+	}
+}
+
+// cleanEnv returns a minimal environment for running external tools.
+// This prevents sensitive variables (tokens, secrets) from leaking to
+// third-party analyzers like syft, trivy, or betterleaks.
+func cleanEnv() []string {
+	return []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + os.Getenv("HOME"),
+		"GIT_TERMINAL_PROMPT=0",
+		"SYFT_CHECK_FOR_APP_UPDATE=false",
+		"TRIVY_SKIP_DB_UPDATE=true",
+		"TRIVY_SKIP_JAVA_DB_UPDATE=true",
+		"TRIVY_OFFLINE_SCAN=true",
+	}
+}
+
 func (r *Runner) runCommand(name string, args ...string) error {
 	cmd := exec.CommandContext(r.ctx, name, args...)
 	cmd.Dir = r.workDir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = cleanEnv()
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -445,32 +430,6 @@ func (r *Runner) streamOutput(reader io.Reader) {
 	for scanner.Scan() {
 		r.log(scanner.Text())
 	}
-}
-
-func (r *Runner) requestToken() (string, error) {
-	reqBody, _ := json.Marshal(map[string]string{"run_id": r.runID})
-	req, err := http.NewRequestWithContext(r.ctx, "POST", r.workerURL+"/runner/token", bytes.NewReader(reqBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+r.runToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("token request failed: %d", resp.StatusCode)
-	}
-
-	var tokenResp TokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", err
-	}
-	return tokenResp.Token, nil
 }
 
 func (r *Runner) uploadFile(filePath, fileType string) error {
@@ -648,15 +607,184 @@ func (r *Runner) createManifestsArchive(files []string, outputPath string) error
 	return os.WriteFile(outputPath, data, 0644)
 }
 
-func (r *Runner) copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644)
-}
-
 func mustJSON(v interface{}) []byte {
 	data, _ := json.Marshal(v)
 	return data
+}
+
+func clearRunEnv() {
+	for _, key := range []string{
+		"WORKER_URL",
+		"RUN_ID",
+		"RUN_TOKEN",
+		"REPO_CLONE_URL",
+		"REPO_REF",
+		"REPO_COMMIT_SHA",
+	} {
+		_ = os.Unsetenv(key)
+	}
+}
+
+// runCloneMode runs in init-container mode, clones the repo through the worker
+// git proxy, and exits. The provider PAT stays in the worker and is never
+// exposed to the runner environment or .git/config.
+func runCloneMode(workerURL, runID, runToken, cloneURL, ref, commitSHA string) int {
+	repoName := strings.TrimSuffix(filepath.Base(cloneURL), ".git")
+	workDir := filepath.Join("/work", repoName)
+
+	// Clean and create work dir
+	os.RemoveAll(workDir)
+	if err := os.MkdirAll(workDir, 0755); err != nil {
+		log.Printf("Failed to create work dir: %v", err)
+		return 1
+	}
+
+	if err := enforceExternalEgressBlockedFromEnv(); err != nil {
+		log.Printf("Runner egress self-test failed: %v", err)
+		return 1
+	}
+
+	proxyCloneURL := buildGitProxyCloneURL(workerURL, runID)
+	gitEnv := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_TERMINAL_PROMPT=0"}
+
+	buildCloneArgs := func(shallow bool) []string {
+		args := []string{"-c", "credential.helper=", "-c", "http.extraHeader=Authorization: Bearer " + runToken, "clone"}
+		if shallow {
+			args = append(args, "--depth=1")
+		} else {
+			args = append(args, "--no-tags")
+		}
+		if ref != "" {
+			args = append(args, "--branch", ref)
+		}
+		args = append(args, proxyCloneURL, workDir)
+		return args
+	}
+
+	ctx := context.Background()
+
+	// Clone repository
+	log.Printf("Cloning %s through worker git proxy...", cloneURL)
+	if commitSHA != "" {
+		// Pinned-commit mode: full clone, then checkout exact SHA
+		cmd := exec.CommandContext(ctx, "git", buildCloneArgs(false)...)
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("Git clone failed: %v\n%s", err, string(out))
+			return 1
+		}
+		log.Printf("Checking out pinned commit %s...", commitSHA)
+		checkout := exec.CommandContext(ctx, "git", "-C", workDir, "checkout", commitSHA)
+		checkout.Env = gitEnv
+		if out, err := checkout.CombinedOutput(); err != nil {
+			log.Printf("Git checkout failed: %v\n%s", err, string(out))
+			return 1
+		}
+	} else {
+		// Standard shallow clone
+		cmd := exec.CommandContext(ctx, "git", buildCloneArgs(true)...)
+		cmd.Env = gitEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("Git clone failed: %v\n%s", err, string(out))
+			return 1
+		}
+	}
+
+	log.Printf("Clone completed successfully")
+	return 0
+}
+
+func buildGitProxyCloneURL(workerURL, runID string) string {
+	return strings.TrimRight(workerURL, "/") + "/runner/git/" + runID
+}
+
+func enforceExternalEgressBlockedFromEnv() error {
+	if !parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED") {
+		return nil
+	}
+
+	probeURL := strings.TrimSpace(os.Getenv("RUNNER_EGRESS_SELF_TEST_URL"))
+	if probeURL == "" {
+		probeURL = "https://example.com"
+	}
+
+	timeout := 5 * time.Second
+	if raw := strings.TrimSpace(os.Getenv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS")); raw != "" {
+		secs, err := strconv.Atoi(raw)
+		if err != nil || secs <= 0 {
+			return fmt.Errorf("invalid RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS: %q", raw)
+		}
+		timeout = time.Duration(secs) * time.Second
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := ensureExternalEgressBlocked(ctx, probeURL); err != nil {
+		return err
+	}
+	log.Printf("Runner egress self-test passed: external probe %s was not reachable", probeURL)
+	return nil
+}
+
+func ensureExternalEgressBlocked(ctx context.Context, probeURL string) error {
+	target, err := parseEgressProbeAddress(probeURL)
+	if err != nil {
+		return err
+	}
+
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	return fmt.Errorf("external egress unexpectedly allowed: tcp connection to %s succeeded", target)
+}
+
+func parseBoolEnv(key string) bool {
+	value := strings.TrimSpace(os.Getenv(key))
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseEgressProbeAddress(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty egress probe target")
+	}
+
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", fmt.Errorf("invalid egress probe URL %q: %w", raw, err)
+		}
+		host := u.Hostname()
+		if host == "" {
+			return "", fmt.Errorf("invalid egress probe URL %q: missing host", raw)
+		}
+		port := u.Port()
+		if port == "" {
+			switch u.Scheme {
+			case "https":
+				port = "443"
+			case "http":
+				port = "80"
+			default:
+				return "", fmt.Errorf("invalid egress probe URL %q: unsupported scheme %q", raw, u.Scheme)
+			}
+		}
+		return net.JoinHostPort(host, port), nil
+	}
+
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return raw, nil
+	}
+
+	return net.JoinHostPort(raw, "443"), nil
 }

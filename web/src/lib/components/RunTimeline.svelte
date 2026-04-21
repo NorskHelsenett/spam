@@ -42,6 +42,7 @@
 	type RunLog = {
 		line: string;
 		ts: string;
+		container?: string;
 	};
 
 	type Props = {
@@ -53,9 +54,11 @@
 			phase: string;
 			reason?: string;
 			message?: string;
+			container_status?: string;
 			waiting_reason?: string;
 			waiting_message?: string;
 			is_error?: boolean;
+			init_container_status?: string;
 		};
 		secretCount?: number;
 		sbomComponentCount?: number;
@@ -86,15 +89,75 @@
 		icon: any;
 		category: 'k8s' | 'run';
 	}> = [
-		// K8s - just show container started
-		{ id: 'k8s-started', title: 'Container Started', defaultDescription: 'Pod running on cluster', icon: Play, category: 'k8s' },
-		// Run steps
-		{ id: 'run-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'run' },
+		{ id: 'k8s-started', title: 'Runner Started', defaultDescription: 'Pod scheduled on cluster', icon: Play, category: 'k8s' },
+		{ id: 'k8s-clone', title: 'Cloning Repository', defaultDescription: 'Fetching source code', icon: GitBranch, category: 'k8s' },
+		// Run steps (main container)
 		{ id: 'run-sbom', title: 'SBOM Generation', defaultDescription: 'Running Syft scanner', icon: Package, category: 'run' },
 		{ id: 'run-manifests', title: 'Collecting Manifests', defaultDescription: 'Finding dependency files', icon: FileCode, category: 'run' },
 		{ id: 'run-secrets', title: 'Secret Detection', defaultDescription: 'Running BetterLeaks scan', icon: Shield, category: 'run' },
 		{ id: 'run-upload', title: 'Uploading Results', defaultDescription: 'Sending data to server', icon: Upload, category: 'run' },
 	];
+
+	// Strip ANSI escape codes (colors, bold, etc.) from log lines
+	const stripAnsi = (str: string) => str.replace(/\x1b\[[0-9;]*m/g, '');
+
+	// Convert ANSI escape codes to HTML spans with theme-aware colors
+	const ansiToHtml = (str: string): string => {
+		const colors: Record<string, string> = {
+			'30': 'var(--text-muted)',     // black
+			'31': 'var(--red-dim)',        // red
+			'32': 'var(--green-dim)',      // green
+			'33': 'var(--yellow-dim)',     // yellow
+			'34': 'var(--blue-dim)',       // blue
+			'35': 'var(--purple-dim)',     // magenta
+			'36': 'var(--aqua-dim)',       // cyan
+			'37': 'var(--text-secondary)', // white
+			'90': 'var(--text-muted)',     // bright black (gray)
+			'91': 'var(--red)',            // bright red
+			'92': 'var(--green)',          // bright green
+			'93': 'var(--yellow)',         // bright yellow
+			'94': 'var(--blue)',           // bright blue
+			'95': 'var(--purple)',         // bright magenta
+			'96': 'var(--aqua)',           // bright cyan
+			'97': 'var(--text-bright)',    // bright white
+		};
+
+		// HTML-escape first to prevent XSS
+		const escaped = str
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;');
+
+		let result = '';
+		let openSpans = 0;
+
+		// Split on ANSI sequences, keeping the delimiters
+		const parts = escaped.split(/(\x1b\[[0-9;]*m)/);
+		for (const part of parts) {
+			const match = part.match(/\x1b\[([0-9;]*)m/);
+			if (!match) {
+				result += part;
+				continue;
+			}
+
+			const codes = match[1].split(';');
+			for (const code of codes) {
+				if (code === '0' || code === '') {
+					// Reset — close all open spans
+					while (openSpans > 0) { result += '</span>'; openSpans--; }
+				} else if (code === '1') {
+					result += '<span style="font-weight:bold">';
+					openSpans++;
+				} else if (colors[code]) {
+					result += `<span style="color:${colors[code]}">`;
+					openSpans++;
+				}
+			}
+		}
+		// Close any remaining open spans
+		while (openSpans > 0) { result += '</span>'; openSpans--; }
+		return result;
+	};
 
 	// Track completed step data from logs/events
 	type CompletedStepData = {
@@ -109,18 +172,11 @@
 		const completed = new Map<string, CompletedStepData>();
 
 		for (const log of logs) {
-			const line = log.line.trim();
+			const line = stripAnsi(log.line).trim();
 
-			if (line.includes('Cloning')) {
-				const match = line.match(/Cloning (https?:\/\/[^\s]+)/);
-				completed.set('run-clone', {
-					timestamp: log.ts,
-					description: match ? match[1].replace('.git...', '').replace(/^https?:\/\/[^/]+\//, '') : 'Repository cloned',
-					status: 'completed'
-				});
-			} else if (line.includes('Commit hash:')) {
+			if (line.includes('Commit hash:')) {
 				const hash = line.match(/Commit hash:\s*([a-f0-9]+)/)?.[1];
-				const existing = completed.get('run-clone');
+				const existing = completed.get('k8s-clone');
 				if (existing && hash) {
 					existing.details = [`Commit: ${hash.substring(0, 7)}`];
 				}
@@ -191,22 +247,53 @@
 		return completed;
 	};
 
+	// Derive clone step status from pod's init container status.
+	// If the main container is running (status=RUNNING or we have logs),
+	// the clone must have completed — init containers always finish first.
+	const parseInitContainerStatus = (): CompletedStepData | null => {
+		if (podStatus?.init_container_status) {
+			switch (podStatus.init_container_status) {
+				case 'running':
+					return { description: 'Fetching source code', status: 'running' };
+				case 'completed':
+					return { description: 'Source code fetched', status: 'completed' };
+				case 'failed':
+					return { description: podStatus.message || 'Clone failed', status: 'error' };
+				case 'waiting':
+					return { description: 'Waiting to start', status: 'running' };
+			}
+		}
+
+		// Main container is running or has run — clone must have completed
+		if (status === 'RUNNING' || status === 'SUCCEEDED' || status === 'FAILED' || (logs && logs.length > 0)) {
+			return { description: 'Source code fetched', status: 'completed' };
+		}
+
+		return null;
+	};
+
 	// Parse K8s events to extract completed step data
 	const parseEventsToCompletedSteps = (events: K8sEvent[]): Map<string, CompletedStepData> => {
 		const completed = new Map<string, CompletedStepData>();
 
 		for (const event of events) {
 			switch (event.reason) {
+				case 'Scheduled':
+				case 'Pulling':
+				case 'Pulled':
+				case 'Created':
 				case 'Started':
-					completed.set('k8s-started', {
-						timestamp: event.first_timestamp,
-						description: 'Container running',
-						status: 'completed'
-					});
+					// Mark runner as started on any pod progress event
+					if (!completed.has('k8s-started')) {
+						completed.set('k8s-started', {
+							timestamp: event.first_timestamp,
+							description: 'Pod running on cluster',
+							status: 'completed'
+						});
+					}
 					break;
 				case 'Failed':
 				case 'BackOff':
-					// Mark container start as failed
 					completed.set('k8s-started', {
 						timestamp: event.first_timestamp,
 						description: event.message.substring(0, 60),
@@ -286,8 +373,14 @@
 		const logSteps = parseLogsToCompletedSteps(logs || []);
 		const eventSteps = parseEventsToCompletedSteps(events || []);
 
-		// Merge completed steps
+		// Merge completed steps (log steps override event steps)
 		const completedSteps = new Map([...eventSteps, ...logSteps]);
+
+		// Add init container (clone) status
+		const initStatus = parseInitContainerStatus();
+		if (initStatus) {
+			completedSteps.set('k8s-clone', initStatus);
+		}
 
 		// Determine current running step based on status
 		let currentRunningStep: string | null = null;
@@ -330,12 +423,15 @@
 			} else if (stepDef.id === currentRunningStep) {
 				stepStatus = 'running';
 			} else if (stepDef.id === 'k8s-started' && podStatus) {
-				if (podStatus.phase === 'Running' || podStatus.phase === 'Succeeded') {
-					stepStatus = 'completed';
-				} else if (podStatus.phase === 'Failed' || podStatus.is_error) {
+				// Any pod status means the runner has started
+				if (podStatus.is_error) {
 					stepStatus = 'error';
+				} else {
+					stepStatus = 'completed';
 				}
-			} else if (stepDef.id === 'k8s-started' && status === 'SUCCEEDED') {
+			} else if (stepDef.id === 'k8s-clone' && status === 'SUCCEEDED') {
+				stepStatus = 'completed';
+			} else if ((stepDef.id === 'k8s-started' || stepDef.id === 'k8s-clone') && status === 'SUCCEEDED') {
 				stepStatus = 'completed';
 			} else if (status === 'FAILED') {
 				// If run failed and step not completed, check if it should be marked as skipped
@@ -361,23 +457,29 @@
 				}
 			}
 
-			// For k8s-started, use context-aware title/description
+			// Context-aware title/description for K8s steps
 			let title = stepDef.title;
 			let description = completed?.description || stepDef.defaultDescription;
 
-			if (stepDef.id === 'k8s-started' && !completed) {
+			if (stepDef.id === 'k8s-clone' && !completed) {
 				if (stepStatus === 'running') {
-					// Pod hasn't started yet — show what's actually happening
 					if (podStatus?.waiting_reason) {
 						title = podStatus.waiting_reason;
 						description = podStatus.waiting_message || 'Waiting...';
 					} else if (podStatus?.phase === 'Pending') {
 						title = 'Scheduling Pod';
 						description = 'Waiting for pod to be scheduled';
-					} else {
-						title = 'Starting Container';
-						description = 'Waiting for pod to start';
 					}
+				} else if (stepStatus === 'error') {
+					title = podStatus?.reason || 'Clone Failed';
+					description = podStatus?.message || 'Init container failed';
+				}
+			}
+
+			if (stepDef.id === 'k8s-started' && !completed) {
+				if (stepStatus === 'running') {
+					title = 'Starting Scanner';
+					description = 'Waiting for scanner container to start';
 				} else if (stepStatus === 'error') {
 					title = podStatus?.waiting_reason || podStatus?.reason || 'Container Failed';
 					description = podStatus?.waiting_message || podStatus?.message || 'Pod failed to start';
@@ -442,8 +544,32 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	};
 
-	// Format raw logs for display
-	const rawLogsText = $derived(logs.map(l => `[${formatTimestamp(l.ts)}] ${l.line}`).join('\n'));
+	// Format raw logs grouped by container with headers showing container name and job name
+	const rawLogsHtml = $derived.by(() => {
+		const containerLabels: Record<string, string> = {
+			'clone': 'clone [init]',
+			'runner': `runner [${runId.substring(0, 8)}]`,
+		};
+		const groups = new Map<string, string[]>();
+		const order: string[] = [];
+
+		for (const l of logs) {
+			const container = l.container || 'runner';
+			if (!groups.has(container)) {
+				groups.set(container, []);
+				order.push(container);
+			}
+			const ts = `<span style="color:var(--text-muted)">[${formatTimestamp(l.ts)}]</span>`;
+			groups.get(container)!.push(`  ${ts} ${ansiToHtml(l.line)}`);
+		}
+
+		const sections: string[] = [];
+		for (const container of order) {
+			const label = containerLabels[container] || container;
+			sections.push(`<span style="color:var(--aqua);font-weight:bold">── ${label} ──</span>\n${groups.get(container)!.join('\n')}`);
+		}
+		return sections.join('\n\n');
+	});
 </script>
 
 <div class="timeline-container">
@@ -456,7 +582,7 @@
 		<!-- Main Timeline -->
 		<div class="timeline">
 			{#each timeline as step, index (step.id)}
-				{@const Icon = step.icon || Clock}
+				{@const Icon = step.icon || Server}
 				{@const isLast = index === timeline.length - 1}
 				{@const isPending = step.status === 'pending'}
 				<div class="timeline-item" style="opacity: {getStatusOpacity(step.status)}">
@@ -604,7 +730,7 @@
 
 				{#if showRawLogs}
 					<div class="mt-3 max-h-80 overflow-auto rounded-lg border border-[var(--border-color)]/60 bg-[var(--main-content-bg)]/80 p-4 shadow-inner">
-						<pre class="code-block text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all"><code>{rawLogsText}</code></pre>
+						<pre class="code-block text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-all"><code>{@html rawLogsHtml}</code></pre>
 					</div>
 				{/if}
 			</div>

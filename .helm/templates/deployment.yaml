@@ -91,7 +91,7 @@ spec:
                   name: {{ .Values.providerSecrets.existingSecret | default (printf "%s-provider-secrets" .Release.Name) }}
                   key: PROVIDER_SECRETS_KEY
             {{- end }}
-            {{- if .Values.trivyScanner.enabled }}
+            {{- if .Values.sbomScanner.enabled }}
             - name: RUNNER_HMAC_KEY
               valueFrom:
                 secretKeyRef:

@@ -6,12 +6,16 @@ WORKDIR /app
 # Only copy package manifests first for better layer caching
 COPY web/package.json web/package-lock.json ./web/
 WORKDIR /app/web
-RUN npm ci --include=dev
+# BuildKit cache mount for npm so re-builds with unchanged package-lock
+# finish in seconds instead of re-downloading every module.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --include=dev
 
 # Copy rest of frontend source
 COPY web/ .
 # Build static site (outputs to web/build via adapter-static config)
-RUN NODE_OPTIONS=--max-old-space-size=4096 npm run build
+RUN --mount=type=cache,target=/root/.npm \
+    NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # 2. Go build stage
 FROM golang:1.26-alpine AS gobuilder
@@ -26,21 +30,29 @@ WORKDIR /go/api/
 # Enable Go modules and caching
 COPY api/go.mod api/go.sum ./
 
-# Download dependencies with verify
-RUN go mod download && go mod verify
+# Download dependencies with verify. Module cache mount so unchanged
+# go.sum doesn't re-fetch every module on every build.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download && go mod verify
 
 # Copy Go source
 COPY api/ .
 # Copy built frontend from previous stage into expected path
 COPY --from=frontend /app/web/build ./web/build
-# Build static binaries (CGO disabled - using pure Go PostgreSQL driver)
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+# Build static binaries (CGO disabled - using pure Go PostgreSQL driver).
+# Build cache mounts dramatically speed up incremental compiles — only
+# the files actually changed get re-compiled.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath \
     -buildvcs=false \
     -ldflags='-w -s -buildid=' \
     -o /go/bin/spam ./cmd/server
 
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath \
     -buildvcs=false \
     -ldflags='-w -s -buildid=' \

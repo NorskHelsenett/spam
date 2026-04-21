@@ -9,7 +9,11 @@ import (
 	"gorm.io/gorm"
 )
 
-type trivyRun struct {
+// sbomScanRun summarises one day of vulnerability-scan activity for the
+// admin page's "recent runs" list. The underlying storage table is still
+// named trivy_scan_results: the scanner binary migrated to grype but the
+// table kept its name to avoid a heavyweight data migration.
+type sbomScanRun struct {
 	StartedAt     string `json:"started_at"`
 	FinishedAt    string `json:"finished_at"`
 	SBOMCount     int64  `json:"sbom_count"`
@@ -17,35 +21,36 @@ type trivyRun struct {
 	HighCount     int64  `json:"high_count"`
 }
 
-type trivyScanStatus struct {
-	JobID         string     `json:"job_id,omitempty"`
-	JobStatus     string     `json:"job_status,omitempty"`
-	CreatedAt     string     `json:"created_at,omitempty"`
-	FinishedAt    string     `json:"finished_at,omitempty"`
-	Error         string     `json:"error,omitempty"`
-	PendingCount  int64      `json:"pending_count"`
-	ScannedCount  int64      `json:"scanned_count"`
-	LastScannedAt string     `json:"last_scanned_at,omitempty"`
-	ScanComplete  bool       `json:"scan_complete"`
-	RecentRuns    []trivyRun `json:"recent_runs"`
+type sbomScanStatusResp struct {
+	JobID         string        `json:"job_id,omitempty"`
+	JobStatus     string        `json:"job_status,omitempty"`
+	CreatedAt     string        `json:"created_at,omitempty"`
+	FinishedAt    string        `json:"finished_at,omitempty"`
+	Error         string        `json:"error,omitempty"`
+	PendingCount  int64         `json:"pending_count"`
+	ScannedCount  int64         `json:"scanned_count"`
+	LastScannedAt string        `json:"last_scanned_at,omitempty"`
+	ScanComplete  bool          `json:"scan_complete"`
+	RecentRuns    []sbomScanRun `json:"recent_runs"`
 }
 
-// AdminTrivyScanStatusHandler returns trivy scanner statistics plus the latest ad-hoc job status.
+// AdminSBOMScanStatusHandler returns SBOM vulnerability-scanner statistics
+// plus the latest ad-hoc job status.
 //
-// GET /api/admin/trivy/scan/status
-func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// GET /api/admin/sbom/scan/status
+func AdminSBOMScanStatusHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 
-		var status trivyScanStatus
+		var status sbomScanStatusResp
 
-		// Most recent TRIVY_ADHOC_SCAN job.
+		// Most recent SBOM_ADHOC_SCAN job.
 		var job jobs.Job
 		if err := db.WithContext(r.Context()).
-			Where("type = ?", jobs.JobTypeTrivyAdhocScan).
+			Where("type = ?", jobs.JobTypeSBOMAdhocScan).
 			Order("created_at DESC").
 			First(&job).Error; err == nil {
 			status.JobID = job.ID
@@ -105,9 +110,9 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			ORDER BY day DESC
 			LIMIT 10
 		`).Scan(&rows)
-		status.RecentRuns = make([]trivyRun, 0, len(rows))
+		status.RecentRuns = make([]sbomScanRun, 0, len(rows))
 		for _, row := range rows {
-			status.RecentRuns = append(status.RecentRuns, trivyRun{
+			status.RecentRuns = append(status.RecentRuns, sbomScanRun{
 				StartedAt:     row.StartedAt.UTC().Format("2006-01-02T15:04:05Z"),
 				FinishedAt:    row.FinishedAt.UTC().Format("2006-01-02T15:04:05Z"),
 				SBOMCount:     row.SBOMCount,
@@ -120,12 +125,12 @@ func AdminTrivyScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Ha
 	}
 }
 
-// AdminTrivyScanHandler enqueues a TRIVY_ADHOC_SCAN job.
-// The worker picks it up and creates a K8s Job from the trivy-scanner CronJob.
+// AdminSBOMScanHandler enqueues an SBOM_ADHOC_SCAN job. The worker
+// picks it up and creates a K8s Job from the sbom-scanner CronJob.
 // Returns 409 if a job is already active.
 //
-// POST /api/admin/trivy/scan
-func AdminTrivyScanHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// POST /api/admin/sbom/scan
+func AdminSBOMScanHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -135,16 +140,16 @@ func AdminTrivyScanHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 		// Block if a job is already active.
 		var active int64
 		db.WithContext(r.Context()).Model(&jobs.Job{}).
-			Where("type = ? AND status IN ?", jobs.JobTypeTrivyAdhocScan,
+			Where("type = ? AND status IN ?", jobs.JobTypeSBOMAdhocScan,
 				[]jobs.JobStatus{jobs.JobStatusQueued, jobs.JobStatusRunning, jobs.JobStatusRetry}).
 			Count(&active)
 		if active > 0 {
-			http.Error(w, "trivy scan job already queued or running", http.StatusConflict)
+			http.Error(w, "sbom scan job already queued or running", http.StatusConflict)
 			return
 		}
 
 		job, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
-			Type:        jobs.JobTypeTrivyAdhocScan,
+			Type:        jobs.JobTypeSBOMAdhocScan,
 			MaxAttempts: 2,
 		})
 		if err != nil {

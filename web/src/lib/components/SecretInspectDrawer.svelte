@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { X, Eye, GitBranch, FileText, Play } from 'lucide-svelte';
+	import { X, Eye, GitBranch, FileText, Play, Copy, Check } from 'lucide-svelte';
 
 	type Location = {
 		repo_id: string;
@@ -48,7 +48,8 @@
 		ruleId = '',
 		dismissed = false,
 		onClose = () => {},
-		onDismiss
+		onDismiss,
+		onProbeRun
 	}: {
 		secretHash: string;
 		secret?: string;
@@ -56,6 +57,7 @@
 		dismissed?: boolean;
 		onClose?: () => void;
 		onDismiss?: (secretHash: string) => void;
+		onProbeRun?: (result: { secretHash: string; status: string; reason: string; metadata?: string }) => void;
 	} = $props();
 
 	let data: InspectData | null = $state(null);
@@ -122,6 +124,9 @@
 
 	let probing = $state(false);
 	let probeResult: { status: string; reason: string; metadata: string } | null = $state(null);
+	let copyPressed = $state(false);
+	let copyConfirmed = $state(false);
+	let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const secretValue = $derived(data?.secret || secret);
 	const jwt = $derived(secretValue ? tryDecodeJWT(secretValue) : null);
@@ -154,9 +159,27 @@
 			});
 			if (res.ok) {
 				probeResult = await res.json();
+				if (probeResult) {
+					onProbeRun?.({
+						secretHash,
+						status: probeResult.status,
+						reason: probeResult.reason,
+						metadata: probeResult.metadata
+					});
+				}
 			}
 		} catch { /* ignore */ }
 		finally { probing = false; }
+	};
+
+	const copySecret = () => {
+		if (!secretValue) return;
+		navigator.clipboard.writeText(secretValue);
+		copyConfirmed = true;
+		if (copyResetTimer) clearTimeout(copyResetTimer);
+		copyResetTimer = setTimeout(() => {
+			copyConfirmed = false;
+		}, 900);
 	};
 </script>
 
@@ -207,7 +230,29 @@
 			<!-- Secret value -->
 			<div>
 				<h4 class="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-tertiary)] mb-1">Secret</h4>
-				<div class="rounded bg-[var(--card-bg)] px-3 py-2 font-mono text-xs text-[var(--text-muted)] break-all select-all cursor-text">{secretValue}</div>
+				<div class="relative rounded bg-[var(--card-bg)] px-3 py-2 font-mono text-xs text-[var(--text-muted)]">
+					<button
+						type="button"
+						class="absolute right-2 top-[0.2rem] rounded p-1 text-[var(--text-muted)] transition-all duration-150 ease-out hover:bg-[var(--hover-bg)] hover:text-[var(--accent)] active:scale-95 {copyPressed ? 'translate-y-px scale-95 bg-[var(--hover-bg)] shadow-inner' : 'scale-100'}"
+						title="Copy secret"
+						aria-label="Copy secret"
+						onmousedown={() => { copyPressed = true; }}
+						onmouseup={() => { copyPressed = false; }}
+						onmouseleave={() => { copyPressed = false; }}
+						onblur={() => { copyPressed = false; }}
+						onclick={copySecret}
+					>
+						<span class="relative block h-3 w-3">
+							<span class="absolute inset-0 transition-all duration-200 ease-out {copyConfirmed ? 'scale-75 opacity-0' : 'scale-100 opacity-100'}">
+								<Copy size={12} />
+							</span>
+							<span class="absolute inset-0 transition-all duration-200 ease-out {copyConfirmed ? 'scale-100 opacity-100' : 'scale-75 opacity-0'}">
+								<Check size={12} />
+							</span>
+						</span>
+					</button>
+					<pre class="max-w-full overflow-x-auto whitespace-pre-wrap break-all pe-8 select-all cursor-text">{secretValue}</pre>
+				</div>
 			</div>
 
 			<!-- JWT decode -->

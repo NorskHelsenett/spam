@@ -46,7 +46,6 @@ func (s *Server) Start(ctx context.Context) error {
 
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -57,18 +56,42 @@ func (s *Server) Start(ctx context.Context) error {
 	// Runner endpoints (internal, token auth)
 	r.Route("/runner", func(r chi.Router) {
 		r.Get("/ws", s.handleWebSocket)
-		r.Post("/token", s.handleTokenExchange)
-		r.Post("/results", s.handleResults)
+		r.HandleFunc("/git/{run_id}/*", s.handleGitProxy)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(60 * time.Second))
+			r.Post("/results", s.handleResults)
+		})
+		r.Group(func(r chi.Router) {
+			// Image-scan results can be larger than git-clone results
+			// (SBOM + grype JSON + cosign + labels + betterleaks); give
+			// the handler more breathing room on slower upstream writes.
+			r.Use(middleware.Timeout(180 * time.Second))
+			r.Post("/image-results", s.handleImageResults)
+		})
 	})
 
 	// Trivy scanner endpoints are served by the worker listener so scanner jobs
 	// can talk directly to the worker service.
 	r.Group(func(r chi.Router) {
 		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))
+		r.Use(middleware.Timeout(60 * time.Second))
 		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
-		r.Get("/api/trivy/next", trivyScanNextHandler(s.db))
-		r.Post("/api/trivy/result/{sbom_id}", trivyScanResultHandler(s.db))
-		r.Get("/api/trivy/manifests/{repo_id}", trivyManifestsHandler(s.db))
+		r.Get("/api/sbom-scan/next", sbomScanNextHandler(s.db))
+		r.Post("/api/sbom-scan/result/{sbom_id}", sbomScanResultHandler(s.db))
+		r.Get("/api/sbom-scan/manifests/{repo_id}", sbomScanManifestsHandler(s.db))
+		// Image-SBOM vuln revuln (grype). Scanner posts grype JSON here
+		// for IMAGE_DIGEST-bound SBOMs; the handler resolves the image
+		// digest from sbom_bindings and writes findings to
+		// image_vuln_findings via the existing grype parser.
+		r.Post("/api/sbom-scan/image-result/{sbom_id}", grypeImageResultHandler(s.db))
+		r.Post("/api/tool-versions", toolVersionsHandler(s.db))
+		// Image scanner endpoints — the dedicated spam-image-scanner pod
+		// leases IMAGE_SCAN jobs via /next, uploads artifacts via
+		// /runner/image-results (run-token-auth), and reports terminal
+		// status via /complete.
+		r.Get("/api/image-scans/next", s.handleImageScanNext)
+		r.Get("/api/image-scans/pending", s.handleImageScanPending)
+		r.Post("/api/image-scans/{job_id}/complete", s.handleImageScanComplete)
 	})
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)

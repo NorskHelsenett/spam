@@ -116,10 +116,6 @@
 			console.info('sse heartbeat', parsePayload(event));
 		});
 
-		appEventSource.addEventListener('sbom_parsed', (event) => {
-			console.info('sse sbom parsed', parsePayload(event));
-		});
-
 		appEventSource.addEventListener('new_user', (event) => {
 			const payload = parsePayload(event);
 			console.info('sse new_user', payload);
@@ -202,6 +198,7 @@
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
 	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
+	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
@@ -212,7 +209,10 @@ let isAdmin = $state(false);
 		{ href: '/app/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
-		{ href: '/app/runs', label: 'Runs', icon: Play },
+		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon },
+		// Visual group break — everything above is inventory/assets,
+		// everything below is operational/security actions.
+		{ href: '/app/runs', label: 'Runs', icon: Play, groupBreak: true },
 		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound }
 	] as const;
 
@@ -325,6 +325,9 @@ let isAdmin = $state(false);
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
 			{#each navLinks as link}
+				{#if 'groupBreak' in link && link.groupBreak}
+					<div class="h-6" aria-hidden="true"></div>
+				{/if}
 				<button
 					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${

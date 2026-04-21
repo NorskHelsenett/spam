@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, Server
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -153,6 +153,36 @@
 	let resolvedRepoDbId = $state('');
 	let runTimeline: RepoMetadataRun[] = $state([]);
 	let totalRuns = $state(0);
+
+	// Workloads — images built from this repo (resolved via OCI image.source
+	// at scan-upload time, cached on image_digests.source_repo_id) plus the
+	// clusters / namespaces / owners currently running each digest. Empty
+	// workloadImages → render the OCI label onboarding panel.
+	type WorkloadEntry = {
+		namespace: string;
+		owner: string;
+		owner_kind: string;
+		pods: number;
+	};
+	type WorkloadCluster = {
+		cluster_id: string;
+		cluster: string;
+		workloads: WorkloadEntry[];
+	};
+	type WorkloadImage = {
+		id: string;
+		registry: string;
+		repository: string;
+		digest: string;
+		created_at: string;
+		latest_scan_at?: string;
+		vuln_count: number;
+		has_sbom: boolean;
+		sbom_id?: string;
+		clusters: WorkloadCluster[];
+	};
+	let workloadImages: WorkloadImage[] = $state([]);
+	let workloadsLoaded = $state(false);
 	let securityData: SecurityData = $state({
 		vulnerabilities: { critical: 0, high: 0, medium: 0, low: 0 },
 		secrets: 0,
@@ -268,6 +298,20 @@
 
 			// Fetch real security data
 			await fetchSecurityData(provider, path, data.details, data.readme);
+
+			// Workloads — images built from this repo + the clusters/owners
+			// currently running each digest. One round trip; empty list
+			// drives the onboarding empty state on the Workloads tab.
+			if (resolvedRepoDbId) {
+				try {
+					const res = await fetch(`/api/repos/${resolvedRepoDbId}/workloads`, { credentials: 'include' });
+					if (res.ok) {
+						const body = await res.json();
+						workloadImages = body.images ?? [];
+					}
+				} catch { /* ignore — tab renders the empty state */ }
+				workloadsLoaded = true;
+			}
 		} catch (err) {
 			error = 'Failed to connect to API.';
 		} finally {
@@ -392,6 +436,20 @@
 
 	// Scan functionality
 	let activeTab = $state('contributors');
+	// One-shot flag: the initial "promote Workloads" flip happens at most
+	// once per page load. Without it, $effect would re-trigger every time
+	// the user clicks Contributors back, bouncing them to Workloads on
+	// every tab click.
+	let defaultTabResolved = $state(false);
+	$effect(() => {
+		if (defaultTabResolved) return;
+		if (workloadsLoaded) {
+			if (workloadImages.length > 0 && activeTab === 'contributors') {
+				activeTab = 'workloads';
+			}
+			defaultTabResolved = true;
+		}
+	});
 	let scanning = $state(false);
 	let scanError = $state('');
 	let activeRunId = $state<string | null>(null);
@@ -475,6 +533,10 @@
 		if (!browser) return;
 		// Re-fetch whenever URL params change (handles same-route navigation)
 		const _ = $page.url.href;
+		// Clear cached dialog data so stale results aren't shown for a different repo
+		vulnDialogData = [];
+		secretsDialogData = [];
+		dependenciesDialogData = [];
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
 
@@ -738,6 +800,29 @@
 					{resolvedProvider === 'gitlab' ? 'GitLab' : resolvedProvider === 'gitea' ? 'Gitea' : resolvedProvider === 'forgejo' ? 'Forgejo' : 'GitHub'}
 				</span>
 				<span class="flex items-center gap-1.5"><Clock class="h-4 w-4" /> Last activity {formatDate(details.updated_at)}</span>
+				{#if workloadImages.length > 0}
+					{@const clusterCount = new Set(workloadImages.flatMap((i) => i.clusters.map((c) => c.cluster_id))).size}
+					<button
+						type="button"
+						class="flex items-center gap-1.5 hover:text-[var(--accent)]"
+						onclick={() => (activeTab = 'workloads')}
+						title="Jump to Workloads tab"
+					>
+						<Package class="h-4 w-4" />
+						{workloadImages.length} image{workloadImages.length === 1 ? '' : 's'}
+					</button>
+					{#if clusterCount > 0}
+						<button
+							type="button"
+							class="flex items-center gap-1.5 hover:text-[var(--accent)]"
+							onclick={() => (activeTab = 'workloads')}
+							title="Jump to Workloads tab"
+						>
+							<Server class="h-4 w-4" />
+							{clusterCount} cluster{clusterCount === 1 ? '' : 's'}
+						</button>
+					{/if}
+				{/if}
 			</div>
 
 			<!-- Stats grid -->
@@ -857,6 +942,7 @@
 						<TabSelector
 							options={[
 								{ value: 'runs', label: 'Runs' },
+								{ value: 'workloads', label: 'Workloads' },
 								{ value: 'contributors', label: 'Contributors' },
 								{ value: 'commits', label: 'Commits' }
 							]}
@@ -907,6 +993,129 @@
 								</div>
 							{/if}
 						</div>
+					{:else if activeTab === 'workloads'}
+						{#if workloadImages.length === 0}
+							<!-- Empty state — teach the OCI label stack. The resolver
+							     reads these labels from the built image config; without
+							     them SPAM can't match a running pod back to this repo. -->
+							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-5 py-5 space-y-4">
+								<div>
+									<h4 class="text-sm font-semibold text-[var(--text-bright)]">No images from this repo are running in any tracked cluster.</h4>
+									<p class="mt-1 text-xs text-[var(--text-muted)]">
+										SPAM links a running image back to its repo via the OCI <code class="font-mono text-[var(--text-secondary)]">org.opencontainers.image.*</code> label stack.
+										Once your build emits them, the next scan resolves the link and this tab fills in.
+									</p>
+								</div>
+
+								<div>
+									<p class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)] mb-2">Recommended label stack</p>
+									<pre class="overflow-x-auto rounded-lg bg-black/30 p-3 text-[11px] leading-5 text-[var(--text-secondary)]"><code>org.opencontainers.image.source        https://github.com/org/repo
+org.opencontainers.image.revision      $(git rev-parse HEAD)
+org.opencontainers.image.version       $(git describe --tags --always)
+org.opencontainers.image.ref.name      $(git rev-parse --abbrev-ref HEAD)
+org.opencontainers.image.created       $(date -u +%Y-%m-%dT%H:%M:%SZ)
+org.opencontainers.image.title         &lt;short name&gt;
+org.opencontainers.image.description   &lt;one line&gt;
+org.opencontainers.image.licenses      &lt;SPDX id&gt;
+org.opencontainers.image.vendor        &lt;org&gt;
+org.opencontainers.image.url           &lt;homepage&gt;
+org.opencontainers.image.documentation &lt;docs url&gt;</code></pre>
+									<p class="mt-2 text-xs text-[var(--text-muted)]">
+										<code class="font-mono">image.source</code> is what drives this tab; the rest power the image detail page (commit/branch/version/license) and make scan reports traceable.
+									</p>
+								</div>
+
+								<div class="grid gap-3 md:grid-cols-3">
+									<div>
+										<p class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)] mb-1">Dockerfile</p>
+										<pre class="overflow-x-auto rounded-lg bg-black/30 p-3 text-[11px] leading-5 text-[var(--text-secondary)]"><code>ARG GIT_COMMIT
+ARG GIT_BRANCH
+ARG BUILD_DATE
+LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
+      org.opencontainers.image.revision=&quot;$GIT_COMMIT&quot; \
+      org.opencontainers.image.ref.name=&quot;$GIT_BRANCH&quot; \
+      org.opencontainers.image.created=&quot;$BUILD_DATE&quot;</code></pre>
+									</div>
+									<div>
+										<p class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)] mb-1">GitHub Actions</p>
+										<pre class="overflow-x-auto rounded-lg bg-black/30 p-3 text-[11px] leading-5 text-[var(--text-secondary)]"><code>- uses: docker/metadata-action@v5
+  id: meta
+  with:
+    images: ghcr.io/$&#123;&#123; github.repository &#125;&#125;
+- uses: docker/build-push-action@v6
+  with:
+    labels: $&#123;&#123; steps.meta.outputs.labels &#125;&#125;</code></pre>
+									</div>
+									<div>
+										<p class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)] mb-1">GitLab CI / Kaniko</p>
+										<pre class="overflow-x-auto rounded-lg bg-black/30 p-3 text-[11px] leading-5 text-[var(--text-secondary)]"><code>/kaniko/executor \
+  --context . \
+  --destination $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA \
+  --label org.opencontainers.image.source=&quot;$CI_PROJECT_URL&quot; \
+  --label org.opencontainers.image.revision=&quot;$CI_COMMIT_SHA&quot; \
+  --label org.opencontainers.image.ref.name=&quot;$CI_COMMIT_REF_NAME&quot;</code></pre>
+									</div>
+								</div>
+							</div>
+						{:else}
+							<div class="space-y-4">
+								{#each workloadImages as img}
+									<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+										<div class="flex flex-wrap items-baseline justify-between gap-2">
+											<a href="/app/images/{img.id}" class="min-w-0 font-mono text-sm text-[var(--text-bright)] hover:text-[var(--accent)]">
+												{img.registry}/{img.repository}
+												<span class="ml-1 text-xs text-[var(--text-tertiary)]">{img.digest.slice(0, 20)}…</span>
+											</a>
+											<div class="flex items-center gap-2 text-xs">
+												{#if img.vuln_count > 0}
+													<span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300">{img.vuln_count} vulns</span>
+												{:else}
+													<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-green-300">no vulns</span>
+												{/if}
+												{#if img.has_sbom}
+													<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-green-300">SBOM</span>
+												{:else}
+													<span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300" title="Scan completed but no SBOM was produced; the reconciler will rescan until it succeeds.">SBOM missing</span>
+												{/if}
+												{#if img.latest_scan_at}
+													<span class="text-[var(--text-muted)]">scanned {new Date(img.latest_scan_at).toLocaleDateString()}</span>
+												{/if}
+											</div>
+										</div>
+										{#if img.clusters.length === 0}
+											<p class="mt-3 text-xs text-[var(--text-muted)]">Image built, but no running pods observed in any tracked cluster.</p>
+										{:else}
+											<ul class="mt-3 space-y-2">
+												{#each img.clusters as c}
+													<li>
+														<div class="flex items-center gap-2 text-xs">
+															<a href={`/app/clusters?cluster_id=${encodeURIComponent(c.cluster_id)}`} class="font-medium text-[var(--text-secondary)] hover:text-[var(--accent)]">
+																{c.cluster || c.cluster_id}
+															</a>
+														</div>
+														<ul class="mt-1 divide-y divide-[var(--border-color)]/20 rounded-lg border border-[var(--border-color)]/30">
+															{#each c.workloads as w}
+																<li class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
+																	<span class="min-w-0 truncate text-[var(--text-secondary)]">
+																		<span class="text-[var(--text-tertiary)]">{w.namespace}</span>
+																		<span class="text-[var(--text-muted)]"> / </span>
+																		<span class="font-mono">{w.owner}</span>
+																		{#if w.owner_kind}
+																			<span class="ml-1 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">{w.owner_kind}</span>
+																		{/if}
+																	</span>
+																	<span class="flex-shrink-0 text-[var(--text-tertiary)]">{w.pods} pod{w.pods === 1 ? '' : 's'}</span>
+																</li>
+															{/each}
+														</ul>
+													</li>
+												{/each}
+											</ul>
+										{/if}
+									</div>
+								{/each}
+							</div>
+						{/if}
 					{:else if activeTab === 'commits'}
 						{#if commits.length === 0}
 							<div class="flex flex-col items-center justify-center py-8 text-center">

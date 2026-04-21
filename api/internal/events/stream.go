@@ -7,14 +7,14 @@ import (
 )
 
 const (
-	StreamEventSBOMParsed = "sbom_parsed"
-
 	StreamEventProviderSyncStarted   = "provider_sync_started"
 	StreamEventProviderSyncProgress  = "provider_sync_progress"
 	StreamEventProviderSyncCompleted = "provider_sync_completed"
 	StreamEventProviderSyncFailed    = "provider_sync_failed"
 
 	StreamEventNewUser = "new_user"
+
+	StreamEventScamIngest = "scam_ingest"
 )
 
 type StreamEvent struct {

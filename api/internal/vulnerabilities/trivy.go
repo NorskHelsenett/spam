@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +23,11 @@ type TrivyScanLease struct {
 
 func (TrivyScanLease) TableName() string { return "trivy_scan_leases" }
 
-// TrivyScanResult stores the processed output of a single Trivy SBOM scan.
+// TrivyScanResult stores the processed output of a single SBOM vulnerability
+// scan. Historically populated by trivy; now the primary producer is grype
+// against stored SBOMs. The `format` column records which tool emitted the
+// raw_json so downstream readers that parse the JSON (advanced_search) can
+// dispatch on it.
 type TrivyScanResult struct {
 	ID            string          `gorm:"primaryKey;size:36"`
 	SBOMID        string          `gorm:"column:sbom_id;index:idx_trivy_scan_results_sbom_scanned_at,priority:1;size:36;not null"`
@@ -35,18 +40,25 @@ type TrivyScanResult struct {
 	MediumCount   int             `gorm:"column:medium_count"`
 	LowCount      int             `gorm:"column:low_count"`
 	UnknownCount  int             `gorm:"column:unknown_count"`
+	Format        string          `gorm:"column:format;size:16;default:'trivy'"`
 	RawJSON       json.RawMessage `gorm:"column:raw_json;type:jsonb"`
 	CreatedAt     time.Time       `gorm:"column:created_at;autoCreateTime"`
 }
 
 func (TrivyScanResult) TableName() string { return "trivy_scan_results" }
 
-// SBOMScanJob is the data returned by GetNextSBOMToScan.
+// SBOMScanJob is the data returned by GetNextSBOMToScan. AssetType
+// tells the scanner which pipeline to run ("REPO_COMMIT" uses trivy →
+// component_vulnerabilities; "IMAGE_DIGEST" uses grype →
+// image_vuln_findings). AssetRefID points at the corresponding
+// repo_commits.id or image_digests.id depending on AssetType.
 type SBOMScanJob struct {
-	SBOMID   string
-	RepoID   string
-	Format   string
-	RepoSlug string
+	SBOMID     string
+	RepoID     string // empty when AssetType != REPO_COMMIT
+	Format     string
+	RepoSlug   string
+	AssetType  string
+	AssetRefID string
 }
 
 // TrivyReport is a minimal representation of Trivy JSON output used to
@@ -70,11 +82,18 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// Find the oldest latest-per-repo SBOM that has not been scanned in this run.
+		// The last_scanned_at sub-query unions:
+		//   - trivy_scan_results for REPO_COMMIT bindings (existing trivy path)
+		//   - image_scan_runs for IMAGE_DIGEST bindings (new grype revuln path)
+		// so image SBOMs naturally participate in the "scan once per run" lease
+		// rhythm without a separate tracking table.
 		type row struct {
-			SBOMID   string
-			RepoID   string
-			Format   string
-			RepoSlug string
+			SBOMID     string
+			RepoID     string
+			Format     string
+			RepoSlug   string
+			AssetType  string
+			AssetRefID string
 		}
 		var r row
 		res := tx.Raw(`
@@ -82,18 +101,32 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 				s.id                                       AS sbom_id,
 				COALESCE(rc.repo_id, '')                   AS repo_id,
 				s.format,
-				COALESCE(repo.org || '/' || repo.slug, '') AS repo_slug
+				COALESCE(repo.org || '/' || repo.slug, '') AS repo_slug,
+				sb.asset_type                              AS asset_type,
+				sb.asset_ref_id                            AS asset_ref_id
 			FROM sboms s
 			INNER JOIN sbom_bindings sb  ON sb.sbom_id = s.id
 			LEFT JOIN repo_commits  rc  ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
 			LEFT JOIN repos         repo ON repo.id = rc.repo_id
 			LEFT JOIN (
-				SELECT sbom_id, MAX(scanned_at) AS last_scanned_at
-				FROM trivy_scan_results
+				SELECT sbom_id, MAX(last_scanned_at) AS last_scanned_at
+				FROM (
+					SELECT sbom_id, MAX(scanned_at) AS last_scanned_at
+					FROM trivy_scan_results
+					GROUP BY sbom_id
+					UNION ALL
+					SELECT sb3.sbom_id, MAX(isr.finished_at) AS last_scanned_at
+					FROM sbom_bindings sb3
+					JOIN image_scan_runs isr ON isr.image_digest_id = sb3.asset_ref_id
+					WHERE sb3.asset_type = 'IMAGE_DIGEST'
+					  AND isr.finished_at IS NOT NULL
+					GROUP BY sb3.sbom_id
+				) merged
 				GROUP BY sbom_id
 			) tsr ON tsr.sbom_id = s.id
 			LEFT JOIN trivy_scan_leases  tsl ON tsl.sbom_id = s.id AND tsl.expires_at > now()
 			WHERE tsl.sbom_id IS NULL
+			  AND sb.asset_type IN ('REPO_COMMIT','IMAGE_DIGEST')
 			  AND (
 			    tsr.last_scanned_at IS NULL
 			    OR tsr.last_scanned_at < ?
@@ -132,10 +165,12 @@ func GetNextSBOMToScan(ctx context.Context, db *gorm.DB, leasedBy string, runSta
 		}
 
 		job = SBOMScanJob{
-			SBOMID:   r.SBOMID,
-			RepoID:   r.RepoID,
-			Format:   r.Format,
-			RepoSlug: r.RepoSlug,
+			SBOMID:     r.SBOMID,
+			RepoID:     r.RepoID,
+			Format:     r.Format,
+			RepoSlug:   r.RepoSlug,
+			AssetType:  r.AssetType,
+			AssetRefID: r.AssetRefID,
 		}
 		return nil
 	})
@@ -164,6 +199,7 @@ func StoreScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, re
 		MediumCount:   counts[2],
 		LowCount:      counts[3],
 		UnknownCount:  counts[4],
+		Format:        "trivy",
 		RawJSON:       raw,
 	}
 
@@ -176,6 +212,78 @@ func StoreScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, re
 		}
 		return nil
 	})
+}
+
+// GrypeReport is the subset of grype's JSON output we consume for severity
+// counting. The full raw document is stored in raw_json so downstream
+// consumers (advanced_search) can introspect individual matches.
+type GrypeReport struct {
+	Matches []struct {
+		Vulnerability struct {
+			ID       string `json:"id"`
+			Severity string `json:"severity"`
+		} `json:"vulnerability"`
+	} `json:"matches"`
+	Source struct {
+		Target json.RawMessage `json:"target"`
+	} `json:"source"`
+}
+
+// StoreGrypeScanResult persists a grype scan result and removes the lease.
+// Mirrors StoreScanResult for the trivy path but dispatches on the grype
+// JSON shape so advanced_search / vulnmetrics keep seeing a single
+// trivy_scan_results row per scan, just with format='grype'.
+func StoreGrypeScanResult(ctx context.Context, db *gorm.DB, sbomID, repoID string, report GrypeReport, raw json.RawMessage) error {
+	counts := countGrypeSeverities(report)
+
+	result := TrivyScanResult{
+		ID:            uuid.NewString(),
+		SBOMID:        sbomID,
+		RepoID:        repoID,
+		ScannedAt:     time.Now().UTC(),
+		SchemaVersion: 0, // grype doesn't expose a schema version in the report root
+		ArtifactName:  "",
+		CriticalCount: counts[0],
+		HighCount:     counts[1],
+		MediumCount:   counts[2],
+		LowCount:      counts[3],
+		UnknownCount:  counts[4],
+		Format:        "grype",
+		RawJSON:       raw,
+	}
+
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&result).Error; err != nil {
+			return fmt.Errorf("create grype result: %w", err)
+		}
+		if err := tx.Delete(&TrivyScanLease{}, "sbom_id = ?", sbomID).Error; err != nil {
+			return fmt.Errorf("delete lease: %w", err)
+		}
+		return nil
+	})
+}
+
+// countGrypeSeverities tallies [critical, high, medium, low, unknown]
+// across grype matches. Grype uses Titlecase ("Critical") while trivy uses
+// UPPERCASE; normalize before bucketing so the two pipelines produce
+// comparable counts.
+func countGrypeSeverities(report GrypeReport) [5]int {
+	var counts [5]int
+	for _, m := range report.Matches {
+		switch strings.ToLower(m.Vulnerability.Severity) {
+		case "critical":
+			counts[0]++
+		case "high":
+			counts[1]++
+		case "medium":
+			counts[2]++
+		case "low":
+			counts[3]++
+		default:
+			counts[4]++
+		}
+	}
+	return counts
 }
 
 // CleanExpiredLeases removes leases whose expiry has passed.

@@ -575,8 +575,8 @@
 		}
 	};
 
-	// ── Trivy scanner ──────────────────────────────────────────────────────
-	type TrivyRun = {
+	// ── SBOM vulnerability scanner ────────────────────────────────────────
+	type SBOMScanRun = {
 		started_at: string;
 		finished_at: string;
 		sbom_count: number;
@@ -584,7 +584,7 @@
 		high_count: number;
 	};
 
-	type TrivyScanStatus = {
+	type SBOMScanStatus = {
 		job_id?: string;
 		job_status?: string;
 		created_at?: string;
@@ -594,31 +594,31 @@
 		scanned_count?: number;
 		last_scanned_at?: string;
 		scan_complete?: boolean;
-		recent_runs?: TrivyRun[];
+		recent_runs?: SBOMScanRun[];
 	};
 
-	let trivyStatus: TrivyScanStatus = $state({});
-	let trivyTriggering = $state(false);
-	let trivyError = $state('');
-	let trivyPollTimer: ReturnType<typeof setTimeout> | null = null;
+	let sbomScanStatus: SBOMScanStatus = $state({});
+	let sbomScanTriggering = $state(false);
+	let sbomScanError = $state('');
+	let sbomScanPollTimer: ReturnType<typeof setTimeout> | null = null;
 
-	const loadTrivyStatus = async () => {
+	const loadSBOMScanStatus = async () => {
 		try {
-			const response = await fetch('/api/admin/trivy/scan/status', { credentials: 'include' });
-			if (response.ok) trivyStatus = await response.json();
+			const response = await fetch('/api/admin/sbom/scan/status', { credentials: 'include' });
+			if (response.ok) sbomScanStatus = await response.json();
 		} catch { /* ignore */ }
 	};
 
-	const triggerTrivyScan = async () => {
-		trivyTriggering = true;
-		trivyError = '';
+	const triggerSBOMScan = async () => {
+		sbomScanTriggering = true;
+		sbomScanError = '';
 		try {
-			const response = await fetch('/api/admin/trivy/scan', {
+			const response = await fetch('/api/admin/sbom/scan', {
 				method: 'POST',
 				credentials: 'include'
 			});
 			if (response.status === 409) {
-				trivyError = 'A scan job is already queued or running.';
+				sbomScanError = 'A scan job is already queued or running.';
 				return;
 			}
 			if (response.status === 503) {
@@ -626,32 +626,32 @@
 				return;
 			}
 			if (!response.ok) {
-				trivyError = 'Failed to start scan.';
+				sbomScanError = 'Failed to start scan.';
 				return;
 			}
-			await loadTrivyStatus();
-			pollTrivyStatus();
+			await loadSBOMScanStatus();
+			pollSBOMScanStatus();
 		} catch {
-			trivyError = 'Failed to start scan.';
+			sbomScanError = 'Failed to start scan.';
 		} finally {
-			trivyTriggering = false;
+			sbomScanTriggering = false;
 		}
 	};
 
-	const pollTrivyStatus = () => {
-		if (trivyPollTimer) clearTimeout(trivyPollTimer);
-		trivyPollTimer = setTimeout(async () => {
-			await loadTrivyStatus();
+	const pollSBOMScanStatus = () => {
+		if (sbomScanPollTimer) clearTimeout(sbomScanPollTimer);
+		sbomScanPollTimer = setTimeout(async () => {
+			await loadSBOMScanStatus();
 			const active =
-				trivyStatus.job_status === 'QUEUED' ||
-				trivyStatus.job_status === 'RUNNING' ||
-				trivyStatus.job_status === 'RETRY' ||
-				!trivyStatus.scan_complete;
-			if (active) pollTrivyStatus();
+				sbomScanStatus.job_status === 'QUEUED' ||
+				sbomScanStatus.job_status === 'RUNNING' ||
+				sbomScanStatus.job_status === 'RETRY' ||
+				!sbomScanStatus.scan_complete;
+			if (active) pollSBOMScanStatus();
 		}, 3000);
 	};
 
-	const trivyJobStatusLabel = (status?: string) => {
+	const sbomScanJobStatusLabel = (status?: string) => {
 		switch (status) {
 			case 'QUEUED': return 'Queued';
 			case 'RUNNING': return 'Running…';
@@ -662,7 +662,7 @@
 		}
 	};
 
-	const trivyJobStatusClass = (status?: string) => {
+	const sbomScanJobStatusClass = (status?: string) => {
 		switch (status) {
 			case 'RUNNING':
 			case 'QUEUED':
@@ -704,13 +704,13 @@
 	let probePreviewOpen = $state(false);
 	let probePreview: any[] = $state([]);
 	let probePreviewLoading = $state(false);
+	let probePreviewRefreshing = $state(false);
 	let probePreviewTab = $state('all');
 	let inspectItem: { hash: string; secret: string; ruleId: string } | null = $state(null);
 
-	// Dismiss inspect drawer when tab or loading state changes
+	// Dismiss inspect drawer when switching tabs
 	$effect(() => {
 		probePreviewTab;
-		probePreviewLoading;
 		inspectItem = null;
 	});
 
@@ -938,10 +938,14 @@
 		navigator.clipboard.writeText(text);
 	};
 
-	const loadProbePreview = async () => {
-		probePreviewLoading = true;
-		probePreview = [];
-		probeExcludedHashes = new Set();
+	const loadProbePreview = async ({ preserveRows = false }: { preserveRows?: boolean } = {}) => {
+		const hasExistingRows = probePreview.length > 0;
+		probePreviewLoading = !preserveRows || !hasExistingRows;
+		probePreviewRefreshing = preserveRows && hasExistingRows;
+		if (!preserveRows || !hasExistingRows) {
+			probePreview = [];
+			probeExcludedHashes = new Set();
+		}
 		try {
 			const params = probeForce ? '?include_probed=true' : '';
 			const res = await fetch(`/api/admin/secrets/probe/preview${params}`, { credentials: 'include' });
@@ -960,7 +964,10 @@
 				probeExcludedHashes = excluded;
 			}
 		} catch { /* ignore */ }
-		finally { probePreviewLoading = false; }
+		finally {
+			probePreviewLoading = false;
+			probePreviewRefreshing = false;
+		}
 	};
 
 	const toggleDismiss = (secretHash: string) => {
@@ -992,6 +999,26 @@
 			const response = await fetch('/api/admin/secrets/probe/status', { credentials: 'include' });
 			if (response.ok) probeStatus = await response.json();
 		} catch { /* ignore */ }
+	};
+
+	const applyProbeRunResult = async (result: { secretHash: string; status: string; reason: string; metadata?: string }) => {
+		let matched = false;
+		for (const group of probePreview) {
+			for (const item of group.items ?? []) {
+				if (item.secret_hash !== result.secretHash) continue;
+				item.probe_status = result.status;
+				item.previous_status = result.status;
+				item.already_probed = true;
+				item.reason = result.reason;
+				matched = true;
+			}
+		}
+
+		if (matched) {
+			probePreview = [...probePreview];
+		}
+
+		await loadProbeStatus();
 	};
 
 	const triggerProbe = async () => {
@@ -1268,13 +1295,13 @@
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
 			});
-			loadTrivyStatus().then(() => {
+			loadSBOMScanStatus().then(() => {
 				const active =
-					trivyStatus.job_status === 'QUEUED' ||
-					trivyStatus.job_status === 'RUNNING' ||
-					trivyStatus.job_status === 'RETRY' ||
-					!trivyStatus.scan_complete;
-				if (active) pollTrivyStatus();
+					sbomScanStatus.job_status === 'QUEUED' ||
+					sbomScanStatus.job_status === 'RUNNING' ||
+					sbomScanStatus.job_status === 'RETRY' ||
+					!sbomScanStatus.scan_complete;
+				if (active) pollSBOMScanStatus();
 			});
 			loadProbeStatus().then(() => {
 				const active = probeStatus.job?.status === 'QUEUED' || probeStatus.job?.status === 'RUNNING' || probeStatus.job?.status === 'RETRY';
@@ -1295,7 +1322,7 @@
 				window.removeEventListener('scroll', closeTooltip, true);
 				window.removeEventListener('resize', closeTooltip);
 				if (osvPollTimer) clearTimeout(osvPollTimer);
-				if (trivyPollTimer) clearTimeout(trivyPollTimer);
+				if (sbomScanPollTimer) clearTimeout(sbomScanPollTimer);
 			};
 		}
 	});
@@ -1342,11 +1369,11 @@
 				<p class="text-3xl font-bold text-[var(--text-bright)]">{osvStatus.result?.scanned ?? '—'}</p>
 				<p class="text-xs text-[var(--text-muted)]">{osvStatus.result?.vulns_found != null ? `${osvStatus.result.vulns_found} vulns found` : 'components scanned'}</p>
 			</div>
-			<!-- Trivy -->
+			<!-- SBOM vuln scanner -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
-				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Trivy</h3>
-				<p class="text-3xl font-bold text-[var(--text-bright)]">{trivyStatus.scanned_count ?? '—'}</p>
-				<p class="text-xs text-[var(--text-muted)]">{trivyStatus.pending_count != null ? `${trivyStatus.pending_count} pending` : 'SBOMs scanned'}</p>
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">SBOM scan</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{sbomScanStatus.scanned_count ?? '—'}</p>
+				<p class="text-xs text-[var(--text-muted)]">{sbomScanStatus.pending_count != null ? `${sbomScanStatus.pending_count} pending` : 'SBOMs scanned'}</p>
 			</div>
 		</div>
 	</section>
@@ -1820,70 +1847,70 @@
 <section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 	<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 		<div>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Trivy Scanner</h2>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">SBOM Vulnerability Scanner</h2>
 			<p class="text-sm text-[var(--text-tertiary)]">
-				Runs as a scheduled K8s CronJob. Trigger an ad-hoc scan to pick up new SBOMs immediately.
+				Runs as a scheduled K8s CronJob (grype against every stored SBOM). Trigger an ad-hoc scan to pick up new SBOMs immediately.
 			</p>
 		</div>
 		<div class="flex flex-wrap items-center gap-2">
 			<button
 				type="button"
 				class="btn btn-primary inline-flex items-center gap-2"
-				onclick={triggerTrivyScan}
-				disabled={trivyTriggering || trivyStatus.job_status === 'QUEUED' || trivyStatus.job_status === 'RUNNING' || trivyStatus.job_status === 'RETRY'}
+				onclick={triggerSBOMScan}
+				disabled={sbomScanTriggering || sbomScanStatus.job_status === 'QUEUED' || sbomScanStatus.job_status === 'RUNNING' || sbomScanStatus.job_status === 'RETRY'}
 			>
 				<Play size={14} />
-				{trivyTriggering ? 'Starting…' : 'Run Trivy Scan'}
+				{sbomScanTriggering ? 'Starting…' : 'Run Scan Now'}
 			</button>
 		</div>
 	</header>
 
-	{#if trivyError}
+	{#if sbomScanError}
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4 text-sm text-[var(--error)]">
-			{trivyError}
+			{sbomScanError}
 		</div>
 	{/if}
 
-	{#if trivyStatus.job_id}
+	{#if sbomScanStatus.job_id}
 		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 space-y-3">
 			<div class="flex items-center justify-between">
-				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {trivyJobStatusClass(trivyStatus.job_status)}">
-					{trivyStatus.scan_complete ? 'Scan complete' : trivyJobStatusLabel(trivyStatus.job_status)}
+				<span class="inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs {sbomScanJobStatusClass(sbomScanStatus.job_status)}">
+					{sbomScanStatus.scan_complete ? 'Scan complete' : sbomScanJobStatusLabel(sbomScanStatus.job_status)}
 				</span>
 				<span class="text-xs text-[var(--text-muted)]">
-					{trivyStatus.scanned_count ?? 0} / {(trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)} SBOMs scanned
+					{sbomScanStatus.scanned_count ?? 0} / {(sbomScanStatus.scanned_count ?? 0) + (sbomScanStatus.pending_count ?? 0)} SBOMs scanned
 				</span>
 			</div>
-			{#if (trivyStatus.pending_count ?? 0) > 0}
-				{@const total = (trivyStatus.scanned_count ?? 0) + (trivyStatus.pending_count ?? 0)}
-				{@const pct = total > 0 ? Math.round(((trivyStatus.scanned_count ?? 0) / total) * 100) : 0}
+			{#if (sbomScanStatus.pending_count ?? 0) > 0}
+				{@const total = (sbomScanStatus.scanned_count ?? 0) + (sbomScanStatus.pending_count ?? 0)}
+				{@const pct = total > 0 ? Math.round(((sbomScanStatus.scanned_count ?? 0) / total) * 100) : 0}
 				<div class="h-1.5 w-full rounded-full bg-[var(--border-color)]/40">
 					<div class="h-1.5 rounded-full bg-amber-400 transition-all duration-500" style="width: {pct}%"></div>
 				</div>
 			{/if}
 			<div class="flex flex-wrap gap-x-6 gap-y-1 text-[11px] text-[var(--text-muted)]">
-				{#if trivyStatus.created_at}
-					<span class="flex items-center gap-1"><Clock size={10} /> Triggered {new Date(trivyStatus.created_at).toLocaleString()}</span>
+				{#if sbomScanStatus.created_at}
+					<span class="flex items-center gap-1"><Clock size={10} /> Triggered {new Date(sbomScanStatus.created_at).toLocaleString()}</span>
 				{/if}
-				{#if trivyStatus.last_scanned_at}
-					<span>Last scan {new Date(trivyStatus.last_scanned_at).toLocaleString()}</span>
+				{#if sbomScanStatus.last_scanned_at}
+					<span>Last scan {new Date(sbomScanStatus.last_scanned_at).toLocaleString()}</span>
 				{/if}
 			</div>
 		</div>
 	{/if}
 
-	{#if trivyStatus.error}
+	{#if sbomScanStatus.error}
 		<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/5 p-4">
 			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--error)]">Job error</p>
-			<p class="mt-1 text-sm text-[var(--text-secondary)]">{trivyStatus.error}</p>
+			<p class="mt-1 text-sm text-[var(--text-secondary)]">{sbomScanStatus.error}</p>
 		</div>
 	{/if}
 
-	{#if trivyStatus.recent_runs && trivyStatus.recent_runs.length > 0}
+	{#if sbomScanStatus.recent_runs && sbomScanStatus.recent_runs.length > 0}
 		<div class="space-y-1">
 			<p class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Recent runs</p>
 			<div class="divide-y divide-[var(--border-color)]/40 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				{#each trivyStatus.recent_runs as run}
+				{#each sbomScanStatus.recent_runs as run}
 					<div class="flex items-center justify-between px-4 py-2.5 text-xs">
 						<div class="flex items-center gap-3">
 							<span class="text-[var(--text-secondary)]">{new Date(run.started_at).toLocaleDateString()}</span>
@@ -2301,22 +2328,29 @@
 
 			<!-- Grouped request table -->
 			<div class="relative min-h-0 flex-1 overflow-x-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-			<div class="h-full overflow-y-auto overflow-x-hidden">
-				<table class="w-full table-fixed text-xs">
-					<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
-						<tr>
-							<th class="w-[3%] px-3 py-2 text-left"></th>
-							<th class="w-[25%] px-3 py-2 text-left">Secret</th>
-							<th class="w-[7%] px-3 py-2 text-left">Method</th>
-							<th class="w-[30%] px-3 py-2 text-left">URL</th>
-							<th class="w-[20%] px-3 py-2 text-left">Headers</th>
-							<th class="w-[8%] px-3 py-2 text-left">Status</th>
-							<th class="w-[3%] px-3 py-2 text-left"></th>
-							<th class="px-3 py-2 text-left"></th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[var(--border-color)]/30">
-						{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
+				{#if probePreviewRefreshing}
+					<div class="pointer-events-none absolute inset-x-0 top-0 z-30 flex justify-center p-3">
+						<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/95 px-3 py-1 text-[11px] text-[var(--text-muted)] shadow-lg backdrop-blur">
+							Refreshing preview…
+						</div>
+					</div>
+				{/if}
+				<div class="h-full overflow-y-auto overflow-x-hidden">
+					<table class="w-full table-fixed text-xs">
+						<thead class="sticky top-0 z-10 bg-[var(--card-bg)] text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">
+							<tr>
+								<th class="w-[3%] px-3 py-2 text-left"></th>
+								<th class="w-[25%] px-3 py-2 text-left">Secret</th>
+								<th class="w-[7%] px-3 py-2 text-left">Method</th>
+								<th class="w-[30%] px-3 py-2 text-left">URL</th>
+								<th class="w-[20%] px-3 py-2 text-left">Headers</th>
+								<th class="w-[8%] px-3 py-2 text-left">Status</th>
+								<th class="w-[3%] px-3 py-2 text-left"></th>
+								<th class="px-3 py-2 text-left"></th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-[var(--border-color)]/30">
+							{#each [...filteredPreview].sort((a, b) => a.rule_id.localeCompare(b.rule_id)) as group}
 							{@const isGroupSelected = probeSelectedRules.length === 0 || probeSelectedRules.includes(group.rule_id)}
 							<!-- Group header row -->
 							<tr class="bg-[var(--hover-bg-subtle)]/50">
@@ -2429,9 +2463,9 @@
 								{/each}
 							{/if}
 						{/each}
-					</tbody>
-				</table>
-			</div>
+						</tbody>
+					</table>
+				</div>
 
 				<!-- Inspect drawer -->
 				{#if inspectItem}
@@ -2446,6 +2480,7 @@
 							ruleId={inspectItem.ruleId}
 							dismissed={probeExcludedHashes.has(inspectItem.hash)}
 							onDismiss={(hash) => toggleDismiss(hash)}
+							onProbeRun={applyProbeRunResult}
 							onClose={() => { inspectItem = null; }}
 						/>
 					</div>
@@ -2459,7 +2494,7 @@
 
 		<!-- Footer -->
 		<div class="flex items-center justify-between pt-2">
-			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview()} />
+			<Toggle bind:checked={probeForce} label="Show all" onchange={() => loadProbePreview({ preserveRows: true })} />
 			<div class="flex items-center gap-3">
 				<button type="button" class="btn btn-ghost" onclick={() => (probePreviewOpen = false)}>
 					Cancel

@@ -1,0 +1,51 @@
+{{- if and .Values.runner.enabled .Values.networkPolicy.runner.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ .Release.Name }}-runner-networkpolicy-test"
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-runner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    "helm.sh/hook": test
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: netcheck
+      image: busybox:1.36.1
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          worker_host="{{ .Release.Name }}-worker"
+          worker_port="{{ .Values.runner.httpPort | default 8081 }}"
+          blocked_host="{{ .Values.runner.egressSelfTest.url | default "https://example.com" }}"
+          blocked_host="${blocked_host#http://}"
+          blocked_host="${blocked_host#https://}"
+          blocked_host="${blocked_host%%/*}"
+
+          echo "Checking worker connectivity on ${worker_host}:${worker_port}"
+          nc -zvw5 "${worker_host}" "${worker_port}"
+
+          echo "Checking blocked external egress to ${blocked_host}:443"
+          if nc -zvw5 "${blocked_host}" 443; then
+            echo "external egress unexpectedly allowed"
+            exit 1
+          fi
+
+          echo "Runner network policy looks active"
+  restartPolicy: Never
+{{- end }}

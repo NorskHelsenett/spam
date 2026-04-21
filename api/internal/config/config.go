@@ -102,10 +102,30 @@ type RunnerConfig struct {
 	HTTPPort           int               // Worker runner HTTP port (default 8081)
 	TTLSeconds         int32             // TTL for completed K8s jobs
 	ActiveDeadline     int64             // Maximum runtime for K8s jobs in seconds
-	LocalMode          bool              // Skip K8s, run Docker inline for testing
-	DockerSocket       string            // Docker socket path for local mode
 	KubeconfigPath     string            // Path to kubeconfig (empty for in-cluster)
 	PodAnnotations     map[string]string // Additional annotations for runner pods (auto-inherits from worker pod)
+	EgressSelfTest     RunnerEgressSelfTestConfig
+	// ImageScanEnv are extra environment variables forwarded to image-scan
+	// runner pods. Typical keys: GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE,
+	// TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY. Parsed from
+	// RUNNER_IMAGE_SCAN_ENV (same format as RUNNER_POD_ANNOTATIONS:
+	// "KEY1=VAL1,KEY2=VAL2").
+	ImageScanEnv map[string]string
+	// ReleaseName mirrors the Helm release name so dynamically-created
+	// K8s Jobs can carry `app.kubernetes.io/instance` and be tracked by
+	// ArgoCD as part of the same Application as the worker. Set via
+	// SPAM_RELEASE_NAME (Helm injects this into the worker deployment).
+	ReleaseName string
+	// ChartName mirrors the Helm chart name (same purpose as above).
+	// Set via SPAM_CHART_NAME. Empty string is fine — the label is
+	// omitted rather than set to "".
+	ChartName string
+}
+
+type RunnerEgressSelfTestConfig struct {
+	Enabled        bool
+	URL            string
+	TimeoutSeconds int
 }
 
 // LoadWorker reads configuration for the worker process.
@@ -168,10 +188,16 @@ func loadRunnerConfig() (RunnerConfig, error) {
 		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
 		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
-		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
-		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+		EgressSelfTest: RunnerEgressSelfTestConfig{
+			Enabled:        parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED", false),
+			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
+			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
+		},
+		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
+		ReleaseName:  strings.TrimSpace(os.Getenv("SPAM_RELEASE_NAME")),
+		ChartName:    strings.TrimSpace(os.Getenv("SPAM_CHART_NAME")),
 	}
 
 	// HMAC key is required when runner is enabled
@@ -216,10 +242,16 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 		HTTPPort:       parseIntEnv("RUNNER_HTTP_PORT", 8081),
 		TTLSeconds:     int32(parseIntEnv("RUNNER_TTL_SECONDS", 3600)),
 		ActiveDeadline: int64(parseIntEnv("RUNNER_ACTIVE_DEADLINE", 1800)),
-		LocalMode:      parseBoolEnv("RUNNER_LOCAL_MODE", false),
-		DockerSocket:   getEnv("RUNNER_DOCKER_SOCKET", "/var/run/docker.sock"),
 		KubeconfigPath: strings.TrimSpace(os.Getenv("RUNNER_KUBECONFIG")),
 		PodAnnotations: parseMapEnv("RUNNER_POD_ANNOTATIONS"),
+		EgressSelfTest: RunnerEgressSelfTestConfig{
+			Enabled:        parseBoolEnv("RUNNER_EGRESS_SELF_TEST_ENABLED", false),
+			URL:            getEnv("RUNNER_EGRESS_SELF_TEST_URL", "https://example.com"),
+			TimeoutSeconds: parseIntEnv("RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS", 5),
+		},
+		ImageScanEnv: parseMapEnv("RUNNER_IMAGE_SCAN_ENV"),
+		ReleaseName:  strings.TrimSpace(os.Getenv("SPAM_RELEASE_NAME")),
+		ChartName:    strings.TrimSpace(os.Getenv("SPAM_CHART_NAME")),
 	}
 
 	// HMAC key is optional for read-only access

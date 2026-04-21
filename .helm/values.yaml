@@ -266,10 +266,57 @@ postgresql:
 
 
 # Worker configuration
-# The worker processes background jobs (SBOM parsing, etc.)
+# The worker processes background jobs (SBOM parsing, etc.) and hosts
+# the runner HTTP endpoints on port 8081 (job lease, results upload,
+# complete). Two replicas give us zero-gap rollouts — without them, an
+# in-flight runner upload can hit the worker Service IP during the
+# brief window when the single pod is rolling and get a TCP timeout.
 worker:
   enabled: true
-  replicaCount: 1
+  replicaCount: 2
+
+  # Rolling strategy: keep serving throughout an upgrade.
+  # maxUnavailable: 0 means we never go below the configured replica
+  # count. maxSurge: 1 lets one extra pod come up before an old one
+  # terminates — the new pod reaches readiness on /health before we
+  # remove the old endpoint from the Service.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+
+  # PodDisruptionBudget — keep at least one worker serving during
+  # voluntary disruptions (node drain, autoscaler evict). Off by
+  # default for single-replica deploys where it would otherwise
+  # block drains entirely.
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+  # Readiness probe: only route Service traffic to pods whose
+  # /health responds 200. Prevents half-booted replicas from
+  # receiving runner uploads.
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: runner-http
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  # Liveness: restart the pod if /health stops responding (worker
+  # deadlocked or wedged on a poll). Looser threshold than readiness
+  # so transient slowness doesn't cause unnecessary restarts.
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: runner-http
+    initialDelaySeconds: 15
+    periodSeconds: 30
+    timeoutSeconds: 5
+    failureThreshold: 3
+
   resources: {}
     # limits:
     #   cpu: 200m
@@ -329,16 +376,33 @@ runner:
   ttlSecondsAfterFinished: 3600  # TTL for completed jobs (1 hour)
   activeDeadlineSeconds: 1800   # Maximum runtime for jobs (30 minutes)
 
-  # Local mode for testing (uses Docker instead of K8s jobs)
-  localMode: false
+  # Fail the clone init container if it can still reach the public internet.
+  # This is a defense-in-depth check that verifies the runner NetworkPolicy is
+  # actually enforced at runtime.
+  egressSelfTest:
+    enabled: true
+    url: "https://example.com"
+    timeoutSeconds: 5
 
-# Trivy scanner CronJob configuration
+# SBOM scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
-trivyScanner:
+# Uses a dedicated image (separate from the runner) with minimal attack surface.
+# Named "sbom-scanner" because the tool inside is interchangeable (trivy today;
+# grype once the backend grype-result ingest lands) — the input is always an
+# SBOM, so the scanner's identity is the input shape, not the binary.
+sbomScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
   parallelism: 3               # Number of concurrent scanner pods
   activeDeadlineSeconds: 14400  # 4h max runtime
+
+  # Dedicated sbom-scanner image (built from runner/Dockerfile.sbom-scanner).
+  # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
+  image:
+    repository: spam-sbom-scanner
+    tag: ""
+    pullPolicy: IfNotPresent
+
   resources:
     requests:
       cpu: 200m
@@ -346,6 +410,59 @@ trivyScanner:
     limits:
       cpu: "1"
       memory: 1Gi
+
+# Image scanner configuration
+# Scans container-image digests with grype / syft / cosign / crane /
+# betterleaks (trivy opt-in per category via the job payload). Pod
+# lifecycle is driven by the worker's scanner-operator loop — the
+# CronJob below serves only as a pod-template source and is suspended.
+imageScanner:
+  enabled: false
+  activeDeadlineSeconds: 10800  # 3h hard cap per pod
+
+  # Scanner operator — the worker-side controller that decides how many
+  # scanner pods exist at any moment. See api/internal/imagescan/operator.go.
+  operator:
+    # Upper bound on concurrent scanner pods. The operator scales up to
+    # this when the queue warrants; individual pods linger after draining
+    # (see lingerIdleMax below) so short bursts amortise one DB download.
+    maxParallelism: 2
+    # Time the operator waits between creating individual pods on a
+    # large backlog — rate-limits k8s API calls. Short is fine.
+    spawnSpacingSeconds: 2
+    # How long a scanner pod keeps polling an empty queue before it
+    # exits (Go duration: 30m / 45m / 2h). Active scans reset the timer.
+    # Longer = more DB-download amortisation, more idle resource; shorter
+    # = faster resource release, more DB-download cost. 30m is a sane
+    # middle for bursty arrival patterns.
+    lingerIdleMax: 30m
+    # Poll cadence while lingering on an empty queue.
+    pollInterval: 15s
+
+  # Dedicated image-scanner image (built from runner/Dockerfile.image-scanner).
+  # Contains grype/syft/cosign/crane/betterleaks + trivy; no git.
+  image:
+    repository: spam-image-scanner
+    tag: ""
+    pullPolicy: IfNotPresent
+
+  # Per-scan deadline enforced by the scanner binary itself (protects
+  # against a single pathological image hanging the whole tick).
+  scanDeadlineSeconds: 900
+
+  # Extra env forwarded to each scan subprocess. Typical keys:
+  #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
+  #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY
+  # Leave empty to use upstream defaults (public CDN for grype / trivy DBs).
+  extraEnv: {}
+
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
 
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
@@ -355,3 +472,33 @@ postgresqlConnection:
   host: ""
   port: 5432
   sslmode: disable
+
+# Network Policy configuration
+# Network policies are automatically applied when runner or sbomScanner is enabled.
+# Restricts egress from runner and sbom-scanner pods to prevent data exfiltration.
+# Pods can ONLY reach the worker service and DNS by default.
+# All other outbound traffic (internet) is blocked unless explicitly allowed.
+networkPolicy:
+  runner:
+    # Set to false to disable the runner network policy entirely.
+    enabled: true
+    # Additional egress rules for runner pods.
+    # By default: DNS + worker API only. Public internet egress is blocked.
+    additionalEgressRules: []
+
+  sbomScanner:
+    # Additional egress rules for sbom-scanner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for scanner
+    # DB download from ghcr.io / anchore.io) are allowed. All RFC 1918
+    # private ranges are blocked — the scanner cannot reach internal
+    # cluster services.
+    additionalEgressRules: []
+
+  imageScanner:
+    # Additional egress rules for image-scanner pods.
+    # By default: DNS + worker API + HTTPS to public internet (for grype
+    # DB download and OCI registry pulls) are allowed. All RFC 1918
+    # private ranges are blocked — the scanner cannot reach internal
+    # cluster services. Operators who host images in an internal
+    # registry must add an allow rule here.
+    additionalEgressRules: []

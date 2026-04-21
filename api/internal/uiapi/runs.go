@@ -2,6 +2,7 @@ package uiapi
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -20,10 +21,12 @@ import (
 
 // RunResponse represents a run in the API response.
 type RunResponse struct {
-	ID         string     `json:"id"`
+	ID   string `json:"id"`
+	Type string `json:"type"` // "CREATE_RUN" (repo) or "IMAGE_SCAN" (image)
+
 	Status     string     `json:"status"`
-	CloneURL   string     `json:"clone_url"`
-	Provider   string     `json:"provider"`
+	CloneURL   string     `json:"clone_url,omitempty"`
+	Provider   string     `json:"provider,omitempty"`
 	ProviderID string     `json:"provider_id,omitempty"`
 	RepoID     string     `json:"repo_id,omitempty"`
 	BaseURL    string     `json:"base_url,omitempty"`
@@ -38,6 +41,110 @@ type RunResponse struct {
 	K8sJobName string     `json:"k8s_job_name,omitempty"`
 	SBOMID     string     `json:"sbom_id,omitempty"`
 	SecretID   string     `json:"secret_id,omitempty"`
+
+	// Image-scan specific. Empty for CREATE_RUN rows.
+	ImageRegistry   string                  `json:"image_registry,omitempty"`
+	ImageRepository string                  `json:"image_repository,omitempty"`
+	ImageDigest     string                  `json:"image_digest,omitempty"`
+	ImageDigestID   string                  `json:"image_digest_id,omitempty"`
+	ImageArtifacts  []ImageArtifactSummary  `json:"image_artifacts,omitempty"`
+	ImageScanners   map[string]string       `json:"image_scanners,omitempty"`
+	ImageVulnCounts *ImageVulnSeverityCount `json:"image_vuln_counts,omitempty"`
+
+	// PartialFailures maps a scan category ("sbom","vuln","secrets",…) to the
+	// scanner error text when that category exited non-zero during an
+	// otherwise-successful run. Present only on IMAGE_SCAN rows where some
+	// categories failed; absent means clean run or categories simply weren't
+	// configured.
+	PartialFailures map[string]string `json:"partial_failures,omitempty"`
+
+	// Rich inline payloads — parsed once server-side so the detail page
+	// renders without follow-up fetches or file downloads.
+	ImageVulns          []ImageVulnListRow   `json:"image_vulns,omitempty"`
+	ImageLabels         map[string]string    `json:"image_labels,omitempty"`
+	ImageLabelsMetadata *ImageOCIMetadata    `json:"image_oci_metadata,omitempty"`
+	ImageSecrets        []ImageSecretListRow `json:"image_secrets,omitempty"`
+	ImageSignature      *ImageSignatureInfo  `json:"image_signature,omitempty"`
+	ImageLinkedRepo     *LinkedRepoSummary   `json:"image_linked_repo,omitempty"`
+	SBOMComponentCount  int                  `json:"sbom_component_count,omitempty"`
+}
+
+// ImageVulnListRow is a client-facing view of a grype/trivy finding.
+type ImageVulnListRow struct {
+	VulnID           string `json:"vuln_id"`
+	Severity         string `json:"severity"`
+	PkgName          string `json:"pkg_name"`
+	InstalledVersion string `json:"installed_version,omitempty"`
+	FixedVersion     string `json:"fixed_version,omitempty"`
+	Title            string `json:"title,omitempty"`
+	Target           string `json:"target,omitempty"`
+	Scanner          string `json:"scanner"`
+}
+
+// ImageOCIMetadata surfaces the high-signal fields from the OCI config —
+// created timestamp, architecture, os, and the raw JSON for operators who
+// want everything without downloading the artifact.
+type ImageOCIMetadata struct {
+	Created      string `json:"created,omitempty"`
+	Architecture string `json:"architecture,omitempty"`
+	OS           string `json:"os,omitempty"`
+	Author       string `json:"author,omitempty"`
+}
+
+// ImageSecretListRow is one betterleaks finding.
+type ImageSecretListRow struct {
+	RuleID      string `json:"rule_id"`
+	Description string `json:"description,omitempty"`
+	File        string `json:"file,omitempty"`
+	StartLine   int    `json:"start_line,omitempty"`
+	Match       string `json:"match,omitempty"`
+}
+
+// ImageSignatureInfo is a client-facing view of cosign's verdict.
+type ImageSignatureInfo struct {
+	Signed   bool   `json:"signed"`
+	Verified bool   `json:"verified"`
+	Error    string `json:"error,omitempty"`
+}
+
+// LinkedRepoSummary connects an image scan to the source repository the
+// image claims to be built from, based on the OCI `image.source` label.
+// Labels are self-attested — the "claimed" wording in the UI reflects
+// that until cosign attestations give us provenance-grade proof.
+type LinkedRepoSummary struct {
+	RepoID     string `json:"repo_id"`
+	Provider   string `json:"provider"`
+	Org        string `json:"org"`
+	Slug       string `json:"slug"`
+	BaseURL    string `json:"base_url,omitempty"`
+	ProviderID string `json:"provider_id,omitempty"`
+	Source     string `json:"source"`             // raw label value
+	Revision   string `json:"revision,omitempty"` // org.opencontainers.image.revision
+}
+
+// ImageVulnSeverityCount aggregates CVE counts by severity for an image
+// scan, so the detail view can render severity-colored chips without
+// having to stream the full finding list.
+type ImageVulnSeverityCount struct {
+	Critical int `json:"critical"`
+	High     int `json:"high"`
+	Medium   int `json:"medium"`
+	Low      int `json:"low"`
+	Unknown  int `json:"unknown"`
+	Total    int `json:"total"`
+}
+
+// ImageArtifactSummary is the lightweight descriptor of one scanner output
+// produced by an image scan. Clients render these as cards linking to the
+// raw download; the heavy blob lives in image_scan_artifacts.content and is
+// fetched on demand.
+type ImageArtifactSummary struct {
+	ID        string    `json:"id"`
+	Category  string    `json:"category"`
+	Scanner   string    `json:"scanner"`
+	Filename  string    `json:"filename,omitempty"`
+	Size      int64     `json:"size"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // RunsListResponse is the response for listing runs.
@@ -76,6 +183,11 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		statuses := parseStatusFilters(r.URL.Query().Get("status"))
 		repoPath := r.URL.Query().Get("repo_path")
 		repoID := r.URL.Query().Get("repo_id")
+		// type filter: "all" (default), "repo", or "image"
+		typeFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+		if typeFilter == "" {
+			typeFilter = "all"
+		}
 
 		sortBy := r.URL.Query().Get("sort_by")
 		sortDir := r.URL.Query().Get("sort_dir")
@@ -98,7 +210,15 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var total int64
-		query := db.WithContext(r.Context()).Table("jobs").Where("type = ?", jobs.JobTypeCreateRun)
+		query := db.WithContext(r.Context()).Table("jobs")
+		switch typeFilter {
+		case "image":
+			query = query.Where("type = ?", jobs.JobTypeImageScan)
+		case "all":
+			query = query.Where("type IN ?", []string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan})
+		default: // "repo"
+			query = query.Where("type = ?", jobs.JobTypeCreateRun)
+		}
 		if len(statuses) == 1 {
 			query = query.Where("status = ?", statuses[0])
 		} else if len(statuses) > 1 {
@@ -114,6 +234,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		var jobRecords []struct {
 			ID         string
+			Type       string
 			Status     string
 			Payload    []byte
 			Error      string
@@ -127,7 +248,7 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		offset := (page - 1) * pageSize
-		if err := query.Select("id, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
+		if err := query.Select("id, type, status, payload, error, commit_hash, created_at, locked_at, finished_at, run_at, k8s_job_name, result").
 			Order(orderClause).
 			Offset(offset).
 			Limit(pageSize).
@@ -137,13 +258,25 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		// Payloads differ by job type. We decode both shapes lazily in the
+		// render loop below; here we only collect provider IDs from
+		// CREATE_RUN rows so we can batch-resolve display names.
 		parsedPayloads := make([]jobs.CreateRunPayload, len(jobRecords))
+		imagePayloads := make([]jobs.ImageScanPayload, len(jobRecords))
 		providerIDs := make([]string, 0, len(jobRecords))
 		seenProviderIDs := make(map[string]struct{}, len(jobRecords))
 		for i, job := range jobRecords {
+			if job.Type == jobs.JobTypeImageScan {
+				var p jobs.ImageScanPayload
+				if len(job.Payload) > 0 {
+					_ = json.Unmarshal(job.Payload, &p)
+				}
+				imagePayloads[i] = p
+				continue
+			}
 			var payload jobs.CreateRunPayload
 			if len(job.Payload) > 0 {
-				json.Unmarshal(job.Payload, &payload)
+				_ = json.Unmarshal(job.Payload, &payload)
 			}
 			parsedPayloads[i] = payload
 			if payload.ProviderID == "" {
@@ -182,8 +315,6 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		runs := make([]RunResponse, 0, len(jobRecords))
 		for i, job := range jobRecords {
-			payload := parsedPayloads[i]
-
 			status := job.Status
 			errorText := job.Error
 			var retryAt *time.Time
@@ -191,7 +322,10 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				t := job.RunAt
 				retryAt = &t
 			}
-			if status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued) {
+			// K8s-failure inference is CREATE_RUN-specific (the result JSON
+			// layout is different for image scans).
+			if job.Type == jobs.JobTypeCreateRun &&
+				(status == string(jobs.JobStatusSucceeded) || status == string(jobs.JobStatusRunning) || status == string(jobs.JobStatusQueued)) {
 				if resultMap, err := parseRunResultMap(job.Result); err == nil {
 					events, podStatus, ok, _ := loadPersistedK8sSnapshotFromResult(resultMap)
 					if ok {
@@ -206,8 +340,30 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				}
 			}
 
+			if job.Type == jobs.JobTypeImageScan {
+				p := imagePayloads[i]
+				runs = append(runs, RunResponse{
+					ID:              job.ID,
+					Type:            job.Type,
+					Status:          status,
+					RepoPath:        imageRefShortDisplay(p.Registry, p.Repository, p.Digest),
+					Error:           errorText,
+					CreatedAt:       job.CreatedAt,
+					StartedAt:       job.LockedAt,
+					FinishedAt:      job.FinishedAt,
+					RetryAt:         retryAt,
+					ImageRegistry:   p.Registry,
+					ImageRepository: p.Repository,
+					ImageDigest:     p.Digest,
+					ImageDigestID:   p.ImageDigestID,
+				})
+				continue
+			}
+
+			payload := parsedPayloads[i]
 			runs = append(runs, RunResponse{
 				ID:         job.ID,
+				Type:       job.Type,
 				Status:     status,
 				CloneURL:   payload.CloneURL,
 				Provider:   displayProviderName(payload.Provider, payload.ProviderID, providerNames),
@@ -233,6 +389,34 @@ func RunsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			PageSize:   pageSize,
 		})
 	}
+}
+
+// imageRefShortDisplay renders a compact label for an image scan's RepoPath
+// field so the runs table shows something readable like
+// "docker.io/library/alpine@sha256:0123abcd" rather than a full 64-char
+// digest. The full digest is available via ImageDigest on the row.
+func imageRefShortDisplay(registry, repository, digest string) string {
+	ref := ""
+	switch {
+	case registry != "" && repository != "":
+		ref = registry + "/" + repository
+	case repository != "":
+		ref = repository
+	case registry != "":
+		ref = registry
+	}
+	if digest == "" {
+		return ref
+	}
+	short := digest
+	// "sha256:abcd..." → first 8 hex chars is enough to disambiguate in a list
+	if idx := strings.IndexByte(digest, ':'); idx > 0 && idx+9 <= len(digest) {
+		short = digest[:idx+9]
+	}
+	if ref == "" {
+		return short
+	}
+	return ref + "@" + short
 }
 
 func displayProviderName(providerType string, providerID string, providerNames map[string]string) string {
@@ -422,6 +606,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		var job struct {
 			ID         string
+			Type       string
 			Status     string
 			Payload    []byte
 			Error      string
@@ -430,16 +615,25 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			LockedAt   *time.Time
 			FinishedAt *time.Time
 			K8sJobName string `gorm:"column:k8s_job_name"`
+			Result     []byte
 		}
 
 		if err := db.WithContext(r.Context()).Table("jobs").
-			Where("id = ? AND type = ?", runID, jobs.JobTypeCreateRun).
+			Where("id = ? AND type IN ?", runID, []string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan}).
 			First(&job).Error; err != nil {
 			if err == gorm.ErrRecordNotFound {
 				http.Error(w, "run not found", http.StatusNotFound)
 				return
 			}
 			http.Error(w, "failed to get run", http.StatusInternalServerError)
+			return
+		}
+
+		// Image scans short-circuit the repo-specific branches below. Their
+		// detail payload is assembled from image_scan_artifacts + SBOM
+		// binding on the image digest.
+		if job.Type == jobs.JobTypeImageScan {
+			writeImageScanRunResponse(w, r, db, job, runID)
 			return
 		}
 
@@ -476,6 +670,7 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		response := RunResponse{
 			ID:         job.ID,
+			Type:       job.Type,
 			Status:     job.Status,
 			CloneURL:   payload.CloneURL,
 			Provider:   payload.Provider,
@@ -892,7 +1087,11 @@ func RunSecretsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 	}
 }
 
-// RunsRescheduleFailedHandler resets failed runs to QUEUED for repos that have no newer non-failed run.
+// RunsRescheduleFailedHandler resets failed runs to QUEUED. Covers both
+// CREATE_RUN (repo) and IMAGE_SCAN jobs; the "skip if a newer run exists"
+// dedup is keyed on the job type's identity field (repo_id for CREATE_RUN,
+// image_digest_id for IMAGE_SCAN) so re-running doesn't double-queue work
+// that the system already has a fresher copy of.
 // POST /api/runs/failed/reschedule
 func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -902,10 +1101,13 @@ func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.Ha
 
 		var totalFailed int64
 		db.WithContext(r.Context()).Table("jobs").
-			Where("type = ? AND status = ?", jobs.JobTypeCreateRun, jobs.JobStatusFailed).
+			Where("type IN ? AND status = ?",
+				[]string{jobs.JobTypeCreateRun, jobs.JobTypeImageScan},
+				jobs.JobStatusFailed).
 			Count(&totalFailed)
 
-		result := db.WithContext(r.Context()).Exec(`
+		// CREATE_RUN branch — dedup on repo_id.
+		createRunResult := db.WithContext(r.Context()).Exec(`
 			UPDATE jobs
 			SET status = 'QUEUED', attempts = 0, error = '',
 			    locked_at = NULL, locked_by = '', finished_at = NULL,
@@ -922,15 +1124,109 @@ func RunsRescheduleFailedHandler(db *gorm.DB, authService *auth.Service) http.Ha
 			  )`,
 			jobs.JobTypeCreateRun, jobs.JobStatusFailed, jobs.JobTypeCreateRun,
 		)
-		if result.Error != nil {
-			log.Printf("failed to reschedule failed runs: %v", result.Error)
+		if createRunResult.Error != nil {
+			log.Printf("failed to reschedule CREATE_RUN runs: %v", createRunResult.Error)
 			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
 			return
 		}
 
+		// IMAGE_SCAN branch — dedup on image_digest_id.
+		imageScanResult := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE type = ? AND status = ?
+			  AND payload->>'image_digest_id' != ''
+			  AND NOT EXISTS (
+			      SELECT 1 FROM jobs j2
+			      WHERE j2.type = ?
+			        AND j2.status IN ('QUEUED', 'RUNNING', 'SUCCEEDED')
+			        AND j2.payload->>'image_digest_id' = jobs.payload->>'image_digest_id'
+			        AND j2.created_at > jobs.created_at
+			  )`,
+			jobs.JobTypeImageScan, jobs.JobStatusFailed, jobs.JobTypeImageScan,
+		)
+		if imageScanResult.Error != nil {
+			log.Printf("failed to reschedule IMAGE_SCAN runs: %v", imageScanResult.Error)
+			http.Error(w, "failed to reschedule failed runs", http.StatusInternalServerError)
+			return
+		}
+
+		rescheduled := createRunResult.RowsAffected + imageScanResult.RowsAffected
 		writeJSON(w, http.StatusOK, map[string]int64{
-			"rescheduled": result.RowsAffected,
-			"skipped":     totalFailed - result.RowsAffected,
+			"rescheduled": rescheduled,
+			"skipped":     totalFailed - rescheduled,
+		})
+	}
+}
+
+// RunRetryHandler re-queues a single failed (or cancelled) job by ID.
+// Unlike the bulk handler this skips the "newer run exists" check —
+// when the user explicitly clicks "Run again" on a specific run, they
+// want that run to fire again regardless of what's happened since.
+// Works for both CREATE_RUN and IMAGE_SCAN.
+// POST /api/runs/{id}/retry
+func RunRetryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		runID := r.PathValue("id")
+		if runID == "" {
+			http.Error(w, "run ID is required", http.StatusBadRequest)
+			return
+		}
+
+		var job struct {
+			ID     string
+			Type   string
+			Status string
+		}
+		if err := db.WithContext(r.Context()).Table("jobs").
+			Where("id = ?", runID).
+			First(&job).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				http.Error(w, "run not found", http.StatusNotFound)
+				return
+			}
+			http.Error(w, "failed to read run", http.StatusInternalServerError)
+			return
+		}
+		if job.Type != jobs.JobTypeCreateRun && job.Type != jobs.JobTypeImageScan {
+			http.Error(w, "run type cannot be retried", http.StatusBadRequest)
+			return
+		}
+		// Don't re-queue a run that already succeeded, is currently
+		// running, or is already sitting in the queue. Anything else —
+		// FAILED, RETRY (backoff), cancelled-but-not-reaped — is fair
+		// game; the user explicitly asked for it to fire again.
+		switch jobs.JobStatus(job.Status) {
+		case jobs.JobStatusSucceeded, jobs.JobStatusRunning, jobs.JobStatusQueued:
+			http.Error(w, "run is already "+strings.ToLower(job.Status)+"; not re-queueing", http.StatusBadRequest)
+			return
+		}
+
+		result := db.WithContext(r.Context()).Exec(`
+			UPDATE jobs
+			SET status = 'QUEUED', attempts = 0, error = '',
+			    locked_at = NULL, locked_by = '', finished_at = NULL,
+			    last_attempted_at = NULL, k8s_job_name = '', k8s_namespace = '',
+			    cancelled_at = NULL, cancelled_by = '',
+			    updated_at = NOW(), run_at = NOW()
+			WHERE id = ?
+		`, runID)
+		if result.Error != nil {
+			log.Printf("retry run %s: %v", runID, result.Error)
+			http.Error(w, "failed to re-queue run", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":   "QUEUED",
+			"id":       runID,
+			"requeued": result.RowsAffected,
 		})
 	}
 }

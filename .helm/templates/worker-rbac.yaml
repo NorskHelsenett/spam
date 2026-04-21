@@ -24,7 +24,7 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "delete", "get", "list", "watch"]
-  {{- if .Values.trivyScanner.enabled }}
+  {{- if or .Values.sbomScanner.enabled .Values.imageScanner.enabled }}
   - apiGroups: ["batch"]
     resources: ["cronjobs"]
     verbs: ["get"]

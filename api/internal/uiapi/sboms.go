@@ -2,316 +2,15 @@ package uiapi
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
-	"io"
-	"log"
 	"net/http"
 	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
-	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
-	"github.com/NorskHelsenett/spam/internal/events"
-	"github.com/NorskHelsenett/spam/internal/jobs"
-	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"gorm.io/gorm"
 )
-
-const (
-	maxSBOMUploadBytes = 25 << 20
-	sbomSourceUpload   = "UPLOAD"
-)
-
-var (
-	errRepoNotFound = errors.New("repo not found")
-	errBadRequest   = errors.New("repo_id or org/slug required")
-)
-
-type sbomUploadResponse struct {
-	SBOMID        string `json:"sbom_id"`
-	BindingID     string `json:"binding_id"`
-	RepoID        string `json:"repo_id"`
-	RepoCommitID  string `json:"repo_commit_id"`
-	ImageDigestID string `json:"image_digest_id"`
-	JobID         string `json:"job_id"`
-}
-
-type sbomBoundPayload struct {
-	SBOMID          string `json:"sbom_id"`
-	BindingID       string `json:"binding_id"`
-	AssetType       string `json:"asset_type"`
-	RepoID          string `json:"repo_id"`
-	RepoCommitID    string `json:"repo_commit_id"`
-	CommitSHA       string `json:"commit_sha"`
-	Provider        string `json:"provider"`
-	Org             string `json:"org"`
-	Slug            string `json:"slug"`
-	ImageDigestID   string `json:"image_digest_id"`
-	ImageRegistry   string `json:"image_registry"`
-	ImageRepository string `json:"image_repository"`
-	ImageDigest     string `json:"image_digest"`
-	Source          string `json:"source"`
-}
-
-type sbomIngestedPayload struct {
-	SBOMID string `json:"sbom_id"`
-	Source string `json:"source"`
-}
-
-// SBOMUploadHandler accepts multipart SBOM uploads and enqueues parsing jobs.
-func SBOMUploadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		user := requireAdmin(w, r, authService)
-		if user == nil {
-			return
-		}
-
-		if err := r.ParseMultipartForm(maxSBOMUploadBytes); err != nil {
-			http.Error(w, "invalid multipart body", http.StatusBadRequest)
-			return
-		}
-
-		file, _, err := r.FormFile("sbom_file")
-		if err != nil {
-			http.Error(w, "sbom_file required", http.StatusBadRequest)
-			return
-		}
-		defer file.Close()
-
-		limited := io.LimitReader(file, maxSBOMUploadBytes)
-		content, err := io.ReadAll(limited)
-		if err != nil {
-			http.Error(w, "failed to read sbom file", http.StatusBadRequest)
-			return
-		}
-
-		format := strings.TrimSpace(r.FormValue("format"))
-		if format == "" {
-			format = detectSBOMFormat(content)
-		}
-		if format == "" {
-			http.Error(w, "unable to detect sbom format", http.StatusBadRequest)
-			return
-		}
-
-		repoID := strings.TrimSpace(r.FormValue("repo_id"))
-		provider := strings.TrimSpace(r.FormValue("provider"))
-		org := strings.TrimSpace(r.FormValue("org"))
-		slug := strings.TrimSpace(r.FormValue("slug"))
-		commitSHA := strings.TrimSpace(r.FormValue("commit_sha"))
-		ref := strings.TrimSpace(r.FormValue("ref"))
-		imageRegistry := strings.TrimSpace(r.FormValue("image_registry"))
-		imageRepository := strings.TrimSpace(r.FormValue("image_repository"))
-		imageDigest := strings.TrimSpace(r.FormValue("image_digest"))
-
-		repoProvided := repoID != "" || provider != "" || org != "" || slug != "" || commitSHA != "" || ref != ""
-		imageProvided := imageRegistry != "" || imageRepository != "" || imageDigest != ""
-
-		if repoProvided && imageProvided {
-			http.Error(w, "choose repo or image target", http.StatusBadRequest)
-			return
-		}
-		if repoProvided {
-			if commitSHA == "" {
-				http.Error(w, "commit_sha required for repo target", http.StatusBadRequest)
-				return
-			}
-			if repoID == "" && (org == "" || slug == "") {
-				http.Error(w, "repo_id or org/slug required for repo target", http.StatusBadRequest)
-				return
-			}
-		}
-		if imageProvided {
-			if imageRegistry == "" || imageRepository == "" || imageDigest == "" {
-				http.Error(w, "image_registry, image_repository, and image_digest required", http.StatusBadRequest)
-				return
-			}
-		}
-
-		hash := sha256.Sum256(content)
-
-		var response sbomUploadResponse
-		err = db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
-			var bindingInput *artifacts.BindingInput
-			var assetRefID string
-
-			if repoProvided {
-				repo, err := resolveRepo(r.Context(), tx, repoID, provider, org, slug, user.ID)
-				if err != nil {
-					return err
-				}
-
-				commit, err := assets.UpsertRepoCommit(r.Context(), tx, assets.RepoCommitInput{
-					RepoID:    repo.ID,
-					CommitSHA: commitSHA,
-					Ref:       ref,
-				})
-				if err != nil {
-					return err
-				}
-
-				bindingInput = &artifacts.BindingInput{
-					AssetType:       artifacts.AssetTypeRepoCommit,
-					AssetRefID:      commit.ID,
-					CommitSHA:       commitSHA,
-					Source:          sbomSourceUpload,
-					CreatedByUserID: user.ID,
-				}
-				assetRefID = commit.ID
-				response.RepoID = repo.ID
-				response.RepoCommitID = commit.ID
-			}
-
-			if imageProvided {
-				image, err := assets.UpsertImageDigest(r.Context(), tx, assets.ImageDigestInput{
-					Registry:        imageRegistry,
-					Repository:      imageRepository,
-					Digest:          imageDigest,
-					CreatedByUserID: user.ID,
-				})
-				if err != nil {
-					return err
-				}
-
-				bindingInput = &artifacts.BindingInput{
-					AssetType:       artifacts.AssetTypeImageDigest,
-					AssetRefID:      image.ID,
-					Source:          sbomSourceUpload,
-					CreatedByUserID: user.ID,
-				}
-				assetRefID = image.ID
-				response.ImageDigestID = image.ID
-			}
-
-			sbomID, bindingID, err := artifacts.StoreSBOM(
-				r.Context(), tx,
-				artifacts.SBOMInput{
-					Format:           format,
-					ContentHash:      hash[:],
-					ContentBytes:     content,
-					IngestedByUserID: user.ID,
-				},
-				bindingInput,
-			)
-			if err != nil {
-				return err
-			}
-
-			response.SBOMID = sbomID
-			if bindingID != "" {
-				response.BindingID = bindingID
-			}
-
-			// Emit appropriate events
-			if bindingInput != nil {
-				if repoProvided {
-					repo, _ := resolveRepo(r.Context(), tx, repoID, provider, org, slug, user.ID)
-					commit, _ := assets.FindRepoCommit(r.Context(), tx, assetRefID)
-					if err := events.EmitSBOMBound(tx, sbomID, sbomBoundPayload{
-						SBOMID:       sbomID,
-						BindingID:    bindingID,
-						AssetType:    artifacts.AssetTypeRepoCommit,
-						RepoID:       repo.ID,
-						RepoCommitID: commit.ID,
-						CommitSHA:    commit.CommitSHA,
-						Provider:     repo.Provider,
-						Org:          repo.Org,
-						Slug:         repo.Slug,
-						Source:       sbomSourceUpload,
-					}); err != nil {
-						return err
-					}
-				}
-				if imageProvided {
-					image, _ := assets.FindImageDigest(r.Context(), tx, assetRefID)
-					if err := events.EmitSBOMBound(tx, sbomID, sbomBoundPayload{
-						SBOMID:          sbomID,
-						BindingID:       bindingID,
-						AssetType:       artifacts.AssetTypeImageDigest,
-						ImageDigestID:   image.ID,
-						ImageRegistry:   image.Registry,
-						ImageRepository: image.Repository,
-						ImageDigest:     image.Digest,
-						Source:          sbomSourceUpload,
-					}); err != nil {
-						return err
-					}
-				}
-			} else {
-				if err := events.EmitSBOMIngested(tx, sbomID, sbomIngestedPayload{
-					SBOMID: sbomID,
-					Source: sbomSourceUpload,
-				}); err != nil {
-					return err
-				}
-			}
-
-			return nil
-		})
-		if err != nil {
-			if errors.Is(err, errRepoNotFound) {
-				http.Error(w, "repo not found", http.StatusNotFound)
-				return
-			}
-			if errors.Is(err, errBadRequest) {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if errors.Is(err, artifacts.ErrBindingExists) {
-				http.Error(w, "sbom already exists for this commit", http.StatusConflict)
-				return
-			}
-			log.Printf("SBOM upload failed (repo_id=%q provider=%q org=%q slug=%q image_registry=%q image_repository=%q image_digest=%q): %v", repoID, provider, org, slug, imageRegistry, imageRepository, imageDigest, err)
-			http.Error(w, "sbom upload failed", http.StatusInternalServerError)
-			return
-		}
-
-		if _, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
-			Type:    jobs.JobTypeRefreshSBOMViews,
-			Payload: map[string]string{"sbom_id": response.SBOMID},
-		}); err != nil {
-			log.Printf("failed to enqueue view refresh: %v", err)
-		}
-
-		writeJSON(w, http.StatusCreated, response)
-	}
-}
-
-func resolveRepo(ctx context.Context, tx *gorm.DB, repoID, provider, org, slug, createdBy string) (*assets.Repo, error) {
-	if org != "" && slug != "" {
-		var providerInstanceID string
-		var pi providerconfig.ProviderInstance
-		err := tx.WithContext(ctx).
-			Where("type = ? AND enabled = true AND (owner_path = '' OR ? = owner_path OR ? LIKE owner_path || '/%')", provider, org, org).
-			Order("CASE WHEN owner_path != '' THEN 0 ELSE 1 END, created_at").
-			First(&pi).Error
-		if err == nil {
-			providerInstanceID = pi.ID
-		}
-		return assets.UpsertRepo(ctx, tx, assets.RepoInput{
-			Provider:           provider,
-			Org:                org,
-			Slug:               slug,
-			CreatedByUserID:    createdBy,
-			ProviderInstanceID: providerInstanceID,
-		})
-	}
-
-	if repoID != "" {
-		var repo assets.Repo
-		if err := tx.WithContext(ctx).First(&repo, "id = ?", repoID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, errRepoNotFound
-			}
-			return nil, err
-		}
-		return &repo, nil
-	}
-
-	return nil, errBadRequest
-}
 
 func detectSBOMFormat(payload []byte) string {
 	var decoded map[string]interface{}
@@ -425,22 +124,18 @@ func cycloneDXDependencyGraphRoot(
 	if len(components) == 0 || len(dependencies) == 0 {
 		return ""
 	}
-	// Build set of component refs present in the components array
 	componentRefs := make(map[string]bool, len(components))
 	for _, c := range components {
 		if ref := firstNonEmpty(c.BomRef, c.Purl); ref != "" {
 			componentRefs[ref] = true
 		}
 	}
-	// Find all refs that are depended upon by at least one other entry
 	dependedOn := make(map[string]bool)
 	for _, d := range dependencies {
 		for _, dep := range d.DependsOn {
 			dependedOn[dep] = true
 		}
 	}
-	// Root = a dependency entry whose ref is a known component and is not
-	// depended upon by anyone else. Return the first match.
 	for _, d := range dependencies {
 		if componentRefs[d.Ref] && !dependedOn[d.Ref] {
 			return d.Ref
@@ -493,16 +188,12 @@ func sbomComponentCount(ctx context.Context, db *gorm.DB, sbomID, format string,
 		Where("sbom_id = ? AND is_root = false", sbomID).
 		Count(&nonRootCount)
 
-	// If the view has entries and at least one is marked as root, trust it.
 	if nonRootCount > 0 && rootCount > 0 {
 		return nonRootCount
 	}
-	// No root detected in the view (root was not in metadata.component or bom-refs
-	// didn't match). Use the Go parser which also tries the dependency graph.
 	if parsed := int64(countComponentsFromContent(format, content)); parsed > 0 {
 		return parsed
 	}
-	// Last resort: return the raw count from the view (may include root).
 	return nonRootCount
 }
 

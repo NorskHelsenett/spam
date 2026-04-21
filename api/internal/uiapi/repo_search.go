@@ -20,11 +20,19 @@ type RepoSearchResult struct {
 	OwnerPath  string  `json:"owner_path,omitempty"`
 }
 
+type GroupSearchResult struct {
+	FullPath    string `json:"full_path"`
+	Name        string `json:"name"`
+	RepoCount   int    `json:"repo_count"`
+	ProviderID  string `json:"provider_id,omitempty"`
+}
+
 type RepoSearchResponse struct {
-	Query   string             `json:"query"`
-	Results []RepoSearchResult `json:"results"`
-	HasMore bool               `json:"has_more"`
-	Offset  int                `json:"offset"`
+	Query   string              `json:"query"`
+	Results []RepoSearchResult  `json:"results"`
+	Groups  []GroupSearchResult `json:"groups"`
+	HasMore bool                `json:"has_more"`
+	Offset  int                 `json:"offset"`
 }
 
 // RepoSearchHandler searches repos by org and slug.
@@ -54,6 +62,8 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		if o, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && o > 0 {
 			offset = o
 		}
+
+		providerID := r.URL.Query().Get("provider_id")
 
 		var rows []RepoSearchResult
 		err := db.WithContext(r.Context()).Raw(`
@@ -89,6 +99,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				) LIKE LOWER(?) || '%'
 			)
 			AND pi.id IS NOT NULL
+			AND (? = '' OR pi.id = ?)
 			ORDER BY
 				CASE
 					WHEN LOWER(r.slug) = LOWER(?) THEN 0
@@ -138,6 +149,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			`,
 			q, q, q,
 			q, q, q, q, q, q, q,
+			providerID, providerID,
 			q, q, q, q, q, q, q, q, q, q,
 			limit+1, offset,
 		).Scan(&rows).Error
@@ -155,9 +167,40 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			rows = rows[:limit]
 		}
 
+		// Find matching groups (distinct org paths that contain the query)
+		var groups []GroupSearchResult
+		_ = db.WithContext(r.Context()).Raw(`
+			SELECT
+				r.org AS full_path,
+				CASE
+					WHEN r.org LIKE '%/%' THEN substring(r.org FROM '[^/]+$')
+					ELSE r.org
+				END AS name,
+				COUNT(*) AS repo_count,
+				COALESCE(pi.id, '') AS provider_id
+			FROM repos r
+			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
+			WHERE r.org ILIKE '%' || ? || '%'
+				AND pi.id IS NOT NULL
+				AND (? = '' OR pi.id = ?)
+			GROUP BY r.org, pi.id
+			ORDER BY
+				CASE WHEN LOWER(r.org) = LOWER(?) THEN 0
+				     WHEN LOWER(r.org) LIKE LOWER(?) || '%' THEN 1
+				     ELSE 2
+				END,
+				repo_count DESC
+			LIMIT 10
+		`, q, providerID, providerID, q, q).Scan(&groups).Error
+
+		if groups == nil {
+			groups = []GroupSearchResult{}
+		}
+
 		writeJSON(w, http.StatusOK, RepoSearchResponse{
 			Query:   q,
 			Results: rows,
+			Groups:  groups,
 			HasMore: hasMore,
 			Offset:  offset,
 		})

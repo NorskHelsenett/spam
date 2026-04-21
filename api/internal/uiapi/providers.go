@@ -203,6 +203,9 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 		}
 
 		group := r.PathValue("group")
+		if group == "" {
+			group = r.URL.Query().Get("group")
+		}
 		// group can be empty to list all public projects
 
 		page, pageSize := parsePagination(r)
@@ -284,6 +287,9 @@ func GitLabSubgroupsHandler(authService *auth.Service, store *providerconfig.Sto
 		}
 
 		group := r.PathValue("group")
+		if group == "" {
+			group = r.URL.Query().Get("group")
+		}
 		page, pageSize := parsePagination(r)
 		rawBaseURL := r.URL.Query().Get("base_url")
 

@@ -1,0 +1,90 @@
+{{- if .Values.sbomScanner.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-sbom-scanner
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-sbom-scanner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: sbom-scanner
+    app.kubernetes.io/managed-by: Helm
+spec:
+  schedule: {{ .Values.sbomScanner.schedule | quote }}
+  concurrencyPolicy: Allow
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.sbomScanner.activeDeadlineSeconds | default 14400 }}
+      ttlSecondsAfterFinished: 3600
+      parallelism: {{ .Values.sbomScanner.parallelism | default 3 }}
+      completions: {{ .Values.sbomScanner.parallelism | default 3 }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ .Chart.Name }}-sbom-scanner
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/component: scanner
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          hostNetwork: false
+          hostPID: false
+          hostIPC: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            fsGroup: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: sbom-scanner
+              image: "{{ .Values.sbomScanner.image.repository }}:{{ .Values.sbomScanner.image.tag | default "latest" }}"
+              imagePullPolicy: {{ .Values.sbomScanner.image.pullPolicy }}
+              command: ["/usr/local/bin/sbom-scanner"]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 1000
+                runAsGroup: 1000
+              env:
+                - name: SPAM_API_URL
+                  value: "http://{{ .Release.Name }}-worker:{{ .Values.runner.httpPort | default 8081 }}"
+                - name: RUNNER_HMAC_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-runner
+                      key: RUNNER_HMAC_KEY
+                - name: GRYPE_DB_CACHE_DIR
+                  value: /grype-cache
+                - name: TMPDIR
+                  value: /tmp
+              volumeMounts:
+                - name: grype-cache
+                  mountPath: /grype-cache
+                - name: tmp
+                  mountPath: /tmp
+                - name: home
+                  mountPath: /home/runner
+              {{- with .Values.sbomScanner.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+          volumes:
+            - name: grype-cache
+              emptyDir: {}
+            - name: tmp
+              emptyDir:
+                medium: Memory
+                sizeLimit: 256Mi
+            - name: home
+              emptyDir:
+                medium: Memory
+                sizeLimit: 10Mi
+{{- end }}

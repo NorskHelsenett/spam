@@ -11,9 +11,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/poller"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
@@ -131,7 +133,18 @@ func run() error {
 
 	// Auto-migrate runner tables
 	if cfg.Runner.Enabled {
-		if err := gormDB.AutoMigrate(&runner.RunLog{}, &runner.RunSecret{}); err != nil {
+		if err := gormDB.AutoMigrate(
+			&runner.RunLog{}, &runner.RunSecret{}, &runner.ScannerVersion{},
+			// Also migrate the ImageDigest model the API server owns — this
+			// avoids a race where the worker's startup backfill queries
+			// source_label (or future columns) before the API server's
+			// AutoMigrate has added them. Both pods then converge on the
+			// same schema regardless of deploy order.
+			&assets.ImageDigest{},
+			&imagescan.ImageScanRun{}, &imagescan.ImageScanArtifact{},
+			&imagescan.ImageVulnFinding{},
+			&imagescan.ScannerControllerLease{},
+		); err != nil {
 			return fmt.Errorf("migrate runner tables: %w", err)
 		}
 	}
@@ -163,7 +176,7 @@ func run() error {
 			}
 		}()
 
-		log.Printf("runner server enabled on port %d (local_mode=%v)", cfg.Runner.HTTPPort, cfg.Runner.LocalMode)
+		log.Printf("runner server enabled on port %d", cfg.Runner.HTTPPort)
 	}
 
 	// Create provider store and poller for commit-based polling
@@ -198,6 +211,63 @@ func run() error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	// Image-scan backfill reconciler. Periodically enqueues IMAGE_SCAN jobs
+	// for digests that don't have one — covers bulk imports, digests
+	// inserted before IMAGE_SCAN_ENABLED flipped on, and any trigger
+	// failures. After reconciling it asks the burst trigger to spawn an
+	// adhoc scanner pod (subject to cooldown) so work doesn't sit until
+	// the next scheduled CronJob tick. No-op when image scanning is off.
+	imageScanReconciler := imagescan.NewReconciler(gormDB, nil)
+	var imageScanTicker *time.Ticker
+	if imageScanReconciler.Enabled() {
+		// One-shot backfill: populate source_repo_id on image_digests
+		// that were scanned before the column existed. Idempotent — the
+		// underlying SQL skips rows that already have the link set.
+		if scanned, linked, err := imagescan.BackfillSourceRepoIDs(ctx, gormDB); err != nil {
+			log.Printf("image scan source-repo backfill: %v", err)
+		} else if scanned > 0 {
+			log.Printf("image scan source-repo backfill: linked %d of %d digest(s)", linked, scanned)
+		}
+
+		// Run once on startup so a pod restart clears any backlog
+		// immediately instead of waiting for the reconciler tick.
+		if n, err := imageScanReconciler.Run(ctx); err != nil {
+			log.Printf("image scan reconciler (startup): %v", err)
+		} else if n > 0 {
+			log.Printf("image scan reconciler: enqueued %d digest(s) on startup", n)
+		}
+		imageScanTicker = time.NewTicker(imagescan.ReconcilerInterval)
+		defer imageScanTicker.Stop()
+	}
+	// Select-compatible channel that fires only when the ticker exists.
+	var imageScanTick <-chan time.Time
+	if imageScanTicker != nil {
+		imageScanTick = imageScanTicker.C
+	}
+
+	// Scanner operator — controller that reconciles running scanner pods
+	// against queue depth. Replaces the previous burst-trigger + cooldown +
+	// scheduled CronJob hacks with one observe/decide/act loop.
+	var scannerOperator *imagescan.Operator
+	var scannerOpTicker *time.Ticker
+	var scannerOpTick <-chan time.Time
+	if runExecutor != nil {
+		if podCtrl, ok := runExecutor.(imagescan.PodController); ok {
+			scannerOperator = imagescan.NewOperator(gormDB, podCtrl)
+		}
+	}
+	if scannerOperator != nil {
+		// Don't wait for the first 10s tick — reconcile once on startup so
+		// a worker restart mid-scan immediately accounts for the in-flight
+		// pods (no double-spawn) and spawns any missing ones.
+		if err := scannerOperator.Run(ctx); err != nil {
+			log.Printf("scanner operator (startup): %v", err)
+		}
+		scannerOpTicker = time.NewTicker(imagescan.OperatorInterval)
+		defer scannerOpTicker.Stop()
+		scannerOpTick = scannerOpTicker.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,6 +275,25 @@ func run() error {
 			wg.Wait()
 			log.Printf("all jobs completed, shutting down")
 			return nil
+
+		case <-imageScanTick:
+			// Backfill enqueue for digests without an IMAGE_SCAN job.
+			// Pod spawning is the scanner operator's job now; this case
+			// only mutates the queue.
+			if n, err := imageScanReconciler.Run(ctx); err != nil {
+				log.Printf("image scan reconciler: %v", err)
+			} else if n > 0 {
+				log.Printf("image scan reconciler: enqueued %d digest(s)", n)
+			}
+
+		case <-scannerOpTick:
+			// Scanner-pod controller tick. Fast cadence (10s) so manual
+			// retries and user-visible actions see a pod running within
+			// seconds. The operator does its own DB-leader-lease so the
+			// other worker replica is idle on this path.
+			if err := scannerOperator.Run(ctx); err != nil {
+				log.Printf("scanner operator: %v", err)
+			}
 
 		case <-ticker.C:
 			now := time.Now()
@@ -258,9 +347,13 @@ func run() error {
 
 				// Determine which job types to claim based on running runs.
 				// Per-provider circuit breaking is handled in processJob itself.
-				var excludeTypes []jobs.JobType
+				//
+				// IMAGE_SCAN jobs are always excluded: they are leased and
+				// executed by the dedicated spam-image-scanner pod, which
+				// keeps the grype/trivy vuln DB warm across many digests.
+				excludeTypes := []jobs.JobType{jobs.JobTypeImageScan}
 				if runningRuns >= int64(cfg.Concurrency) {
-					excludeTypes = []jobs.JobType{jobs.JobTypeCreateRun}
+					excludeTypes = append(excludeTypes, jobs.JobTypeCreateRun)
 				}
 
 				job, err := jobs.ClaimNextJob(ctx, gormDB, workerID, time.Now(), excludeTypes...)

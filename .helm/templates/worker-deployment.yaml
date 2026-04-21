@@ -11,6 +11,10 @@ metadata:
     app.kubernetes.io/managed-by: "Helm"
 spec:
   replicas: {{ .Values.worker.replicaCount | default 1 }}
+  {{- with .Values.worker.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ .Chart.Name }}-worker
@@ -55,6 +59,14 @@ spec:
             - name: runner-http
               containerPort: {{ .Values.runner.httpPort | default 8081 }}
               protocol: TCP
+          {{- with .Values.worker.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.worker.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- end }}
           {{- with .Values.worker.resources }}
           resources:
@@ -100,9 +112,32 @@ spec:
             - name: POSTGRES_SSLMODE
               value: {{ .Values.postgresqlConnection.sslmode | quote }}
             {{- end }}
-            {{- if .Values.trivyScanner.enabled }}
-            - name: TRIVY_SCANNER_CRONJOB_NAME
-              value: "{{ .Release.Name }}-trivy-scanner"
+            # Tracking metadata so dynamically-created run/scanner Jobs
+            # carry ArgoCD + helm labels and appear as part of this
+            # Application instead of as orphans. Read by the Go config
+            # and stamped onto every Job the worker spawns.
+            - name: SPAM_RELEASE_NAME
+              value: {{ .Release.Name | quote }}
+            - name: SPAM_CHART_NAME
+              value: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+            {{- if .Values.sbomScanner.enabled }}
+            - name: SBOM_SCANNER_CRONJOB_NAME
+              value: "{{ .Release.Name }}-sbom-scanner"
+            {{- end }}
+            {{- if .Values.imageScanner.enabled }}
+            - name: IMAGE_SCAN_ENABLED
+              value: "true"
+            # The scanner-operator loop in the worker clones this CronJob's
+            # pod template to spawn scanner pods on demand. The CronJob
+            # itself is suspended — schedule exists only to satisfy k8s.
+            - name: IMAGE_SCAN_CRONJOB_NAME
+              value: "{{ .Release.Name }}-image-scanner"
+            {{- with .Values.imageScanner.operator }}
+            - name: IMAGE_SCAN_MAX_PARALLELISM
+              value: {{ .maxParallelism | default 2 | quote }}
+            - name: IMAGE_SCAN_SPAWN_SPACING_SECONDS
+              value: {{ .spawnSpacingSeconds | default 2 | quote }}
+            {{- end }}
             {{- end }}
             {{- if .Values.runner.enabled }}
             - name: RUNNER_ENABLED
@@ -126,10 +161,12 @@ spec:
               value: {{ .Values.runner.ttlSecondsAfterFinished | default 3600 | quote }}
             - name: RUNNER_ACTIVE_DEADLINE
               value: {{ .Values.runner.activeDeadlineSeconds | default 1800 | quote }}
-            {{- if .Values.runner.localMode }}
-            - name: RUNNER_LOCAL_MODE
-              value: "true"
-            {{- end }}
+            - name: RUNNER_EGRESS_SELF_TEST_ENABLED
+              value: {{ .Values.runner.egressSelfTest.enabled | quote }}
+            - name: RUNNER_EGRESS_SELF_TEST_URL
+              value: {{ .Values.runner.egressSelfTest.url | default "https://example.com" | quote }}
+            - name: RUNNER_EGRESS_SELF_TEST_TIMEOUT_SECONDS
+              value: {{ .Values.runner.egressSelfTest.timeoutSeconds | default 5 | quote }}
             {{- if .Values.runner.podAnnotations }}
             - name: RUNNER_POD_ANNOTATIONS
               value: {{ include "spam.runnerPodAnnotations" . | quote }}

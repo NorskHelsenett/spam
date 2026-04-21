@@ -7,13 +7,36 @@ const (
 	JobTypeCreateRun        JobType = "CREATE_RUN"
 	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
 	JobTypeOSVScan          JobType = "OSV_SCAN"
-	JobTypeTrivyAdhocScan   JobType = "TRIVY_ADHOC_SCAN"
+	JobTypeSBOMAdhocScan    JobType = "SBOM_ADHOC_SCAN"
 	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
+	JobTypeImageScan        JobType = "IMAGE_SCAN"
 )
 
-// TrivyAdhocPayload is the payload for TRIVY_ADHOC_SCAN jobs.
-type TrivyAdhocPayload struct {
+// SBOMAdhocPayload is the payload for SBOM_ADHOC_SCAN jobs. The ad-hoc
+// run clones the SBOM scanner CronJob's pod template to force a scan
+// sweep on demand; the cronjob name is read from the worker's env var
+// by default, but can be overridden per-job via CronJobName.
+type SBOMAdhocPayload struct {
 	CronJobName string `json:"cronjob_name"`
+}
+
+// ImageScanPayload is the payload for IMAGE_SCAN jobs.
+// Scanner selection is a map keyed by scan category:
+//
+//	"vuln"      -> "grype" (default) | "trivy"
+//	"sbom"      -> "syft"  (default) | "trivy"
+//	"secrets"   -> "betterleaks" (default) | "trivy"
+//	"signature" -> "cosign" (default)
+//	"labels"    -> "crane"  (default)
+//
+// An empty or missing key falls back to the default. The runner is the source
+// of truth for the registry of scanners; the API only forwards names.
+type ImageScanPayload struct {
+	ImageDigestID string            `json:"image_digest_id"`
+	Registry      string            `json:"registry"`
+	Repository    string            `json:"repository"`
+	Digest        string            `json:"digest"`
+	Scanners      map[string]string `json:"scanners,omitempty"`
 }
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.

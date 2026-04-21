@@ -1,15 +1,18 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm/clause"
 )
 
 var upgrader = websocket.Upgrader{
@@ -20,13 +23,21 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+// ToolVersion represents a tool's version and binary digest.
+type ToolVersion struct {
+	Name         string `json:"name"`
+	Version      string `json:"version"`
+	BinaryDigest string `json:"binary_digest"`
+}
+
 // WSMessage represents a WebSocket message.
 type WSMessage struct {
-	Type       string    `json:"type"`
-	Line       string    `json:"line,omitempty"`
-	Timestamp  time.Time `json:"ts,omitempty"`
-	ExitCode   int       `json:"exit_code,omitempty"`
-	CommitHash string    `json:"commit_hash,omitempty"`
+	Type         string        `json:"type"`
+	Line         string        `json:"line,omitempty"`
+	Timestamp    time.Time     `json:"ts,omitempty"`
+	ExitCode     int           `json:"exit_code,omitempty"`
+	CommitHash   string        `json:"commit_hash,omitempty"`
+	ToolVersions []ToolVersion `json:"tool_versions,omitempty"`
 }
 
 // WSConn wraps a WebSocket connection for a run.
@@ -98,6 +109,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("runner connected: run_id=%s", claims.RunID)
 
+	// Fetch and store init container (clone) logs — the main container
+	// just connected, so the init container has completed.
+	go s.fetchInitContainerLogs(claims.RunID)
+
 	// Read messages from runner
 	for {
 		_, message, err := conn.ReadMessage()
@@ -120,8 +135,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			if ts.IsZero() {
 				ts = time.Now()
 			}
-			// Store log in database
-			s.storeLog(r.Context(), claims.RunID, msg.Line, ts)
+			s.storeLog(r.Context(), claims.RunID, "runner", msg.Line, ts)
 
 		case "commit_hash":
 			log.Printf("received commit hash for run %s: %s", claims.RunID, msg.CommitHash)
@@ -154,6 +168,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				log.Printf("failed to update commit hash: %v", err)
 			}
 
+		case "tool_versions":
+			if len(msg.ToolVersions) > 0 {
+				log.Printf("received tool versions for run %s: %d tools", claims.RunID, len(msg.ToolVersions))
+				s.storeToolVersions(r.Context(), claims.RunID, msg.ToolVersions)
+			}
+
 		case "done":
 			log.Printf("run completed: run_id=%s exit_code=%d", claims.RunID, msg.ExitCode)
 			status := RunStatusSucceeded
@@ -168,9 +188,68 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) storeLog(ctx context.Context, runID, line string, ts time.Time) {
+// fetchInitContainerLogs retrieves logs from the clone init container via
+// the K8s API and stores them as run log entries so they appear in the UI.
+func (s *Server) fetchInitContainerLogs(runID string) {
+	if s.k8sClient == nil {
+		return
+	}
+
+	// Look up the K8s job name for this run
+	var run Run
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := s.db.WithContext(ctx).Where("id = ?", runID).First(&run).Error; err != nil {
+		log.Printf("fetch init logs: failed to load run %s: %v", runID, err)
+		return
+	}
+	if run.K8sJobName == "" || run.K8sNamespace == "" {
+		return
+	}
+
+	logs, err := s.k8sClient.GetContainerLogs(ctx, run.K8sJobName, run.K8sNamespace, "clone")
+	if err != nil {
+		log.Printf("fetch init logs: failed for run %s: %v", runID, err)
+		return
+	}
+
+	now := time.Now()
+	scanner := bufio.NewScanner(strings.NewReader(logs))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		s.storeLog(ctx, runID, "clone", line, now)
+	}
+}
+
+func (s *Server) storeToolVersions(ctx context.Context, runID string, versions []ToolVersion) {
+	versionsJSON, err := json.Marshal(versions)
+	if err != nil {
+		log.Printf("failed to marshal tool versions: %v", err)
+		return
+	}
+
+	record := ScannerVersion{
+		Source:    "runner",
+		Versions:  versionsJSON,
+		UpdatedAt: time.Now(),
+	}
+	if err := s.db.WithContext(ctx).
+		Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "source"}},
+			DoUpdates: clause.AssignmentColumns([]string{"versions", "updated_at"}),
+		}).Create(&record).Error; err != nil {
+		log.Printf("failed to store tool versions: %v", err)
+	}
+}
+
+func (s *Server) storeLog(ctx context.Context, runID, container, line string, ts time.Time) {
 	logEntry := RunLog{
 		RunID:     runID,
+		Container: container,
 		Line:      line,
 		CreatedAt: ts,
 	}

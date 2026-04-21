@@ -1,0 +1,23 @@
+{{- if and .Values.worker.enabled .Values.worker.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ default .Release.Name .Values.name }}-worker
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-worker
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Voluntary disruptions (node drain, cluster autoscaler eviction,
+  # operator `kubectl drain`) must leave at least one worker serving so
+  # runner uploads in flight don't hit a timeout. Involuntary
+  # disruptions (node OS crash) can still take everyone out — that's
+  # where the scanner's upload retry kicks in.
+  minAvailable: {{ .Values.worker.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}-worker
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

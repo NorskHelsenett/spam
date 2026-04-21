@@ -8,12 +8,14 @@
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import SecretsDialog from '$lib/components/SecretsDialog.svelte';
 	import DependenciesDialog from '$lib/components/DependenciesDialog.svelte';
+	import ImageScanDetail from '$lib/components/ImageScanDetail.svelte';
 
 	type Run = {
 		id: string;
+		type?: string; // "CREATE_RUN" | "IMAGE_SCAN"
 		status: string;
-		clone_url: string;
-		provider: string;
+		clone_url?: string;
+		provider?: string;
 		provider_id?: string;
 		repo_id?: string;
 		base_url?: string;
@@ -27,7 +29,23 @@
 		k8s_job_name?: string;
 		sbom_id?: string;
 		secret_id?: string;
+		// Image scan fields
+		image_registry?: string;
+		image_repository?: string;
+		image_digest?: string;
+		image_digest_id?: string;
+		image_artifacts?: Array<{
+			id: string;
+			category: string;
+			scanner: string;
+			filename?: string;
+			size: number;
+			created_at: string;
+		}>;
+		image_scanners?: Record<string, string>;
 	};
+
+	const runIsImageScan = (r: Run | null) => !!r && r.type === 'IMAGE_SCAN';
 
 	type Artifact = {
 		type: string;
@@ -169,8 +187,10 @@
 			run = newRun;
 			lastStatus = newRun.status;
 			
-			// Load artifacts after getting run details, or when status changes to completed
-			if (shouldLoadArtifacts && run && (run.status === 'SUCCEEDED' || run.status === 'FAILED' || statusChanged)) {
+			// Load artifacts after getting run details, or when status changes
+			// to completed. Image scans carry their artifact list inline
+			// (run.image_artifacts) so the repo-specific loader is skipped.
+			if (shouldLoadArtifacts && run && !runIsImageScan(run) && (run.status === 'SUCCEEDED' || run.status === 'FAILED' || statusChanged)) {
 				await loadArtifacts(id, run);
 			}
 		} catch (e) {
@@ -466,6 +486,25 @@
 		}, 5000);
 	};
 
+	let retrying = $state(false);
+	const runAgain = async () => {
+		if (!run || retrying) return;
+		retrying = true;
+		try {
+			const res = await fetch(`/api/runs/${run.id}/retry`, {
+				method: 'POST', credentials: 'include'
+			});
+			if (!res.ok) {
+				const text = await res.text();
+				alert(`Failed to re-queue: ${text || res.status}`);
+				return;
+			}
+			await loadRun(true);
+		} finally {
+			retrying = false;
+		}
+	};
+
 	onMount(async () => {
 		if (!browser) return;
 
@@ -474,6 +513,13 @@
 
 		// Initial load - wait for it to complete before connecting SSE
 		await loadRun(true);
+
+		// Image scans render via <ImageScanDetail> and don't need any of the
+		// repo-specific K8s / SSE plumbing below. Bail out early.
+		if (runIsImageScan(run)) {
+			ticker = setInterval(() => { now = Date.now(); }, 1000);
+			return;
+		}
 
 		// Load K8s events if the run has a K8s job
 		if (run?.k8s_job_name) {
@@ -528,6 +574,8 @@
 				return 'var(--success)';
 			case 'FAILED':
 				return 'var(--error)';
+			case 'RETRY':
+				return 'var(--warning)';
 			case 'CANCELLED':
 				return 'var(--warning)';
 			default:
@@ -581,7 +629,7 @@
 			if (run.provider_id) params.set('provider_id', run.provider_id);
 			return `/app/providers/repo?${params}`;
 		}
-		const repoPath = run.repo_path || extractRepoPath(run.clone_url);
+		const repoPath = run.repo_path || extractRepoPath(run.clone_url ?? '');
 		if (!repoPath) return null;
 		const provider = run.provider?.toLowerCase() || 'github';
 		const params = new URLSearchParams({ provider, path: repoPath });
@@ -622,6 +670,27 @@
 			<XCircle class="mx-auto h-12 w-12 text-[var(--error)]" />
 			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
 		</div>
+	{:else if run && runIsImageScan(run)}
+		{#if run.status === 'FAILED' || run.status === 'RETRY'}
+			<div class="mb-3 flex items-center justify-between rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
+				<div>
+					<p class="text-xs uppercase tracking-wider text-[var(--error)]">
+						{run.status === 'RETRY' ? 'Scheduled for retry' : 'Scan failed'}
+					</p>
+					<p class="mt-0.5 text-sm text-[var(--text-secondary)] break-words">{run.error || 'No error message recorded.'}</p>
+				</div>
+				<button
+					type="button"
+					class="rounded-lg border border-[var(--error)]/60 bg-[var(--error)]/10 px-3 py-1.5 text-sm text-[var(--error)] transition hover:bg-[var(--error)]/20 disabled:opacity-50"
+					disabled={retrying}
+					onclick={runAgain}
+					title={run.status === 'RETRY' ? 'Force re-queue now instead of waiting for the backoff timer' : 'Re-queue this failed job'}
+				>
+					{retrying ? 'Re-queueing…' : run.status === 'RETRY' ? 'Retry this job now' : 'Retry this failed job'}
+				</button>
+			</div>
+		{/if}
+		<ImageScanDetail {run} />
 	{:else if run}
 		{@const StatusIcon = getStatusIcon(run.status)}
 
@@ -638,10 +707,21 @@
 						</h1>
 						<span
 							class="rounded-full px-3 py-1 text-xs font-semibold uppercase"
-							style="color: {getStatusColor(run.status)}; background: {getStatusColor(run.status)}20;"
+							style="color: {getStatusColor(run.status)}; background: color-mix(in srgb, {getStatusColor(run.status)} 15%, transparent);"
 						>
 							{run.status}
 						</span>
+						{#if run.status === 'FAILED' || run.status === 'RETRY'}
+							<button
+								type="button"
+								class="rounded-lg border border-[var(--error)]/60 bg-[var(--error)]/10 px-3 py-1 text-xs font-medium text-[var(--error)] transition hover:bg-[var(--error)]/20 disabled:opacity-50"
+								disabled={retrying}
+								onclick={runAgain}
+								title={run.status === 'RETRY' ? 'Force re-queue now instead of waiting for the backoff timer' : 'Re-queue this failed job'}
+							>
+								{retrying ? 'Re-queueing…' : run.status === 'RETRY' ? 'Retry this job now' : 'Retry this failed job'}
+							</button>
+						{/if}
 					</div>
 					{#if run.error}
 						<div class="mt-4 flex items-start gap-3 rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
@@ -664,7 +744,7 @@
 							{/if}
 						</a>
 						{#if run.commit_sha}
-							{@const commitUrl = getCommitUrl(run.clone_url, run.provider, run.commit_sha)}
+							{@const commitUrl = getCommitUrl(run.clone_url ?? '', run.provider ?? '', run.commit_sha)}
 							<a
 								href={commitUrl || '#'}
 								target="_blank"

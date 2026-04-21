@@ -34,8 +34,9 @@ type AppSummaryCounts struct {
 }
 
 type AppSummaryScanner struct {
-	Name  string `json:"name"`
-	Count int64  `json:"count"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Count   int64  `json:"count"`
 }
 
 type AppSummarySBOM struct {
@@ -47,10 +48,13 @@ type AppSummarySBOM struct {
 	RepoID         string    `json:"repo_id,omitempty"`
 	RepoName       string    `json:"repo_name,omitempty"`
 	CommitSHA      string    `json:"commit_sha,omitempty"`
+	ImageID        string    `json:"image_id,omitempty"`
 	ImageRegistry  string    `json:"image_registry,omitempty"`
-	ImageRepo      string    `json:"image_repository,omitempty"`
+	ImageRepo      string    `gorm:"column:image_repository" json:"image_repository,omitempty"`
 	ImageDigest    string    `json:"image_digest,omitempty"`
 	ComponentCount int64     `json:"component_count"`
+	VulnCount      int64     `json:"vuln_count"`
+	SecretCount    int64     `json:"secret_count"`
 }
 
 type AppSummaryComponent struct {
@@ -225,12 +229,15 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 	resp.Counts.OSVSBOMPURLCount = int64(purlStats.SBOMDistinct)
 	resp.Counts.OSVManifestPURLCount = int64(purlStats.ManifestAdded)
 
-	// Scanners
+	// Scanners — include the most recent version per scanner
 	if err := db.WithContext(ctx).Raw(`
 		SELECT
 			scanner_name AS name,
+			(SELECT m2.scanner_version FROM sbom_metadata_view m2
+			 WHERE m2.scanner_name = m.scanner_name AND m2.scanner_version <> ''
+			 ORDER BY m2.created_at DESC LIMIT 1) AS version,
 			COUNT(DISTINCT sbom_id) AS count
-		FROM sbom_metadata_view
+		FROM sbom_metadata_view m
 		WHERE scanner_name <> ''
 		GROUP BY scanner_name
 		ORDER BY count DESC, scanner_name ASC
@@ -238,30 +245,80 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
-	// Recent SBOMs – join pre-aggregated library counts to avoid a correlated subquery per row.
+	// Recent SBOMs – resolve identity fields from live tables so the row
+	// doesn't go blank when sbom_metadata_view is stale. The materialized
+	// view is still used for scanner name/version (those require parsing
+	// the SBOM JSON and don't change after ingest).
 	if err := db.WithContext(ctx).Raw(`
+		WITH recent AS (
+			SELECT sb.sbom_id, sb.asset_type, sb.asset_ref_id, s.created_at
+			FROM sbom_bindings sb
+			JOIN sboms s ON s.id = sb.sbom_id
+			ORDER BY s.created_at DESC
+			LIMIT 8
+		),
+		trivy_latest AS (
+			SELECT DISTINCT ON (repo_id)
+				repo_id,
+				critical_count + high_count + medium_count + low_count + unknown_count AS total
+			FROM trivy_scan_results
+			ORDER BY repo_id, scanned_at DESC
+		),
+		image_vulns AS (
+			SELECT image_digest_id AS image_id, COUNT(*) AS total
+			FROM image_vuln_findings
+			GROUP BY image_digest_id
+		),
+		repo_secret_latest AS (
+			SELECT DISTINCT ON (repo_id)
+				repo_id,
+				jsonb_array_length(COALESCE(findings, '[]'::jsonb)) AS total
+			FROM run_secrets
+			WHERE repo_id IS NOT NULL AND repo_id <> ''
+			ORDER BY repo_id, created_at DESC
+		)
 		SELECT
-			m.sbom_id,
-			m.created_at,
-			m.scanner_name,
-			m.scanner_version,
-			m.asset_type,
-			COALESCE(m.repo_id::text, '') AS repo_id,
-			COALESCE(m.repo_name, '') AS repo_name,
-			COALESCE(m.commit_sha, '') AS commit_sha,
-			COALESCE(m.image_registry, '') AS image_registry,
-			COALESCE(m.image_repository, '') AS image_repository,
-			COALESCE(m.image_digest, '') AS image_digest,
-			COALESCE(lib.component_count, 0) AS component_count
-		FROM sbom_metadata_view m
+			r.sbom_id,
+			r.created_at,
+			COALESCE(mv.scanner_name, '') AS scanner_name,
+			COALESCE(mv.scanner_version, '') AS scanner_version,
+			r.asset_type,
+			COALESCE(rc.repo_id::text, '') AS repo_id,
+			COALESCE(rp.org || '/' || rp.slug, '') AS repo_name,
+			COALESCE(rc.commit_sha, '') AS commit_sha,
+			-- Prefer direct image_digests lookup, but fall back to the
+			-- materialized view when the direct join misses (e.g. the
+			-- reconciler hasn't harvested this digest yet, or there's a
+			-- type cast quirk on asset_ref_id). Without the fallback the
+			-- Latest activity row goes blank and the UI collapses to the
+			-- first 8 chars of the sbom_id.
+			COALESCE(NULLIF(imd.id::text, ''), NULLIF(mv.image_id::text, ''), '') AS image_id,
+			COALESCE(NULLIF(imd.registry, ''), mv.image_registry, '') AS image_registry,
+			COALESCE(NULLIF(imd.repository, ''), mv.image_repository, '') AS image_repository,
+			COALESCE(imd.digest, '') AS image_digest,
+			COALESCE(lib.component_count, 0) AS component_count,
+			COALESCE(tv.total, iv.total, 0) AS vuln_count,
+			COALESCE(rs.total, 0) AS secret_count
+		FROM recent r
+		LEFT JOIN sbom_metadata_view mv
+			ON mv.sbom_id = r.sbom_id
+			AND mv.asset_type = r.asset_type
+			AND mv.asset_ref_id = r.asset_ref_id
+		LEFT JOIN repo_commits rc
+			ON rc.id = r.asset_ref_id AND r.asset_type = 'REPO_COMMIT'
+		LEFT JOIN repos rp ON rp.id = rc.repo_id
+		LEFT JOIN image_digests imd
+			ON imd.id = r.asset_ref_id AND r.asset_type = 'IMAGE_DIGEST'
 		LEFT JOIN (
 			SELECT sbom_id, COUNT(*) AS component_count
 			FROM sbom_component_view
 			WHERE is_root = false
 			GROUP BY sbom_id
-		) lib ON lib.sbom_id = m.sbom_id
-		ORDER BY m.created_at DESC
-		LIMIT 8
+		) lib ON lib.sbom_id = r.sbom_id
+		LEFT JOIN trivy_latest tv ON tv.repo_id::text = rc.repo_id::text
+		LEFT JOIN image_vulns iv ON iv.image_id::text = imd.id::text
+		LEFT JOIN repo_secret_latest rs ON rs.repo_id::text = rc.repo_id::text
+		ORDER BY r.created_at DESC
 	`).Scan(&resp.RecentSBOMs).Error; err != nil {
 		return resp, err
 	}

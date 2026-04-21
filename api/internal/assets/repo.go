@@ -8,6 +8,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/dbutil"
+	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -120,6 +121,18 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 	}
 	if len(updates) > 0 {
 		db.WithContext(ctx).Model(&repo).Updates(updates)
+	}
+
+	// When we just inserted a new repo, opportunistically relink any
+	// previously-scanned images whose OCI source label points at it.
+	// No-op for the far more common "already existed" case so this
+	// doesn't slow down every provider-sync tick.
+	if result.RowsAffected == 1 {
+		if _, err := imagescan.RelinkRepoImages(ctx, db, repo.ID); err != nil {
+			// Non-fatal — the periodic backfill (or a future image
+			// upload) will still converge.
+			_ = err
+		}
 	}
 
 	return &repo, nil
@@ -260,14 +273,6 @@ func FindRepo(ctx context.Context, db *gorm.DB, repoID string) (*Repo, error) {
 		return nil, err
 	}
 	return &repo, nil
-}
-
-func FindRepoCommit(ctx context.Context, db *gorm.DB, commitID string) (*RepoCommit, error) {
-	var commit RepoCommit
-	if err := db.WithContext(ctx).First(&commit, "id = ?", commitID).Error; err != nil {
-		return nil, err
-	}
-	return &commit, nil
 }
 
 // FindRepoByCommitSHA looks up a repo via the repo_commits table using the commit hash.

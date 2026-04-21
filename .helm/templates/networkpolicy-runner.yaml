@@ -1,0 +1,41 @@
+{{- if and .Values.runner.enabled .Values.networkPolicy.runner.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-runner
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}-runner
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/component: runner
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Matches dynamically-created runner Job pods (labels set in Go code)
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: runner
+  policyTypes:
+    - Ingress
+    - Egress
+  # Deny all inbound traffic — runner pods expose no services
+  ingress: []
+  egress:
+    # Allow DNS resolution (kube-dns / CoreDNS)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    # Allow traffic to the worker service (result upload, log streaming)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}-worker
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.runner.httpPort | default 8081 }}
+    {{- with .Values.networkPolicy.runner.additionalEgressRules }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
