@@ -482,7 +482,10 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			    ORDER BY payload->>'image_digest_id', created_at DESC
 			),
 			vuln_counts AS (
-			    SELECT image_digest_id,
+			    -- Qualify image_digest_id with f. — image_vuln_findings AND
+			    -- latest_scan both expose it, so unqualified references
+			    -- raise "column reference is ambiguous".
+			    SELECT f.image_digest_id,
 			        COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
 			        COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
 			        COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
@@ -490,7 +493,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			        COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
 			    FROM image_vuln_findings f
 			    JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
-			    GROUP BY image_digest_id
+			    GROUP BY f.image_digest_id
 			)
 			SELECT
 			    agg.registry, agg.image, agg.digest,
