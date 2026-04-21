@@ -34,6 +34,40 @@ const resourceKeyExpr = `(
 	END
 )`
 
+// liveCTE deduplicates cluster_record rows to one-per-resource-identity
+// AND restricts to the agent's current session. Combined:
+//
+//	- DISTINCT ON takes the latest non-DELETE row per resource (belt-
+//	  and-braces against any residual msg-duplication; the
+//	  20260420_dedupe_cluster_record_msg migration plus the resource-
+//	  keyed unique index normally guarantee this).
+//	- Join to cluster_sessions filters out rows from prior agent
+//	  sessions (received_at < session_started_at) and silent clusters
+//	  (last_push_at too old).
+//
+// Every live-state query reads FROM live and gets both behaviours
+// for free — no per-query session-filter boilerplate.
+const liveCTE = `WITH live AS (
+	SELECT DISTINCT ON (
+		cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END
+	) cr.*
+	FROM cluster_record cr
+	JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
+	WHERE cr.data->>'msg' != 'DELETE'
+	  AND cr.received_at >= cs.session_started_at
+	  AND cs.last_push_at >= NOW() - INTERVAL '15 minutes'
+	ORDER BY cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END,
+		cr.received_at DESC
+) `
+
 // CallcenterHandler accepts a JSON array of SCAM records, validates each one,
 // and upserts live-state rows. DELETE events are stored (not physically removed)
 // so the history is preserved. No authentication required.
@@ -97,9 +131,6 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		if len(items) > 0 {
-			// Collect distinct cluster_ids for session-touch after
-			// the upsert. A batch commonly covers one cluster, but
-			// support multi-cluster batches cleanly.
 			clusterIDs := make(map[string]struct{}, 4)
 
 			for i := 0; i < len(items); i += 500 {
@@ -125,20 +156,17 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 					DO UPDATE SET data = EXCLUDED.data, received_at = EXCLUDED.received_at`)
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
-					// Surface the real error so agents hitting 500s in the
-					// wild can be diagnosed without re-deploying. We don't
-					// echo it back to the caller (it may reveal schema
-					// detail) but we do log it locally.
+					// Surface the underlying GORM error so silent 500s
+					// become diagnosable without a re-deploy.
 					log.Printf("callcenter: upsert batch failed (%d rows): %v", len(batch), err)
 					http.Error(w, "database error", http.StatusInternalServerError)
 					return
 				}
 			}
 
-			// Re-scan items to pick up cluster_ids for the session-touch.
-			// Parsed once at ingest time above via json.Unmarshal into
-			// Incoming; re-parse here is wasteful but narrow. Keeps
-			// the hot-path batch insert unchanged.
+			// Touch cluster_sessions so every live-state query can see
+			// the current session boundary. Re-scan items for cluster_ids;
+			// cheap given typical batch sizes.
 			for _, item := range items {
 				var idOnly struct {
 					ClusterID string `json:"cluster_id"`
@@ -149,9 +177,6 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 			}
 			for clusterID := range clusterIDs {
 				if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
-					// Session-touch failure is non-fatal to the ingest
-					// (data is already persisted). Log so it's visible
-					// if it becomes chronic.
 					log.Printf("callcenter: touch session %s: %v", clusterID, err)
 				}
 			}
@@ -177,8 +202,7 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 //
 // Protocol: POST /api/scam/heartbeat with body {"cluster_id": "..."}.
 // Extends the current session's last_push_at without rolling the
-// session boundary (a heartbeat within an existing session doesn't
-// clear stale state). Recommended cadence: every 60s from the agent.
+// session boundary. Recommended cadence: every 60s from the agent.
 //
 // Unauthenticated like the callcenter endpoint — same threat model.
 func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
@@ -187,7 +211,7 @@ func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KiB is plenty
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 		var body struct {
 			ClusterID string `json:"cluster_id"`
 		}
@@ -219,11 +243,8 @@ const (
 )
 
 var (
-	// DNS-1123 subdomain with optional wildcard prefix (Ingress hostnames).
 	hostnameRe = regexp.MustCompile(`^(\*\.)?[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$`)
-	// OCI content digest — algorithm:hex, e.g. sha256:abcd...
-	digestRe = regexp.MustCompile(`^[a-zA-Z0-9]+:[a-fA-F0-9]{32,}$`)
-	// Container registry host — hostname[:port], no path segments.
+	digestRe   = regexp.MustCompile(`^[a-zA-Z0-9]+:[a-fA-F0-9]{32,}$`)
 	registryRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*(:[0-9]{1,5})?$`)
 )
 
@@ -231,9 +252,6 @@ func validHostname(h string) bool {
 	if h == "" || len(h) > maxHostnameLen {
 		return false
 	}
-	// Reject IP literals — cluster topology records should only carry DNS
-	// names. Storing IPs would let anonymous agents target internal or cloud
-	// metadata addresses that an authenticated UI session might later fetch.
 	if net.ParseIP(h) != nil {
 		return false
 	}
@@ -266,8 +284,6 @@ func validate(r Incoming) error {
 		}
 	}
 
-	// Length caps on every free-form string that could reach SQL / cache /
-	// downstream fetches. Agents are anonymous; no field should be arbitrary.
 	fields := []struct {
 		name, val string
 	}{
@@ -339,28 +355,24 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		var rows []row
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				data->>'cluster'     AS cluster,
 				data->>'cluster_id'  AS cluster_id,
 				data->>'environment' AS environment,
 				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 					AND data->>'pod_phase' = 'Running') AS containers,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						AND data->>'pod_phase' = 'Running'
 						AND COALESCE(data->>'digest','') != '') AS images,
 				COUNT(DISTINCT data->>'namespace')
 					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						AND data->>'pod_phase' = 'Running') AS namespaces,
 				COUNT(DISTINCT data->>'uid')
-					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-						AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')) AS ingress_count,
+					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')) AS ingress_count,
 				MAX(received_at) AS last_seen
-			FROM cluster_record
+			FROM live
 			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
 			ORDER BY last_seen DESC
 		`).Scan(&rows).Error
@@ -380,13 +392,12 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		var rows []row
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'pod_phase' = 'Running'
 			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
@@ -408,17 +419,15 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 			InternalServices int64 `json:"internal_services"`
 		}
 		var res result
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-					  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				) AS internet_exposed,
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' = 'Service'
-					  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				) AS internal_services
-			FROM cluster_record
+			FROM live
 		`).Scan(&res).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -435,83 +444,28 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			Registry       string    `json:"registry"`
 			Image          string    `json:"image"`
 			Digest         string    `json:"digest"`
-			DigestID       string    `json:"digest_id"` // image_digests.id — enables deep-link to /app/images/<id>
-			Tags           string    `json:"tags"`      // comma-separated
+			Tags           string    `json:"tags"` // comma-separated
 			ClusterCount   int64     `json:"cluster_count"`
 			NamespaceCount int64     `json:"namespace_count"`
 			ContainerCount int64     `json:"container_count"`
 			LastSeen       time.Time `json:"last_seen"`
-			VulnCritical   int       `json:"vuln_critical"`
-			VulnHigh       int       `json:"vuln_high"`
-			VulnMedium     int       `json:"vuln_medium"`
-			VulnLow        int       `json:"vuln_low"`
-			VulnUnknown    int       `json:"vuln_unknown"`
 		}
 		var rows []row
-		// Aggregate cluster observations first, then LEFT JOIN
-		// image_digests so rows get a digest_id when the reconciler has
-		// already harvested them (and empty otherwise — the page still
-		// renders, just without a clickable link). When the digest is
-		// linked, fold in severity counts from image_vuln_findings for
-		// that digest's latest SUCCEEDED scan.
-		err := db.Raw(`
-			WITH agg AS (
-			    SELECT
-			        data->>'registry' AS raw_registry,
-			        COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-			        data->>'image' AS image,
-			        COALESCE(data->>'digest', '') AS digest,
-			        STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
-			        COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
-			        COUNT(DISTINCT data->>'namespace') AS namespace_count,
-			        COUNT(*) AS container_count,
-			        MAX(received_at) AS last_seen
-			    FROM cluster_record
-			    WHERE data->>'kind' = 'Container'
-			      AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
-			      AND data->>'pod_phase' = 'Running'
-			    GROUP BY data->>'registry', data->>'image', data->>'digest'
-			),
-			latest_scan AS (
-			    -- Latest SUCCEEDED IMAGE_SCAN per image_digest_id.
-			    SELECT DISTINCT ON (payload->>'image_digest_id')
-			           payload->>'image_digest_id' AS image_digest_id,
-			           id AS scan_run_id
-			    FROM jobs
-			    WHERE type = 'IMAGE_SCAN' AND status = 'SUCCEEDED'
-			    ORDER BY payload->>'image_digest_id', created_at DESC
-			),
-			vuln_counts AS (
-			    -- Qualify image_digest_id with f. — image_vuln_findings AND
-			    -- latest_scan both expose it, so unqualified references
-			    -- raise "column reference is ambiguous".
-			    SELECT f.image_digest_id,
-			        COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
-			        COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
-			        COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
-			        COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS vuln_low,
-			        COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
-			    FROM image_vuln_findings f
-			    JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
-			    GROUP BY f.image_digest_id
-			)
+		err := db.Raw(liveCTE + `
 			SELECT
-			    agg.registry, agg.image, agg.digest,
-			    COALESCE(id.id, '') AS digest_id,
-			    agg.tags, agg.cluster_count, agg.namespace_count,
-			    agg.container_count, agg.last_seen,
-			    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
-			    COALESCE(vc.vuln_high, 0)     AS vuln_high,
-			    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
-			    COALESCE(vc.vuln_low, 0)      AS vuln_low,
-			    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
-			FROM agg
-			LEFT JOIN image_digests id
-			  ON id.registry   = agg.raw_registry
-			 AND id.repository = agg.image
-			 AND id.digest     = agg.digest
-			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
-			ORDER BY agg.container_count DESC, agg.image
+				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
+				data->>'image' AS image,
+				COALESCE(data->>'digest', '') AS digest,
+				STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
+				COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
+				COUNT(DISTINCT data->>'namespace') AS namespace_count,
+				COUNT(*) AS container_count,
+				MAX(received_at) AS last_seen
+			FROM live
+			WHERE data->>'kind' = 'Container'
+			  AND data->>'pod_phase' = 'Running'
+			GROUP BY data->>'registry', data->>'image', data->>'digest'
+			ORDER BY container_count DESC, data->>'image'
 		`).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -545,8 +499,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
 		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
-		err := db.Raw(`
-			WITH ingress_hosts AS (
+		err := db.Raw(liveCTE + `,
+			ingress_hosts AS (
 				SELECT
 					r->>'host' AS host,
 					data->>'kind' AS kind,
@@ -568,10 +522,9 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'rules') = 'array'
 				  AND jsonb_array_length(data->'rules') > 0
 			),
@@ -589,9 +542,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					'' AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 				  AND jsonb_array_length(data->'hostnames') > 0
 			),
@@ -615,9 +567,8 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					received_at AS last_seen
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
 			)
@@ -633,17 +584,15 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			) h
 			LEFT JOIN LATERAL (
 				SELECT COUNT(*) AS cnt
-				FROM cluster_record c
+				FROM live c
 				WHERE c.data->>'kind' = 'Container'
-				  AND c.data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = c.data->>'cluster_id' AND c.received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND c.data->>'pod_phase' = 'Running'
 				  AND c.data->>'cluster_id' = h.cluster_id
 				  AND c.data->>'namespace' = h.namespace
 				  AND h.backends != ''
 				  AND EXISTS (
-				    SELECT 1 FROM cluster_record s
+				    SELECT 1 FROM live s
 				    WHERE s.data->>'kind' = 'Service'
-				      AND s.data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = s.data->>'cluster_id' AND s.received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				      AND s.data->>'cluster_id' = h.cluster_id
 				      AND s.data->>'namespace' = h.namespace
 				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
@@ -719,7 +668,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 1: All ingresses/routes in this cluster
 		var ingresses []nsIngress
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT * FROM (
 				SELECT
 					data->>'namespace' AS namespace,
@@ -733,10 +682,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 						 FROM jsonb_array_elements(r->'paths') AS p
 						 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
 						'') AS backends
-				FROM cluster_record
+				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				UNION ALL
@@ -752,10 +700,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 							(SELECT string_agg(DISTINCT b->>'name', ', ')
 							 FROM jsonb_array_elements(data->'backends') AS b), '')
 						ELSE '' END AS backends
-				FROM cluster_record,
+				FROM live,
 				     jsonb_array_elements_text(data->'hosts') AS h
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				UNION ALL
@@ -767,10 +714,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					FALSE AS tls,
 					'' AS backends
-				FROM cluster_record,
+				FROM live,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 			) sub WHERE host IS NOT NULL AND host != ''
@@ -779,23 +725,22 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 2: All services in this cluster
 		var services []nsSvc
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'name' AS name,
 				COALESCE(data->>'service_type', '') AS service_type,
 				COALESCE(data->'ports'::text, '[]') AS ports_json,
 				COALESCE(data->'selector'::text, '{}') AS selector_json
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Service'
-			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'cluster_id' = ?
 			ORDER BY data->>'namespace', data->>'name'
 		`, clusterID).Scan(&services)
 
 		// Step 3: All running pod groups in this cluster
 		var pods []nsPod
-		db.Raw(`
+		db.Raw(liveCTE + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'owner' AS owner,
@@ -810,9 +755,8 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					'registry', data->>'registry'
 				)) AS containers_json,
 				(array_agg(data->'pod_labels'))[1] AS labels_json
-			FROM cluster_record
+			FROM live
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 			  AND data->>'pod_phase' = 'Running'
 			  AND data->>'cluster_id' = ?
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
@@ -834,19 +778,14 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Phase        string           `json:"phase"`
 			Containers   []chainContainer `json:"containers"`
 			ServiceNames []string         `json:"service_names"`
-			// Transient marks pod groups that aren't currently Running but
-			// have been observed in the cluster recently (e.g. CronJob-spawned
-			// pods that finished, failed, or were evicted). UI renders these
-			// muted so operators see the recent-but-ephemeral workloads
-			// without losing focus on what's live.
-			Transient bool      `json:"transient,omitempty"`
-			LastSeen  time.Time `json:"last_seen,omitempty"`
 		}
 		type chainSvc struct {
-			Name        string            `json:"name"`
-			ServiceType string            `json:"service_type"`
-			Ports       json.RawMessage   `json:"ports"`
-			Selector    map[string]string `json:"selector"`
+			Name          string            `json:"name"`
+			ServiceType   string            `json:"service_type"`
+			Ports         json.RawMessage   `json:"ports"`
+			Selector      map[string]string `json:"selector"`
+			EndpointIPs   []string          `json:"endpoint_ips,omitempty"`
+			EndpointPorts []int             `json:"endpoint_ports,omitempty"`
 		}
 		type chainIng struct {
 			Host         string `json:"host"`
@@ -914,73 +853,81 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			c.Pods = append(c.Pods, pg)
 		}
 
-		// Step 3b: Transient pod groups — non-Running container observations
-		// from the last 24h. Excludes owners we already rendered above (the
-		// Running row is authoritative) so we don't double-list a deployment
-		// that happens to have one crashed pod alongside healthy ones.
-		type transientPodRow struct {
-			Namespace      string    `gorm:"column:namespace"`
-			Owner          string    `gorm:"column:owner"`
-			OwnerKind      string    `gorm:"column:owner_kind"`
-			PodCount       int64     `gorm:"column:pod_count"`
-			Phase          string    `gorm:"column:phase"`
-			ContainersJSON string    `gorm:"column:containers_json"`
-			LastSeen       time.Time `gorm:"column:last_seen"`
+		// Populate EndpointSlice IPs for services that have no matching pods
+		type epIPRow struct {
+			Namespace   string `json:"namespace"`
+			ServiceName string `gorm:"column:service_name"`
+			Address     string `gorm:"column:address"`
 		}
-		var transientPods []transientPodRow
-		db.Raw(`
+		var epIPs []epIPRow
+		db.Raw(liveCTE + `
 			SELECT
 				data->>'namespace' AS namespace,
-				data->>'owner' AS owner,
-				data->>'owner_kind' AS owner_kind,
-				COUNT(DISTINCT data->>'pod_uid') AS pod_count,
-				(array_agg(data->>'pod_phase' ORDER BY received_at DESC))[1] AS phase,
-				jsonb_agg(DISTINCT jsonb_build_object(
-					'name', data->>'container',
-					'image', data->>'image',
-					'tag', data->>'tag',
-					'digest', data->>'digest',
-					'registry', data->>'registry'
-				)) AS containers_json,
-				MAX(received_at) AS last_seen
-			FROM cluster_record
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'
-			  AND (data->>'pod_phase' IS NULL OR data->>'pod_phase' != 'Running')
+				data->>'service_name' AS service_name,
+				jsonb_array_elements_text(
+					jsonb_array_elements(data->'endpoints')->'addresses'
+				) AS address
+			FROM live
+			WHERE data->>'kind' = 'EndpointSlice'
 			  AND data->>'cluster_id' = ?
-			  -- Transient query intentionally spans the last 24h so
-			  -- recently-completed Jobs surface in the chain drawer,
-			  -- even after the current agent session boundary.
-			  AND received_at >= NOW() - INTERVAL '24 hours'
-			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
-			ORDER BY data->>'namespace', data->>'owner'
-		`, clusterID).Scan(&transientPods)
+		`, clusterID).Scan(&epIPs)
 
-		// De-dupe against the Running set — an owner that already appears in
-		// pg (Running) shouldn't also render as transient.
-		liveKeys := make(map[string]struct{}, len(pods))
-		for _, p := range pods {
-			liveKeys[p.Namespace+"/"+p.Owner+"/"+p.OwnerKind] = struct{}{}
+		// Endpoint ports per service
+		type epPortRow struct {
+			Namespace   string `json:"namespace"`
+			ServiceName string `gorm:"column:service_name"`
+			Port        int    `gorm:"column:port"`
 		}
-		for _, pod := range transientPods {
-			if _, dup := liveKeys[pod.Namespace+"/"+pod.Owner+"/"+pod.OwnerKind]; dup {
-				continue
+		var epPortRows []epPortRow
+		db.Raw(liveCTE + `
+			SELECT DISTINCT
+				data->>'namespace' AS namespace,
+				data->>'service_name' AS service_name,
+				(p->>'port')::int AS port
+			FROM live, jsonb_array_elements(data->'ports') AS p
+			WHERE data->>'kind' = 'EndpointSlice'
+			  AND data->>'cluster_id' = ?
+			  AND p->>'port' IS NOT NULL
+		`, clusterID).Scan(&epPortRows)
+
+		// Build maps: namespace/service_name → IPs and ports
+		epMap := make(map[string][]string)
+		for _, ep := range epIPs {
+			key := ep.Namespace + "/" + ep.ServiceName
+			if ep.Address != "" {
+				epMap[key] = append(epMap[key], ep.Address)
 			}
-			c := getOrCreate(pod.Namespace)
-			pg := chainPodGroup{
-				Owner: pod.Owner, OwnerKind: pod.OwnerKind,
-				PodCount: pod.PodCount, Phase: pod.Phase,
-				Transient: true, LastSeen: pod.LastSeen,
+		}
+		epPortMap := make(map[string][]int)
+		for _, ep := range epPortRows {
+			key := ep.Namespace + "/" + ep.ServiceName
+			epPortMap[key] = append(epPortMap[key], ep.Port)
+		}
+
+		// Attach endpoint IPs and ports to services that have no pods connected
+		for ns, chain := range nsMap {
+			connectedSvcs := make(map[string]bool)
+			for _, pg := range chain.Pods {
+				for _, sn := range pg.ServiceNames {
+					connectedSvcs[sn] = true
+				}
 			}
-			if pod.ContainersJSON != "" {
-				_ = json.Unmarshal([]byte(pod.ContainersJSON), &pg.Containers)
+			for i, svc := range chain.Services {
+				if !connectedSvcs[svc.Name] {
+					key := ns + "/" + svc.Name
+					if ips, ok := epMap[key]; ok {
+						chain.Services[i].EndpointIPs = ips
+					}
+					if ports, ok := epPortMap[key]; ok {
+						chain.Services[i].EndpointPorts = ports
+					}
+				}
 			}
-			c.Pods = append(c.Pods, pg)
 		}
 
 		// Look up cluster name
 		var clusterName string
-		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		// Sort namespaces and build result
 		type result struct {
@@ -1041,6 +988,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Ports       []chainPort       `json:"ports"`
 			Selector    map[string]string `json:"selector"`
 			PodCount    int64             `json:"pod_count"`
+			EndpointIPs   []string `json:"endpoint_ips,omitempty"`
+			EndpointPorts []int    `json:"endpoint_ports,omitempty"`
 		}
 		type chainContainer struct {
 			Name     string `json:"name"`
@@ -1069,7 +1018,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Look up cluster name from any record with this cluster_id.
 		var clusterName string
-		db.Raw(`SELECT data->>'cluster' FROM cluster_record WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		resp := chainResponse{Host: host, Cluster: clusterName, ClusterID: clusterID, Namespace: namespace}
 
@@ -1085,7 +1034,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
-		err := db.Raw(`
+		err := db.Raw(liveCTE + `
 			SELECT * FROM (
 				-- Ingress
 				SELECT
@@ -1113,9 +1062,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						      jsonb_array_elements(r->'paths') AS p
 						 WHERE r->>'host' = ?),
 						'[]') AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
@@ -1139,9 +1087,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 							'')
 						ELSE '' END AS backends,
 					'[]' AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
@@ -1159,9 +1106,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS lb_ips,
 					'' AS backends,
 					'[]' AS paths_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
@@ -1203,16 +1149,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var svcRows []svcRow
-			err = db.Raw(`
+			err = db.Raw(liveCTE+`
 				SELECT
 					data->>'name' AS name,
 					data->>'namespace' AS namespace,
 					COALESCE(data->>'service_type', '') AS service_type,
 					COALESCE(data->'ports'::text, '[]') AS ports_json,
 					COALESCE(data->'selector'::text, '{}') AS selector_json
-				FROM cluster_record
+				FROM live
 				WHERE data->>'kind' = 'Service'
-				  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND data->>'name' IN (?)
@@ -1243,7 +1188,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						Containers string `gorm:"column:containers_json"`
 					}
 					var podRows []podRow
-					err = db.Raw(`
+					err = db.Raw(liveCTE+`
 						SELECT
 							data->>'owner' AS owner,
 							data->>'owner_kind' AS owner_kind,
@@ -1256,9 +1201,8 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 								'digest', data->>'digest',
 								'registry', data->>'registry'
 							)) AS containers_json
-						FROM cluster_record
+						FROM live
 						WHERE data->>'kind' = 'Container'
-						  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
 						  AND data->>'pod_phase' = 'Running'
 						  AND data->>'cluster_id' = ?
 						  AND data->>'namespace' = ?
@@ -1286,6 +1230,116 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				}
 
 				resp.Services = append(resp.Services, cs)
+			}
+		}
+
+		// --- Step 4: Find additional services that select the same pods ---
+		// This picks up sibling services like gitea-ssh (LoadBalancer) that
+		// share the same pod selector as the ingress-backed gitea-http.
+		if len(resp.Pods) > 0 {
+			knownSvcs := make(map[string]bool)
+			for _, s := range resp.Services {
+				knownSvcs[s.Name] = true
+			}
+			type extraSvcRow struct {
+				Name         string `json:"name"`
+				Namespace    string `json:"namespace"`
+				ServiceType  string `json:"service_type"`
+				PortsJSON    string `gorm:"column:ports_json"`
+				SelectorJSON string `gorm:"column:selector_json"`
+			}
+			var extraSvcs []extraSvcRow
+			db.Raw(liveCTE+`
+				SELECT DISTINCT
+					s.data->>'name' AS name,
+					s.data->>'namespace' AS namespace,
+					COALESCE(s.data->>'service_type', '') AS service_type,
+					COALESCE(s.data->'ports'::text, '[]') AS ports_json,
+					COALESCE(s.data->'selector'::text, '{}') AS selector_json
+				FROM live s, live c
+				WHERE s.data->>'kind' = 'Service'
+				  AND s.data->>'cluster_id' = ?
+				  AND s.data->>'namespace' = ?
+				  AND s.data->>'service_type' IN ('LoadBalancer', 'NodePort')
+				  AND c.data->>'kind' = 'Container'
+				  AND c.data->>'pod_phase' = 'Running'
+				  AND c.data->>'cluster_id' = ?
+				  AND c.data->>'namespace' = ?
+				  AND jsonb_typeof(s.data->'selector') = 'object'
+				  AND (c.data->'pod_labels') @> (s.data->'selector')
+				  AND c.data->>'owner' IN (?)
+			`, clusterID, namespace, clusterID, namespace,
+				func() []string {
+					owners := make([]string, 0)
+					seen := make(map[string]bool)
+					for _, p := range resp.Pods {
+						if !seen[p.Owner] {
+							owners = append(owners, p.Owner)
+							seen[p.Owner] = true
+						}
+					}
+					return owners
+				}(),
+			).Scan(&extraSvcs)
+
+			for _, es := range extraSvcs {
+				if knownSvcs[es.Name] {
+					continue
+				}
+				cs := chainService{
+					Name: es.Name, Namespace: es.Namespace, ServiceType: es.ServiceType,
+				}
+				if es.PortsJSON != "" {
+					_ = json.Unmarshal([]byte(es.PortsJSON), &cs.Ports)
+				}
+				if es.SelectorJSON != "" {
+					_ = json.Unmarshal([]byte(es.SelectorJSON), &cs.Selector)
+				}
+				resp.Services = append(resp.Services, cs)
+			}
+		}
+
+		// --- Step 5: For services with no pods, look up EndpointSlice IPs and ports ---
+		for i := range resp.Services {
+			if resp.Services[i].PodCount == 0 {
+				type epRow struct {
+					Addresses string `gorm:"column:addresses"`
+				}
+				var eps []epRow
+				db.Raw(liveCTE+`
+					SELECT jsonb_array_elements_text(
+						jsonb_array_elements(data->'endpoints')->'addresses'
+					) AS addresses
+					FROM live
+					WHERE data->>'kind' = 'EndpointSlice'
+					  AND data->>'cluster_id' = ?
+					  AND data->>'namespace' = ?
+					  AND data->>'service_name' = ?
+				`, clusterID, namespace, resp.Services[i].Name).Scan(&eps)
+				seen := make(map[string]bool)
+				for _, ep := range eps {
+					if ep.Addresses != "" && !seen[ep.Addresses] {
+						resp.Services[i].EndpointIPs = append(resp.Services[i].EndpointIPs, ep.Addresses)
+						seen[ep.Addresses] = true
+					}
+				}
+				// Get endpoint ports (from the EndpointSlice, not the Service)
+				type epPortRow struct {
+					Port int `gorm:"column:port"`
+				}
+				var epPorts []epPortRow
+				db.Raw(liveCTE+`
+					SELECT DISTINCT (p->>'port')::int AS port
+					FROM live, jsonb_array_elements(data->'ports') AS p
+					WHERE data->>'kind' = 'EndpointSlice'
+					  AND data->>'cluster_id' = ?
+					  AND data->>'namespace' = ?
+					  AND data->>'service_name' = ?
+					  AND p->>'port' IS NOT NULL
+				`, clusterID, namespace, resp.Services[i].Name).Scan(&epPorts)
+				for _, p := range epPorts {
+					resp.Services[i].EndpointPorts = append(resp.Services[i].EndpointPorts, p.Port)
+				}
 			}
 		}
 
