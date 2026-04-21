@@ -6,7 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -19,17 +18,7 @@ type CreateJobInput struct {
 	MaxAttempts int
 }
 
-type JobEventPayload struct {
-	JobID       string    `json:"job_id"`
-	Type        string    `json:"type"`
-	Status      JobStatus `json:"status"`
-	Previous    JobStatus `json:"previous,omitempty"`
-	Attempts    int       `json:"attempts"`
-	MaxAttempts int       `json:"max_attempts"`
-	RunAt       time.Time `json:"run_at"`
-}
-
-// CreateJob inserts a new queued job and emits a JOB_CREATED event.
+// CreateJob inserts a new queued job.
 func CreateJob(ctx context.Context, db *gorm.DB, input CreateJobInput) (*Job, error) {
 	if input.Type == "" {
 		return nil, errors.New("job type required")
@@ -84,21 +73,10 @@ func CreateJobTx(ctx context.Context, tx *gorm.DB, input CreateJobInput) (*Job, 
 		return nil, err
 	}
 
-	if err := events.EmitEvent(tx, events.EventJobCreated, "job", job.ID, JobEventPayload{
-		JobID:       job.ID,
-		Type:        job.Type,
-		Status:      job.Status,
-		Attempts:    job.Attempts,
-		MaxAttempts: job.MaxAttempts,
-		RunAt:       job.RunAt,
-	}); err != nil {
-		return nil, err
-	}
-
 	return &job, nil
 }
 
-// UpdateJobStatus changes a job status and emits a JOB_STATUS_CHANGED event.
+// UpdateJobStatus changes a job status.
 func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status JobStatus, result interface{}, errText string, nextRunAt *time.Time) (*Job, error) {
 	var updated Job
 
@@ -107,7 +85,6 @@ func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status JobS
 			return err
 		}
 
-		previous := updated.Status
 		now := time.Now()
 
 		resultJSON, err := marshalPayload(result)
@@ -154,15 +131,7 @@ func UpdateJobStatus(ctx context.Context, db *gorm.DB, jobID string, status JobS
 		}
 		updated.Result = resultJSON
 
-		return events.EmitEvent(tx, events.EventJobStatusChanged, "job", updated.ID, JobEventPayload{
-			JobID:       updated.ID,
-			Type:        updated.Type,
-			Status:      updated.Status,
-			Previous:    previous,
-			Attempts:    updated.Attempts,
-			MaxAttempts: updated.MaxAttempts,
-			RunAt:       updated.RunAt,
-		})
+		return nil
 	}); err != nil {
 		return nil, err
 	}

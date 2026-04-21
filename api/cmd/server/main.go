@@ -81,7 +81,6 @@ func run() error {
 		&imagescan.ImageVulnFinding{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
-		&events.OutboxEvent{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
 		&vulnerabilities.TrivyScanLease{},

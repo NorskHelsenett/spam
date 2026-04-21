@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/NorskHelsenett/spam/internal/events"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -38,7 +37,6 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 			return err
 		}
 
-		previous := job.Status
 		attemptedAt := now
 		updates := map[string]interface{}{
 			"status":            JobStatusRunning,
@@ -58,18 +56,6 @@ func ClaimNextJob(ctx context.Context, db *gorm.DB, workerID string, now time.Ti
 		job.LockedBy = workerID
 		job.Attempts++
 		job.LastAttemptedAt = &attemptedAt
-
-		if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{
-			JobID:       job.ID,
-			Type:        job.Type,
-			Status:      job.Status,
-			Previous:    previous,
-			Attempts:    job.Attempts,
-			MaxAttempts: job.MaxAttempts,
-			RunAt:       job.RunAt,
-		}); err != nil {
-			return err
-		}
 
 		claimed = &job
 		return nil
@@ -102,7 +88,6 @@ func ClaimNextJobOfType(ctx context.Context, db *gorm.DB, workerID string, now t
 			return err
 		}
 
-		previous := job.Status
 		attemptedAt := now
 		updates := map[string]interface{}{
 			"status":            JobStatusRunning,
@@ -122,17 +107,6 @@ func ClaimNextJobOfType(ctx context.Context, db *gorm.DB, workerID string, now t
 		job.Attempts++
 		job.LastAttemptedAt = &attemptedAt
 
-		if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{
-			JobID:       job.ID,
-			Type:        job.Type,
-			Status:      job.Status,
-			Previous:    previous,
-			Attempts:    job.Attempts,
-			MaxAttempts: job.MaxAttempts,
-			RunAt:       job.RunAt,
-		}); err != nil {
-			return err
-		}
 		claimed = &job
 		return nil
 	}); err != nil {
@@ -176,7 +150,6 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, syncStaleBefore, asyncSt
 
 		for i := range jobs {
 			job := jobs[i]
-			previous := job.Status
 			runAt := NextRetryTime(job.Attempts, job.MaxAttempts, now)
 			updates := map[string]interface{}{
 				"status":     JobStatusRetry,
@@ -192,18 +165,6 @@ func RequeueStaleJobs(ctx context.Context, db *gorm.DB, syncStaleBefore, asyncSt
 
 			job.Status = JobStatusRetry
 			job.RunAt = runAt
-
-			if err := events.EmitEvent(tx, events.EventJobStatusChanged, "job", job.ID, JobEventPayload{
-				JobID:       job.ID,
-				Type:        job.Type,
-				Status:      job.Status,
-				Previous:    previous,
-				Attempts:    job.Attempts,
-				MaxAttempts: job.MaxAttempts,
-				RunAt:       job.RunAt,
-			}); err != nil {
-				return err
-			}
 
 			updated++
 		}
