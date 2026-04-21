@@ -35,6 +35,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Ensure buildah is available
+        # Works whether the runner is Ubuntu (act's catthehacker image),
+        # Fedora (self-hosted), or already-provisioned. First-run cost is
+        # a package install; subsequent runs short-circuit on the which.
+        run: |
+          set -e
+          if command -v buildah >/dev/null 2>&1; then
+            buildah --version
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y buildah
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y buildah
+          else
+            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
+            exit 1
+          fi
+          buildah --version
+
       - name: Derive registry host
         # Extract plain host (strip scheme) from server URL and export to environment.
         # ghcr.io for GitHub.com, otherwise the server host (Gitea, etc).
@@ -135,6 +156,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Ensure buildah is available
+        # Works whether the runner is Ubuntu (act's catthehacker image),
+        # Fedora (self-hosted), or already-provisioned. First-run cost is
+        # a package install; subsequent runs short-circuit on the which.
+        run: |
+          set -e
+          if command -v buildah >/dev/null 2>&1; then
+            buildah --version
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y buildah
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y buildah
+          else
+            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
+            exit 1
+          fi
+          buildah --version
+
       - name: Derive registry host
         run: |
           set -e
@@ -226,6 +268,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
+      - name: Ensure buildah is available
+        # Works whether the runner is Ubuntu (act's catthehacker image),
+        # Fedora (self-hosted), or already-provisioned. First-run cost is
+        # a package install; subsequent runs short-circuit on the which.
+        run: |
+          set -e
+          if command -v buildah >/dev/null 2>&1; then
+            buildah --version
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y buildah
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y buildah
+          else
+            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
+            exit 1
+          fi
+          buildah --version
+
       - name: Derive registry host
         run: |
           set -e
@@ -316,6 +379,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+
+      - name: Ensure buildah is available
+        # Works whether the runner is Ubuntu (act's catthehacker image),
+        # Fedora (self-hosted), or already-provisioned. First-run cost is
+        # a package install; subsequent runs short-circuit on the which.
+        run: |
+          set -e
+          if command -v buildah >/dev/null 2>&1; then
+            buildah --version
+            exit 0
+          fi
+          if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y buildah
+          elif command -v dnf >/dev/null 2>&1; then
+            sudo dnf install -y buildah
+          else
+            echo "ERROR: no supported package manager found (apt-get/dnf) to install buildah" >&2
+            exit 1
+          fi
+          buildah --version
 
       - name: Derive registry host
         run: |
