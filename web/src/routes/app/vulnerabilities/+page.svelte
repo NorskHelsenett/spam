@@ -482,7 +482,7 @@
 					</div>
 				</div>
 			{:else if activeTab === 'images' && imageFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }}>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
 					<div class="relative flex items-center">
 						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
 						<input
@@ -491,6 +491,10 @@
 							placeholder="Search registry, image, digest, tag…"
 							bind:value={imageSearch}
 						/>
+					</div>
+					<div class="flex items-center justify-between gap-3">
+						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
+						<Toggle bind:checked={hideClean} label="Hide clean images" />
 					</div>
 				</div>
 			{:else if activeTab === 'vulnerabilities' && vulnFilterOpen}
@@ -599,10 +603,6 @@
 						</div>
 					</div>
 				{:else}
-					<div class="flex items-center justify-between gap-3 pb-1">
-						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
-						<Toggle bind:checked={hideClean} label="Hide clean images" />
-					</div>
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
 							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
