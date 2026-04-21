@@ -50,7 +50,7 @@ type AppSummarySBOM struct {
 	CommitSHA      string    `json:"commit_sha,omitempty"`
 	ImageID        string    `json:"image_id,omitempty"`
 	ImageRegistry  string    `json:"image_registry,omitempty"`
-	ImageRepo      string    `json:"image_repository,omitempty"`
+	ImageRepo      string    `gorm:"column:image_repository" json:"image_repository,omitempty"`
 	ImageDigest    string    `json:"image_digest,omitempty"`
 	ComponentCount int64     `json:"component_count"`
 	VulnCount      int64     `json:"vuln_count"`
