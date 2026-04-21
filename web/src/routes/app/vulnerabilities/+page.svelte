@@ -2,7 +2,9 @@
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container } from 'lucide-svelte';
+	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { slide } from 'svelte/transition';
+	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -127,6 +129,18 @@
 	let vulnScrollTop = 0;
 	let vulnViewH = 600;
 
+	// Per-tab search state. Each tab owns its own filter-open toggle + query
+	// so switching tabs doesn't clobber the other's filter.
+	let repoFilterOpen = false;
+	let repoSearch = '';
+	let imageFilterOpen = false;
+	let imageSearch = '';
+	let vulnFilterOpen = false;
+	let vulnSearch = '';
+
+	const includesCI = (haystack: string | undefined | null, needle: string) =>
+		(haystack ?? '').toLowerCase().includes(needle.toLowerCase());
+
 	const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
 	$: groupedVulns = (() => {
@@ -235,17 +249,36 @@
 	$: filteredImages = (() => {
 		const w = (img: ImageRow) =>
 			img.vuln_critical * 1e9 + img.vuln_high * 1e6 + img.vuln_medium * 1e3 + img.vuln_low;
-		const list = hideClean ? images.filter((i) => w(i) > 0) : images.slice();
+		let list = hideClean ? images.filter((i) => w(i) > 0) : images.slice();
+		const q = imageSearch.trim();
+		if (q) list = list.filter((i) => includesCI(i.registry, q) || includesCI(i.image, q) || includesCI(i.digest, q) || includesCI(i.tags, q));
 		return list.sort((a, b) => w(b) - w(a));
 	})();
 
 	// Repo table has an inline .filter(...) in the template; hoist it
 	// so the virt slice math uses the same list the UI renders.
-	$: filteredRepos = repos.filter((r) => r.repo_slug !== r.repo_id && r.repo_slug);
+	$: filteredRepos = (() => {
+		let list = repos.filter((r) => r.repo_slug !== r.repo_id && r.repo_slug);
+		const q = repoSearch.trim();
+		if (q) list = list.filter((r) => includesCI(r.repo_slug, q));
+		return list;
+	})();
+
+	// Vuln table — search across ID, title, package name.
+	$: filteredVulns = (() => {
+		const q = vulnSearch.trim();
+		if (!q) return groupedVulns;
+		return groupedVulns.filter((g) =>
+			includesCI(g.vuln_id, q) ||
+			includesCI(g.title, q) ||
+			includesCI(g.pkg_name, q) ||
+			g.repos.some((r) => includesCI(r.repo_slug, q))
+		);
+	})();
 
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
 	$: imageVirt = virtSlice(filteredImages.length, ROW_HEIGHT, imageScrollTop, imageViewH);
-	$: vulnVirt = virtSlice(groupedVulns.length, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
+	$: vulnVirt = virtSlice(filteredVulns.length, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
 
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
 	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
@@ -389,10 +422,90 @@
 	<!-- Table panel -->
 	{#if !loading && !error}
 		<section class="panel-surface flex flex-col gap-6 px-6 py-8 sm:px-10 sm:py-10 h-[calc(100vh-7rem)]">
-			<header>
-				<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
-				<p class="text-sm text-[var(--text-tertiary)]">Vulnerability scan results from the latest scans.</p>
+			<header class="flex items-start justify-between gap-4">
+				<div>
+					<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
+					<p class="text-sm text-[var(--text-tertiary)]">Vulnerability scan results from the latest scans.</p>
+				</div>
+				{#if activeTab === 'repositories' && repos.length > 0}
+					<button
+						type="button"
+						class="filter-toggle"
+						class:active={repoFilterOpen}
+						onclick={() => (repoFilterOpen = !repoFilterOpen)}
+						aria-expanded={repoFilterOpen}
+						aria-label="Toggle filters"
+					>
+						<SlidersHorizontal size={14} />
+						<span>Filters</span>
+						{#if repoSearch.trim()}<span class="filter-badge">1</span>{/if}
+					</button>
+				{:else if activeTab === 'images' && images.length > 0}
+					<button
+						type="button"
+						class="filter-toggle"
+						class:active={imageFilterOpen}
+						onclick={() => (imageFilterOpen = !imageFilterOpen)}
+						aria-expanded={imageFilterOpen}
+						aria-label="Toggle filters"
+					>
+						<SlidersHorizontal size={14} />
+						<span>Filters</span>
+						{#if imageSearch.trim()}<span class="filter-badge">1</span>{/if}
+					</button>
+				{:else if activeTab === 'vulnerabilities' && groupedVulns.length > 0}
+					<button
+						type="button"
+						class="filter-toggle"
+						class:active={vulnFilterOpen}
+						onclick={() => (vulnFilterOpen = !vulnFilterOpen)}
+						aria-expanded={vulnFilterOpen}
+						aria-label="Toggle filters"
+					>
+						<SlidersHorizontal size={14} />
+						<span>Filters</span>
+						{#if vulnSearch.trim()}<span class="filter-badge">1</span>{/if}
+					</button>
+				{/if}
 			</header>
+
+			{#if activeTab === 'repositories' && repoFilterOpen}
+				<div transition:slide={{ duration: 220, easing: cubicOut }}>
+					<div class="relative flex items-center">
+						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+						<input
+							type="text"
+							class="filter-search-input"
+							placeholder="Search by repo slug…"
+							bind:value={repoSearch}
+						/>
+					</div>
+				</div>
+			{:else if activeTab === 'images' && imageFilterOpen}
+				<div transition:slide={{ duration: 220, easing: cubicOut }}>
+					<div class="relative flex items-center">
+						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+						<input
+							type="text"
+							class="filter-search-input"
+							placeholder="Search registry, image, digest, tag…"
+							bind:value={imageSearch}
+						/>
+					</div>
+				</div>
+			{:else if activeTab === 'vulnerabilities' && vulnFilterOpen}
+				<div transition:slide={{ duration: 220, easing: cubicOut }}>
+					<div class="relative flex items-center">
+						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+						<input
+							type="text"
+							class="filter-search-input"
+							placeholder="Search CVE id, title, package, repo…"
+							bind:value={vulnSearch}
+						/>
+					</div>
+				</div>
+			{/if}
 
 			{#if activeTab === 'repositories'}
 				{#if repos.length === 0}
@@ -594,7 +707,7 @@
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 									{#if vulnVirt.topPad > 0}<tr style="height:{vulnVirt.topPad}px"><td colspan="4"></td></tr>{/if}
-									{#each groupedVulns.slice(vulnVirt.start, vulnVirt.end) as g}
+									{#each filteredVulns.slice(vulnVirt.start, vulnVirt.end) as g}
 										<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
 											<td class="px-5 py-3">
 												<div class="flex flex-wrap items-center gap-2">
@@ -653,3 +766,54 @@
 		</section>
 	{/if}
 </div>
+
+<style>
+	.filter-toggle {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		padding: 0.4rem 0.85rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		color: var(--text-secondary);
+		font-size: 0.8rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
+		white-space: nowrap;
+		flex-shrink: 0;
+	}
+	.filter-toggle:hover { color: var(--text-bright); border-color: var(--text-tertiary); }
+	.filter-toggle.active {
+		background: color-mix(in srgb, var(--accent) 12%, transparent);
+		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+		color: var(--accent);
+	}
+	.filter-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 18px;
+		height: 18px;
+		border-radius: 999px;
+		background: var(--accent);
+		color: var(--bg-hard);
+		font-size: 0.65rem;
+		font-weight: 700;
+		line-height: 1;
+		padding: 0 0.3rem;
+	}
+	.filter-search-input {
+		width: 100%;
+		padding: 0.5rem 0.75rem 0.5rem 2rem;
+		border-radius: 8px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		color: var(--text-primary);
+		font-size: 0.85rem;
+		outline: none;
+		transition: border-color 150ms ease;
+	}
+	.filter-search-input:focus { border-color: var(--accent); }
+</style>

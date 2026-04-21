@@ -326,7 +326,7 @@ let isAdmin = $state(false);
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
 			{#each navLinks as link}
 				{#if 'groupBreak' in link && link.groupBreak}
-					<div class="my-2 h-px bg-[var(--border-color)]/40" aria-hidden="true"></div>
+					<div class="h-6" aria-hidden="true"></div>
 				{/if}
 				<button
 					type="button"
