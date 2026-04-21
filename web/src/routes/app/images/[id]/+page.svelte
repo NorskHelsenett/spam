@@ -2,7 +2,25 @@
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
 	import { page } from '$app/stores';
-	import { ArrowLeft, Container, ExternalLink, Loader2, XCircle, CheckCircle, Clock, Server, History, GitBranch } from 'lucide-svelte';
+	import {
+		ArrowLeft,
+		Container,
+		ExternalLink,
+		Loader2,
+		XCircle,
+		CheckCircle,
+		Clock,
+		Server,
+		History,
+		GitBranch,
+		Shield,
+		ShieldAlert,
+		ShieldX,
+		Package,
+		Copy,
+		AlertCircle
+	} from 'lucide-svelte';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 	import ImageScanDetail from '$lib/components/ImageScanDetail.svelte';
 
 	type LinkedRepo = {
@@ -32,6 +50,15 @@
 		last_seen: string;
 	};
 
+	type VulnSeverity = {
+		critical: number;
+		high: number;
+		medium: number;
+		low: number;
+		unknown: number;
+		total: number;
+	};
+
 	type ImageDetail = {
 		id: string;
 		registry: string;
@@ -42,43 +69,63 @@
 		scan_history?: ScanHistoryRow[];
 		latest_scan_id?: string;
 		cluster_usage?: ClusterUsageRow[];
+		vuln_severity?: VulnSeverity;
 	};
 
-	let image: ImageDetail | null = $state(null);
-	let latestScan: any = $state(null);
+	let image = $state<ImageDetail | null>(null);
+	let latestScan = $state<any>(null);
 	let loading = $state(true);
 	let error = $state('');
+	let activeTab = $state('scans');
+	let copied = $state(false);
 
 	const shortDigest = (digest: string) => {
 		const i = digest.indexOf(':');
-		if (i < 0) return digest;
+		if (i < 0) return digest.slice(0, 12);
 		return digest.slice(0, i + 13);
 	};
 
 	const statusIcon = (s: string) => {
 		switch (s) {
-			case 'SUCCEEDED': return CheckCircle;
-			case 'FAILED':    return XCircle;
-			case 'RUNNING':   return Loader2;
-			default:          return Clock;
+			case 'SUCCEEDED':
+				return CheckCircle;
+			case 'FAILED':
+				return XCircle;
+			case 'RUNNING':
+				return Loader2;
+			default:
+				return Clock;
 		}
 	};
 	const statusColor = (s: string) => {
 		switch (s) {
-			case 'SUCCEEDED': return 'var(--success)';
-			case 'FAILED':    return 'var(--error)';
-			case 'RUNNING':   return 'var(--accent)';
-			default:          return 'var(--text-tertiary)';
+			case 'SUCCEEDED':
+				return 'var(--success)';
+			case 'FAILED':
+				return 'var(--error)';
+			case 'RUNNING':
+				return 'var(--accent)';
+			default:
+				return 'var(--text-tertiary)';
 		}
 	};
 
-	const copyText = async (text: string) => {
-		try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
+	const copyDigest = async () => {
+		if (!image) return;
+		try {
+			await navigator.clipboard.writeText(image.digest);
+			copied = true;
+			setTimeout(() => (copied = false), 1200);
+		} catch {
+			/* ignore */
+		}
 	};
 
 	const loadImage = async () => {
 		const id = $page.params.id;
 		if (!id) return;
+		loading = true;
+		error = '';
 		try {
 			const res = await fetch(`/api/images/${id}`, { credentials: 'include' });
 			if (!res.ok) {
@@ -86,6 +133,7 @@
 				return;
 			}
 			image = await res.json();
+			latestScan = null;
 			if (image?.latest_scan_id) {
 				const scanRes = await fetch(`/api/runs/${image.latest_scan_id}`, { credentials: 'include' });
 				if (scanRes.ok) latestScan = await scanRes.json();
@@ -97,9 +145,18 @@
 		}
 	};
 
-	onMount(() => { if (browser) loadImage(); });
+	onMount(() => {
+		if (browser) loadImage();
+	});
 
-	const formatDate = (iso: string) => new Date(iso).toLocaleString();
+	const formatDate = (iso: string) => {
+		if (!iso) return '—';
+		return new Date(iso).toLocaleString();
+	};
+	const formatShortDate = (iso: string) => {
+		if (!iso) return '—';
+		return new Date(iso).toLocaleDateString();
+	};
 	const formatDuration = (start: string, end?: string) => {
 		const s = new Date(start).getTime();
 		const e = end ? new Date(end).getTime() : Date.now();
@@ -108,6 +165,19 @@
 		const m = Math.floor(secs / 60);
 		return `${m}m ${secs % 60}s`;
 	};
+
+	const clusterCount = $derived(
+		new Set((image?.cluster_usage ?? []).map((c) => c.cluster)).size
+	);
+	const namespaceCount = $derived((image?.cluster_usage ?? []).length);
+	const podCount = $derived(
+		(image?.cluster_usage ?? []).reduce((sum, c) => sum + c.pod_count, 0)
+	);
+	const scanCount = $derived(image?.scan_history?.length ?? 0);
+	const lastScanAt = $derived(image?.scan_history?.[0]?.created_at);
+	const severity = $derived(
+		image?.vuln_severity ?? { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 }
+	);
 </script>
 
 <svelte:head>
@@ -115,143 +185,336 @@
 </svelte:head>
 
 <div class="space-y-6">
-	<button type="button" class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]" onclick={() => history.back()}>
-		<ArrowLeft class="h-4 w-4" />
-		Back
-	</button>
+	<!-- Back button + linked repo -->
+	<div class="flex items-center justify-between">
+		<button
+			type="button"
+			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
+			onclick={() => history.back()}
+		>
+			<ArrowLeft class="h-4 w-4" />
+			Back
+		</button>
+		{#if image?.linked_repo}
+			<a
+				class="flex mr-[2em] pr-2 items-center gap-1.5 text-[11px] font-medium transition-opacity hover:opacity-70"
+				style="color: var(--accent);"
+				href={`/app/providers/repo?repo_id=${image.linked_repo.repo_id}${image.linked_repo.provider_id ? `&provider_id=${image.linked_repo.provider_id}` : ''}`}
+			>
+				<GitBranch class="h-3 w-3" />
+				View {image.linked_repo.org}/{image.linked_repo.slug}
+				<ExternalLink class="h-3 w-3" />
+			</a>
+		{/if}
+	</div>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-20"><Loader2 class="h-8 w-8 animate-spin text-[var(--accent)]" /></div>
+		<div class="flex items-center justify-center py-20">
+			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+		</div>
 	{:else if error}
-		<div class="panel-surface p-8 text-center">
-			<XCircle class="mx-auto h-12 w-12 text-[var(--error)]" />
-			<p class="mt-4 text-[var(--text-secondary)]">{error}</p>
+		<div class="panel-surface flex flex-col items-center gap-3 px-6 py-12 text-center">
+			<AlertCircle class="h-10 w-10 text-[var(--error)]" />
+			<p class="text-sm text-[var(--text-secondary)]">{error}</p>
 		</div>
 	{:else if image}
-		<!-- Image header -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
-			<div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+		<!-- Header + Stats -->
+		<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+			<div class="flex items-start justify-between gap-4">
 				<div class="min-w-0 flex-1">
-					<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-						<Container size={14} />
-						<span>Container image</span>
+					<div class="flex items-center gap-3">
+						<Container class="h-6 w-6 flex-shrink-0 text-[var(--warning)]" />
+						<h1 class="truncate text-2xl font-semibold text-[var(--text-bright)]">
+							{image.repository}
+						</h1>
+						<span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-xs text-[var(--accent)]">
+							<Package class="h-3 w-3" /> Container image
+						</span>
+						{#if image.linked_repo}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
+								<GitBranch class="h-3 w-3" /> Source linked
+							</span>
+						{/if}
 					</div>
-					<h1 class="break-all text-2xl font-semibold text-[var(--text-bright)]">
-						{image.registry}/{image.repository}
-					</h1>
-					<div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--text-tertiary)]">
-						<code class="rounded bg-[var(--hover-bg-subtle)] px-2 py-0.5 font-mono">{shortDigest(image.digest)}</code>
-						<button type="button" class="btn btn-ghost btn-xs" onclick={() => copyText(image!.digest)} title="Copy full digest">Copy</button>
+					<p class="mt-1 text-sm text-[var(--text-muted)]">{image.registry}/{image.repository}</p>
+					<div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+						<code class="rounded bg-[var(--hover-bg-subtle)] px-2 py-0.5 font-mono text-[var(--text-secondary)]">
+							{shortDigest(image.digest)}
+						</code>
+						<button
+							type="button"
+							class="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] px-2 py-0.5 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+							onclick={copyDigest}
+							title="Copy full digest"
+						>
+							<Copy class="h-3 w-3" />
+							{copied ? 'Copied' : 'Copy'}
+						</button>
 					</div>
-					<div class="mt-2 text-xs text-[var(--text-tertiary)]">First seen: {formatDate(image.created_at)}</div>
 				</div>
-				{#if image.linked_repo}
+				{#if image.latest_scan_id}
 					<a
-						class="btn btn-secondary btn-sm"
-						href={`/app/providers/repo?repo_id=${image.linked_repo.repo_id}${image.linked_repo.provider_id ? `&provider_id=${image.linked_repo.provider_id}` : ''}`}
+						class="btn btn-primary"
+						href={`/app/runs/${image.latest_scan_id}`}
 					>
-						<GitBranch class="h-4 w-4" />
-						{image.linked_repo.org}/{image.linked_repo.slug}
-						<ExternalLink class="h-3 w-3" />
+						View latest scan
 					</a>
 				{/if}
 			</div>
-		</div>
 
-		<!-- Cluster usage -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
-			<header class="mb-3 flex items-center gap-2">
-				<Server size={16} />
-				<h2 class="text-sm font-semibold text-[var(--text-bright)]">Where this image runs</h2>
-				<span class="text-xs text-[var(--text-tertiary)]">
-					{image.cluster_usage?.length ?? 0} namespace{(image.cluster_usage?.length ?? 0) === 1 ? '' : 's'}
+			<!-- Quick stats row -->
+			<div class="flex flex-wrap gap-4 pt-4 text-sm text-[var(--text-secondary)]">
+				<span class="flex items-center gap-1.5">
+					<Clock class="h-4 w-4" /> First seen {formatDate(image.created_at)}
 				</span>
-			</header>
-			{#if !image.cluster_usage || image.cluster_usage.length === 0}
-				<p class="py-4 text-center text-sm text-[var(--text-tertiary)]">Not observed in any cluster yet.</p>
-			{:else}
-				<div class="overflow-hidden rounded-lg border border-[var(--border-color)]/40">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-xs">
-						<thead class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							<tr>
-								<th class="px-3 py-2 text-left">Cluster</th>
-								<th class="px-3 py-2 text-left">Namespace</th>
-								<th class="px-3 py-2 text-right">Pods</th>
-								<th class="px-3 py-2 text-left">First seen</th>
-								<th class="px-3 py-2 text-left">Last seen</th>
-							</tr>
-						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
-							{#each image.cluster_usage as u}
-								<tr class="hover:bg-[var(--hover-bg-subtle)]">
-									<td class="px-3 py-1.5 font-mono text-[var(--text-bright)]">{u.cluster || '-'}</td>
-									<td class="px-3 py-1.5 font-mono">{u.namespace || '-'}</td>
-									<td class="px-3 py-1.5 text-right">{u.pod_count}</td>
-									<td class="px-3 py-1.5">{formatDate(u.first_seen)}</td>
-									<td class="px-3 py-1.5">{formatDate(u.last_seen)}</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-		</div>
-
-		<!-- Scan history -->
-		<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
-			<header class="mb-3 flex items-center gap-2">
-				<History size={16} />
-				<h2 class="text-sm font-semibold text-[var(--text-bright)]">Scan history</h2>
-				<span class="text-xs text-[var(--text-tertiary)]">
-					{image.scan_history?.length ?? 0} run{(image.scan_history?.length ?? 0) === 1 ? '' : 's'}
-				</span>
-			</header>
-			{#if !image.scan_history || image.scan_history.length === 0}
-				<p class="py-4 text-center text-sm text-[var(--text-tertiary)]">No scans for this digest yet.</p>
-			{:else}
-				<div class="overflow-hidden rounded-lg border border-[var(--border-color)]/40">
-					<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-xs">
-						<thead class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-							<tr>
-								<th class="px-3 py-2 text-left">Run</th>
-								<th class="px-3 py-2 text-left">Status</th>
-								<th class="px-3 py-2 text-right">Vulns</th>
-								<th class="px-3 py-2 text-left">Created</th>
-								<th class="px-3 py-2 text-left">Duration</th>
-							</tr>
-						</thead>
-						<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
-							{#each image.scan_history as s}
-								{@const Icon = statusIcon(s.status)}
-								<tr class="cursor-pointer hover:bg-[var(--hover-bg-subtle)]" onclick={() => location.assign(`/app/runs/${s.job_id}`)}>
-									<td class="px-3 py-1.5 font-mono text-[var(--text-bright)]">
-										<a class="hover:underline" href={`/app/runs/${s.job_id}`} onclick={(e) => e.stopPropagation()}>{s.job_id.slice(0, 8)}</a>
-									</td>
-									<td class="px-3 py-1.5">
-										<span class="inline-flex items-center gap-1" style={`color: ${statusColor(s.status)}`}>
-											<Icon size={14} class={s.status === 'RUNNING' ? 'animate-spin' : ''} />
-											{s.status}
-										</span>
-									</td>
-									<td class="px-3 py-1.5 text-right font-mono">{s.vuln_count}</td>
-									<td class="px-3 py-1.5">{formatDate(s.created_at)}</td>
-									<td class="px-3 py-1.5 font-mono">{s.finished_at ? formatDuration(s.created_at, s.finished_at) : '-'}</td>
-								</tr>
-							{/each}
-						</tbody>
-					</table>
-				</div>
-			{/if}
-		</div>
-
-		<!-- Latest scan — full detail inline, reusing the scan detail component -->
-		{#if latestScan}
-			<div class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-				Latest scan · <a class="text-[var(--accent)] hover:underline" href={`/app/runs/${latestScan.id}`}>open run</a>
+				{#if lastScanAt}
+					<span class="flex items-center gap-1.5">
+						<History class="h-4 w-4" /> Last scan {formatShortDate(lastScanAt)}
+					</span>
+				{/if}
+				{#if clusterCount > 0}
+					<span class="flex items-center gap-1.5">
+						<Server class="h-4 w-4" />
+						{clusterCount} cluster{clusterCount === 1 ? '' : 's'}
+					</span>
+				{/if}
+				{#if podCount > 0}
+					<span class="flex items-center gap-1.5">
+						<Package class="h-4 w-4" />
+						{podCount} pod{podCount === 1 ? '' : 's'}
+					</span>
+				{/if}
 			</div>
-			<ImageScanDetail run={latestScan} />
-		{:else}
-			<p class="text-sm text-[var(--text-tertiary)]">No successful scan yet — findings will appear here once one completes.</p>
-		{/if}
+
+			<!-- Stats grid -->
+			<div class="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-4">
+				<!-- Image -->
+				<div class="space-y-3 metric-card rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Image</h3>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-bright)]">{scanCount}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<History class="h-3 w-3" /> Scans
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-bright)]">
+								{image.scan_history?.filter((s) => s.status === 'SUCCEEDED').length ?? 0}
+							</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<CheckCircle class="h-3 w-3" /> Succeeded
+							</p>
+						</div>
+					</div>
+				</div>
+
+				<!-- Vulnerabilities -->
+				<div class="space-y-3 metric-card rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<p class="text-2xl font-bold text-red-500">{severity.critical}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<ShieldX class="h-3 w-3 text-red-500" /> Critical
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-orange-500">{severity.high}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<ShieldAlert class="h-3 w-3 text-orange-500" /> High
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-yellow-500">{severity.medium}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Shield class="h-3 w-3 text-yellow-500" /> Medium
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-secondary)]">{severity.low}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Shield class="h-3 w-3" /> Low
+							</p>
+						</div>
+					</div>
+				</div>
+
+				<!-- Clusters -->
+				<div class="space-y-3 metric-card rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Workloads</h3>
+					<div class="grid grid-cols-2 gap-3">
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-bright)]">{clusterCount}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Server class="h-3 w-3" /> Clusters
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-bright)]">{namespaceCount}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Package class="h-3 w-3" /> Namespaces
+							</p>
+						</div>
+						<div>
+							<p class="text-2xl font-bold text-[var(--text-bright)]">{podCount}</p>
+							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+								<Container class="h-3 w-3" /> Pods
+							</p>
+						</div>
+					</div>
+				</div>
+
+				<!-- Source / Registry -->
+				<div class="space-y-3 metric-card rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Registry</h3>
+					<div class="space-y-2">
+						<div>
+							<p class="truncate text-sm font-semibold text-[var(--text-bright)]" title={image.registry}>
+								{image.registry}
+							</p>
+							<p class="text-xs text-[var(--text-muted)]">Host</p>
+						</div>
+						<div>
+							<p class="truncate text-sm font-semibold text-[var(--text-bright)]" title={image.repository}>
+								{image.repository}
+							</p>
+							<p class="text-xs text-[var(--text-muted)]">Repository</p>
+						</div>
+						{#if image.linked_repo}
+							<a
+								class="block truncate text-xs text-[var(--accent)] hover:underline"
+								href={`/app/providers/repo?repo_id=${image.linked_repo.repo_id}${image.linked_repo.provider_id ? `&provider_id=${image.linked_repo.provider_id}` : ''}`}
+							>
+								{image.linked_repo.org}/{image.linked_repo.slug}
+							</a>
+						{/if}
+					</div>
+				</div>
+			</div>
+
+			<!-- Activity Tabs -->
+			<div class="pt-4">
+				<TabSelector
+					options={[
+						{ value: 'scans', label: 'Scans' },
+						{ value: 'clusters', label: 'Clusters' },
+						{ value: 'findings', label: 'Latest findings' }
+					]}
+					bind:value={activeTab}
+				/>
+
+				<div class="mt-[2em]">
+					{#if activeTab === 'scans'}
+						{#if (image.scan_history?.length ?? 0) === 0}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<History class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No scans yet</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">
+									Scans will appear here once the reconciler picks up this digest.
+								</p>
+							</div>
+						{:else}
+							<div class="space-y-3">
+								{#each image.scan_history ?? [] as s}
+									{@const Icon = statusIcon(s.status)}
+									<a
+										href={`/app/runs/${s.job_id}`}
+										class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]"
+									>
+										<div class="min-w-0 space-y-1">
+											<div class="flex items-center gap-2">
+												<span
+													class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
+													style={`background: ${statusColor(s.status)}1a; color: ${statusColor(s.status)}`}
+												>
+													<Icon size={12} class={s.status === 'RUNNING' ? 'animate-spin' : ''} />
+													{s.status}
+												</span>
+												<span class="text-xs text-[var(--text-muted)]">{formatDate(s.created_at)}</span>
+												{#if s.finished_at}
+													<span class="text-xs text-[var(--text-muted)]">
+														• {formatDuration(s.created_at, s.finished_at)}
+													</span>
+												{/if}
+											</div>
+											<p class="truncate text-xs text-[var(--text-secondary)]">
+												Run <span class="font-mono text-[var(--accent)]">{s.job_id.slice(0, 8)}</span>
+											</p>
+										</div>
+										<div class="flex items-center gap-2 text-xs">
+											{#if s.vuln_count > 0}
+												<span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300">
+													{s.vuln_count} vuln{s.vuln_count === 1 ? '' : 's'}
+												</span>
+											{:else if s.status === 'SUCCEEDED'}
+												<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-green-300">clean</span>
+											{/if}
+										</div>
+									</a>
+								{/each}
+							</div>
+						{/if}
+					{:else if activeTab === 'clusters'}
+						{#if (image.cluster_usage?.length ?? 0) === 0}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<Server class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">
+									Not observed in any cluster yet
+								</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">
+									Running pods on tracked clusters will appear here once the agent reports them.
+								</p>
+							</div>
+						{:else}
+							<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+								<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-sm">
+									<thead class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+										<tr>
+											<th class="px-4 py-2.5 text-left">Cluster</th>
+											<th class="px-4 py-2.5 text-left">Namespace</th>
+											<th class="px-4 py-2.5 text-right">Pods</th>
+											<th class="px-4 py-2.5 text-left">First seen</th>
+											<th class="px-4 py-2.5 text-left">Last seen</th>
+										</tr>
+									</thead>
+									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
+										{#each image.cluster_usage ?? [] as u}
+											<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+												<td class="px-4 py-2 font-mono text-[var(--text-bright)]">{u.cluster || '—'}</td>
+												<td class="px-4 py-2 font-mono">{u.namespace || '—'}</td>
+												<td class="px-4 py-2 text-right font-semibold">{u.pod_count}</td>
+												<td class="px-4 py-2 text-xs text-[var(--text-tertiary)]">{formatDate(u.first_seen)}</td>
+												<td class="px-4 py-2 text-xs text-[var(--text-tertiary)]">{formatDate(u.last_seen)}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+						{/if}
+					{:else if activeTab === 'findings'}
+						{#if latestScan}
+							<div class="space-y-3">
+								<p class="text-xs text-[var(--text-muted)]">
+									Latest scan · <a
+										class="text-[var(--accent)] hover:underline"
+										href={`/app/runs/${latestScan.id}`}>open run</a
+									>
+								</p>
+								<ImageScanDetail run={latestScan} />
+							</div>
+						{:else}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<Shield class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No successful scan yet</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">
+									Findings will appear here once a scan completes.
+								</p>
+							</div>
+						{/if}
+					{/if}
+				</div>
+			</div>
+		</article>
 	{/if}
 </div>

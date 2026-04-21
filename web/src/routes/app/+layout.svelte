@@ -116,10 +116,6 @@
 			console.info('sse heartbeat', parsePayload(event));
 		});
 
-		appEventSource.addEventListener('sbom_parsed', (event) => {
-			console.info('sse sbom parsed', parsePayload(event));
-		});
-
 		appEventSource.addEventListener('new_user', (event) => {
 			const payload = parsePayload(event);
 			console.info('sse new_user', payload);

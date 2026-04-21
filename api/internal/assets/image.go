@@ -94,11 +94,3 @@ func UpsertImageDigestTx(ctx context.Context, tx *gorm.DB, input ImageDigestInpu
 	}
 	return &image, created, nil
 }
-
-func FindImageDigest(ctx context.Context, db *gorm.DB, imageID string) (*ImageDigest, error) {
-	var image ImageDigest
-	if err := db.WithContext(ctx).First(&image, "id = ?", imageID).Error; err != nil {
-		return nil, err
-	}
-	return &image, nil
-}

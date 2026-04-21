@@ -48,10 +48,13 @@ type AppSummarySBOM struct {
 	RepoID         string    `json:"repo_id,omitempty"`
 	RepoName       string    `json:"repo_name,omitempty"`
 	CommitSHA      string    `json:"commit_sha,omitempty"`
+	ImageID        string    `json:"image_id,omitempty"`
 	ImageRegistry  string    `json:"image_registry,omitempty"`
 	ImageRepo      string    `json:"image_repository,omitempty"`
 	ImageDigest    string    `json:"image_digest,omitempty"`
 	ComponentCount int64     `json:"component_count"`
+	VulnCount      int64     `json:"vuln_count"`
+	SecretCount    int64     `json:"secret_count"`
 }
 
 type AppSummaryComponent struct {
@@ -242,8 +245,35 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
-	// Recent SBOMs – join pre-aggregated library counts to avoid a correlated subquery per row.
+	// Recent SBOMs – join pre-aggregated library counts, per-repo trivy vuln counts
+	// and per-image grype vuln counts, plus latest per-repo secret findings.
 	if err := db.WithContext(ctx).Raw(`
+		WITH recent AS (
+			SELECT *
+			FROM sbom_metadata_view
+			ORDER BY created_at DESC
+			LIMIT 8
+		),
+		trivy_latest AS (
+			SELECT DISTINCT ON (repo_id)
+				repo_id,
+				critical_count + high_count + medium_count + low_count + unknown_count AS total
+			FROM trivy_scan_results
+			ORDER BY repo_id, scanned_at DESC
+		),
+		image_vulns AS (
+			SELECT image_digest_id AS image_id, COUNT(*) AS total
+			FROM image_vuln_findings
+			GROUP BY image_digest_id
+		),
+		repo_secret_latest AS (
+			SELECT DISTINCT ON (repo_id)
+				repo_id,
+				jsonb_array_length(COALESCE(findings, '[]'::jsonb)) AS total
+			FROM run_secrets
+			WHERE repo_id IS NOT NULL AND repo_id <> ''
+			ORDER BY repo_id, created_at DESC
+		)
 		SELECT
 			m.sbom_id,
 			m.created_at,
@@ -253,19 +283,24 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			COALESCE(m.repo_id::text, '') AS repo_id,
 			COALESCE(m.repo_name, '') AS repo_name,
 			COALESCE(m.commit_sha, '') AS commit_sha,
+			COALESCE(m.image_id::text, '') AS image_id,
 			COALESCE(m.image_registry, '') AS image_registry,
 			COALESCE(m.image_repository, '') AS image_repository,
 			COALESCE(m.image_digest, '') AS image_digest,
-			COALESCE(lib.component_count, 0) AS component_count
-		FROM sbom_metadata_view m
+			COALESCE(lib.component_count, 0) AS component_count,
+			COALESCE(tv.total, iv.total, 0) AS vuln_count,
+			COALESCE(rs.total, 0) AS secret_count
+		FROM recent m
 		LEFT JOIN (
 			SELECT sbom_id, COUNT(*) AS component_count
 			FROM sbom_component_view
 			WHERE is_root = false
 			GROUP BY sbom_id
 		) lib ON lib.sbom_id = m.sbom_id
+		LEFT JOIN trivy_latest tv ON tv.repo_id::text = m.repo_id::text
+		LEFT JOIN image_vulns iv ON iv.image_id::text = m.image_id::text
+		LEFT JOIN repo_secret_latest rs ON rs.repo_id::text = m.repo_id::text
 		ORDER BY m.created_at DESC
-		LIMIT 8
 	`).Scan(&resp.RecentSBOMs).Error; err != nil {
 		return resp, err
 	}

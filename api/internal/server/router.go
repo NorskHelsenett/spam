@@ -134,7 +134,6 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			priv.Use(authService.APIGuard)
 
 			priv.Route("/api", func(api chi.Router) {
-				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
 				api.Get("/sboms/{id}", uiapi.SBOMGetHandler(db, authService))
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))

@@ -7,8 +7,6 @@ import (
 )
 
 const (
-	StreamEventSBOMParsed = "sbom_parsed"
-
 	StreamEventProviderSyncStarted   = "provider_sync_started"
 	StreamEventProviderSyncProgress  = "provider_sync_progress"
 	StreamEventProviderSyncCompleted = "provider_sync_completed"

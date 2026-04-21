@@ -183,51 +183,98 @@
 	const isURL = (v: string) => /^https?:\/\//i.test(v);
 </script>
 
-<div class="flex flex-col gap-6">
+<div class="space-y-6">
 	<!-- Header card -->
-	<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
-		<div class="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-			<div class="min-w-0 flex-1">
-				<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-					<span class="rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--accent)]">Image Scan</span>
-					<span>Job ID: {run.id.slice(0, 8)}</span>
+	<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
+		<div class="flex items-start justify-between gap-4">
+			<div class="flex-1">
+				<div class="flex items-center gap-3">
+					<StatusIcon
+						class="h-6 w-6 {run.status === 'RUNNING' ? 'animate-spin' : ''}"
+						style={`color: ${statusColor}`}
+					/>
+					<h1 class="text-2xl font-semibold text-[var(--text-bright)]">
+						Run {run.id.slice(0, 8)}
+					</h1>
+					<span
+						class="rounded-full px-3 py-1 text-xs font-semibold uppercase"
+						style={`color: ${statusColor}; background: color-mix(in srgb, ${statusColor} 15%, transparent);`}
+					>
+						{run.status}
+					</span>
+					<span class="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent)]">
+						Image Scan
+					</span>
 				</div>
-				<h1 class="break-all text-xl font-semibold text-[var(--text-bright)]">
+				{#if run.error}
+					<div class="mt-4 flex items-start gap-3 rounded-xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3">
+						<XCircle class="mt-0.5 h-5 w-5 text-[var(--error)]" />
+						<div>
+							<p class="text-xs uppercase tracking-wider text-[var(--error)]">Error</p>
+							<p class="mt-1 break-words text-sm text-[var(--text-secondary)]">{run.error}</p>
+						</div>
+					</div>
+				{/if}
+				<div class="mt-3 flex flex-wrap items-center gap-3">
 					{#if run.image_digest_id}
-						<a class="hover:text-[var(--accent)] hover:underline" href={`/app/images/${run.image_digest_id}`}>
+						<a
+							href={`/app/images/${run.image_digest_id}`}
+							class="inline-flex items-center gap-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
+						>
+							<Container class="h-4 w-4" />
 							{run.image_registry}/{run.image_repository}
 						</a>
 					{:else}
-						{run.image_registry}/{run.image_repository}
+						<span class="inline-flex items-center gap-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 text-sm text-[var(--text-secondary)]">
+							<Container class="h-4 w-4" />
+							{run.image_registry}/{run.image_repository}
+						</span>
 					{/if}
-				</h1>
-				<div class="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--text-tertiary)]">
-					<code class="rounded bg-[var(--hover-bg-subtle)] px-2 py-0.5 font-mono">{shortDigest(run.image_digest)}</code>
 					{#if run.image_digest}
-						<button type="button" class="btn btn-ghost btn-xs" onclick={() => copyText(run.image_digest!)} title="Copy full digest">Copy</button>
+						<button
+							type="button"
+							class="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 font-mono text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
+							onclick={() => copyText(run.image_digest!)}
+							title="Copy full digest"
+						>
+							<Tag class="h-4 w-4" />
+							{shortDigest(run.image_digest)}
+						</button>
 					{/if}
 				</div>
 			</div>
-			<div class="flex flex-col items-end gap-2 text-sm">
-				<span class="flex items-center gap-2 text-base font-semibold" style={`color: ${statusColor}`}>
-					<StatusIcon size={18} class={run.status === 'RUNNING' ? 'animate-spin' : ''} />
-					{run.status}
-				</span>
-				<span class="text-xs text-[var(--text-tertiary)]">Duration: {formatDuration(run.started_at, run.finished_at)}</span>
-				<span class="text-xs text-[var(--text-tertiary)]">Created: {new Date(run.created_at).toLocaleString()}</span>
+		</div>
+
+		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="metric-card rounded-2xl p-4 sm:p-6">
+				<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Duration</p>
+				<p class="mt-1 font-mono text-lg font-semibold text-[var(--text-bright)]">
+					{formatDuration(run.started_at, run.finished_at)}
+				</p>
+			</div>
+			<div class="metric-card rounded-2xl p-4 sm:p-6">
+				<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Created</p>
+				<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>{new Date(run.created_at).toLocaleString()}</p>
+			</div>
+			<div class="metric-card rounded-2xl p-4 sm:p-6">
+				<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Started</p>
+				<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>
+					{run.started_at ? new Date(run.started_at).toLocaleString() : '—'}
+				</p>
+			</div>
+			<div class="metric-card rounded-2xl p-4 sm:p-6">
+				<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Finished</p>
+				<p class="mt-1 text-sm text-[var(--text-bright)]" data-no-format>
+					{run.finished_at ? new Date(run.finished_at).toLocaleString() : '—'}
+				</p>
 			</div>
 		</div>
-		{#if run.error}
-			<div class="mt-4 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">
-				{run.error}
-			</div>
-		{/if}
-	</div>
+	</article>
 
 	<!-- Summary row: signature + metadata + SBOM + artifacts -->
 	<div class="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
 		<!-- Signature -->
-		<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		<div class="metric-card rounded-2xl p-4">
 			<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 				<Shield size={14} />
 				Signature
@@ -254,7 +301,7 @@
 		</div>
 
 		<!-- OCI metadata -->
-		<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		<div class="metric-card rounded-2xl p-4">
 			<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 				<Container size={14} />
 				Image
@@ -277,7 +324,7 @@
 		</div>
 
 		<!-- SBOM -->
-		<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		<div class="metric-card rounded-2xl p-4">
 			<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 				<Package size={14} />
 				SBOM
@@ -298,7 +345,7 @@
 		</div>
 
 		<!-- Scanner tools summary -->
-		<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+		<div class="metric-card rounded-2xl p-4">
 			<div class="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 				<FileCode size={14} />
 				Artifacts
@@ -321,7 +368,7 @@
 	</div>
 
 	<!-- Vulnerabilities -->
-	<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
+	<article class="panel-surface px-6 py-6 sm:px-10">
 		<header class="mb-3 flex flex-wrap items-center justify-between gap-3">
 			<div class="flex items-center gap-3">
 				<h2 class="text-sm font-semibold text-[var(--text-bright)]">Vulnerabilities</h2>
@@ -396,10 +443,10 @@
 				</p>
 			{/if}
 		{/if}
-	</div>
+	</article>
 
 	<!-- Secrets -->
-	<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
+	<article class="panel-surface px-6 py-6 sm:px-10">
 		<header class="mb-3 flex items-center gap-2">
 			<AlertTriangle size={16} class="text-[var(--warning)]" />
 			<h2 class="text-sm font-semibold text-[var(--text-bright)]">Secrets in image filesystem</h2>
@@ -433,10 +480,10 @@
 				</table>
 			</div>
 		{/if}
-	</div>
+	</article>
 
 	<!-- OCI Labels -->
-	<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-6">
+	<article class="panel-surface px-6 py-6 sm:px-10">
 		<header class="mb-3 flex items-center gap-2">
 			<Tag size={16} />
 			<h2 class="text-sm font-semibold text-[var(--text-bright)]">OCI labels</h2>
@@ -545,5 +592,5 @@
 				</details>
 			{/if}
 		{/if}
-	</div>
+	</article>
 </div>
