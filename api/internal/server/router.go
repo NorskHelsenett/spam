@@ -44,56 +44,96 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 		syncMgr = uiapi.NewSyncManager(db, providerStore, appCache)
 	}
 
-	// Health check endpoint without middleware to avoid noise in logs
-	r.Get("/api/healthz", health.Handler(db))
+	// ---------------------------------------------------------------
+	// PUBLIC endpoints (no authentication).
+	//
+	// Only the following are intentionally reachable unauthenticated:
+	//   - /api/healthz              liveness probe
+	//   - /api/scam/callcenter      SCAM agent ingest
+	//   - /api/scam/heartbeat       SCAM agent quiet-but-alive ping
+	//   - /api/auth/login           OIDC entry
+	//   - /api/auth/callback        OIDC return
+	//   - /api/auth/me              UI probes current session state
+	//   - /api/auth/logout          idempotent session clear
+	//   - /api/auth/pending/stream  pre-approval polling (pending session)
+	//
+	// Everything else is gated by APIGuard below — fail-closed. New
+	// endpoints added to the gated groups cannot accidentally leak
+	// data because they never run without a valid session.
+	// ---------------------------------------------------------------
 
-	// SCAM ingest — open endpoints, no auth. Agents POST records to
-	// /callcenter; heartbeats (quiet-but-alive pings) go to /heartbeat
-	// so clusters with no state changes for hours don't falsely go
-	// dark in the UI.
+	r.Get("/api/healthz", health.Handler(db))
 	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db))
 	r.Post("/api/scam/heartbeat", scam.HeartbeatHandler(db))
 
-	// SSE / long-lived streaming endpoints — registered without the 60 s timeout
-	// so the server doesn't kill the connection mid-stream.
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequestID)
-		r.Use(middleware.RealIP)
-		r.Use(middleware.Logger)
-		r.Use(middleware.Recoverer)
-		r.Use(cache.Middleware)
+	if authService != nil {
+		r.Group(func(pub chi.Router) {
+			pub.Use(middleware.RequestID)
+			pub.Use(middleware.RealIP)
+			pub.Use(middleware.Logger)
+			pub.Use(middleware.Recoverer)
+			pub.Use(middleware.Timeout(60 * time.Second))
 
-		if authService != nil {
-			r.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
-			r.Get("/api/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
-			r.Get("/api/runs/active/stream", uiapi.RunsActiveStreamHandler(db, authService))
-			r.Get("/api/runs/{id}/stream", uiapi.RunStreamHandler(db, authService, func() *runner.K8sClient {
+			pub.Get("/api/auth/login", authService.LoginHandler())
+			pub.Get("/api/auth/callback", authService.CallbackHandler())
+			pub.Get("/api/auth/me", authService.MeHandler())
+			pub.Post("/api/auth/logout", authService.LogoutHandler())
+		})
+
+		// Pending-approval SSE accepts a pending session (pre-approval),
+		// not a full one, so it gets its own no-timeout group separate
+		// from both the public and the authenticated SSE routes.
+		r.Group(func(pend chi.Router) {
+			pend.Use(middleware.RequestID)
+			pend.Use(middleware.RealIP)
+			pend.Use(middleware.Logger)
+			pend.Use(middleware.Recoverer)
+			pend.Use(cache.Middleware)
+			pend.Get("/api/auth/pending/stream", events.PendingApprovalStream(authService.PendingSessionInfo, authService.UserApprovalStatus))
+		})
+	}
+
+	// ---------------------------------------------------------------
+	// GATED long-lived SSE endpoints — no Timeout middleware so the
+	// server doesn't kill the connection mid-stream.
+	// ---------------------------------------------------------------
+
+	if authService != nil {
+		r.Group(func(sse chi.Router) {
+			sse.Use(middleware.RequestID)
+			sse.Use(middleware.RealIP)
+			sse.Use(middleware.Logger)
+			sse.Use(middleware.Recoverer)
+			sse.Use(cache.Middleware)
+			sse.Use(authService.APIGuard)
+
+			sse.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
+			sse.Get("/api/runs/active/stream", uiapi.RunsActiveStreamHandler(db, authService))
+			sse.Get("/api/runs/{id}/stream", uiapi.RunStreamHandler(db, authService, func() *runner.K8sClient {
 				if opts != nil {
 					return opts.K8sClient
 				}
 				return nil
 			}()))
-			r.Post("/api/scan-all", uiapi.ScanAllHandler(db, authService, providerStore))
-		}
-	})
+			sse.Post("/api/scan-all", uiapi.ScanAllHandler(db, authService, providerStore))
+		})
+	}
 
-	// Apply middleware to all other routes
-	r.Group(func(r chi.Router) {
-		r.Use(middleware.RequestID)
-		r.Use(middleware.RealIP)
-		r.Use(middleware.Logger)
-		r.Use(middleware.Recoverer)
-		r.Use(cache.Middleware)
-		r.Use(middleware.Timeout(60 * time.Second))
+	// ---------------------------------------------------------------
+	// GATED JSON API endpoints.
+	// ---------------------------------------------------------------
 
-		r.Route("/api", func(api chi.Router) {
-			if authService != nil {
-				api.Route("/auth", func(authRouter chi.Router) {
-					authRouter.Get("/login", authService.LoginHandler())
-					authRouter.Get("/callback", authService.CallbackHandler())
-					authRouter.Get("/me", authService.MeHandler())
-					authRouter.Post("/logout", authService.LogoutHandler())
-				})
+	if authService != nil {
+		r.Group(func(priv chi.Router) {
+			priv.Use(middleware.RequestID)
+			priv.Use(middleware.RealIP)
+			priv.Use(middleware.Logger)
+			priv.Use(middleware.Recoverer)
+			priv.Use(cache.Middleware)
+			priv.Use(middleware.Timeout(60 * time.Second))
+			priv.Use(authService.APIGuard)
+
+			priv.Route("/api", func(api chi.Router) {
 				api.Post("/sboms/upload", uiapi.SBOMUploadHandler(db, authService))
 				api.Get("/sboms/{id}", uiapi.SBOMGetHandler(db, authService))
 				api.Get("/sboms/{id}/download", uiapi.SBOMDownloadHandler(db, authService))
@@ -168,7 +208,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
 
-				// Cluster query endpoints (authenticated, data from SCAM agents)
+				// Cluster query endpoints — SCAM inventory (namespaces,
+				// pods, images, hostnames, LB IPs). Gated via APIGuard
+				// on the enclosing group.
 				api.Get("/clusters/summary", scam.ClusterSummaryHandler(db))
 				api.Get("/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
 				api.Get("/clusters/exposure", scam.ExposureHandler(db))
@@ -212,29 +254,35 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				if opts != nil && opts.RunExecutor != nil {
 					api.Post("/runs/{id}/cancel", uiapi.RunCancelHandler(db, authService, opts.RunExecutor))
 				}
-			}
-		})
+			})
 
-		if authService != nil {
-			r.Route("/api/vuln", func(v chi.Router) {
+			priv.Route("/api/vuln", func(v chi.Router) {
 				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
 				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
 			})
-			r.Route("/api/secrets", func(s chi.Router) {
+			priv.Route("/api/secrets", func(s chi.Router) {
 				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
 				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
 				s.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
 				s.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
 			})
-		}
+		})
+	}
 
-		if spaHandler != nil && authService != nil {
-			r.Handle("/*", authService.SPAGuard(spaHandler))
-		}
-	})
+	// SPA fallback — served as a separate top-level catch-all because
+	// SPAGuard does its own per-request redirect logic (not an API guard).
+	if spaHandler != nil && authService != nil {
+		r.Group(func(sp chi.Router) {
+			sp.Use(middleware.RequestID)
+			sp.Use(middleware.RealIP)
+			sp.Use(middleware.Logger)
+			sp.Use(middleware.Recoverer)
+			sp.Handle("/*", authService.SPAGuard(spaHandler))
+		})
+	}
 
 	return r
 }

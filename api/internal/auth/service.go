@@ -404,6 +404,23 @@ func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error
 	}, nil
 }
 
+// APIGuard returns middleware that rejects requests lacking an approved
+// session with 403. It is the fail-closed counterpart to calling
+// requireAuth at the top of each handler: once it wraps a subrouter,
+// every route under it requires admin/global_reader before the handler
+// ever runs, so a newly-added endpoint cannot accidentally leak data.
+// Per-handler requireAdmin checks still apply on top for write-role
+// granularity.
+func (s *Service) APIGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := s.RequireAdminOrGlobalReader(r); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // SPAGuard wraps next to redirect unauthenticated browser navigations before the SPA loads.
 // Paths with a "." (static assets) and anything under /auth pass through unchanged.
 // Pending users are redirected to /auth/pending; everyone else to /auth/login.
