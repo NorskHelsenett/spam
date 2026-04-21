@@ -10,6 +10,7 @@
 	import EmptyRepos from '$lib/components/icons/EmptyRepos.svelte';
 	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
 	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -94,6 +95,37 @@
 	let activeTab = 'repositories';
 	let imageDrawerOpen = false;
 	let imageDrawerId = '';
+
+	// --- Virtual scroll helpers for tables ---
+	// ROW_HEIGHT = flat single-line rows (repos, images). VULN_ROW_HEIGHT
+	// is taller because those rows stack title+pkg+fix inside one tr.
+	// OVERSCAN keeps a handful of rows rendered above/below the viewport
+	// so fast scrolls don't flash empty rows while the slice updates.
+	const ROW_HEIGHT = 48;
+	const VULN_ROW_HEIGHT = 96;
+	const OVERSCAN = 10;
+
+	type Virt = { start: number; end: number; topPad: number; bottomPad: number };
+	function virtSlice(total: number, rowHeight: number, scrollTop: number, viewH: number): Virt {
+		const start = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN);
+		const end = Math.min(total, Math.ceil((scrollTop + viewH) / rowHeight) + OVERSCAN);
+		return {
+			start,
+			end,
+			topPad: start * rowHeight,
+			bottomPad: Math.max(0, (total - end) * rowHeight),
+		};
+	}
+
+	let repoScrollEl: HTMLDivElement | undefined;
+	let repoScrollTop = 0;
+	let repoViewH = 600;
+	let imageScrollEl: HTMLDivElement | undefined;
+	let imageScrollTop = 0;
+	let imageViewH = 600;
+	let vulnScrollEl: HTMLDivElement | undefined;
+	let vulnScrollTop = 0;
+	let vulnViewH = 600;
 
 	const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
@@ -206,6 +238,14 @@
 		const list = hideClean ? images.filter((i) => w(i) > 0) : images.slice();
 		return list.sort((a, b) => w(b) - w(a));
 	})();
+
+	// Repo table has an inline .filter(...) in the template; hoist it
+	// so the virt slice math uses the same list the UI renders.
+	$: filteredRepos = repos.filter((r) => r.repo_slug !== r.repo_id && r.repo_slug);
+
+	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
+	$: imageVirt = virtSlice(filteredImages.length, ROW_HEIGHT, imageScrollTop, imageViewH);
+	$: vulnVirt = virtSlice(groupedVulns.length, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
 
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
 	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
@@ -364,22 +404,24 @@
 					</div>
 				{:else}
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<div class="flex-1 overflow-y-auto">
-							<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-								<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={repoScrollEl} onscroll={() => { repoScrollTop = repoScrollEl?.scrollTop ?? 0; repoViewH = repoScrollEl?.clientHeight ?? 600; }}>
+							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
+								<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 									<tr>
-										<th class="px-5 py-3 text-left">Repository</th>
-										<th class="px-5 py-3 text-right" style="color:var(--red)">Critical</th>
-										<th class="px-5 py-3 text-right" style="color:var(--orange)">High</th>
-										<th class="px-5 py-3 text-right" style="color:var(--yellow)">Medium</th>
-										<th class="px-5 py-3 text-right" style="color:var(--blue)">Low</th>
-										<th class="px-5 py-3 text-right">Last Scanned</th>
+										<th class="w-[40%] px-5 py-3 text-left">Repository</th>
+										<th class="w-[12%] px-5 py-3 text-right" style="color:var(--red)">Critical</th>
+										<th class="w-[12%] px-5 py-3 text-right" style="color:var(--orange)">High</th>
+										<th class="w-[12%] px-5 py-3 text-right" style="color:var(--yellow)">Medium</th>
+										<th class="w-[12%] px-5 py-3 text-right" style="color:var(--blue)">Low</th>
+										<th class="w-[12%] px-5 py-3 text-right">Last Scanned</th>
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-									{#each repos.filter(r => r.repo_slug !== r.repo_id && r.repo_slug) as repo}
+									{#if repoVirt.topPad > 0}<tr style="height:{repoVirt.topPad}px"><td colspan="6"></td></tr>{/if}
+									{#each filteredRepos.slice(repoVirt.start, repoVirt.end) as repo}
 										<tr
 											class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
+											style="height:{ROW_HEIGHT}px"
 											onclick={() => openRepo(repo.repo_id)}
 										>
 											<td class="px-5 py-3">
@@ -421,6 +463,7 @@
 											</td>
 										</tr>
 									{/each}
+									{#if repoVirt.bottomPad > 0}<tr style="height:{repoVirt.bottomPad}px"><td colspan="6"></td></tr>{/if}
 								</tbody>
 							</table>
 						</div>
@@ -445,15 +488,12 @@
 				{:else}
 					<div class="flex items-center justify-between gap-3 pb-1">
 						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
-						<label class="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-							<input type="checkbox" bind:checked={hideClean} />
-							Hide clean images
-						</label>
+						<Toggle bind:checked={hideClean} label="Hide clean images" />
 					</div>
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<div class="flex-1 overflow-y-auto [overflow-anchor:none]">
+						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
 							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
-								<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+								<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 									<tr>
 										<th class="w-[14%] px-5 py-3 text-left">Registry</th>
 										<th class="w-[32%] px-5 py-3 text-left">Image</th>
@@ -466,9 +506,11 @@
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-									{#each filteredImages as img}
+									{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="8"></td></tr>{/if}
+									{#each filteredImages.slice(imageVirt.start, imageVirt.end) as img}
 										<tr
 											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+											style="height:{ROW_HEIGHT}px"
 											onclick={() => openImageDrawer(img.digest_id)}
 										>
 											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
@@ -513,6 +555,7 @@
 											</td>
 										</tr>
 									{/each}
+									{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="8"></td></tr>{/if}
 								</tbody>
 							</table>
 						</div>
@@ -539,9 +582,9 @@
 					</div>
 				{:else}
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-						<div class="flex-1 overflow-y-auto">
-							<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-								<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={vulnScrollEl} onscroll={() => { vulnScrollTop = vulnScrollEl?.scrollTop ?? 0; vulnViewH = vulnScrollEl?.clientHeight ?? 600; }}>
+							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
+								<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 									<tr>
 										<th class="px-5 py-3 text-left w-[22%]">CVE / ID</th>
 										<th class="px-5 py-3 text-left w-[10%]">Severity</th>
@@ -550,8 +593,9 @@
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-									{#each groupedVulns as g}
-										<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]">
+									{#if vulnVirt.topPad > 0}<tr style="height:{vulnVirt.topPad}px"><td colspan="4"></td></tr>{/if}
+									{#each groupedVulns.slice(vulnVirt.start, vulnVirt.end) as g}
+										<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
 											<td class="px-5 py-3">
 												<div class="flex flex-wrap items-center gap-2">
 													<a
@@ -599,6 +643,7 @@
 											</td>
 										</tr>
 									{/each}
+									{#if vulnVirt.bottomPad > 0}<tr style="height:{vulnVirt.bottomPad}px"><td colspan="4"></td></tr>{/if}
 								</tbody>
 							</table>
 						</div>
