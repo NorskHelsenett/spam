@@ -555,7 +555,7 @@
 				{#if activeTab === 'repositories' && repos.length > 0}
 					<button
 						type="button"
-						class="filter-toggle"
+						class="host-filter-toggle"
 						class:active={repoFilterOpen}
 						onclick={() => (repoFilterOpen = !repoFilterOpen)}
 						aria-expanded={repoFilterOpen}
@@ -563,12 +563,12 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if repoActiveFilterCount > 0}<span class="filter-badge">{repoActiveFilterCount}</span>{/if}
+						{#if repoActiveFilterCount > 0}<span class="host-filter-badge">{repoActiveFilterCount}</span>{/if}
 					</button>
 				{:else if activeTab === 'images' && images.length > 0}
 					<button
 						type="button"
-						class="filter-toggle"
+						class="host-filter-toggle"
 						class:active={imageFilterOpen}
 						onclick={() => (imageFilterOpen = !imageFilterOpen)}
 						aria-expanded={imageFilterOpen}
@@ -576,12 +576,12 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if imageActiveFilterCount > 0}<span class="filter-badge">{imageActiveFilterCount}</span>{/if}
+						{#if imageActiveFilterCount > 0}<span class="host-filter-badge">{imageActiveFilterCount}</span>{/if}
 					</button>
 				{:else if activeTab === 'vulnerabilities' && groupedVulns.length > 0}
 					<button
 						type="button"
-						class="filter-toggle"
+						class="host-filter-toggle"
 						class:active={vulnFilterOpen}
 						onclick={() => (vulnFilterOpen = !vulnFilterOpen)}
 						aria-expanded={vulnFilterOpen}
@@ -589,96 +589,102 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if vulnActiveFilterCount > 0}<span class="filter-badge">{vulnActiveFilterCount}</span>{/if}
+						{#if vulnActiveFilterCount > 0}<span class="host-filter-badge">{vulnActiveFilterCount}</span>{/if}
 					</button>
 				{/if}
 			</header>
 
 			{#if activeTab === 'repositories' && repoFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
-					<div class="flex flex-wrap items-end gap-4">
-						<div class="min-w-[16rem] flex-1">
-							<span class="filter-field-label">Search</span>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+					<div class="flex flex-wrap items-start gap-6">
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
 							<div class="relative flex items-center">
-								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-								<input type="text" class="filter-search-input" placeholder="Repo slug…" bind:value={repoSearch} />
+								<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+								<input type="text" class="host-search-input" placeholder="Repo slug…" bind:value={repoSearch} />
 							</div>
 						</div>
-						<div class="min-w-[14rem]">
-							<span class="filter-field-label">Has severity</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Has severity</span>
 							<MultiSelect bind:selected={repoSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
 						</div>
-					</div>
-					<div class="flex items-center justify-between gap-3">
-						<p class="text-xs text-[var(--text-muted)]">Showing {filteredRepos.length} of {repos.length}</p>
-						<div class="flex items-center gap-4">
-							<Toggle bind:checked={repoHideClean} label="Hide clean repos" />
-							{#if repoActiveFilterCount > 0}
-								<button type="button" class="clear-filters-btn" onclick={clearRepoFilters}>Clear all</button>
-							{/if}
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Clean repos</span>
+							<div class="flex items-center h-[28px]">
+								<Toggle bind:checked={repoHideClean} label="Only with findings" />
+							</div>
 						</div>
+						{#if repoActiveFilterCount > 0}
+							<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+								<button type="button" class="host-clear-filters" onclick={clearRepoFilters}>Clear all</button>
+							</div>
+						{/if}
 					</div>
 				</div>
 			{:else if activeTab === 'images' && imageFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
-					<div class="flex flex-wrap items-end gap-4">
-						<div class="min-w-[16rem] flex-1">
-							<span class="filter-field-label">Search</span>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+					<div class="flex flex-wrap items-start gap-6">
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
 							<div class="relative flex items-center">
-								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-								<input type="text" class="filter-search-input" placeholder="Registry, image, digest, tag…" bind:value={imageSearch} />
+								<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+								<input type="text" class="host-search-input" placeholder="Registry, image, digest, tag…" bind:value={imageSearch} />
 							</div>
 						</div>
-						<div class="min-w-[14rem]">
-							<span class="filter-field-label">Registry</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Registry</span>
 							<MultiSelect bind:selected={imageSelectedRegistries} options={imageRegistryFilterOptions} placeholder="All registries" size="sm" />
 						</div>
-						<div class="min-w-[14rem]">
-							<span class="filter-field-label">Severity</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Severity</span>
 							<MultiSelect bind:selected={imageSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
 						</div>
-					</div>
-					<div class="flex items-center justify-between gap-3">
-						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
-						<div class="flex items-center gap-4">
-							<Toggle bind:checked={hideClean} label="Hide clean images" />
-							{#if imageActiveFilterCount > 0}
-								<button type="button" class="clear-filters-btn" onclick={clearImageFilters}>Clear all</button>
-							{/if}
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Clean images</span>
+							<div class="flex items-center h-[28px]">
+								<Toggle bind:checked={hideClean} label="Only with vulns" />
+							</div>
 						</div>
+						{#if imageActiveFilterCount > 0}
+							<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+								<button type="button" class="host-clear-filters" onclick={clearImageFilters}>Clear all</button>
+							</div>
+						{/if}
 					</div>
 				</div>
 			{:else if activeTab === 'vulnerabilities' && vulnFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
-					<div class="flex flex-wrap items-end gap-4">
-						<div class="min-w-[18rem] flex-1">
-							<span class="filter-field-label">Search</span>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="pb-2">
+					<div class="flex flex-wrap items-start gap-6">
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
 							<div class="relative flex items-center">
-								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-								<input type="text" class="filter-search-input" placeholder="CVE id, title, package, repo…" bind:value={vulnSearch} />
+								<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
+								<input type="text" class="host-search-input" placeholder="CVE id, title, package, repo…" bind:value={vulnSearch} />
 							</div>
 						</div>
-						<div class="min-w-[12rem]">
-							<span class="filter-field-label">Severity</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Severity</span>
 							<MultiSelect bind:selected={vulnSelectedSeverities} options={severityFilterOptions} placeholder="Any" size="sm" />
 						</div>
-						<div class="min-w-[12rem]">
-							<span class="filter-field-label">Source</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Source</span>
 							<MultiSelect bind:selected={vulnSelectedSources} options={vulnSourceFilterOptions} placeholder="Any" size="sm" />
 						</div>
-						<div class="min-w-[10rem]">
-							<span class="filter-field-label">CVE year</span>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">CVE year</span>
 							<MultiSelect bind:selected={vulnSelectedYears} options={vulnYearFilterOptions} placeholder="Any" size="sm" />
 						</div>
-					</div>
-					<div class="flex items-center justify-between gap-3">
-						<p class="text-xs text-[var(--text-muted)]">Showing {filteredVulns.length} of {groupedVulns.length}</p>
-						<div class="flex items-center gap-4">
-							<Toggle bind:checked={vulnFixAvailable} label="Has fix available" />
-							{#if vulnActiveFilterCount > 0}
-								<button type="button" class="clear-filters-btn" onclick={clearVulnFilters}>Clear all</button>
-							{/if}
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Has fix</span>
+							<div class="flex items-center h-[28px]">
+								<Toggle bind:checked={vulnFixAvailable} label="Fixable only" />
+							</div>
 						</div>
+						{#if vulnActiveFilterCount > 0}
+							<div class="flex items-center gap-3 ml-auto" style="padding-top: calc(0.65rem * 1.2 + 0.25rem);">
+								<button type="button" class="host-clear-filters" onclick={clearVulnFilters}>Clear all</button>
+							</div>
+						{/if}
 					</div>
 				</div>
 			{/if}
@@ -940,79 +946,81 @@
 </div>
 
 <style>
-	.filter-toggle {
+	/* Filter chrome mirrors the clusters page (host-*) so the page feels
+	   like one unified tool. */
+	.host-filter-toggle {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.4rem;
-		padding: 0.4rem 0.85rem;
+		padding: 0.35rem 0.75rem;
 		border-radius: 999px;
 		border: 1px solid var(--border-color);
-		background: var(--card-bg);
+		background: transparent;
 		color: var(--text-secondary);
-		font-size: 0.8rem;
+		font-size: 0.75rem;
 		font-weight: 500;
 		cursor: pointer;
 		transition: border-color 150ms ease, color 150ms ease, background 150ms ease;
 		white-space: nowrap;
-		flex-shrink: 0;
 	}
-	.filter-toggle:hover { color: var(--text-bright); border-color: var(--text-tertiary); }
-	.filter-toggle.active {
+	.host-filter-toggle:hover {
+		color: var(--text-bright);
+		border-color: var(--text-tertiary);
+	}
+	.host-filter-toggle.active {
 		background: color-mix(in srgb, var(--accent) 12%, transparent);
 		border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 		color: var(--accent);
 	}
-	.filter-badge {
+
+	.host-filter-badge {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		min-width: 18px;
-		height: 18px;
+		min-width: 16px;
+		height: 16px;
 		border-radius: 999px;
 		background: var(--accent);
 		color: var(--bg-hard);
-		font-size: 0.65rem;
+		font-size: 0.6rem;
 		font-weight: 700;
 		line-height: 1;
-		padding: 0 0.3rem;
+		padding: 0 0.25rem;
 	}
-	.filter-search-input {
+
+	.host-search-input {
+		height: 28px;
 		width: 100%;
-		padding: 0.5rem 0.75rem 0.5rem 2rem;
-		border-radius: 8px;
+		min-width: 320px;
+		border-radius: 999px;
 		border: 1px solid var(--border-color);
 		background: var(--card-bg);
-		color: var(--text-primary);
-		font-size: 0.85rem;
+		padding: 0 0.6rem 0 1.7rem;
+		font-size: 0.75rem;
+		color: var(--text-secondary);
+		transition: border-color 150ms ease, box-shadow 150ms ease;
+	}
+	.host-search-input::placeholder { color: var(--text-muted); }
+	.host-search-input:focus {
 		outline: none;
-		transition: border-color 150ms ease;
-	}
-	.filter-search-input:focus { border-color: var(--accent); }
-
-	.filter-field-label {
-		display: block;
-		font-size: 0.65rem;
-		font-weight: 600;
-		color: var(--text-tertiary);
-		text-transform: uppercase;
-		letter-spacing: 0.12em;
-		padding-left: 0.15rem;
-		margin-bottom: 0.35rem;
+		border-color: var(--accent);
+		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
 	}
 
-	.clear-filters-btn {
-		font-size: 0.72rem;
-		font-weight: 500;
-		color: var(--text-tertiary);
-		padding: 0.25rem 0.6rem;
-		border-radius: 6px;
+	.host-clear-filters {
+		padding: 0.3rem 0.75rem;
+		border-radius: 999px;
+		border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
 		background: transparent;
-		border: 1px solid transparent;
-		cursor: pointer;
-		transition: color 150ms ease, border-color 150ms ease;
-	}
-	.clear-filters-btn:hover {
 		color: var(--accent);
-		border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+		font-size: 0.75rem;
+		font-weight: 500;
+		cursor: pointer;
+		transition: background 150ms ease, color 150ms ease, border-color 150ms ease;
+	}
+	.host-clear-filters:hover {
+		background: color-mix(in srgb, var(--red) 14%, transparent);
+		border-color: color-mix(in srgb, var(--red) 50%, transparent);
+		color: var(--red);
 	}
 </style>
