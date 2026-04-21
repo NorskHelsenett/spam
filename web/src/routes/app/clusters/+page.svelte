@@ -854,10 +854,10 @@
 												<span class="text-xs text-[var(--text-muted)]" title="The kubelet has not resolved a digest for this image. This typically happens when the image was pulled from a local cache (imagePullPolicy: IfNotPresent) or the container hasn't started yet.">unresolved</span>
 											{/if}
 										</td>
-										<td class="px-5 py-3">
-											<div class="flex flex-wrap gap-1">
+										<td class="overflow-hidden px-5 py-3">
+											<div class="flex flex-nowrap gap-1 overflow-hidden">
 												{#each parseTags(img.tags) as tag}
-													<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">{tag}</span>
+													<span class="whitespace-nowrap rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">{tag}</span>
 												{/each}
 											</div>
 										</td>
