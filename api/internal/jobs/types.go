@@ -7,13 +7,16 @@ const (
 	JobTypeCreateRun        JobType = "CREATE_RUN"
 	JobTypeRefreshSBOMViews JobType = "REFRESH_SBOM_VIEWS"
 	JobTypeOSVScan          JobType = "OSV_SCAN"
-	JobTypeTrivyAdhocScan   JobType = "TRIVY_ADHOC_SCAN"
+	JobTypeSBOMAdhocScan    JobType = "SBOM_ADHOC_SCAN"
 	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
 	JobTypeImageScan        JobType = "IMAGE_SCAN"
 )
 
-// TrivyAdhocPayload is the payload for TRIVY_ADHOC_SCAN jobs.
-type TrivyAdhocPayload struct {
+// SBOMAdhocPayload is the payload for SBOM_ADHOC_SCAN jobs. The ad-hoc
+// run clones the SBOM scanner CronJob's pod template to force a scan
+// sweep on demand; the cronjob name is read from the worker's env var
+// by default, but can be overridden per-job via CronJobName.
+type SBOMAdhocPayload struct {
 	CronJobName string `json:"cronjob_name"`
 }
 

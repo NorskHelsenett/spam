@@ -16,10 +16,11 @@ import (
 	"gorm.io/gorm"
 )
 
-// TrivyJobCreator is implemented by the runner when K8s is available.
-// It allows the worker to create an ad-hoc trivy scanner K8s job.
-type TrivyJobCreator interface {
-	CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error
+// SBOMAdhocJobCreator is implemented by the runner when K8s is available.
+// It allows the worker to create an ad-hoc SBOM scanner K8s job by
+// cloning the deployed sbom-scanner CronJob's pod template.
+type SBOMAdhocJobCreator interface {
+	CreateSBOMAdhocJob(ctx context.Context, cronJobName string) error
 }
 
 // retryableError wraps an error to signal the worker to retry without counting
@@ -55,8 +56,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processRefreshSBOMViews(ctx, db)
 	case JobTypeOSVScan:
 		return processOSVScan(ctx, db, job.ID)
-	case JobTypeTrivyAdhocScan:
-		return processTrivyAdhocScan(ctx, job, runExecutor)
+	case JobTypeSBOMAdhocScan:
+		return processSBOMAdhocScan(ctx, job, runExecutor)
 	case JobTypeProbeSecrets:
 		return processProbeSecrets(ctx, db, job)
 	default:
@@ -95,27 +96,27 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 	return result, nil
 }
 
-func processTrivyAdhocScan(ctx context.Context, job *Job, runExecutor RunExecutor) (interface{}, error) {
-	creator, ok := runExecutor.(TrivyJobCreator)
+func processSBOMAdhocScan(ctx context.Context, job *Job, runExecutor RunExecutor) (interface{}, error) {
+	creator, ok := runExecutor.(SBOMAdhocJobCreator)
 	if !ok {
-		return nil, NonRetryable(errors.New("trivy job creation not available: runner not enabled"))
+		return nil, NonRetryable(errors.New("sbom scan job creation not available: runner not enabled"))
 	}
 
 	// CronJob name comes from the worker's own environment — the worker owns K8s config.
-	cronJobName := strings.TrimSpace(os.Getenv("TRIVY_SCANNER_CRONJOB_NAME"))
+	cronJobName := strings.TrimSpace(os.Getenv("SBOM_SCANNER_CRONJOB_NAME"))
 	if cronJobName == "" {
 		// Fall back to payload for backwards compatibility.
-		var payload TrivyAdhocPayload
+		var payload SBOMAdhocPayload
 		if len(job.Payload) > 0 {
 			_ = json.Unmarshal(job.Payload, &payload)
 		}
 		cronJobName = payload.CronJobName
 	}
 	if cronJobName == "" {
-		return nil, NonRetryable(errors.New("TRIVY_SCANNER_CRONJOB_NAME not configured on worker"))
+		return nil, NonRetryable(errors.New("SBOM_SCANNER_CRONJOB_NAME not configured on worker"))
 	}
 
-	if err := creator.CreateTrivyAdhocJob(ctx, cronJobName); err != nil {
+	if err := creator.CreateSBOMAdhocJob(ctx, cronJobName); err != nil {
 		if isAlreadyRunning(err) {
 			return nil, NonRetryable(err)
 		}

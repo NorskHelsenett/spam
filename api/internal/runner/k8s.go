@@ -709,10 +709,10 @@ func copyStringMap(src map[string]string) map[string]string {
 }
 
 
-// CreateTrivyAdhocJob creates an ad-hoc K8s Job from an existing CronJob's template.
+// CreateSBOMAdhocJob creates an ad-hoc K8s Job from an existing CronJob's template.
 // If a job with the given name already exists and is still running, it returns an error.
 // If it has finished (succeeded or failed), the old job is deleted before creating a new one.
-func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobName string, ttlSecondsAfterFinished int32) error {
+func (k *K8sClient) CreateSBOMAdhocJob(ctx context.Context, cronJobName, jobName string, ttlSecondsAfterFinished int32) error {
 	namespace := k.cfg.Namespace
 
 	// Check whether a prior adhoc job still exists.
@@ -723,7 +723,7 @@ func (k *K8sClient) CreateTrivyAdhocJob(ctx context.Context, cronJobName, jobNam
 	if err == nil {
 		// Still active — refuse to create a duplicate.
 		if existing.Status.Active > 0 {
-			return fmt.Errorf("ad-hoc trivy scan job is already running")
+			return fmt.Errorf("ad-hoc sbom scan job is already running")
 		}
 		// Finished — delete it so we can recreate.
 		propagation := metav1.DeletePropagationBackground
@@ -861,8 +861,8 @@ func (k *K8sClient) GetPodLogs(ctx context.Context, jobName, namespace string, t
 // interfaces the worker expects. IMAGE_SCAN is not here — it is leased by
 // the dedicated spam-image-scanner pod rather than executed in-worker.
 var (
-	_ jobs.RunExecutor     = (*RunExecutor)(nil)
-	_ jobs.TrivyJobCreator = (*RunExecutor)(nil)
+	_ jobs.RunExecutor        = (*RunExecutor)(nil)
+	_ jobs.SBOMAdhocJobCreator = (*RunExecutor)(nil)
 )
 
 // RunExecutor handles creating and managing runs.
@@ -935,12 +935,12 @@ func (e *RunExecutor) ExecuteRun(ctx context.Context, runID string, payload inte
 	return nil
 }
 
-// CreateTrivyAdhocJob implements jobs.TrivyJobCreator for the worker.
-// It creates an ad-hoc trivy scanner K8s Job from the given CronJob template,
+// CreateSBOMAdhocJob implements jobs.SBOMAdhocJobCreator for the worker.
+// It creates an ad-hoc SBOM scanner K8s Job from the given CronJob template,
 // with a fixed 12-hour TTL so it cleans itself up.
-func (e *RunExecutor) CreateTrivyAdhocJob(ctx context.Context, cronJobName string) error {
+func (e *RunExecutor) CreateSBOMAdhocJob(ctx context.Context, cronJobName string) error {
 	const ttl = int32(12 * 3600)
-	return e.k8s.CreateTrivyAdhocJob(ctx, cronJobName, "trivy-adhoc", ttl)
+	return e.k8s.CreateSBOMAdhocJob(ctx, cronJobName, "sbom-adhoc", ttl)
 }
 
 // CountActiveScannerPods + CreateScannerJob satisfy imagescan.PodController

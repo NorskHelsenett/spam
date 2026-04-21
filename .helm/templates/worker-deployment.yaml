@@ -121,7 +121,7 @@ spec:
             - name: SPAM_CHART_NAME
               value: "{{ .Chart.Name }}-{{ .Chart.Version }}"
             {{- if .Values.sbomScanner.enabled }}
-            - name: TRIVY_SCANNER_CRONJOB_NAME
+            - name: SBOM_SCANNER_CRONJOB_NAME
               value: "{{ .Release.Name }}-sbom-scanner"
             {{- end }}
             {{- if .Values.imageScanner.enabled }}
