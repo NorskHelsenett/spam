@@ -2,13 +2,14 @@
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch } from 'lucide-svelte';
+	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container } from 'lucide-svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import LineChart from '$lib/components/LineChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import VulnBadges from '$lib/components/VulnBadges.svelte';
 	import EmptyRepos from '$lib/components/icons/EmptyRepos.svelte';
 	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
+	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -40,6 +41,23 @@
 		last_scanned_at: string | null;
 	};
 
+	type ImageRow = {
+		registry: string;
+		image: string;
+		digest: string;
+		digest_id?: string;
+		tags: string;
+		cluster_count: number;
+		namespace_count: number;
+		container_count: number;
+		last_seen: string;
+		vuln_critical: number;
+		vuln_high: number;
+		vuln_medium: number;
+		vuln_low: number;
+		vuln_unknown: number;
+	};
+
 	type VulnRow = {
 		repo_id: string;
 		repo_slug: string;
@@ -67,10 +85,15 @@
 	let repos: RepoRow[] = [];
 	let trend: TrendPoint[] = [];
 	let vulns: VulnRow[] = [];
+	let images: ImageRow[] = [];
+	let hideClean = true;
 	let loading = true;
 	let vulnsLoading = false;
+	let imagesLoading = false;
 	let error = '';
 	let activeTab = 'repositories';
+	let imageDrawerOpen = false;
+	let imageDrawerId = '';
 
 	const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
@@ -160,7 +183,43 @@
 		}
 	};
 
+	const loadImages = async () => {
+		if (images.length > 0) return;
+		imagesLoading = true;
+		try {
+			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
+			if (res.ok) images = (await res.json()) ?? [];
+		} catch {
+			// ignore
+		} finally {
+			imagesLoading = false;
+		}
+	};
+
 	$: if (activeTab === 'vulnerabilities') loadVulns();
+	$: if (activeTab === 'images') loadImages();
+
+	// Images filtered + sorted by severity weight (critical > high > medium > low).
+	$: filteredImages = (() => {
+		const w = (img: ImageRow) =>
+			img.vuln_critical * 1e9 + img.vuln_high * 1e6 + img.vuln_medium * 1e3 + img.vuln_low;
+		const list = hideClean ? images.filter((i) => w(i) > 0) : images.slice();
+		return list.sort((a, b) => w(b) - w(a));
+	})();
+
+	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
+	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
+
+	const openImageDrawer = (digestId: string | undefined) => {
+		if (!digestId) return;
+		if (imageDrawerOpen && imageDrawerId === digestId) {
+			imageDrawerOpen = false;
+			imageDrawerId = '';
+		} else {
+			imageDrawerId = digestId;
+			imageDrawerOpen = true;
+		}
+	};
 
 	onMount(async () => {
 		try {
@@ -278,6 +337,7 @@
 				<TabSelector
 					options={[
 						{ value: 'repositories', label: 'Repositories' },
+						{ value: 'images', label: 'Images' },
 						{ value: 'vulnerabilities', label: 'Vulnerabilities' }
 					]}
 					bind:value={activeTab}
@@ -365,6 +425,104 @@
 							</table>
 						</div>
 					</div>
+				{/if}
+
+			{:else if activeTab === 'images'}
+				{#if imagesLoading}
+					<div class="flex flex-1 items-center justify-center">
+						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+					</div>
+				{:else if filteredImages.length === 0}
+					<div class="flex flex-1 items-center justify-center">
+						<div class="flex flex-col items-center gap-3 text-center">
+							<Container class="h-10 w-10 text-[var(--text-muted)]" />
+							<p class="text-sm text-[var(--text-muted)]">{hideClean ? 'No images with vulnerabilities.' : 'No images.'}</p>
+							{#if hideClean && images.length > 0}
+								<button type="button" class="text-xs text-[var(--accent)] hover:underline" onclick={() => (hideClean = false)}>Show clean images</button>
+							{/if}
+						</div>
+					</div>
+				{:else}
+					<div class="flex items-center justify-between gap-3 pb-1">
+						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
+						<label class="inline-flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+							<input type="checkbox" bind:checked={hideClean} />
+							Hide clean images
+						</label>
+					</div>
+					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+						<div class="flex-1 overflow-y-auto [overflow-anchor:none]">
+							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
+								<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
+									<tr>
+										<th class="w-[14%] px-5 py-3 text-left">Registry</th>
+										<th class="w-[32%] px-5 py-3 text-left">Image</th>
+										<th class="w-[14%] px-5 py-3 text-left">Digest</th>
+										<th class="w-[7%] px-5 py-3 text-right" style="color:var(--red)">Critical</th>
+										<th class="w-[7%] px-5 py-3 text-right" style="color:var(--orange)">High</th>
+										<th class="w-[7%] px-5 py-3 text-right" style="color:var(--yellow)">Medium</th>
+										<th class="w-[7%] px-5 py-3 text-right" style="color:var(--blue)">Low</th>
+										<th class="w-[12%] px-5 py-3 text-right">Last seen</th>
+									</tr>
+								</thead>
+								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+									{#each filteredImages as img}
+										<tr
+											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+											onclick={() => openImageDrawer(img.digest_id)}
+										>
+											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
+											<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>{img.image}</td>
+											<td class="px-5 py-3">
+												{#if img.digest}
+													<code class="rounded bg-[var(--hover-bg)] px-1.5 py-0.5 text-xs text-[var(--text-secondary)]">{shortDigest(img.digest)}</code>
+												{:else}
+													<span class="text-xs text-[var(--text-muted)]">—</span>
+												{/if}
+											</td>
+											<td class="px-5 py-3 text-right tabular-nums">
+												{#if img.vuln_critical > 0}
+													<span class="inline-flex items-center rounded-full bg-red-500/10 px-2.5 py-0.5 text-xs font-semibold text-red-400">{fmt(img.vuln_critical)}</span>
+												{:else}
+													<span class="text-[var(--text-muted)]">—</span>
+												{/if}
+											</td>
+											<td class="px-5 py-3 text-right tabular-nums">
+												{#if img.vuln_high > 0}
+													<span class="inline-flex items-center rounded-full bg-orange-500/10 px-2.5 py-0.5 text-xs font-semibold text-orange-400">{fmt(img.vuln_high)}</span>
+												{:else}
+													<span class="text-[var(--text-muted)]">—</span>
+												{/if}
+											</td>
+											<td class="px-5 py-3 text-right tabular-nums">
+												{#if img.vuln_medium > 0}
+													<span class="inline-flex items-center rounded-full bg-yellow-500/10 px-2.5 py-0.5 text-xs font-semibold text-yellow-400">{fmt(img.vuln_medium)}</span>
+												{:else}
+													<span class="text-[var(--text-muted)]">—</span>
+												{/if}
+											</td>
+											<td class="px-5 py-3 text-right tabular-nums">
+												{#if img.vuln_low > 0}
+													<span class="inline-flex items-center rounded-full bg-blue-500/10 px-2.5 py-0.5 text-xs font-semibold text-blue-400">{fmt(img.vuln_low)}</span>
+												{:else}
+													<span class="text-[var(--text-muted)]">—</span>
+												{/if}
+											</td>
+											<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]" title={img.last_seen}>
+												{fmtRelative(img.last_seen)}
+											</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					</div>
+
+					{#if imageDrawerOpen && imageDrawerId}
+						<div class="fixed top-2 bottom-2 right-2 z-50 flex w-[620px] flex-col overflow-hidden rounded-[10px] border border-[var(--border-color)] bg-[var(--bg-soft)] shadow-xl">
+							<ImageDrawer imageId={imageDrawerId} onClose={() => { imageDrawerOpen = false; imageDrawerId = ''; }} />
+						</div>
+					{/if}
 				{/if}
 
 			{:else if activeTab === 'vulnerabilities'}
