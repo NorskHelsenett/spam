@@ -13,6 +13,8 @@
 	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
 	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
+	import MultiSelect from '$lib/components/MultiSelect.svelte';
+	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -129,14 +131,32 @@
 	let vulnScrollTop = 0;
 	let vulnViewH = 600;
 
-	// Per-tab search state. Each tab owns its own filter-open toggle + query
-	// so switching tabs doesn't clobber the other's filter.
+	// Per-tab filter state. Each tab owns its own filter-open + per-field
+	// selections so switching tabs doesn't clobber the other's filters.
 	let repoFilterOpen = false;
 	let repoSearch = '';
+	let repoSelectedSeverities: string[] = [];
+	let repoHideClean = false;
+
 	let imageFilterOpen = false;
 	let imageSearch = '';
+	let imageSelectedRegistries: string[] = [];
+	let imageSelectedSeverities: string[] = [];
+
 	let vulnFilterOpen = false;
 	let vulnSearch = '';
+	let vulnSelectedSeverities: string[] = [];
+	let vulnSelectedSources: string[] = [];
+	let vulnSelectedYears: string[] = [];
+	let vulnFixAvailable = false;
+
+	const severityFilterOptions: MultiSelectOption[] = [
+		{ value: 'CRITICAL', label: 'Critical' },
+		{ value: 'HIGH', label: 'High' },
+		{ value: 'MEDIUM', label: 'Medium' },
+		{ value: 'LOW', label: 'Low' },
+		{ value: 'UNKNOWN', label: 'Unknown' },
+	];
 
 	const includesCI = (haystack: string | undefined | null, needle: string) =>
 		(haystack ?? '').toLowerCase().includes(needle.toLowerCase());
@@ -252,6 +272,20 @@
 		let list = hideClean ? images.filter((i) => w(i) > 0) : images.slice();
 		const q = imageSearch.trim();
 		if (q) list = list.filter((i) => includesCI(i.registry, q) || includesCI(i.image, q) || includesCI(i.digest, q) || includesCI(i.tags, q));
+		if (imageSelectedRegistries.length > 0) {
+			const set = new Set(imageSelectedRegistries);
+			list = list.filter((i) => set.has(i.registry || '—'));
+		}
+		if (imageSelectedSeverities.length > 0) {
+			const sevs = new Set(imageSelectedSeverities);
+			list = list.filter((i) =>
+				(sevs.has('CRITICAL') && i.vuln_critical > 0) ||
+				(sevs.has('HIGH') && i.vuln_high > 0) ||
+				(sevs.has('MEDIUM') && i.vuln_medium > 0) ||
+				(sevs.has('LOW') && i.vuln_low > 0) ||
+				(sevs.has('UNKNOWN') && i.vuln_unknown > 0)
+			);
+		}
 		return list.sort((a, b) => w(b) - w(a));
 	})();
 
@@ -261,20 +295,111 @@
 		let list = repos.filter((r) => r.repo_slug !== r.repo_id && r.repo_slug);
 		const q = repoSearch.trim();
 		if (q) list = list.filter((r) => includesCI(r.repo_slug, q));
+		if (repoHideClean) {
+			list = list.filter((r) =>
+				r.critical_count + r.high_count + r.medium_count + r.low_count + r.unknown_count > 0
+			);
+		}
+		if (repoSelectedSeverities.length > 0) {
+			const sevs = new Set(repoSelectedSeverities);
+			list = list.filter((r) =>
+				(sevs.has('CRITICAL') && r.critical_count > 0) ||
+				(sevs.has('HIGH') && r.high_count > 0) ||
+				(sevs.has('MEDIUM') && r.medium_count > 0) ||
+				(sevs.has('LOW') && r.low_count > 0) ||
+				(sevs.has('UNKNOWN') && r.unknown_count > 0)
+			);
+		}
 		return list;
 	})();
 
-	// Vuln table — search across ID, title, package name.
+	// Vuln table — search across ID, title, package name, affected repos.
 	$: filteredVulns = (() => {
+		let list: VulnGroup[] = groupedVulns;
 		const q = vulnSearch.trim();
-		if (!q) return groupedVulns;
-		return groupedVulns.filter((g) =>
-			includesCI(g.vuln_id, q) ||
-			includesCI(g.title, q) ||
-			includesCI(g.pkg_name, q) ||
-			g.repos.some((r) => includesCI(r.repo_slug, q))
-		);
+		if (q) {
+			list = list.filter((g) =>
+				includesCI(g.vuln_id, q) ||
+				includesCI(g.title, q) ||
+				includesCI(g.pkg_name, q) ||
+				g.repos.some((r) => includesCI(r.repo_slug, q))
+			);
+		}
+		if (vulnSelectedSeverities.length > 0) {
+			const sevs = new Set(vulnSelectedSeverities);
+			list = list.filter((g) => sevs.has((g.severity || 'UNKNOWN').toUpperCase()));
+		}
+		if (vulnSelectedSources.length > 0) {
+			const srcs = new Set(vulnSelectedSources);
+			list = list.filter((g) => [...g.sources].some((s) => srcs.has(s)));
+		}
+		if (vulnSelectedYears.length > 0) {
+			const years = new Set(vulnSelectedYears);
+			list = list.filter((g) => {
+				// CVE-YYYY-NNNN or GHSA-xxxx — year is the first 4-digit run,
+				// fallback to "other" when we can't parse one out so the
+				// filter is honest about unknowns.
+				const m = g.vuln_id.match(/(\d{4})/);
+				return years.has(m ? m[1] : 'other');
+			});
+		}
+		if (vulnFixAvailable) list = list.filter((g) => !!g.fixed_version);
+		return list;
 	})();
+
+	// Dynamic MultiSelect options derived from the current data set.
+	$: imageRegistryFilterOptions = [...new Set(images.map((i) => i.registry || '—'))]
+		.sort()
+		.map((r) => ({ value: r, label: r } as MultiSelectOption));
+
+	$: vulnSourceFilterOptions = [...new Set(
+		groupedVulns.flatMap((g) => [...g.sources]).filter(Boolean)
+	)]
+		.sort()
+		.map((s) => ({ value: s, label: s } as MultiSelectOption));
+
+	$: vulnYearFilterOptions = (() => {
+		const years = new Set<string>();
+		for (const g of groupedVulns) {
+			const m = g.vuln_id.match(/(\d{4})/);
+			years.add(m ? m[1] : 'other');
+		}
+		// Descending so newest years are first — matches "what do I need
+		// to fix today" workflow; "other" (unparseable IDs) falls to the end.
+		return [...years]
+			.sort((a, b) => (a === 'other' ? 1 : b === 'other' ? -1 : b.localeCompare(a)))
+			.map((y) => ({ value: y, label: y } as MultiSelectOption));
+	})();
+
+	// Badge counts per tab.
+	$: repoActiveFilterCount =
+		(repoSearch.trim() ? 1 : 0) +
+		(repoHideClean ? 1 : 0) +
+		(repoSelectedSeverities.length > 0 ? 1 : 0);
+
+	$: imageActiveFilterCount =
+		(imageSearch.trim() ? 1 : 0) +
+		(hideClean ? 1 : 0) +
+		(imageSelectedRegistries.length > 0 ? 1 : 0) +
+		(imageSelectedSeverities.length > 0 ? 1 : 0);
+
+	$: vulnActiveFilterCount =
+		(vulnSearch.trim() ? 1 : 0) +
+		(vulnSelectedSeverities.length > 0 ? 1 : 0) +
+		(vulnSelectedSources.length > 0 ? 1 : 0) +
+		(vulnSelectedYears.length > 0 ? 1 : 0) +
+		(vulnFixAvailable ? 1 : 0);
+
+	function clearRepoFilters() {
+		repoSearch = ''; repoSelectedSeverities = []; repoHideClean = false;
+	}
+	function clearImageFilters() {
+		imageSearch = ''; imageSelectedRegistries = []; imageSelectedSeverities = []; hideClean = true;
+	}
+	function clearVulnFilters() {
+		vulnSearch = ''; vulnSelectedSeverities = []; vulnSelectedSources = [];
+		vulnSelectedYears = []; vulnFixAvailable = false;
+	}
 
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
 	$: imageVirt = virtSlice(filteredImages.length, ROW_HEIGHT, imageScrollTop, imageViewH);
@@ -438,7 +563,7 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if repoSearch.trim()}<span class="filter-badge">1</span>{/if}
+						{#if repoActiveFilterCount > 0}<span class="filter-badge">{repoActiveFilterCount}</span>{/if}
 					</button>
 				{:else if activeTab === 'images' && images.length > 0}
 					<button
@@ -451,7 +576,7 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if imageSearch.trim()}<span class="filter-badge">1</span>{/if}
+						{#if imageActiveFilterCount > 0}<span class="filter-badge">{imageActiveFilterCount}</span>{/if}
 					</button>
 				{:else if activeTab === 'vulnerabilities' && groupedVulns.length > 0}
 					<button
@@ -464,49 +589,96 @@
 					>
 						<SlidersHorizontal size={14} />
 						<span>Filters</span>
-						{#if vulnSearch.trim()}<span class="filter-badge">1</span>{/if}
+						{#if vulnActiveFilterCount > 0}<span class="filter-badge">{vulnActiveFilterCount}</span>{/if}
 					</button>
 				{/if}
 			</header>
 
 			{#if activeTab === 'repositories' && repoFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }}>
-					<div class="relative flex items-center">
-						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-						<input
-							type="text"
-							class="filter-search-input"
-							placeholder="Search by repo slug…"
-							bind:value={repoSearch}
-						/>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
+					<div class="flex flex-wrap items-end gap-4">
+						<div class="min-w-[16rem] flex-1">
+							<span class="filter-field-label">Search</span>
+							<div class="relative flex items-center">
+								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+								<input type="text" class="filter-search-input" placeholder="Repo slug…" bind:value={repoSearch} />
+							</div>
+						</div>
+						<div class="min-w-[14rem]">
+							<span class="filter-field-label">Has severity</span>
+							<MultiSelect bind:selected={repoSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
+						</div>
+					</div>
+					<div class="flex items-center justify-between gap-3">
+						<p class="text-xs text-[var(--text-muted)]">Showing {filteredRepos.length} of {repos.length}</p>
+						<div class="flex items-center gap-4">
+							<Toggle bind:checked={repoHideClean} label="Hide clean repos" />
+							{#if repoActiveFilterCount > 0}
+								<button type="button" class="clear-filters-btn" onclick={clearRepoFilters}>Clear all</button>
+							{/if}
+						</div>
 					</div>
 				</div>
 			{:else if activeTab === 'images' && imageFilterOpen}
 				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
-					<div class="relative flex items-center">
-						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-						<input
-							type="text"
-							class="filter-search-input"
-							placeholder="Search registry, image, digest, tag…"
-							bind:value={imageSearch}
-						/>
+					<div class="flex flex-wrap items-end gap-4">
+						<div class="min-w-[16rem] flex-1">
+							<span class="filter-field-label">Search</span>
+							<div class="relative flex items-center">
+								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+								<input type="text" class="filter-search-input" placeholder="Registry, image, digest, tag…" bind:value={imageSearch} />
+							</div>
+						</div>
+						<div class="min-w-[14rem]">
+							<span class="filter-field-label">Registry</span>
+							<MultiSelect bind:selected={imageSelectedRegistries} options={imageRegistryFilterOptions} placeholder="All registries" size="sm" />
+						</div>
+						<div class="min-w-[14rem]">
+							<span class="filter-field-label">Severity</span>
+							<MultiSelect bind:selected={imageSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
+						</div>
 					</div>
 					<div class="flex items-center justify-between gap-3">
 						<p class="text-xs text-[var(--text-muted)]">Showing {filteredImages.length} of {images.length}</p>
-						<Toggle bind:checked={hideClean} label="Hide clean images" />
+						<div class="flex items-center gap-4">
+							<Toggle bind:checked={hideClean} label="Hide clean images" />
+							{#if imageActiveFilterCount > 0}
+								<button type="button" class="clear-filters-btn" onclick={clearImageFilters}>Clear all</button>
+							{/if}
+						</div>
 					</div>
 				</div>
 			{:else if activeTab === 'vulnerabilities' && vulnFilterOpen}
-				<div transition:slide={{ duration: 220, easing: cubicOut }}>
-					<div class="relative flex items-center">
-						<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
-						<input
-							type="text"
-							class="filter-search-input"
-							placeholder="Search CVE id, title, package, repo…"
-							bind:value={vulnSearch}
-						/>
+				<div transition:slide={{ duration: 220, easing: cubicOut }} class="space-y-3">
+					<div class="flex flex-wrap items-end gap-4">
+						<div class="min-w-[18rem] flex-1">
+							<span class="filter-field-label">Search</span>
+							<div class="relative flex items-center">
+								<Search size={13} class="pointer-events-none absolute left-3 text-[var(--text-muted)]" />
+								<input type="text" class="filter-search-input" placeholder="CVE id, title, package, repo…" bind:value={vulnSearch} />
+							</div>
+						</div>
+						<div class="min-w-[12rem]">
+							<span class="filter-field-label">Severity</span>
+							<MultiSelect bind:selected={vulnSelectedSeverities} options={severityFilterOptions} placeholder="Any" size="sm" />
+						</div>
+						<div class="min-w-[12rem]">
+							<span class="filter-field-label">Source</span>
+							<MultiSelect bind:selected={vulnSelectedSources} options={vulnSourceFilterOptions} placeholder="Any" size="sm" />
+						</div>
+						<div class="min-w-[10rem]">
+							<span class="filter-field-label">CVE year</span>
+							<MultiSelect bind:selected={vulnSelectedYears} options={vulnYearFilterOptions} placeholder="Any" size="sm" />
+						</div>
+					</div>
+					<div class="flex items-center justify-between gap-3">
+						<p class="text-xs text-[var(--text-muted)]">Showing {filteredVulns.length} of {groupedVulns.length}</p>
+						<div class="flex items-center gap-4">
+							<Toggle bind:checked={vulnFixAvailable} label="Has fix available" />
+							{#if vulnActiveFilterCount > 0}
+								<button type="button" class="clear-filters-btn" onclick={clearVulnFilters}>Clear all</button>
+							{/if}
+						</div>
 					</div>
 				</div>
 			{/if}
@@ -816,4 +988,31 @@
 		transition: border-color 150ms ease;
 	}
 	.filter-search-input:focus { border-color: var(--accent); }
+
+	.filter-field-label {
+		display: block;
+		font-size: 0.65rem;
+		font-weight: 600;
+		color: var(--text-tertiary);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		padding-left: 0.15rem;
+		margin-bottom: 0.35rem;
+	}
+
+	.clear-filters-btn {
+		font-size: 0.72rem;
+		font-weight: 500;
+		color: var(--text-tertiary);
+		padding: 0.25rem 0.6rem;
+		border-radius: 6px;
+		background: transparent;
+		border: 1px solid transparent;
+		cursor: pointer;
+		transition: color 150ms ease, border-color 150ms ease;
+	}
+	.clear-filters-btn:hover {
+		color: var(--accent);
+		border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+	}
 </style>
