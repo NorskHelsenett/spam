@@ -867,6 +867,9 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		switch source {
 		case "sbom":
 			// Skip manifest_deps CTE entirely – only scan sbom_component_view.
+			// LEFT JOIN on repo_commits so image-bound SBOM components survive
+			// the join; repo_count counts only REPO_COMMIT-bound rows,
+			// image_count only IMAGE_DIGEST-bound rows.
 			query = `
 				WITH sbom_deps AS (
 					SELECT
@@ -875,7 +878,8 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						MIN(NULLIF(split_part(scv.purl, '@', 1), '')) as purl,
 						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
 						COUNT(DISTINCT scv.sbom_id) as sbom_count,
-						COUNT(DISTINCT rc.repo_id) as repo_count
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN rc.repo_id END) as repo_count,
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'IMAGE_DIGEST' THEN scv.asset_ref_id END) as image_count
 					FROM (
 						SELECT
 							COALESCE(s.package_name, s.normalized_name, s.name) as name,
@@ -890,7 +894,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						WHERE s.is_root = false
 						  AND s.purl IS NOT NULL
 					) scv
-					JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
+					LEFT JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
 					WHERE scv.name IS NOT NULL
 			`
 			if parsedSearch.Structured {
@@ -914,7 +918,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			query += `
 					GROUP BY scv.name, scv.ecosystem
 				)
-				SELECT name, ecosystem, purl, 'sbom' AS sources, version_count, sbom_count, repo_count,
+				SELECT name, ecosystem, purl, 'sbom' AS sources, version_count, sbom_count, repo_count, image_count,
 				       false AS has_direct, NULL::text[] AS scopes, COUNT(*) OVER () AS total_count
 				FROM sbom_deps
 			`
@@ -956,13 +960,16 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			query += `
 					GROUP BY md.name, md.ecosystem
 				)
-				SELECT name, ecosystem, NULL AS purl, 'manifest' AS sources, version_count, 0 AS sbom_count, repo_count,
+				SELECT name, ecosystem, NULL AS purl, 'manifest' AS sources, version_count, 0 AS sbom_count, repo_count, 0 AS image_count,
 				       has_direct, scopes, COUNT(*) OVER () AS total_count
 				FROM manifest_deps
 			`
 
 		default:
 			// Both sources (or "both" filter) – FULL OUTER JOIN across all data.
+			// LEFT JOIN on repo_commits so image-bound SBOM components survive
+			// the join; repo_count counts only REPO_COMMIT-bound rows,
+			// image_count only IMAGE_DIGEST-bound rows.
 			query = `
 				WITH sbom_deps AS (
 					SELECT
@@ -972,7 +979,8 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						'sbom' as source,
 						COUNT(DISTINCT COALESCE(scv.version, NULLIF(scv.purl_version, ''), '')) as version_count,
 						COUNT(DISTINCT scv.sbom_id) as sbom_count,
-						COUNT(DISTINCT rc.repo_id) as repo_count
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'REPO_COMMIT' THEN rc.repo_id END) as repo_count,
+						COUNT(DISTINCT CASE WHEN scv.asset_type = 'IMAGE_DIGEST' THEN scv.asset_ref_id END) as image_count
 					FROM (
 						SELECT
 							COALESCE(s.package_name, s.normalized_name, s.name) as name,
@@ -987,7 +995,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						WHERE s.is_root = false
 						  AND s.purl IS NOT NULL
 					) scv
-					JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
+					LEFT JOIN repo_commits rc ON rc.id = scv.asset_ref_id AND scv.asset_type = 'REPO_COMMIT'
 					WHERE scv.name IS NOT NULL
 			`
 			if parsedSearch.Structured {
@@ -1059,6 +1067,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						GREATEST(COALESCE(s.version_count, 0), COALESCE(m.version_count, 0)) as version_count,
 						COALESCE(s.sbom_count, 0) as sbom_count,
 						COALESCE(s.repo_count, m.repo_count, 0) as repo_count,
+						COALESCE(s.image_count, 0) as image_count,
 						COALESCE(m.has_direct, false) as has_direct,
 						m.scopes
 					FROM sbom_deps s
@@ -1066,7 +1075,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						ON s.name = m.name
 						AND s.ecosystem = m.ecosystem
 				)
-				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
+				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, image_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
 			`
 			if source == "both" {
 				query += ` WHERE sources = 'both'`
@@ -1107,7 +1116,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			if err := rows.Scan(
 				&dep.Name, &dep.Ecosystem, &purl,
 				&sources, &dep.VersionCount,
-				&dep.SBOMCount, &dep.RepoCount,
+				&dep.SBOMCount, &dep.RepoCount, &dep.ImageCount,
 				&dep.HasDirect, &scopes, &total,
 			); err != nil {
 				log.Printf("scan error: %v", err)
@@ -1129,17 +1138,12 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			}
 
 			dep.Sources = []string{sources}
+			if dep.ImageCount > 0 {
+				// Surface 'image' as a secondary source so the UI badge row
+				// can render a container icon alongside the primary source.
+				dep.Sources = append(dep.Sources, "image")
+			}
 			deps = append(deps, dep)
-		}
-
-		// Enrich with per-component image counts. Image-sourced SBOM
-		// components already live in sbom_component_view alongside
-		// repo-sourced ones; a small secondary aggregate tells us how many
-		// distinct image digests carry each (name, ecosystem) that's
-		// already in the result set. Keeping this as a second query avoids
-		// invasive surgery on the FULL OUTER JOIN above.
-		if len(deps) > 0 {
-			enrichWithImageCounts(r.Context(), db, deps)
 		}
 
 		totalPages := int(total) / perPage
@@ -1155,52 +1159,6 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			PerPage:      perPage,
 			TotalPages:   totalPages,
 		})
-	}
-}
-
-// enrichWithImageCounts fills UnifiedDependency.ImageCount in place. The
-// query buckets distinct image_digest asset refs per (name, ecosystem) and
-// joins to the passed-in rows. Only components already in deps get a
-// non-zero count — image-only components are intentionally NOT added here,
-// since /app/components is framed around "things repos depend on" and
-// flooding the list with OS packages from alpine base images would be
-// noise. That data is still reachable via /app/runs/{id} and
-// /app/clusters.
-func enrichWithImageCounts(ctx context.Context, db *gorm.DB, deps []UnifiedDependency) {
-	type row struct {
-		Name       string
-		Ecosystem  string
-		ImageCount int `gorm:"column:image_count"`
-	}
-	var rows []row
-	err := db.WithContext(ctx).Raw(`
-		SELECT
-			COALESCE(s.package_name, s.normalized_name, s.name) AS name,
-			s.kind AS ecosystem,
-			COUNT(DISTINCT s.asset_ref_id) AS image_count
-		FROM sbom_component_view s
-		WHERE s.is_root = false
-		  AND s.purl IS NOT NULL
-		  AND s.asset_type = 'IMAGE_DIGEST'
-		  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
-		GROUP BY 1, 2
-	`).Scan(&rows).Error
-	if err != nil {
-		log.Printf("enrichWithImageCounts: %v", err)
-		return
-	}
-	index := make(map[string]int, len(rows))
-	for _, r := range rows {
-		index[r.Name+"\x00"+r.Ecosystem] = r.ImageCount
-	}
-	for i := range deps {
-		if c := index[deps[i].Name+"\x00"+deps[i].Ecosystem]; c > 0 {
-			deps[i].ImageCount = c
-			// Promote 'image' into the sources list so the UI can render
-			// a third badge. Existing sources[0] ("sbom"/"manifest"/"both")
-			// stays first for back-compat.
-			deps[i].Sources = append(deps[i].Sources, "image")
-		}
 	}
 }
 
@@ -1226,7 +1184,7 @@ type DependencyVersionInfo struct {
 
 // DependencyAsset describes where a dependency is used (from SBOM or manifest)
 type DependencyAsset struct {
-	AssetType       string  `json:"asset_type"` // "REPO_COMMIT" only for now
+	AssetType       string  `json:"asset_type"` // "REPO_COMMIT" or "IMAGE_DIGEST"
 	RepoID          string  `json:"repo_id,omitempty"`
 	Provider        string  `json:"provider,omitempty"`
 	ProviderID      string  `json:"provider_id,omitempty"`
@@ -1234,6 +1192,10 @@ type DependencyAsset struct {
 	Org             string  `json:"org,omitempty"`
 	Slug            string  `json:"slug,omitempty"`
 	CommitSHA       *string `json:"commit_sha,omitempty"`
+	ImageID         string  `json:"image_id,omitempty"`
+	ImageRegistry   string  `json:"image_registry,omitempty"`
+	ImageRepository string  `json:"image_repository,omitempty"`
+	ImageDigest     string  `json:"image_digest,omitempty"`
 	Version         string  `json:"version"`
 	Source          string  `json:"source"` // "sbom" or "manifest"
 	ManifestPath    *string `json:"manifest_path,omitempty"`
@@ -1279,28 +1241,38 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
-		// Aggregate versions from both SBOM and manifest sources.
+		// Aggregate versions from both SBOM (repo + image) and manifest sources.
 		// purl_base is computed once in the sbom_versions CTE and projected via MIN() OVER ()
 		// to avoid a second round-trip for the PURL lookup.
 		versionsQuery := `
-			WITH sbom_versions AS (
+			WITH sbom_rows AS (
 				SELECT
 					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
-					COUNT(DISTINCT s.asset_ref_id) as repo_count,
-					MIN(NULLIF(split_part(s.purl, '@', 1), '')) as purl_base,
-					MIN(NULLIF(s.licenses, '')) as licenses,
-					'sbom' as source
+					s.asset_type,
+					s.asset_ref_id,
+					NULLIF(split_part(s.purl, '@', 1), '') as purl_base,
+					NULLIF(s.licenses, '') as licenses
 				FROM sbom_component_view s
 				WHERE s.is_root = false
 				  AND s.purl IS NOT NULL
 				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
-				  AND s.asset_type = 'REPO_COMMIT'
-				GROUP BY COALESCE(s.version, NULLIF(s.purl_version, ''), '')
+			),
+			sbom_versions AS (
+				SELECT
+					version,
+					COUNT(DISTINCT CASE WHEN asset_type = 'REPO_COMMIT' THEN asset_ref_id END) as repo_count,
+					COUNT(DISTINCT CASE WHEN asset_type = 'IMAGE_DIGEST' THEN asset_ref_id END) as image_count,
+					MIN(purl_base) as purl_base,
+					MIN(licenses) as licenses,
+					'sbom' as source
+				FROM sbom_rows
+				GROUP BY version
 			),
 			manifest_versions AS (
 				SELECT
 					md.version,
 					COUNT(DISTINCT m.repo_id) as repo_count,
+					0 as image_count,
 					NULL::text as purl_base,
 					NULL::text as licenses,
 					'manifest' as source
@@ -1313,6 +1285,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				SELECT
 					COALESCE(s.version, m.version) as version,
 					COALESCE(s.repo_count, 0) + COALESCE(m.repo_count, 0) as repo_count,
+					COALESCE(s.image_count, 0) as image_count,
 					CASE
 						WHEN s.version IS NOT NULL AND m.version IS NOT NULL THEN 'both'
 						WHEN s.version IS NOT NULL THEN 'sbom'
@@ -1323,9 +1296,11 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				FROM sbom_versions s
 				FULL OUTER JOIN manifest_versions m ON s.version = m.version
 			)
-			SELECT version, repo_count, sources, MIN(purl_base) OVER () AS overall_purl, MIN(NULLIF(licenses, '')) OVER () AS overall_licenses
+			SELECT version, repo_count, image_count, sources,
+			       MIN(purl_base) OVER () AS overall_purl,
+			       MIN(NULLIF(licenses, '')) OVER () AS overall_licenses
 			FROM merged_versions
-			ORDER BY repo_count DESC, version DESC
+			ORDER BY (repo_count + image_count) DESC, version DESC
 			LIMIT 100
 		`
 
@@ -1338,18 +1313,21 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 		versions := make([]DependencyVersionInfo, 0)
 		totalRepoCount := 0
+		totalImageCount := 0
 		var overallPURL sql.NullString
 		var overallLicenses sql.NullString
 		for rows.Next() {
 			var v DependencyVersionInfo
+			var imageCount int
 			var sources string
-			if err := rows.Scan(&v.Version, &v.RepoCount, &sources, &overallPURL, &overallLicenses); err != nil {
+			if err := rows.Scan(&v.Version, &v.RepoCount, &imageCount, &sources, &overallPURL, &overallLicenses); err != nil {
 				log.Printf("version scan error: %v", err)
 				continue
 			}
 			v.Sources = []string{sources}
 			versions = append(versions, v)
 			totalRepoCount += v.RepoCount
+			totalImageCount += imageCount
 		}
 
 		// Determine sources from versions
@@ -1400,7 +1378,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			PURL:         overallPURL.String,
 			VersionCount: len(versions),
 			RepoCount:    totalRepoCount,
-			ImageCount:   0, // Images only from SBOMs, we can calculate this if needed
+			ImageCount:   totalImageCount,
 			Sources:      sources,
 			Versions:     versions,
 			Licenses:     licenses,
@@ -1459,12 +1437,16 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 						r.slug,
 						r.provider_instance_id,
 						rc.commit_sha,
+						NULL::text as image_id,
+						NULL::text as image_registry,
+						NULL::text as image_repository,
+						NULL::text as image_digest,
 						COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
 						'sbom' as source,
-						NULL as manifest_path,
-						NULL as manifest_type,
+						NULL::text as manifest_path,
+						NULL::text as manifest_type,
 						false as direct,
-						NULL as scope,
+						NULL::text as scope,
 						sb.created_at
 					FROM sbom_component_view s
 					JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
@@ -1489,6 +1471,50 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			`
 			cteParts = append(cteParts, sbomCTE)
 			selectParts = append(selectParts, `SELECT * FROM sbom_assets`)
+
+			imageCTE := `
+				image_assets AS (
+					SELECT DISTINCT
+						'IMAGE_DIGEST' as asset_type,
+						NULL::text as repo_id,
+						NULL::text as provider,
+						NULL::text as org,
+						NULL::text as slug,
+						NULL::text as provider_instance_id,
+						NULL::text as commit_sha,
+						id.id::text as image_id,
+						id.registry as image_registry,
+						id.repository as image_repository,
+						id.digest as image_digest,
+						COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+						'sbom' as source,
+						NULL::text as manifest_path,
+						NULL::text as manifest_type,
+						false as direct,
+						NULL::text as scope,
+						sb.created_at
+					FROM sbom_component_view s
+					JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+					  AND sb.asset_type = 'IMAGE_DIGEST'
+					  AND sb.asset_ref_id = s.asset_ref_id
+					JOIN image_digests id ON id.id = sb.asset_ref_id
+					WHERE s.is_root = false
+					  AND s.purl IS NOT NULL
+					  AND s.kind = ?
+					  AND COALESCE(s.package_name, s.normalized_name, s.name) = ?
+			`
+			args = append(args, ecosystem, name)
+			if len(versions) > 0 {
+				imageCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') IN (` + inPlaceholders(len(versions)) + `)`
+				for _, v := range versions {
+					args = append(args, v)
+				}
+			}
+			imageCTE += `
+				)
+			`
+			cteParts = append(cteParts, imageCTE)
+			selectParts = append(selectParts, `SELECT * FROM image_assets`)
 		}
 
 		if source == "" || source == "manifest" {
@@ -1501,7 +1527,11 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 						r.org,
 						r.slug,
 						r.provider_instance_id,
-						'' as commit_sha,
+						''::text as commit_sha,
+						NULL::text as image_id,
+						NULL::text as image_registry,
+						NULL::text as image_repository,
+						NULL::text as image_digest,
 						md.version,
 						'manifest' as source,
 						m.path as manifest_path,
@@ -1554,12 +1584,16 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			)
 			SELECT
 				ca.asset_type,
-				ca.repo_id,
-				COALESCE(pi.display_name, ca.provider) as provider,
-				ca.provider_instance_id as provider_id,
-				ca.org,
-				ca.slug,
+				COALESCE(ca.repo_id, '') as repo_id,
+				COALESCE(pi.display_name, ca.provider, '') as provider,
+				COALESCE(ca.provider_instance_id, '') as provider_id,
+				COALESCE(ca.org, '') as org,
+				COALESCE(ca.slug, '') as slug,
 				ca.commit_sha,
+				COALESCE(ca.image_id, '') as image_id,
+				COALESCE(ca.image_registry, '') as image_registry,
+				COALESCE(ca.image_repository, '') as image_repository,
+				COALESCE(ca.image_digest, '') as image_digest,
 				ca.version,
 				ca.source,
 				ca.manifest_path,
@@ -1589,7 +1623,8 @@ func DependencyAssetsHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 			if err := rows.Scan(
 				&a.AssetType, &a.RepoID, &a.Provider, &a.ProviderID, &a.Org, &a.Slug,
-				&commitSHA, &a.Version, &a.Source, &manifestPath,
+				&commitSHA, &a.ImageID, &a.ImageRegistry, &a.ImageRepository, &a.ImageDigest,
+				&a.Version, &a.Source, &manifestPath,
 				&manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
 			); err != nil {
 				log.Printf("asset scan error: %v", err)
