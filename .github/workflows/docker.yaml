@@ -80,11 +80,14 @@ jobs:
           echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to container registry
-        uses: redhat-actions/podman-login@v1
-        with:
-          registry: ${{ env.REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+        # podman isn't installed inside this runner container, but buildah
+        # is — and they write the same auth.json so the next buildah build
+        # / push sees the creds automatically.
+        run: |
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
+            --username "${{ github.actor }}" \
+            --password-stdin \
+            "${{ env.REGISTRY_HOST }}"
 
       - name: Build image with Buildah
         uses: redhat-actions/buildah-build@v2
@@ -102,12 +105,24 @@ jobs:
             --layers
 
       - name: Push to container registry
-        uses: redhat-actions/push-to-registry@v2
+        # push-to-registry uses `podman push` under the hood, which we
+        # don't have in this runner container. buildah push does the same
+        # thing and emits the pushed manifest digest via --digestfile.
         id: push
-        with:
-          image: ${{ env.REPOSITORY_LOWER }}
-          tags: ${{ steps.bare-tags.outputs.tags }}
-          registry: ${{ env.REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          digest=""
+          for tag in ${{ steps.bare-tags.outputs.tags }}; do
+            digestfile=$(mktemp)
+            buildah push \
+              --digestfile "$digestfile" \
+              "${{ env.REPOSITORY_LOWER }}:$tag" \
+              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}:$tag"
+            digest=$(cat "$digestfile")
+            rm -f "$digestfile"
+          done
+          # All tags point at the same manifest, so any one digest is THE digest.
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-runner:
     runs-on: ubuntu-latest
@@ -160,11 +175,14 @@ jobs:
           echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner" >> "$GITHUB_OUTPUT"
 
       - name: Log in to container registry
-        uses: redhat-actions/podman-login@v1
-        with:
-          registry: ${{ env.REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+        # podman isn't installed inside this runner container, but buildah
+        # is — and they write the same auth.json so the next buildah build
+        # / push sees the creds automatically.
+        run: |
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
+            --username "${{ github.actor }}" \
+            --password-stdin \
+            "${{ env.REGISTRY_HOST }}"
 
       - name: Build runner image with Buildah
         uses: redhat-actions/buildah-build@v2
@@ -182,12 +200,20 @@ jobs:
             --layers
 
       - name: Push runner to container registry
-        uses: redhat-actions/push-to-registry@v2
         id: push
-        with:
-          image: ${{ env.REPOSITORY_LOWER }}/runner
-          tags: ${{ steps.bare-tags.outputs.tags }}
-          registry: ${{ env.REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          digest=""
+          for tag in ${{ steps.bare-tags.outputs.tags }}; do
+            digestfile=$(mktemp)
+            buildah push \
+              --digestfile "$digestfile" \
+              "${{ env.REPOSITORY_LOWER }}/runner:$tag" \
+              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:$tag"
+            digest=$(cat "$digestfile")
+            rm -f "$digestfile"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-sbom-scanner:
     runs-on: ubuntu-latest
@@ -240,11 +266,14 @@ jobs:
           echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner" >> "$GITHUB_OUTPUT"
 
       - name: Log in to container registry
-        uses: redhat-actions/podman-login@v1
-        with:
-          registry: ${{ env.REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+        # podman isn't installed inside this runner container, but buildah
+        # is — and they write the same auth.json so the next buildah build
+        # / push sees the creds automatically.
+        run: |
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
+            --username "${{ github.actor }}" \
+            --password-stdin \
+            "${{ env.REGISTRY_HOST }}"
 
       - name: Build sbom-scanner image with Buildah
         uses: redhat-actions/buildah-build@v2
@@ -262,12 +291,20 @@ jobs:
             --layers
 
       - name: Push sbom-scanner to container registry
-        uses: redhat-actions/push-to-registry@v2
         id: push
-        with:
-          image: ${{ env.REPOSITORY_LOWER }}/sbom-scanner
-          tags: ${{ steps.bare-tags.outputs.tags }}
-          registry: ${{ env.REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          digest=""
+          for tag in ${{ steps.bare-tags.outputs.tags }}; do
+            digestfile=$(mktemp)
+            buildah push \
+              --digestfile "$digestfile" \
+              "${{ env.REPOSITORY_LOWER }}/sbom-scanner:$tag" \
+              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/sbom-scanner:$tag"
+            digest=$(cat "$digestfile")
+            rm -f "$digestfile"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   build-image-scanner:
     runs-on: ubuntu-latest
@@ -320,11 +357,14 @@ jobs:
           echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner" >> "$GITHUB_OUTPUT"
 
       - name: Log in to container registry
-        uses: redhat-actions/podman-login@v1
-        with:
-          registry: ${{ env.REGISTRY_HOST }}
-          username: ${{ github.actor }}
-          password: ${{ env.REGISTRY_ACCESS_TOKEN }}
+        # podman isn't installed inside this runner container, but buildah
+        # is — and they write the same auth.json so the next buildah build
+        # / push sees the creds automatically.
+        run: |
+          echo "${{ env.REGISTRY_ACCESS_TOKEN }}" | buildah login \
+            --username "${{ github.actor }}" \
+            --password-stdin \
+            "${{ env.REGISTRY_HOST }}"
 
       - name: Build image-scanner image with Buildah
         uses: redhat-actions/buildah-build@v2
@@ -342,12 +382,20 @@ jobs:
             --layers
 
       - name: Push image-scanner to container registry
-        uses: redhat-actions/push-to-registry@v2
         id: push
-        with:
-          image: ${{ env.REPOSITORY_LOWER }}/image-scanner
-          tags: ${{ steps.bare-tags.outputs.tags }}
-          registry: ${{ env.REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          digest=""
+          for tag in ${{ steps.bare-tags.outputs.tags }}; do
+            digestfile=$(mktemp)
+            buildah push \
+              --digestfile "$digestfile" \
+              "${{ env.REPOSITORY_LOWER }}/image-scanner:$tag" \
+              "docker://${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/image-scanner:$tag"
+            digest=$(cat "$digestfile")
+            rm -f "$digestfile"
+          done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
   deploy-helm:
     runs-on: ubuntu-latest
