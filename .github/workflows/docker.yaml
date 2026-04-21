@@ -54,8 +54,11 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -141,8 +144,11 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -227,8 +233,11 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -314,8 +323,11 @@ jobs:
               type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
               type=raw,value=dev,enable=${{ github.ref != format('refs/heads/{0}', 'main') }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # QEMU is only needed for cross-arch emulation. All four images
+      # currently build linux/amd64 only, so setting it up just burns
+      # a minute of CI per job. Re-enable if we add an arm64 target.
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
