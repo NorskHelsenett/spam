@@ -817,7 +817,7 @@
 						</div>
 					{/if}
 
-					<div class="overflow-auto" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
+					<div class="overflow-auto [overflow-anchor:none]" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
@@ -832,15 +832,15 @@
 								</tr>
 							</thead>
 							<tbody class="text-[var(--text-secondary)]">
-								{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="7"></td></tr>{/if}
+								{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="8"></td></tr>{/if}
 								{#each sortedImages.slice(imageVirt.start, imageVirt.end) as img}
 									<tr
 										class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
 										style="height:{ROW_HEIGHT}px"
 										onclick={() => { if (img.digest_id) openImageDrawer(img.digest_id); }}
 									>
-										<td class="px-5 py-3 text-xs text-[var(--text-tertiary)]">{img.registry}</td>
-										<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">
+										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
+										<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>
 											{#if img.digest_id}
 												<a class="hover:text-[var(--accent)] hover:underline" href={`/app/images/${img.digest_id}`} onclick={(e) => e.stopPropagation()}>{img.image}</a>
 											{:else}
@@ -885,7 +885,7 @@
 										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(img.last_seen, tick)}</td>
 									</tr>
 								{/each}
-								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="7"></td></tr>{/if}
+								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="8"></td></tr>{/if}
 							</tbody>
 						</table>
 					</div>
