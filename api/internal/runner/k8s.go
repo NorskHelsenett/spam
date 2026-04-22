@@ -135,8 +135,8 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 	// as an orphaned resource. ReleaseName/ChartName come from Helm via
 	// SPAM_RELEASE_NAME / SPAM_CHART_NAME env vars.
 	runLabels := map[string]string{
-		"app.kubernetes.io/name":      "spam-runner",
-		"app.kubernetes.io/component": "runner",
+		"app.kubernetes.io/name":      "spam-repo-runner",
+		"app.kubernetes.io/component": "repo-runner",
 		"spam.io/run-id":              runID,
 	}
 	if k.cfg.ReleaseName != "" {

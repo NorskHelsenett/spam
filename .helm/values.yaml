@@ -358,13 +358,15 @@ worker:
     #   memory: 128Mi
 
 # Runner configuration
-# The runner executes scans (SBOM generation, secret scanning) in Kubernetes jobs
+# repo-runner: clones a repo in a K8s Job and produces artifacts —
+# syft-generated SBOM, betterleaks secret scan, dependency manifests.
+# (sbom-scanner / image-scanner handle the vuln side; see their blocks.)
 runner:
   enabled: false
 
-  # Runner container image
+  # repo-runner container image
   image:
-    repository: spam-runner
+    repository: spam-repo-runner
     tag: latest
     pullPolicy: IfNotPresent
 

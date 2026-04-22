@@ -21,8 +21,8 @@ else
 fi
 
 echo "Using container runtime: $CONTAINER_CMD"
-echo "Building runner image..."
-$CONTAINER_CMD build --build-arg TARGETARCH=amd64 -t spam-runner:local "$SCRIPT_DIR"
+echo "Building repo-runner image..."
+$CONTAINER_CMD build --build-arg TARGETARCH=amd64 -f "$SCRIPT_DIR/Dockerfile.repo-runner" -t spam-repo-runner:local "$SCRIPT_DIR"
 
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
@@ -50,7 +50,7 @@ $CONTAINER_CMD run --rm \
     -e OUTPUT_DIR="/output" \
     ${REPO_REF:+-e REPO_REF="$REPO_REF"} \
     -v "$OUTPUT_DIR:/output${VOLUME_OPTS}" \
-    spam-runner:local
+    spam-repo-runner:local
 
 echo ""
 echo "=========================================="
