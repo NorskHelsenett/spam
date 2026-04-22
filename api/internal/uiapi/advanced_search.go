@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -529,9 +530,15 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 
 // AdvancedSearchHandler runs cross-domain searches over repo metadata and artifacts.
 // GET /api/search/advanced?q=<query>&target=<all|repo|commit|language|contributor|readme|manifest|sbom|secret>
+//
+// Phase 3 gate: admin or wildcard-grant callers only. Scoped search
+// across repo / cluster / image / secret targets is a follow-up.
 func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		if !requireUnrestrictedRepos(w, r) {
 			return
 		}
 
@@ -640,6 +647,17 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 		}
 		if _, ok := advancedSearchTargets[targetType]; !ok {
 			http.Error(w, "unsupported type", http.StatusBadRequest)
+			return
+		}
+		// Gate by repo ACL when the preview is about a repo-bound
+		// artifact. No repo_id present → admin-only.
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/manifests"
@@ -45,6 +46,18 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		repoID := r.URL.Query().Get("repo_id")
 		runID := r.URL.Query().Get("run_id")
 
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		}
+		readable, unrestricted, err := readableRepoIDSet(r, db)
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+
 		// Count total
 		var total int64
 		countQuery := db.WithContext(r.Context()).Model(&manifests.Manifest{})
@@ -53,6 +66,19 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		}
 		if runID != "" {
 			countQuery = countQuery.Where("run_id = ?", runID)
+		}
+		if !unrestricted {
+			if len(readable) == 0 {
+				writeJSON(w, http.StatusOK, ManifestsListResponse{
+					Manifests: []ManifestSummary{}, Total: 0, Page: page, PerPage: perPage, TotalPages: 0,
+				})
+				return
+			}
+			ids := make([]string, 0, len(readable))
+			for id := range readable {
+				ids = append(ids, id)
+			}
+			countQuery = countQuery.Where("repo_id IN ?", ids)
 		}
 		if err := countQuery.Count(&total).Error; err != nil {
 			log.Printf("manifests count error: %v", err)
@@ -67,13 +93,25 @@ func ManifestsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			LEFT JOIN manifest_dependencies d ON d.manifest_id = m.id
 		`
 		args := []interface{}{}
-		whereClause := ""
+		var wheres []string
 		if repoID != "" {
-			whereClause = " WHERE m.repo_id = ?"
+			wheres = append(wheres, "m.repo_id = ?")
 			args = append(args, repoID)
 		} else if runID != "" {
-			whereClause = " WHERE m.run_id = ?"
+			wheres = append(wheres, "m.run_id = ?")
 			args = append(args, runID)
+		}
+		if !unrestricted {
+			ids := make([]string, 0, len(readable))
+			for id := range readable {
+				ids = append(ids, id)
+			}
+			wheres = append(wheres, "m.repo_id IN ?")
+			args = append(args, ids)
+		}
+		whereClause := ""
+		if len(wheres) > 0 {
+			whereClause = " WHERE " + strings.Join(wheres, " AND ")
 		}
 		query += whereClause + " GROUP BY m.id ORDER BY m.created_at DESC LIMIT ? OFFSET ?"
 
@@ -129,7 +167,11 @@ func ManifestGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 
 		var manifest manifests.Manifest
 		if err := db.WithContext(r.Context()).Where("id = ?", manifestID).First(&manifest).Error; err != nil {
-			http.Error(w, "manifest not found", http.StatusNotFound)
+			notFoundOrForbidden(w)
+			return
+		}
+		if ok, err := canReadRepoByID(r, db, manifest.RepoID); err != nil || !ok {
+			notFoundOrForbidden(w)
 			return
 		}
 
@@ -167,13 +209,32 @@ func DependencySearchHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
-		// Search dependencies
+		// Search dependencies, constrained to manifests from readable
+		// repos. Admins and wildcard-grant callers skip the restrict
+		// subquery; others see only their scope.
 		dbQuery := db.WithContext(r.Context()).
 			Model(&manifests.ManifestDependency{}).
 			Where("name ILIKE ?", "%"+query+"%")
 
 		if ecosystem != "" {
 			dbQuery = dbQuery.Where("ecosystem = ?", ecosystem)
+		}
+
+		readable, unrestricted, err := readableRepoIDSet(r, db)
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		if !unrestricted {
+			if len(readable) == 0 {
+				json.NewEncoder(w).Encode([]manifests.ManifestDependency{})
+				return
+			}
+			ids := make([]string, 0, len(readable))
+			for id := range readable {
+				ids = append(ids, id)
+			}
+			dbQuery = dbQuery.Where("manifest_id IN (SELECT id FROM manifests WHERE repo_id IN ?)", ids)
 		}
 
 		var deps []manifests.ManifestDependency

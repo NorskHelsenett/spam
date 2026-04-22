@@ -68,6 +68,65 @@ func notFoundOrForbidden(w http.ResponseWriter) {
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
+// requireUnrestrictedRepos is the gate for aggregate handlers whose
+// queries are too tangled to retrofit ACL filtering into. Returns true
+// only for admins and callers with a wildcard repo grant (e.g. the
+// grandfathered global_reader migration row). Restricted callers get
+// 404 so existence of aggregate data isn't leaked.
+//
+// This is a deliberately narrow allow-list: anyone who'd have seen the
+// aggregate under the pre-ACL model still sees it today, but users
+// with genuinely scoped grants don't. Tighter per-subject scoping is
+// a post-Phase-3 follow-up.
+func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin {
+		return true
+	}
+	patterns, err := acl.ProviderFromRequest(r).Grants(r.Context(), subj, acl.ScopeRepo)
+	if err != nil {
+		http.Error(w, "failed to scope results", http.StatusInternalServerError)
+		return false
+	}
+	for _, p := range patterns {
+		if p.IsWildcard() {
+			return true
+		}
+	}
+	notFoundOrForbidden(w)
+	return false
+}
+
+// dependencyACLFragments compiles the readable-repo set into three
+// WHERE fragments the dependency detail query needs:
+//
+//   - sbomRepoFilter    : applied where asset_type = 'REPO_COMMIT'. Matches
+//                         when the repo_commit's repo is readable.
+//   - sbomImageFilter   : applied where asset_type = 'IMAGE_DIGEST'. Matches
+//                         when the image has verified_source=true AND its
+//                         source_repo_id is readable.
+//   - manifestFilter    : applied on the manifests → repos relation.
+//
+// For unrestricted callers all three collapse to TRUE with no args.
+// For restricted callers with no readable repos all three collapse to
+// FALSE (and thus no rows).
+func dependencyACLFragments(unrestricted bool, readableIDs []string) (string, []any, string, []any, string, []any) {
+	if unrestricted {
+		return "TRUE", nil, "TRUE", nil, "TRUE", nil
+	}
+	if len(readableIDs) == 0 {
+		return "FALSE", nil, "FALSE", nil, "FALSE", nil
+	}
+	// Each fragment needs its own args slice since we splice them
+	// in at different positions in the query arg list.
+	repoCommitFilter := "s.asset_ref_id IN (SELECT rc.id FROM repo_commits rc WHERE rc.repo_id IN ?)"
+	imageDigestFilter := "s.asset_ref_id IN (SELECT d.id FROM image_digests d WHERE d.verified_source = true AND d.source_repo_id IN ?)"
+	manifestRepoFilter := "m.repo_id IN ?"
+	return repoCommitFilter, []any{readableIDs},
+		imageDigestFilter, []any{readableIDs},
+		manifestRepoFilter, []any{readableIDs}
+}
+
 // readableRepoIDSet returns the set of repo IDs the subject can see,
 // plus a bool indicating "unrestricted" (admin or wildcard grant).
 // When unrestricted is true, callers may skip post-filtering.

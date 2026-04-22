@@ -96,6 +96,12 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
+		// Cross-repo aggregate — admin or wildcard grant only in
+		// Phase 3. Narrow grants fall through to 404 until a
+		// per-subject scoped recomputation lands.
+		if !requireUnrestrictedRepos(w, r) {
+			return
+		}
 
 		watermark := appSummaryWatermark(r.Context(), db)
 

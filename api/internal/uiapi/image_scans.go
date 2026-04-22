@@ -833,10 +833,37 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 			Where("id = ? AND scan_run_id = ?", artifactID, jobID).
 			First(&art).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				http.Error(w, "artifact not found", http.StatusNotFound)
+				notFoundOrForbidden(w)
 				return
 			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Gate by source-repo ACL with the verified_source rule: an
+		// admin or a reader of the source repo can fetch the artifact
+		// only when the image's claimed repo binding is signed.
+		var img struct {
+			SourceRepoID   string
+			VerifiedSource bool
+		}
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT d.source_repo_id, d.verified_source
+			FROM image_digests d
+			JOIN jobs j ON j.payload->>'image_digest_id' = d.id
+			WHERE j.id = ?
+			LIMIT 1
+		`, jobID).Scan(&img).Error; err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if img.VerifiedSource && img.SourceRepoID != "" {
+			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 

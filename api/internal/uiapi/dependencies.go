@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -48,6 +49,18 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		}
+		repoClause, err := acl.ReadableRepoClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		aclSQL, aclArgs := aclWhereFragment(repoClause)
 
 		query := `
 			WITH sbom_rows AS (
@@ -114,10 +127,10 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 			FROM merged
 			LEFT JOIN repos r ON r.id = merged.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-			WHERE 1=1
-		`
+			WHERE ` + aclSQL
 
 		args := []interface{}{}
+		args = append(args, aclArgs...)
 		if parsedSearch.Structured {
 			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
 			if predicate != "" {
@@ -219,6 +232,18 @@ func DependencyExportFullCSVHandler(db *gorm.DB, authService *auth.Service) http
 			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		}
+		repoClause, err := acl.ReadableRepoClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		aclSQL, aclArgs := aclWhereFragment(repoClause)
 
 		query := `
 			WITH sbom_rows AS (
@@ -287,10 +312,10 @@ func DependencyExportFullCSVHandler(db *gorm.DB, authService *auth.Service) http
 			FROM merged
 			LEFT JOIN repos r ON r.id = merged.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-			WHERE 1=1
-		`
+			WHERE ` + aclSQL
 
 		args := []interface{}{}
+		args = append(args, aclArgs...)
 		if parsedSearch.Structured {
 			predicate, predicateArgs := buildStructuredDependencyPredicate("merged.component_name", "merged.version", parsedSearch.Groups)
 			if predicate != "" {
@@ -427,6 +452,32 @@ func DependencyDetailExportCSVHandler(db *gorm.DB, authService *auth.Service) ht
 			log.Printf("dependency detail export query error: %v", err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
+		}
+
+		// Post-filter by readable repos. Image-bound rows (AssetType
+		// 'IMAGE_DIGEST') are kept only when their image's
+		// source_repo_id is readable AND verified_source is true; any
+		// asset with an unresolved RepoID falls back to admin-only.
+		readable, unrestricted, err := readableRepoIDSet(r, db)
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		isAdmin := acl.SubjectFromRequest(r).IsAdmin
+		if !unrestricted {
+			filtered := assets[:0]
+			for _, a := range assets {
+				if a.RepoID == "" {
+					if isAdmin {
+						filtered = append(filtered, a)
+					}
+					continue
+				}
+				if _, ok := readable[a.RepoID]; ok {
+					filtered = append(filtered, a)
+				}
+			}
+			assets = filtered
 		}
 
 		repoIDs := make([]string, 0, len(assets))
@@ -1253,6 +1304,21 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			return
 		}
 
+		// Scope filter: for non-admin / non-wildcard callers the CTEs
+		// below restrict to repos and repo-backed images the caller
+		// can read. For unrestricted callers the filter collapses to
+		// TRUE so the aggregate is unchanged.
+		readable, unrestricted, err := readableRepoIDSet(r, db)
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		readableIDs := make([]string, 0, len(readable))
+		for id := range readable {
+			readableIDs = append(readableIDs, id)
+		}
+		sbomRepoFilter, sbomRepoArgs, sbomImageFilter, sbomImageArgs, manifestFilter, manifestArgs := dependencyACLFragments(unrestricted, readableIDs)
+
 		// Aggregate versions from both SBOM (repo + image) and manifest sources.
 		// purl_base is computed once in the sbom_versions CTE and projected via MIN() OVER ()
 		// to avoid a second round-trip for the PURL lookup.
@@ -1268,6 +1334,11 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				WHERE s.is_root = false
 				  AND s.purl IS NOT NULL
 				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ? AND s.kind = ?
+				  AND (
+				    s.asset_type NOT IN ('REPO_COMMIT','IMAGE_DIGEST')
+				    OR (s.asset_type = 'REPO_COMMIT' AND ` + sbomRepoFilter + `)
+				    OR (s.asset_type = 'IMAGE_DIGEST' AND ` + sbomImageFilter + `)
+				  )
 			),
 			sbom_versions AS (
 				SELECT
@@ -1291,6 +1362,7 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 				FROM manifest_dependencies md
 				JOIN manifests m ON m.id = md.manifest_id
 				WHERE md.name = ? AND md.ecosystem = ?
+				  AND ` + manifestFilter + `
 				GROUP BY md.version
 			),
 			merged_versions AS (
@@ -1316,7 +1388,12 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 			LIMIT 100
 		`
 
-		rows, err := db.WithContext(r.Context()).Raw(versionsQuery, name, ecosystem, name, ecosystem).Rows()
+		args := []any{name, ecosystem}
+		args = append(args, sbomRepoArgs...)
+		args = append(args, sbomImageArgs...)
+		args = append(args, name, ecosystem)
+		args = append(args, manifestArgs...)
+		rows, err := db.WithContext(r.Context()).Raw(versionsQuery, args...).Rows()
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return

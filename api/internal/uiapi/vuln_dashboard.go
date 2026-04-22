@@ -12,9 +12,15 @@ import (
 // VulnSummaryHandler returns overall vulnerability counts and last scan time.
 //
 // GET /api/vuln/summary
+//
+// Cross-repo aggregate: gated to admins + wildcard-grant callers in
+// Phase 3. Narrow-grant callers get 404 until scoped recomputation lands.
 func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		if !requireUnrestrictedRepos(w, r) {
 			return
 		}
 
@@ -118,9 +124,14 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // VulnTrendHandler returns daily aggregate vulnerability counts for the last N days.
 //
 // GET /api/vuln/trend?days=30
+//
+// Cross-repo aggregate: same Phase 3 gate as VulnSummaryHandler.
 func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		if !requireUnrestrictedRepos(w, r) {
 			return
 		}
 

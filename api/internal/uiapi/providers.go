@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
@@ -1100,6 +1101,10 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		repoPath := strings.TrimSpace(r.URL.Query().Get("path"))
 		repoDBID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
 		if repoDBID != "" {
+			if ok, err := canReadRepoByID(r, db, repoDBID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
 			var repoRow struct {
 				ProviderInstanceID string
 				Org                string
@@ -1110,7 +1115,7 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 				Select("provider_instance_id, org, slug").
 				Where("id = ?", repoDBID).
 				First(&repoRow).Error; err != nil {
-				http.Error(w, "repo not found", http.StatusNotFound)
+				notFoundOrForbidden(w)
 				return
 			}
 			// repo_id is canonical; it uniquely identifies the provider instance and repo path.
@@ -1124,6 +1129,20 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		if providerID == "" || repoPath == "" {
 			http.Error(w, "repo_id or provider_id and path are required", http.StatusBadRequest)
 			return
+		}
+		// No repo_id but the caller gave provider+path — resolve to a
+		// repo row and gate if we find one. Unknown paths fall
+		// through so admins can still probe providers directly.
+		if repoDBID == "" {
+			if id := lookupRepoID(r.Context(), db, providerID, repoPath); id != "" {
+				if ok, err := canReadRepoByID(r, db, id); err != nil || !ok {
+					notFoundOrForbidden(w)
+					return
+				}
+			} else if !acl.SubjectFromRequest(r).IsAdmin {
+				notFoundOrForbidden(w)
+				return
+			}
 		}
 
 		var instance struct {
