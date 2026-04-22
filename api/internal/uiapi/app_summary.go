@@ -323,6 +323,27 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 		return resp, err
 	}
 
+	// Backfill component_count for rows where sbom_component_view hasn't
+	// caught up (view is refreshed periodically, so freshly-bound SBOMs show
+	// 0 until then). Parse the raw SBOM content for those — capped to the 8
+	// rows already in RecentSBOMs.
+	for i := range resp.RecentSBOMs {
+		if resp.RecentSBOMs[i].ComponentCount > 0 {
+			continue
+		}
+		var sbom struct {
+			Format       string
+			ContentBytes []byte
+		}
+		if err := db.WithContext(ctx).Table("sboms").
+			Select("format, content_bytes").
+			Where("id = ?", resp.RecentSBOMs[i].SBOMID).
+			First(&sbom).Error; err != nil {
+			continue
+		}
+		resp.RecentSBOMs[i].ComponentCount = sbomComponentCount(ctx, db, resp.RecentSBOMs[i].SBOMID, sbom.Format, sbom.ContentBytes)
+	}
+
 	// Top components by SBOM count
 	if err := db.WithContext(ctx).Raw(`
 		SELECT

@@ -134,6 +134,16 @@ type ImageVulnSeverityCount struct {
 	Total    int `json:"total"`
 }
 
+// pickStartedAt returns the first non-nil pointer. Used to prefer
+// last_attempted_at (preserved across completion) over locked_at (cleared
+// when the job transitions to SUCCEEDED/FAILED) when reporting run start.
+func pickStartedAt(a, b *time.Time) *time.Time {
+	if a != nil {
+		return a
+	}
+	return b
+}
+
 // ImageArtifactSummary is the lightweight descriptor of one scanner output
 // produced by an image scan. Clients render these as cards linking to the
 // raw download; the heavy blob lives in image_scan_artifacts.content and is
@@ -605,17 +615,18 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		var job struct {
-			ID         string
-			Type       string
-			Status     string
-			Payload    []byte
-			Error      string
-			CommitHash string
-			CreatedAt  time.Time
-			LockedAt   *time.Time
-			FinishedAt *time.Time
-			K8sJobName string `gorm:"column:k8s_job_name"`
-			Result     []byte
+			ID              string
+			Type            string
+			Status          string
+			Payload         []byte
+			Error           string
+			CommitHash      string
+			CreatedAt       time.Time
+			LockedAt        *time.Time
+			LastAttemptedAt *time.Time
+			FinishedAt      *time.Time
+			K8sJobName      string `gorm:"column:k8s_job_name"`
+			Result          []byte
 		}
 
 		if err := db.WithContext(r.Context()).Table("jobs").
@@ -681,7 +692,10 @@ func RunGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			CommitSHA:  job.CommitHash,
 			Error:      job.Error,
 			CreatedAt:  job.CreatedAt,
-			StartedAt:  job.LockedAt,
+			// locked_at is cleared when the job completes, so prefer
+			// last_attempted_at which is preserved across the SUCCEEDED/FAILED
+			// transition and matches when the worker picked up the job.
+			StartedAt:  pickStartedAt(job.LastAttemptedAt, job.LockedAt),
 			FinishedAt: job.FinishedAt,
 			K8sJobName: job.K8sJobName,
 		}

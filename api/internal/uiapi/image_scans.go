@@ -19,17 +19,18 @@ import (
 // struct parameter comes from RunGetHandler's local select so we reuse the
 // row without re-querying.
 func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.DB, job struct {
-	ID         string
-	Type       string
-	Status     string
-	Payload    []byte
-	Error      string
-	CommitHash string
-	CreatedAt  time.Time
-	LockedAt   *time.Time
-	FinishedAt *time.Time
-	K8sJobName string `gorm:"column:k8s_job_name"`
-	Result     []byte
+	ID              string
+	Type            string
+	Status          string
+	Payload         []byte
+	Error           string
+	CommitHash      string
+	CreatedAt       time.Time
+	LockedAt        *time.Time
+	LastAttemptedAt *time.Time
+	FinishedAt      *time.Time
+	K8sJobName      string `gorm:"column:k8s_job_name"`
+	Result          []byte
 }, runID string) {
 	var payload jobs.ImageScanPayload
 	if len(job.Payload) > 0 {
@@ -43,7 +44,7 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		RepoPath:        imageRefShortDisplay(payload.Registry, payload.Repository, payload.Digest),
 		Error:           job.Error,
 		CreatedAt:       job.CreatedAt,
-		StartedAt:       job.LockedAt,
+		StartedAt:       pickStartedAt(job.LastAttemptedAt, job.LockedAt),
 		FinishedAt:      job.FinishedAt,
 		ImageRegistry:   payload.Registry,
 		ImageRepository: payload.Repository,
@@ -201,15 +202,20 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		}
 	}
 
-	// SBOM component count (cheap lookup; frontend can hit /api/sboms/{id}
-	// for the full list if the operator wants to drill in).
+	// SBOM component count. Use the helper so newly-created SBOMs have a
+	// non-zero count before the materialized view is next refreshed —
+	// sbomComponentCount falls back to parsing the raw SBOM content when
+	// sbom_component_view has no rows for this id yet.
 	if response.SBOMID != "" {
-		var componentCount int64
-		if err := db.WithContext(r.Context()).
-			Table("sbom_component_view").
-			Where("sbom_id = ? AND is_root = false", response.SBOMID).
-			Count(&componentCount).Error; err == nil {
-			response.SBOMComponentCount = int(componentCount)
+		var sbom struct {
+			Format       string
+			ContentBytes []byte
+		}
+		if err := db.WithContext(r.Context()).Table("sboms").
+			Select("format, content_bytes").
+			Where("id = ?", response.SBOMID).
+			First(&sbom).Error; err == nil {
+			response.SBOMComponentCount = int(sbomComponentCount(r.Context(), db, response.SBOMID, sbom.Format, sbom.ContentBytes))
 		}
 	}
 
