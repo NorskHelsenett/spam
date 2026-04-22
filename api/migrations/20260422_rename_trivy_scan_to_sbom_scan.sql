@@ -6,45 +6,16 @@
 -- repopulates sbom_scan_results from the stored SBOMs (grype doesn't pull
 -- images — just reads SBOM files — so the rescan is cheap).
 --
--- Columns that were trivy-specific are gone:
---   * format              (every row is grype now; no dispatch needed)
---   * schema_version      (trivy's report schema version; not in grype)
---   * artifact_name       (trivy's top-level scan target name; grype puts
---                          the equivalent under source.target)
+-- Creation of the new sbom_scan_leases / sbom_scan_results tables is left
+-- to GORM AutoMigrate (SBOMScanLease / SBOMScanResult in vulnerabilities/
+-- scan.go) — that runs before this migration, so by the time we get here
+-- the new tables already exist. This file only needs to drop the legacy
+-- trivy tables and rebuild the unified-vulnerabilities view around the
+-- new table + grype JSON shape.
 
 DROP VIEW IF EXISTS view_unified_repositories_vulnerabilities;
 DROP TABLE IF EXISTS trivy_scan_leases;
 DROP TABLE IF EXISTS trivy_scan_results;
-
-CREATE TABLE sbom_scan_leases (
-    sbom_id     TEXT        PRIMARY KEY,
-    leased_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    leased_by   TEXT        NOT NULL DEFAULT '',
-    expires_at  TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE sbom_scan_results (
-    id               TEXT        PRIMARY KEY,
-    sbom_id          TEXT        NOT NULL,
-    repo_id          TEXT        NOT NULL,
-    scanned_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    critical_count   INT         NOT NULL DEFAULT 0,
-    high_count       INT         NOT NULL DEFAULT 0,
-    medium_count     INT         NOT NULL DEFAULT 0,
-    low_count        INT         NOT NULL DEFAULT 0,
-    unknown_count    INT         NOT NULL DEFAULT 0,
-    raw_json         JSONB       NOT NULL,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_sbom_scan_results_repo_id
-    ON sbom_scan_results (repo_id);
-
-CREATE INDEX idx_sbom_scan_results_scanned_at
-    ON sbom_scan_results (scanned_at);
-
-CREATE INDEX idx_sbom_scan_results_sbom_scanned_at
-    ON sbom_scan_results (sbom_id, scanned_at DESC);
 
 -- view_unified_repositories_vulnerabilities merges grype findings
 -- (sbom_scan_results.raw_json) and OSV findings (component_vulnerabilities)
