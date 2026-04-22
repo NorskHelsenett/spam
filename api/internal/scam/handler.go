@@ -50,25 +50,59 @@ const resourceKeyExpr = `(
 //
 // Every live-state query reads FROM live and gets both behaviours
 // for free — no per-query session-filter boilerplate.
-var liveCTE = `WITH live AS (
-	SELECT DISTINCT ON (
-		cr.data->>'cluster_id',
-		CASE WHEN cr.data->>'kind' = 'Container'
-		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
-		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
-		END
-	) cr.*
-	FROM cluster_record cr
-	JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
-	WHERE cr.data->>'msg' != 'DELETE'
-	  AND cs.last_push_at >= NOW() - ` + liveWindowInterval() + `
-	ORDER BY cr.data->>'cluster_id',
-		CASE WHEN cr.data->>'kind' = 'Container'
-		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
-		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
-		END,
-		cr.received_at DESC
-) `
+var liveCTE = buildLiveCTE(false)
+
+// allCTE is the same CTE without the liveness predicate — used by
+// endpoints that let the operator opt into seeing silent/inactive
+// clusters (see `?include_inactive=true`). Still honours the
+// resource-identity DISTINCT and the msg!='DELETE' guard.
+var allCTE = buildLiveCTE(true)
+
+func buildLiveCTE(includeInactive bool) string {
+	liveness := `AND cs.last_push_at >= NOW() - ` + liveWindowInterval()
+	if includeInactive {
+		liveness = ""
+	}
+	return `WITH live AS (
+		SELECT DISTINCT ON (
+			cr.data->>'cluster_id',
+			CASE WHEN cr.data->>'kind' = 'Container'
+			     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+			     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+			END
+		) cr.*
+		FROM cluster_record cr
+		JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
+		WHERE cr.data->>'msg' != 'DELETE'
+		  ` + liveness + `
+		ORDER BY cr.data->>'cluster_id',
+			CASE WHEN cr.data->>'kind' = 'Container'
+			     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+			     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+			END,
+			cr.received_at DESC
+	) `
+}
+
+// cteFor returns allCTE when the request's ?include_inactive query
+// param is truthy, otherwise liveCTE. Intended for the /app/clusters
+// page endpoints so one toggle in the UI can broaden every data
+// source. Detail views (cluster drilldown, chain, etc.) ignore this
+// and always use liveCTE.
+func cteFor(r *http.Request) string {
+	if isTruthy(r.URL.Query().Get("include_inactive")) {
+		return allCTE
+	}
+	return liveCTE
+}
+
+func isTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 // CallcenterHandler accepts a JSON array of SCAM records, validates each one,
 // and upserts live-state rows. DELETE events are stored (not physically removed)
@@ -357,7 +391,7 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		rows := []row{}
-		err := db.Raw(liveCTE + `
+		err := db.Raw(cteFor(r) + `
 			SELECT
 				data->>'cluster'     AS cluster,
 				data->>'cluster_id'  AS cluster_id,
@@ -394,7 +428,7 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		rows := []row{}
-		err := db.Raw(liveCTE + `
+		err := db.Raw(cteFor(r) + `
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
@@ -462,7 +496,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			VulnUnknown    int       `json:"vuln_unknown"`
 		}
 		rows := []row{}
-		err := db.Raw(liveCTE + `,
+		err := db.Raw(cteFor(r) + `,
 			agg AS (
 				SELECT
 					data->>'registry' AS raw_registry,
@@ -551,7 +585,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
 		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
-		err := db.Raw(liveCTE + `,
+		err := db.Raw(cteFor(r) + `,
 			ingress_hosts AS (
 				SELECT
 					r->>'host' AS host,

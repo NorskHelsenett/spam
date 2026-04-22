@@ -175,11 +175,17 @@
 		'var(--yellow)', 'var(--orange)', 'var(--purple)', 'var(--aqua)'
 	];
 
+	// When the "Show inactive (>24h)" toggle is on, every cluster-page
+	// endpoint gets ?include_inactive=true so silent clusters and their
+	// images/hosts come through. Default is live-only.
+	const inactiveQS = () => (includeInactive ? '?include_inactive=true' : '');
+
 	const loadMain = async () => {
 		try {
+			const qs = inactiveQS();
 			const [clusterRes, regRes] = await Promise.all([
-				fetch('/api/clusters/summary', { credentials: 'include' }),
-				fetch('/api/clusters/registry-distribution', { credentials: 'include' })
+				fetch(`/api/clusters/summary${qs}`, { credentials: 'include' }),
+				fetch(`/api/clusters/registry-distribution${qs}`, { credentials: 'include' })
 			]);
 			if (clusterRes.ok) clusters = (await clusterRes.json()) ?? [];
 			if (regRes.ok) registryDist = (await regRes.json()) ?? [];
@@ -194,7 +200,7 @@
 	const loadImages = async () => {
 		if (imagesFetched) return;
 		try {
-			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
+			const res = await fetch(`/api/clusters/images/detail${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) imageDetails = (await res.json()) ?? [];
 			imagesFetched = true;
 		} catch { /* silent */ }
@@ -203,7 +209,7 @@
 	const loadHosts = async () => {
 		if (hostsFetched) return;
 		try {
-			const res = await fetch('/api/clusters/hosts', { credentials: 'include' });
+			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) {
 				hosts = (await res.json()) ?? [];
 			}
@@ -287,6 +293,19 @@
 		if (activeTab === 'images') loadImages();
 	});
 
+	// When the "Show inactive" toggle flips, invalidate the lazy-load
+	// caches and refetch the three top-level payloads so they reflect
+	// the new scope.
+	let initialInactive = true;
+	$effect(() => {
+		includeInactive; // track
+		if (initialInactive) { initialInactive = false; return; }
+		imagesFetched = false;
+		hostsFetched = false;
+		loadMain();
+		if (activeTab === 'images') loadImages();
+	});
+
 	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
 	const totalContainers = $derived(clusters.reduce((s, c) => s + c.containers, 0));
 	const uniqueHosts = $derived(new Set(hosts.map((h) => h.host)).size);
@@ -363,18 +382,17 @@
 	// --- Cluster filters ---
 	let clusterFilterOpen = $state(false);
 	let clusterSearch = $state('');
-	let clusterRecentOnly = $state(false);
+	// When true, include clusters whose agent has been silent longer than
+	// the server's live window (24h default). Reissues the cluster-page
+	// fetches with ?include_inactive=true — see $effect below.
+	let includeInactive = $state(false);
 
 	const clusterActiveFilterCount = $derived(
-		(clusterSearch.trim() ? 1 : 0) + (clusterRecentOnly ? 1 : 0)
+		(clusterSearch.trim() ? 1 : 0) + (includeInactive ? 1 : 0)
 	);
 
 	const filteredClusters = $derived(
 		clusters.filter((c) => {
-			if (clusterRecentOnly && c.last_seen) {
-				const age = Date.now() - new Date(c.last_seen).getTime();
-				if (age > 24 * 60 * 60 * 1000) return false;
-			}
 			if (clusterSearch.trim()) {
 				const q = clusterSearch.trim().toLowerCase();
 				if (
@@ -389,7 +407,7 @@
 
 	const clearClusterFilters = () => {
 		clusterSearch = '';
-		clusterRecentOnly = false;
+		includeInactive = false;
 	};
 
 	// --- Image filters ---
@@ -687,9 +705,9 @@
 							</div>
 
 							<div class="flex flex-col gap-1">
-								<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Seen recently</span>
+								<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Activity</span>
 								<div class="flex items-center h-[28px]">
-									<Toggle bind:checked={clusterRecentOnly} label="Last 24h" />
+									<Toggle bind:checked={includeInactive} label="Show inactive (>24h)" />
 								</div>
 							</div>
 

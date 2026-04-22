@@ -31,13 +31,15 @@ type ClusterSession struct {
 func (ClusterSession) TableName() string { return "cluster_sessions" }
 
 // defaultSessionLiveWindow is how fresh last_push_at must be for the
-// cluster to be considered "live" in the UI. One hour tolerates the
-// realistic transient failure modes — agent restart loops, firewall
-// blips, short network outages, rolling API deploys — without letting
-// a decommissioned cluster linger on the dashboard for a whole day.
-// Override with SPAM_CLUSTER_LIVE_WINDOW (any Go duration, e.g. "30m",
-// "6h").
-const defaultSessionLiveWindow = 1 * time.Hour
+// cluster to be considered "live" in the UI. 24h is intentionally
+// generous: the SCAM agent doesn't currently emit heartbeats, so
+// last_push_at only advances on actual resource changes. A stable
+// cluster with no pod churn for several hours would otherwise fall
+// outside a shorter window and disappear from the dashboard. Once
+// the agent wires /api/scam/heartbeat this can drop back to ~1h.
+// Override with SPAM_CLUSTER_LIVE_WINDOW (any Go duration, e.g. "6h",
+// "48h").
+const defaultSessionLiveWindow = 24 * time.Hour
 
 // sessionLiveWindow is resolved once at package init from the env var.
 // Plumbed into the SQL filters below via fmt.Sprintf so there's a
