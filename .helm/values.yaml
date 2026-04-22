@@ -162,6 +162,14 @@ resources: {}
   #   memory: 128Mi
 
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+# startupProbe gates liveness/readiness during boot — gives up to
+# 60s (30 × 2s) for the server to bind before kubelet restarts the pod.
+startupProbe:
+  httpGet:
+    path: /api/healthz
+    port: http
+  periodSeconds: 2
+  failureThreshold: 30
 livenessProbe:
   httpGet:
     path: /api/healthz
