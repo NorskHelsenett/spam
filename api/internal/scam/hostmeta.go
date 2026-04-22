@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -77,15 +79,53 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 	return safeDialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
 }
 
+// extraBlockedCIDRs lets operators extend the SSRF block list at deploy
+// time — e.g. to cut off a corporate 172.16/12 zone while still allowing
+// the common 10/8 and 192.168/16 homelab/k8s ranges. Comma-separated
+// list of CIDRs in SPAM_HOSTMETA_BLOCK_CIDRS; invalid entries are logged
+// and skipped so a typo doesn't break startup.
+var extraBlockedCIDRs = parseExtraBlockedCIDRs()
+
+func parseExtraBlockedCIDRs() []*net.IPNet {
+	raw := strings.TrimSpace(os.Getenv("SPAM_HOSTMETA_BLOCK_CIDRS"))
+	if raw == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(entry)
+		if err != nil {
+			log.Printf("scam: ignoring invalid SPAM_HOSTMETA_BLOCK_CIDRS entry %q: %v", entry, err)
+			continue
+		}
+		out = append(out, cidr)
+	}
+	return out
+}
+
 func isBlockedIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
 	// IsLinkLocalUnicast covers 169.254/16 including the cloud metadata
 	// service; IsLoopback covers 127.0.0.0/8 and ::1. Private ranges are
-	// deliberately excluded — see safeDialContext for the rationale.
-	return ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	// deliberately excluded by default — see safeDialContext for the
+	// rationale. Operators can layer in extra CIDRs via
+	// SPAM_HOSTMETA_BLOCK_CIDRS.
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	for _, cidr := range extraBlockedCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 var httpClient = &http.Client{

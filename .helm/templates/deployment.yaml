@@ -88,6 +88,10 @@ spec:
             {{- with .Values.environments }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- with .Values.hostmeta.blockCIDRs }}
+            - name: SPAM_HOSTMETA_BLOCK_CIDRS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if or .Values.providerSecrets.enabled .Values.providerSecrets.existingSecret }}
             - name: PROVIDER_SECRETS_KEY
               valueFrom:

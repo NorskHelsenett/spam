@@ -198,6 +198,16 @@ tolerations: []
 
 affinity: {}
 
+# SSRF guardrails for the server-side host metadata / favicon fetcher
+# used by the clusters page. Non-negotiable blocks (loopback,
+# link-local, multicast, unspecified) are always enforced in code.
+# blockCIDRs is an additional comma-separated list the operator can
+# extend. Default: block 172.16/12 (often a corporate zone) while
+# still letting the server reach 10/8 and 192.168/16 ingress hosts.
+# Set to "" to allow all RFC1918 ranges.
+hostmeta:
+  blockCIDRs: "172.16.0.0/12"
+
 # PostgreSQL configuration
 # Set enabled: true to deploy PostgreSQL alongside your application
 postgresql:
