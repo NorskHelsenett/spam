@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
@@ -133,6 +134,16 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 			// upload) will still converge.
 			_ = err
 		}
+		// Apply provider default_grants so newly-discovered repos
+		// don't become invisible to every non-admin. The helper is
+		// best-effort: grant insertion failures are logged, not
+		// propagated.
+		acl.ApplyIngestDefaults(ctx, db, providerInstanceID, acl.RepoIdentity{
+			Provider:           provider,
+			ProviderInstanceID: providerInstanceID,
+			Owner:              org,
+			Slug:               slug,
+		})
 	}
 
 	return &repo, nil

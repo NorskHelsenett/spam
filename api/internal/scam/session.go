@@ -66,7 +66,22 @@ func resolveLiveWindow() time.Duration {
 // session_started_at is only set on the initial INSERT; subsequent
 // pushes leave it frozen. We used to roll it forward on long silences,
 // but nothing reads that anymore.
+//
+// The first time an agent reports a new cluster_id we also register
+// it in the `clusters` table so it can be referenced by ACL grants.
+// No grants are seeded — clusters are deny-by-default; an admin has
+// to claim the cluster before non-admins can see it. Registration is
+// idempotent via ON CONFLICT (cluster_id) DO NOTHING.
 func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now time.Time) error {
+	if err := db.WithContext(ctx).Exec(`
+		INSERT INTO clusters (id, cluster_id, display_name, first_seen_at, created_at)
+		VALUES (gen_random_uuid()::text, ?, ?, ?, ?)
+		ON CONFLICT (cluster_id) DO NOTHING
+	`, clusterID, clusterID, now, now).Error; err != nil {
+		// Registration failure must not block liveness tracking —
+		// the row will be auto-registered on the next heartbeat.
+		log.Printf("scam: register cluster %s: %v", clusterID, err)
+	}
 	return db.WithContext(ctx).Exec(`
 		INSERT INTO cluster_sessions (cluster_id, session_started_at, last_push_at)
 		VALUES (?, ?, ?)

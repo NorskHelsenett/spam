@@ -203,6 +203,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
 				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
 
+				// Admin ACL grant management. Admin-only, audit-wrapped
+				// so every grant add/remove leaves a trail.
+				aclAudit := audit.Middleware(db, auditUserID, "admin.acl")
+				api.With(aclAudit).Get("/admin/acl/grants", uiapi.AdminACLGrantsListHandler(db, authService))
+				api.With(aclAudit).Post("/admin/acl/grants", uiapi.AdminACLGrantsCreateHandler(db, authService))
+				api.With(aclAudit).Delete("/admin/acl/grants/{id}", uiapi.AdminACLGrantsDeleteHandler(db, authService))
+
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
