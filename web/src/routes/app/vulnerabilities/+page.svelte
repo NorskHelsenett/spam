@@ -356,16 +356,14 @@
 		return list;
 	})();
 
-	// Server-side filtering now — filteredVulns no longer exists.
-	// getVulnAt(idx) returns the group at position idx in the current
-	// filtered result, fetching the backing page if it's not in cache.
-	function getVulnAt(idx: number): VulnGroup | undefined {
+	// Server-side filtering now — filteredVulns no longer exists. A pure
+	// lookup (no side effects): fetches are kicked off by the reactive
+	// block watching vulnVirt so a keyed each-block doesn't silently skip
+	// re-running when vulnPages updates.
+	function getVulnAt(idx: number, pages: Map<number, VulnGroup[]>): VulnGroup | undefined {
 		const page = Math.floor(idx / VULN_PAGE_SIZE);
 		const within = idx % VULN_PAGE_SIZE;
-		const cached = vulnPages.get(page);
-		if (cached) return cached[within];
-		void fetchVulnPage(page);
-		return undefined;
+		return pages.get(page)?.[within];
 	}
 
 	// Dynamic MultiSelect options derived from the current data set.
@@ -437,6 +435,20 @@
 			if (!vulnPages.has(p) && !vulnInflight.has(p)) void fetchVulnPage(p);
 		}
 	}
+
+	// Pre-resolve the visible slice reactively against vulnPages so that
+	// rows re-render when a page fetch lands. A {@const getVulnAt(idx)}
+	// inside a keyed {#each ... (idx)} block does NOT re-evaluate on
+	// existing rows when only vulnPages changes (Svelte reconciles same
+	// keys as unchanged), so fast scrolls left rows stuck on "loading…"
+	// even after the fetch resolved.
+	$: vulnRows = (() => {
+		const rows: Array<{ idx: number; group: VulnGroup | undefined }> = [];
+		for (let i = vulnVirt.start; i < vulnVirt.end; i++) {
+			rows.push({ idx: i, group: getVulnAt(i, vulnPages) });
+		}
+		return rows;
+	})();
 
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
 	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
@@ -926,8 +938,8 @@
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 									{#if vulnVirt.topPad > 0}<tr style="height:{vulnVirt.topPad}px"><td colspan="4"></td></tr>{/if}
-									{#each Array.from({ length: Math.max(0, vulnVirt.end - vulnVirt.start) }, (_, i) => vulnVirt.start + i) as idx (idx)}
-										{@const g = getVulnAt(idx)}
+									{#each vulnRows as row (row.idx)}
+										{@const g = row.group}
 										{#if g}
 											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
 												<td class="px-5 py-3">
