@@ -9,7 +9,6 @@ OUTPUT_DIR="${SCRIPT_DIR}/output"
 # Default test repository (public)
 REPO_URL="${1:-https://github.com/jonasbg/picoblog.git}"
 REPO_REF="${2:-}"
-SBOM_SCANNER="${3:-syft}"  # Default to syft, can also be "trivy"
 
 # Detect container runtime (podman or docker)
 if command -v podman &> /dev/null; then
@@ -31,7 +30,6 @@ mkdir -p "$OUTPUT_DIR"
 echo ""
 echo "Running scanner against: $REPO_URL"
 echo "Reference: ${REPO_REF:-default branch}"
-echo "SBOM Scanner: $SBOM_SCANNER"
 echo "Output directory: $OUTPUT_DIR"
 echo ""
 
@@ -50,7 +48,6 @@ $CONTAINER_CMD run --rm \
     -e RUN_TOKEN="dummy" \
     -e REPO_CLONE_URL="$REPO_URL" \
     -e OUTPUT_DIR="/output" \
-    -e SBOM_SCANNER="$SBOM_SCANNER" \
     ${REPO_REF:+-e REPO_REF="$REPO_REF"} \
     -v "$OUTPUT_DIR:/output${VOLUME_OPTS}" \
     spam-runner:local

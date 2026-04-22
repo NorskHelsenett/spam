@@ -112,7 +112,7 @@ type VulnListParams struct {
 }
 
 type summaryVersion struct {
-	LastTrivyAt     *time.Time `json:"last_trivy_at" gorm:"column:last_trivy_at"`
+	LastScanAt      *time.Time `json:"last_scan_at" gorm:"column:last_scan_at"`
 	LastOSVAt       *time.Time `json:"last_osv_at" gorm:"column:last_osv_at"`
 	LastVEXAt       *time.Time `json:"last_vex_at" gorm:"column:last_vex_at"`
 	LastImageScanAt *time.Time `json:"last_image_scan_at" gorm:"column:last_image_scan_at"`
@@ -483,7 +483,7 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	var meta scanMeta
 	if err := db.WithContext(ctx).Raw(`
 		WITH sboms_all AS (
-			SELECT sbom_id FROM trivy_scan_results
+			SELECT sbom_id FROM sbom_scan_results
 			UNION
 			SELECT sb.sbom_id
 			FROM sbom_bindings sb
@@ -492,7 +492,7 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 			  AND isr.finished_at IS NOT NULL
 		),
 		ts AS (
-			SELECT MAX(scanned_at) AS t FROM trivy_scan_results
+			SELECT MAX(scanned_at) AS t FROM sbom_scan_results
 			UNION ALL
 			SELECT MAX(finished_at) FROM image_scan_runs
 		)
@@ -514,7 +514,7 @@ func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, erro
 	var version summaryVersion
 	err := db.WithContext(ctx).Raw(`
 		SELECT
-			(SELECT MAX(scanned_at) FROM trivy_scan_results)        AS last_trivy_at,
+			(SELECT MAX(scanned_at) FROM sbom_scan_results)         AS last_scan_at,
 			(SELECT MAX(checked_at) FROM component_vulnerabilities) AS last_osv_at,
 			(SELECT MAX(created_at) FROM component_vex)             AS last_vex_at,
 			(SELECT MAX(finished_at) FROM image_scan_runs)          AS last_image_scan_at
@@ -576,7 +576,7 @@ func upsertSnapshot(ctx context.Context, db *gorm.DB, capturedAt time.Time, summ
 }
 
 func sameVersion(a, b summaryVersion) bool {
-	return sameTime(a.LastTrivyAt, b.LastTrivyAt) &&
+	return sameTime(a.LastScanAt, b.LastScanAt) &&
 		sameTime(a.LastOSVAt, b.LastOSVAt) &&
 		sameTime(a.LastVEXAt, b.LastVEXAt) &&
 		sameTime(a.LastImageScanAt, b.LastImageScanAt)

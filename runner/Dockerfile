@@ -14,9 +14,6 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Get syft binary (pinned digest for reproducibility)
 FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36 AS syft
 
-# Get trivy binary (pinned digest for reproducibility)
-FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
-
 # Get betterleaks binary (pinned digest for reproducibility)
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 
@@ -27,7 +24,6 @@ RUN apk add --no-cache git ca-certificates
 
 # Copy binaries from official images
 COPY --from=syft /syft /usr/local/bin/syft
-COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
 COPY --from=betterleaks /usr/bin/betterleaks /usr/local/bin/betterleaks
 
 # Copy Go binaries from builder

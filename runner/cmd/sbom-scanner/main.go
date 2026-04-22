@@ -1,13 +1,12 @@
 // sbom-scanner loops through unscanned SBOMs and uploads vulnerability
-// results. Today the only tool wired in is trivy; grype support is planned
-// and will be selected at runtime via SBOM_SCANNER once the backend
-// ingest can parse grype output.
+// results. Grype is the only tool wired in today; to swap scanners,
+// ship a new binary that speaks the same upload contract (the server
+// just stores the tool's native JSON in sbom_scan_results.raw_json).
 //
 // Environment variables:
 //
 //	SPAM_API_URL     - base URL of the worker API (e.g. http://spam-worker:8081)
 //	RUNNER_HMAC_KEY  - shared secret for request signing
-//	TRIVY_CACHE_DIR  - trivy database cache dir (default: /trivy-cache)
 package main
 
 import (
@@ -135,7 +134,7 @@ func scanSBOM(apiURL string, hmacKey []byte, job *nextJobResponse) error {
 
 	// Grype handles both paths — same tool, different upload endpoint.
 	// IMAGE_DIGEST writes image_vuln_findings; REPO_COMMIT writes
-	// trivy_scan_results (with format=grype) for the dashboard.
+	// sbom_scan_results for the dashboard.
 	switch job.AssetType {
 	case "IMAGE_DIGEST":
 		return scanImageSBOM(apiURL, hmacKey, tmpDir, sbomPath, job)
@@ -145,10 +144,9 @@ func scanSBOM(apiURL string, hmacKey []byte, job *nextJobResponse) error {
 }
 
 func scanRepoSBOM(apiURL string, hmacKey []byte, tmpDir, sbomPath string, job *nextJobResponse) error {
-	// Grype against the SBOM. Dropped the previous "fs manifest fallback"
-	// for ≤1-component SBOMs — that was trivy-specific. A hollow SBOM
-	// yields zero findings, which is the honest answer; the upstream fix
-	// is better SBOM generation, not re-scanning manifests on every tick.
+	// Grype against the SBOM. A hollow SBOM yields zero findings, which
+	// is the honest answer; the upstream fix is better SBOM generation,
+	// not re-scanning manifests on every tick.
 	resultPath := filepath.Join(tmpDir, "grype.json")
 	if err := grypeScanSBOM(sbomPath, resultPath); err != nil {
 		return fmt.Errorf("grype scan: %w", err)
@@ -159,9 +157,8 @@ func scanRepoSBOM(apiURL string, hmacKey []byte, tmpDir, sbomPath string, job *n
 		return fmt.Errorf("read grype result: %w", err)
 	}
 
-	// The /api/sbom-scan/result endpoint dispatches on root shape
-	// (Results[] for trivy, matches[] for grype) so the same path
-	// accepts either tool's output.
+	// The /api/sbom-scan/result endpoint stores the raw grype JSON
+	// as-is for advanced_search to parse on demand.
 	url := fmt.Sprintf("%s/api/sbom-scan/result/%s?repo_id=%s", apiURL, job.SBOMID, job.RepoID)
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(resultBytes))
 	if err != nil {

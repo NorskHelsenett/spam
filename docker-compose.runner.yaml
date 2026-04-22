@@ -59,7 +59,7 @@ services:
       WORKER_URL: "http://worker:8081"
       RUN_ID: "test-run-${RUN_ID:-local}"
       RUN_TOKEN: "dummy"
-      REPO_CLONE_URL: "${REPO_CLONE_URL:-https://github.com/aquasecurity/trivy.git}"
+      REPO_CLONE_URL: "${REPO_CLONE_URL:-https://github.com/jonasbg/picoblog.git}"
       REPO_REF: "${REPO_REF:-}"
     depends_on:
       - worker

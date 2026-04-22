@@ -55,7 +55,6 @@ type Runner struct {
 	cancel        context.CancelFunc
 	wsConn        *websocket.Conn
 	logChan       chan string
-	sbomScanner   string // "trivy" or "syft"
 	commitHash    string
 	runnerMode    string // "clone" or "scan"
 }
@@ -67,7 +66,6 @@ func main() {
 	repoCloneURL := os.Getenv("REPO_CLONE_URL")
 	repoRef := os.Getenv("REPO_REF")
 	repoCommitSHA := os.Getenv("REPO_COMMIT_SHA")
-	sbomScanner := os.Getenv("SBOM_SCANNER")
 
 	runnerMode := os.Getenv("RUNNER_MODE")
 
@@ -80,11 +78,6 @@ func main() {
 	// Clone mode: init container that clones the repo and exits
 	if runnerMode == "clone" {
 		os.Exit(runCloneMode(workerURL, runID, runToken, repoCloneURL, repoRef, repoCommitSHA))
-	}
-
-	// Default to syft if not specified
-	if sbomScanner == "" {
-		sbomScanner = "syft"
 	}
 
 	// Extract repo name from clone URL
@@ -107,7 +100,6 @@ func main() {
 		ctx:           ctx,
 		cancel:        cancel,
 		logChan:       make(chan string, 100),
-		sbomScanner:   sbomScanner,
 		runnerMode:    runnerMode,
 	}
 
@@ -259,20 +251,13 @@ func (r *Runner) runPipeline() int {
 	}
 
 	// Run SBOM generation
-	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
+	r.log("Running syft for SBOM generation...")
 	sbomPath := filepath.Join(r.artifactDir, "sbom.json")
 	betterleaksPath := filepath.Join(r.artifactDir, "betterleaks.json")
 	manifestsPath := filepath.Join(r.artifactDir, "manifests.json")
 
-	var sbomErr error
-	if r.sbomScanner == "trivy" {
-		sbomErr = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
-	} else {
-		sbomErr = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
-	}
-
-	if sbomErr != nil {
-		r.log(fmt.Sprintf("SBOM generation failed: %v", sbomErr))
+	if err := r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir); err != nil {
+		r.log(fmt.Sprintf("SBOM generation failed: %v", err))
 		return 1
 	}
 
@@ -356,7 +341,6 @@ func (r *Runner) logToolVersions() {
 		versionArgs []string
 	}{
 		{"syft", "/usr/local/bin/syft", []string{"--version"}},
-		{"trivy", "/usr/local/bin/trivy", []string{"--version"}},
 		{"betterleaks", "/usr/local/bin/betterleaks", []string{"version"}},
 		{"git", "/usr/bin/git", []string{"--version"}},
 	}
@@ -387,16 +371,13 @@ func (r *Runner) logToolVersions() {
 
 // cleanEnv returns a minimal environment for running external tools.
 // This prevents sensitive variables (tokens, secrets) from leaking to
-// third-party analyzers like syft, trivy, or betterleaks.
+// third-party analyzers like syft or betterleaks.
 func cleanEnv() []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 		"GIT_TERMINAL_PROMPT=0",
 		"SYFT_CHECK_FOR_APP_UPDATE=false",
-		"TRIVY_SKIP_DB_UPDATE=true",
-		"TRIVY_SKIP_JAVA_DB_UPDATE=true",
-		"TRIVY_OFFLINE_SCAN=true",
 	}
 }
 

@@ -85,8 +85,8 @@ func run() error {
 		&providerconfig.ProviderSecret{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
-		&vulnerabilities.TrivyScanLease{},
-		&vulnerabilities.TrivyScanResult{},
+		&vulnerabilities.SBOMScanLease{},
+		&vulnerabilities.SBOMScanResult{},
 		&secretprobe.SecretProbe{},
 		&secretprobe.ProbeAuditLog{},
 		&secretprobe.SecretDismissal{},
@@ -129,6 +129,7 @@ func run() error {
 		"migrations/20260421_rename_trivy_adhoc_job_type.sql",
 		"migrations/20260422_create_acl_constraints.sql",
 		"migrations/20260422_seed_acl_migration.sql",
+		"migrations/20260422_rename_trivy_scan_to_sbom_scan.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

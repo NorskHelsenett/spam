@@ -405,9 +405,9 @@ runner:
 # SBOM scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.
-# Named "sbom-scanner" because the tool inside is interchangeable (trivy today;
-# grype once the backend grype-result ingest lands) — the input is always an
-# SBOM, so the scanner's identity is the input shape, not the binary.
+# Named "sbom-scanner" because the tool inside is interchangeable — the input
+# is always an SBOM, so the scanner's identity is the input shape, not the
+# binary. Grype is the current producer.
 sbomScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
@@ -415,7 +415,7 @@ sbomScanner:
   activeDeadlineSeconds: 14400  # 4h max runtime
 
   # Dedicated sbom-scanner image (built from runner/Dockerfile.sbom-scanner).
-  # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
+  # Contains ONLY grype + the scanner binary — no git, syft, or betterleaks.
   image:
     repository: spam-sbom-scanner
     tag: ""

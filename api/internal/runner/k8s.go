@@ -250,9 +250,6 @@ func (k *K8sClient) createK8sJob(ctx context.Context, runID, cloneURL, ref, toke
 									{Name: "REPO_REF", Value: ref},
 									// Prevent third-party tools from phoning home
 									{Name: "SYFT_CHECK_FOR_APP_UPDATE", Value: "false"},
-									{Name: "TRIVY_SKIP_DB_UPDATE", Value: "true"},
-									{Name: "TRIVY_SKIP_JAVA_DB_UPDATE", Value: "true"},
-									{Name: "TRIVY_OFFLINE_SCAN", Value: "true"},
 								}
 								if commitSHA != "" {
 									envs = append(envs, corev1.EnvVar{Name: "REPO_COMMIT_SHA", Value: commitSHA})
@@ -744,7 +741,7 @@ func (k *K8sClient) CreateSBOMAdhocJob(ctx context.Context, cronJobName, jobName
 	// helm see the adhoc Job as part of the same Application and don't
 	// flag it as an orphan.
 	labels := copyStringMap(cronJob.Labels)
-	labels["spam.io/adhoc-trivy-scan"] = "true"
+	labels["spam.io/adhoc-sbom-scan"] = "true"
 	annotations := copyStringMap(cronJob.Annotations)
 	annotations["spam.io/created-by"] = "admin-adhoc"
 	annotations["spam.io/source-cronjob"] = cronJobName
@@ -773,7 +770,7 @@ func (k *K8sClient) CreateSBOMAdhocJob(ctx context.Context, cronJobName, jobName
 	if _, err := k.clientset.BatchV1().Jobs(namespace).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("create job: %w", err)
 	}
-	log.Printf("created adhoc trivy scan job: %s/%s", namespace, jobName)
+	log.Printf("created adhoc sbom scan job: %s/%s", namespace, jobName)
 	return nil
 }
 

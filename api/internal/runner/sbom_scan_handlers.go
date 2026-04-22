@@ -18,7 +18,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const maxTrivyResultBytes = 50 << 20 // 50 MB guard
+const maxScanResultBytes = 50 << 20 // 50 MB guard
 
 func sbomDownloadHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +59,7 @@ func sbomScanNextHandler(db *gorm.DB) http.HandlerFunc {
 
 		job, ok, err := vulnerabilities.GetNextSBOMToScan(r.Context(), db, leasedBy, runStartedAt)
 		if err != nil {
-			log.Printf("trivy/next: get next sbom: %v", err)
+			log.Printf("sbom-scan/next: get next sbom: %v", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -103,7 +103,7 @@ func sbomScanManifestsHandler(db *gorm.DB) http.HandlerFunc {
 			     WHERE repo_id = ?
 			     ORDER BY path, created_at DESC`, repoID).
 			Scan(&rows).Error; err != nil {
-			log.Printf("trivy/manifests: query repo %s: %v", repoID, err)
+			log.Printf("sbom-scan/manifests: query repo %s: %v", repoID, err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
@@ -128,7 +128,7 @@ func sbomScanManifestsHandler(db *gorm.DB) http.HandlerFunc {
 //  2. Create a new image_scan_runs row (scan_type inferred from presence
 //     of an sbom-revuln marker — just a normal run for now).
 //  3. Parse grype JSON via imagescan.ParseAndStoreGrype → image_vuln_findings.
-//  4. Release the trivy_scan_leases row so the next-SBOM query can advance.
+//  4. Release the sbom_scan_leases row so the next-SBOM query can advance.
 //
 // POST /api/sbom-scan/image-result/{sbom_id}
 func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
@@ -139,13 +139,13 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
-		limited := io.LimitReader(r.Body, maxTrivyResultBytes+1)
+		limited := io.LimitReader(r.Body, maxScanResultBytes+1)
 		body, err := io.ReadAll(limited)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
 			return
 		}
-		if int64(len(body)) > maxTrivyResultBytes {
+		if int64(len(body)) > maxScanResultBytes {
 			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
@@ -188,7 +188,7 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 				return err
 			}
 			// Release the lease so the next-SBOM query can pick up the next one.
-			if err := tx.Exec(`DELETE FROM trivy_scan_leases WHERE sbom_id = ?`, sbomID).Error; err != nil {
+			if err := tx.Exec(`DELETE FROM sbom_scan_leases WHERE sbom_id = ?`, sbomID).Error; err != nil {
 				return err
 			}
 			return nil
@@ -203,14 +203,10 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// sbomScanResultHandler ingests a scan result for a REPO_COMMIT-bound SBOM.
-// Accepts either trivy or grype JSON — format is inferred from the root
-// shape ({Results: [...]} = trivy, {matches: [...]} = grype) so the
-// scanner can switch tools without a new endpoint.
-//
-// The row is stored in trivy_scan_results with `format` recording which
-// tool produced it; advanced_search dispatches on that column when parsing
-// raw_json for full-text search.
+// sbomScanResultHandler ingests a grype JSON scan result for a
+// REPO_COMMIT-bound SBOM. The sbom-scanner posts here after running
+// grype against the stored SBOM; raw_json is persisted as-is so
+// advanced_search can introspect individual matches.
 func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sbomID := r.PathValue("sbom_id")
@@ -219,58 +215,32 @@ func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
-		limited := io.LimitReader(r.Body, maxTrivyResultBytes+1)
+		limited := io.LimitReader(r.Body, maxScanResultBytes+1)
 		body, err := io.ReadAll(limited)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
 			return
 		}
-		if int64(len(body)) > maxTrivyResultBytes {
+		if int64(len(body)) > maxScanResultBytes {
 			http.Error(w, "payload too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 
 		repoID := r.URL.Query().Get("repo_id")
 
-		// Shape-dispatch. Grype emits a top-level "matches" array; trivy
-		// emits "Results". The two formats are incompatible so we never
-		// need to parse both — pick one based on what's actually present.
-		var probe struct {
-			Matches []json.RawMessage `json:"matches"`
-			Results []json.RawMessage `json:"Results"`
+		var report vulnerabilities.GrypeReport
+		if err := json.Unmarshal(body, &report); err != nil {
+			http.Error(w, "invalid grype json: "+err.Error(), http.StatusBadRequest)
+			return
 		}
-		if err := json.Unmarshal(body, &probe); err != nil {
-			http.Error(w, "invalid scan json: "+err.Error(), http.StatusBadRequest)
+		if err := vulnerabilities.StoreScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
+			log.Printf("sbom-scan/result: store %s: %v", sbomID, err)
+			http.Error(w, "failed to store result", http.StatusInternalServerError)
 			return
 		}
 
-		switch {
-		case len(probe.Matches) > 0 || (probe.Results == nil && probe.Matches != nil):
-			var report vulnerabilities.GrypeReport
-			if err := json.Unmarshal(body, &report); err != nil {
-				http.Error(w, "invalid grype json: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			if err := vulnerabilities.StoreGrypeScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
-				log.Printf("trivy/result (grype): store %s: %v", sbomID, err)
-				http.Error(w, "failed to store result", http.StatusInternalServerError)
-				return
-			}
-		default:
-			var report vulnerabilities.TrivyReport
-			if err := json.Unmarshal(body, &report); err != nil {
-				http.Error(w, "invalid trivy json: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			if err := vulnerabilities.StoreScanResult(r.Context(), db, sbomID, repoID, report, json.RawMessage(body)); err != nil {
-				log.Printf("trivy/result: store %s: %v", sbomID, err)
-				http.Error(w, "failed to store result", http.StatusInternalServerError)
-				return
-			}
-		}
-
 		if _, err := vulnmetrics.Refresh(r.Context(), db, time.Now().UTC()); err != nil {
-			log.Printf("trivy/result: refresh dashboard metrics for %s: %v", sbomID, err)
+			log.Printf("sbom-scan/result: refresh dashboard metrics for %s: %v", sbomID, err)
 		}
 
 		w.WriteHeader(http.StatusNoContent)
