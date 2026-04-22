@@ -312,6 +312,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
+				v.Get("/facets", uiapi.VulnFacetsHandler(db, authService))
 			})
 			// The /api/secrets subrouter exposes discovered secret
 			// findings and per-repo secret tables. These responses
