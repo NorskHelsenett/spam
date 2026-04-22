@@ -557,12 +557,17 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				GROUP BY data->>'registry', data->>'image', data->>'digest'
 			),
 			latest_scan AS (
-				SELECT DISTINCT ON (payload->>'image_digest_id')
-				       payload->>'image_digest_id' AS image_digest_id,
+				-- Source of truth for findings is image_scan_runs, not jobs:
+				-- the nightly sbom-scanner revuln flow creates scan_run rows
+				-- with uuid.NewString() that don't correspond to any jobs.id,
+				-- so joining via jobs drops any image that's been re-scanned
+				-- against a newer grype DB since its last IMAGE_SCAN.
+				SELECT DISTINCT ON (image_digest_id)
+				       image_digest_id,
 				       id AS scan_run_id
-				FROM jobs
-				WHERE type = 'IMAGE_SCAN' AND status = 'SUCCEEDED'
-				ORDER BY payload->>'image_digest_id', created_at DESC
+				FROM image_scan_runs
+				WHERE finished_at IS NOT NULL
+				ORDER BY image_digest_id, finished_at DESC
 			),
 			vuln_counts AS (
 				-- Qualify image_digest_id with f. — both tables expose it

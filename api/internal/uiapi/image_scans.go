@@ -481,32 +481,43 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			}
 		}
 
-		// Severity breakdown for the latest successful scan — drives the
-		// drawer's "critical/high/…" chip row without requiring the
-		// client to hit /api/runs/{id} and parse the full finding list.
-		if resp.LatestScanID != "" {
-			var sev struct {
-				Critical int
-				High     int
-				Medium   int
-				Low      int
-				Unknown  int
-			}
-			_ = db.WithContext(r.Context()).Raw(`
-				SELECT
-				  -- grype stores severities UPPERCASE; trivy lowercases; normalize
-				  -- with UPPER() here so case inconsistencies don't quietly
-				  -- dump everything into the "Unknown" bucket.
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
-				  -- grype emits NEGLIGIBLE for info-grade findings (not a CVSS
-				  -- severity per se) — roll it into Low for the chip row.
-				  COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS low,
-				  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
-				FROM image_vuln_findings
-				WHERE scan_run_id = ?
-			`, resp.LatestScanID).Scan(&sev).Error
+		// Severity breakdown for the latest scan — drives the drawer's
+		// "critical/high/…" chip row without requiring the client to hit
+		// /api/runs/{id} and parse the full finding list. Sourced from
+		// image_scan_runs rather than jobs because the nightly sbom-scanner
+		// revuln creates scan_run rows with uuid.NewString() that are
+		// disjoint from jobs.id — so the findings it stores are invisible
+		// to a jobs-tied query. image_scan_runs is the single source of
+		// truth the findings actually FK against.
+		var sev struct {
+			Critical int
+			High     int
+			Medium   int
+			Low      int
+			Unknown  int
+		}
+		_ = db.WithContext(r.Context()).Raw(`
+			WITH latest_scan AS (
+				SELECT id FROM image_scan_runs
+				WHERE image_digest_id = ? AND finished_at IS NOT NULL
+				ORDER BY finished_at DESC
+				LIMIT 1
+			)
+			SELECT
+			  -- grype stores severities Titlecase; normalize with UPPER()
+			  -- so case inconsistencies don't quietly dump everything
+			  -- into the "Unknown" bucket.
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
+			  -- grype emits NEGLIGIBLE for info-grade findings (not a CVSS
+			  -- severity per se) — roll it into Low for the chip row.
+			  COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS low,
+			  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
+			FROM image_vuln_findings f
+			JOIN latest_scan ls ON ls.id = f.scan_run_id
+		`, id).Scan(&sev).Error
+		{
 			total := sev.Critical + sev.High + sev.Medium + sev.Low + sev.Unknown
 			if total > 0 {
 				resp.VulnSeverity = &ImageVulnSeverityCount{
@@ -601,9 +612,8 @@ func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		var rows []row
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
-			       (SELECT MAX(finished_at) FROM jobs j
-			          WHERE j.type = 'IMAGE_SCAN'
-			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       (SELECT MAX(finished_at) FROM image_scan_runs r
+			          WHERE r.image_digest_id = id.id) AS latest_scan_at,
 			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
 			          WHERE f.image_digest_id = id.id), 0) AS vuln_count
 			FROM image_digests id
@@ -661,9 +671,8 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		var headers []imageHeader
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
-			       (SELECT MAX(finished_at) FROM jobs j
-			          WHERE j.type = 'IMAGE_SCAN'
-			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       (SELECT MAX(finished_at) FROM image_scan_runs r
+			          WHERE r.image_digest_id = id.id) AS latest_scan_at,
 			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
 			          WHERE f.image_digest_id = id.id), 0) AS vuln_count,
 			       EXISTS (SELECT 1 FROM sbom_bindings b
