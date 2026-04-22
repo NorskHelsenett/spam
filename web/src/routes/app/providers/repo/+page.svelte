@@ -540,10 +540,11 @@
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
 
-	// Vulnerabilities dialog
-	type VulnRow = {
-		repo_id: string;
-		repo_slug: string;
+	// Vulnerabilities dialog — /api/vuln/list now returns grouped
+	// results {total, items: VulnGroup[]}. For a repo-scoped request
+	// every group has exactly one asset (this repo), so the dialog
+	// still renders one row per CVE.
+	type VulnGroup = {
 		vuln_id: string;
 		severity: string;
 		pkg_name: string;
@@ -551,11 +552,14 @@
 		fixed_version: string;
 		title: string;
 		description: string;
-		source: string;
+		sources: string[];
+		assets: Array<{ type: 'repo' | 'image'; id: string; slug: string }>;
+		repo_count: number;
+		image_count: number;
 	};
 
 	let vulnDialogOpen = $state(false);
-	let vulnDialogData = $state<VulnRow[]>([]);
+	let vulnDialogData = $state<VulnGroup[]>([]);
 	let vulnDialogLoading = $state(false);
 	let vulnDialogTab = $state('all');
 
@@ -573,11 +577,15 @@
 		if (vulnDialogData.length > 0) return;
 		vulnDialogLoading = true;
 		try {
-			const url = repoDbId
-				? `/api/vuln/list?repo_id=${encodeURIComponent(repoDbId)}`
-				: '/api/vuln/list';
-			const res = await fetch(url, { credentials: 'include' });
-			if (res.ok) vulnDialogData = await res.json();
+			// Cap at 500 (the server maximum) — a single repo rarely
+			// exceeds that, and the dialog shows one row per CVE.
+			const params = new URLSearchParams({ limit: '500' });
+			if (repoDbId) params.set('repo_id', repoDbId);
+			const res = await fetch(`/api/vuln/list?${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const payload = (await res.json()) as { items?: VulnGroup[] };
+				vulnDialogData = payload.items ?? [];
+			}
 		} finally {
 			vulnDialogLoading = false;
 		}
@@ -1293,9 +1301,9 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 												rel="noopener noreferrer"
 												class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
 											>{v.vuln_id}</a>
-											{#if v.source}
-												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{v.source}</span>
-											{/if}
+											{#each v.sources ?? [] as src}
+												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{src}</span>
+											{/each}
 										</div>
 										{#if v.title}
 											<p class="text-sm text-[var(--text-secondary)]">{v.title}</p>

@@ -63,16 +63,10 @@
 		vuln_unknown: number;
 	};
 
-	type VulnRow = {
-		repo_id: string;
-		repo_slug: string;
-		vuln_id: string;
-		severity: string;
-		pkg_name: string;
-		installed_version: string;
-		fixed_version: string;
-		title: string;
-		source: string;
+	type VulnAsset = {
+		type: 'repo' | 'image';
+		id: string;
+		slug: string;
 	};
 
 	type VulnGroup = {
@@ -82,14 +76,30 @@
 		installed_version: string;
 		fixed_version: string;
 		title: string;
-		sources: Set<string>;
-		repos: Array<{ repo_id: string; repo_slug: string }>;
+		description: string;
+		sources: string[];
+		assets: VulnAsset[];
+		repo_count: number;
+		image_count: number;
 	};
+
+	type VulnListResponse = {
+		total: number;
+		limit: number;
+		offset: number;
+		items: VulnGroup[];
+	};
+
+	const VULN_PAGE_SIZE = 100;
 
 	let summary: Summary | null = null;
 	let repos: RepoRow[] = [];
 	let trend: TrendPoint[] = [];
-	let vulns: VulnRow[] = [];
+	let vulnTotal = 0;
+	let vulnPages = new Map<number, VulnGroup[]>();
+	let vulnInflight = new Set<number>();
+	let vulnFilterVersion = 0;
+	let vulnLoaded = false;
 	let images: ImageRow[] = [];
 	let hideClean = true;
 	let loading = true;
@@ -163,33 +173,60 @@
 
 	const severityOrder: Record<string, number> = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, UNKNOWN: 4 };
 
-	$: groupedVulns = (() => {
-		const map = new Map<string, VulnGroup>();
-		for (const v of vulns.filter((v) => v.repo_slug !== v.repo_id && v.repo_slug)) {
-			if (!map.has(v.vuln_id)) {
-				map.set(v.vuln_id, {
-					vuln_id: v.vuln_id,
-					severity: v.severity,
-					pkg_name: v.pkg_name,
-					installed_version: v.installed_version,
-					fixed_version: v.fixed_version,
-					title: v.title,
-					sources: new Set<string>(),
-					repos: []
-				});
-			}
-			const g = map.get(v.vuln_id)!;
-			if (v.source) g.sources.add(v.source);
-			if (!g.repos.find((r) => r.repo_id === v.repo_id)) {
-				g.repos.push({ repo_id: v.repo_id, repo_slug: v.repo_slug });
-			}
+	// Paginated fetch: each page = VULN_PAGE_SIZE groups from the server.
+	// filterVersion increments on any filter change so stale responses
+	// (arriving after the user typed something new) are discarded.
+	async function fetchVulnPage(page: number) {
+		if (page < 0) return;
+		if (vulnPages.has(page) || vulnInflight.has(page)) return;
+		vulnInflight.add(page);
+		const filterAtRequest = vulnFilterVersion;
+		const params = new URLSearchParams({
+			limit: String(VULN_PAGE_SIZE),
+			offset: String(page * VULN_PAGE_SIZE)
+		});
+		if (vulnSelectedSeverities.length) params.set('severity', vulnSelectedSeverities.join(','));
+		if (vulnSelectedSources.length) params.set('source', vulnSelectedSources.join(','));
+		if (vulnSelectedYears.length) params.set('year', vulnSelectedYears.join(','));
+		if (vulnFixAvailable) params.set('fix', '1');
+		const q = vulnSearch.trim();
+		if (q) params.set('q', q);
+		try {
+			const res = await fetch(`/api/vuln/list?${params}`, { credentials: 'include' });
+			if (!res.ok) return;
+			const data = (await res.json()) as VulnListResponse;
+			if (filterAtRequest !== vulnFilterVersion) return;
+			vulnTotal = data.total ?? 0;
+			const next = new Map(vulnPages);
+			next.set(page, data.items ?? []);
+			vulnPages = next;
+			vulnLoaded = true;
+		} catch {
+			// swallow — next scroll tick will retry
+		} finally {
+			vulnInflight.delete(page);
 		}
-		return Array.from(map.values()).sort(
-			(a, b) =>
-				(severityOrder[a.severity?.toUpperCase()] ?? 4) -
-				(severityOrder[b.severity?.toUpperCase()] ?? 4)
-		);
-	})();
+	}
+
+	function resetVulnPages() {
+		vulnFilterVersion++;
+		vulnPages = new Map();
+		vulnInflight = new Set();
+		vulnTotal = 0;
+		vulnLoaded = false;
+		if (vulnScrollEl) vulnScrollEl.scrollTop = 0;
+		vulnScrollTop = 0;
+		void fetchVulnPage(0);
+	}
+
+	// Debounced search: typing shouldn't fire a request per keystroke.
+	let vulnSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	let vulnSearchDebounced = '';
+	$: {
+		if (vulnSearchTimer) clearTimeout(vulnSearchTimer);
+		const v = vulnSearch;
+		vulnSearchTimer = setTimeout(() => { vulnSearchDebounced = v; }, 250);
+	}
 
 	const vulnUrl = (id: string) => {
 		if (id.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
@@ -236,19 +273,6 @@
 		}
 	};
 
-	const loadVulns = async () => {
-		if (vulns.length > 0) return;
-		vulnsLoading = true;
-		try {
-			const res = await fetch('/api/vuln/list', { credentials: 'include' });
-			if (res.ok) vulns = await res.json();
-		} catch {
-			// ignore
-		} finally {
-			vulnsLoading = false;
-		}
-	};
-
 	const loadImages = async () => {
 		if (images.length > 0) return;
 		imagesLoading = true;
@@ -262,8 +286,27 @@
 		}
 	};
 
-	$: if (activeTab === 'vulnerabilities') loadVulns();
+	// When the vulns tab is opened, kick off the first fetch. Filter
+	// changes (including the debounced search) bump vulnFilterVersion
+	// and clear caches via the filtersKey watcher below.
+	$: if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0)) {
+		vulnsLoading = true;
+		fetchVulnPage(0).finally(() => { vulnsLoading = false; });
+	}
 	$: if (activeTab === 'images') loadImages();
+
+	$: vulnFiltersKey = JSON.stringify([
+		vulnSearchDebounced,
+		vulnSelectedSeverities.slice().sort(),
+		vulnSelectedSources.slice().sort(),
+		vulnSelectedYears.slice().sort(),
+		vulnFixAvailable
+	]);
+	let prevVulnFiltersKey = '';
+	$: if (activeTab === 'vulnerabilities' && vulnFiltersKey !== prevVulnFiltersKey) {
+		prevVulnFiltersKey = vulnFiltersKey;
+		if (vulnLoaded || vulnInflight.has(0)) resetVulnPages();
+	}
 
 	// Images filtered + sorted by severity weight (critical > high > medium > low).
 	$: filteredImages = (() => {
@@ -313,62 +356,39 @@
 		return list;
 	})();
 
-	// Vuln table — search across ID, title, package name, affected repos.
-	$: filteredVulns = (() => {
-		let list: VulnGroup[] = groupedVulns;
-		const q = vulnSearch.trim();
-		if (q) {
-			list = list.filter((g) =>
-				includesCI(g.vuln_id, q) ||
-				includesCI(g.title, q) ||
-				includesCI(g.pkg_name, q) ||
-				g.repos.some((r) => includesCI(r.repo_slug, q))
-			);
-		}
-		if (vulnSelectedSeverities.length > 0) {
-			const sevs = new Set(vulnSelectedSeverities);
-			list = list.filter((g) => sevs.has((g.severity || 'UNKNOWN').toUpperCase()));
-		}
-		if (vulnSelectedSources.length > 0) {
-			const srcs = new Set(vulnSelectedSources);
-			list = list.filter((g) => [...g.sources].some((s) => srcs.has(s)));
-		}
-		if (vulnSelectedYears.length > 0) {
-			const years = new Set(vulnSelectedYears);
-			list = list.filter((g) => {
-				// CVE-YYYY-NNNN or GHSA-xxxx — year is the first 4-digit run,
-				// fallback to "other" when we can't parse one out so the
-				// filter is honest about unknowns.
-				const m = g.vuln_id.match(/(\d{4})/);
-				return years.has(m ? m[1] : 'other');
-			});
-		}
-		if (vulnFixAvailable) list = list.filter((g) => !!g.fixed_version);
-		return list;
-	})();
+	// Server-side filtering now — filteredVulns no longer exists.
+	// getVulnAt(idx) returns the group at position idx in the current
+	// filtered result, fetching the backing page if it's not in cache.
+	function getVulnAt(idx: number): VulnGroup | undefined {
+		const page = Math.floor(idx / VULN_PAGE_SIZE);
+		const within = idx % VULN_PAGE_SIZE;
+		const cached = vulnPages.get(page);
+		if (cached) return cached[within];
+		void fetchVulnPage(page);
+		return undefined;
+	}
 
 	// Dynamic MultiSelect options derived from the current data set.
 	$: imageRegistryFilterOptions = [...new Set(images.map((i) => i.registry || '—'))]
 		.sort()
 		.map((r) => ({ value: r, label: r } as MultiSelectOption));
 
-	$: vulnSourceFilterOptions = [...new Set(
-		groupedVulns.flatMap((g) => [...g.sources]).filter(Boolean)
-	)]
-		.sort()
-		.map((s) => ({ value: s, label: s } as MultiSelectOption));
+	// Source + year filter options are now static (we can't survey the
+	// full set of groups without fetching every page). Three scanners
+	// produce vulns today; years span a reasonable CVE window.
+	const vulnSourceFilterOptions: MultiSelectOption[] = [
+		{ value: 'trivy', label: 'trivy' },
+		{ value: 'osv', label: 'osv' },
+		{ value: 'grype', label: 'grype' }
+	];
 
-	$: vulnYearFilterOptions = (() => {
-		const years = new Set<string>();
-		for (const g of groupedVulns) {
-			const m = g.vuln_id.match(/(\d{4})/);
-			years.add(m ? m[1] : 'other');
+	const vulnYearFilterOptions: MultiSelectOption[] = (() => {
+		const now = new Date().getUTCFullYear();
+		const years: MultiSelectOption[] = [];
+		for (let y = now; y >= 2015; y--) {
+			years.push({ value: String(y), label: String(y) });
 		}
-		// Descending so newest years are first — matches "what do I need
-		// to fix today" workflow; "other" (unparseable IDs) falls to the end.
-		return [...years]
-			.sort((a, b) => (a === 'other' ? 1 : b === 'other' ? -1 : b.localeCompare(a)))
-			.map((y) => ({ value: y, label: y } as MultiSelectOption));
+		return years;
 	})();
 
 	// Badge counts per tab.
@@ -403,7 +423,20 @@
 
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
 	$: imageVirt = virtSlice(filteredImages.length, ROW_HEIGHT, imageScrollTop, imageViewH);
-	$: vulnVirt = virtSlice(filteredVulns.length, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
+	$: vulnVirt = virtSlice(vulnTotal, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
+
+	// Whenever the visible window shifts, kick off fetches for any
+	// page that isn't yet cached. The virt slice overscan already
+	// lookaheads ~10 rows above/below, but page boundaries mean we
+	// may also need to fetch the next page as soon as any of its rows
+	// enter the window.
+	$: if (vulnTotal > 0 && vulnVirt.end > vulnVirt.start) {
+		const startPage = Math.floor(vulnVirt.start / VULN_PAGE_SIZE);
+		const endPage = Math.floor((vulnVirt.end - 1) / VULN_PAGE_SIZE);
+		for (let p = startPage; p <= endPage; p++) {
+			if (!vulnPages.has(p) && !vulnInflight.has(p)) void fetchVulnPage(p);
+		}
+	}
 
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
 	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
@@ -578,7 +611,7 @@
 						<span>Filters</span>
 						{#if imageActiveFilterCount > 0}<span class="host-filter-badge">{imageActiveFilterCount}</span>{/if}
 					</button>
-				{:else if activeTab === 'vulnerabilities' && groupedVulns.length > 0}
+				{:else if activeTab === 'vulnerabilities' && (vulnTotal > 0 || vulnActiveFilterCount > 0)}
 					<button
 						type="button"
 						class="host-filter-toggle"
@@ -860,18 +893,26 @@
 				{/if}
 
 			{:else if activeTab === 'vulnerabilities'}
-				{#if vulnsLoading}
+				{#if vulnsLoading && !vulnLoaded}
 					<div class="flex flex-1 items-center justify-center">
 						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
 					</div>
-				{:else if groupedVulns.length === 0}
+				{:else if vulnLoaded && vulnTotal === 0}
 					<div class="flex flex-1 items-center justify-center">
 						<div class="flex flex-col items-center gap-3 text-center">
 							<EmptyVulns class="text-[var(--text-muted)]" />
-							<p class="text-sm text-[var(--text-muted)]">No vulnerabilities found.</p>
+							<p class="text-sm text-[var(--text-muted)]">
+								{vulnActiveFilterCount > 0 ? 'No vulnerabilities match the current filters.' : 'No vulnerabilities found.'}
+							</p>
+							{#if vulnActiveFilterCount > 0}
+								<button type="button" class="text-xs text-[var(--accent)] hover:underline" onclick={clearVulnFilters}>Clear filters</button>
+							{/if}
 						</div>
 					</div>
 				{:else}
+					<div class="flex items-center justify-between pb-2 text-xs text-[var(--text-muted)]">
+						<span>{fmt(vulnTotal)} unique {vulnTotal === 1 ? 'vulnerability' : 'vulnerabilities'}</span>
+					</div>
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={vulnScrollEl} onscroll={() => { vulnScrollTop = vulnScrollEl?.scrollTop ?? 0; vulnViewH = vulnScrollEl?.clientHeight ?? 600; }}>
 							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
@@ -880,59 +921,85 @@
 										<th class="px-5 py-3 text-left w-[22%]">CVE / ID</th>
 										<th class="px-5 py-3 text-left w-[10%]">Severity</th>
 										<th class="px-5 py-3 text-left">Package &amp; Fix</th>
-										<th class="px-5 py-3 text-left w-[28%]">Affected Repos</th>
+										<th class="px-5 py-3 text-left w-[28%]">Affected</th>
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 									{#if vulnVirt.topPad > 0}<tr style="height:{vulnVirt.topPad}px"><td colspan="4"></td></tr>{/if}
-									{#each filteredVulns.slice(vulnVirt.start, vulnVirt.end) as g}
-										<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
-											<td class="px-5 py-3">
-												<div class="flex flex-wrap items-center gap-2">
-													<a
-														href={vulnUrl(g.vuln_id)}
-														target="_blank"
-														rel="noopener noreferrer"
-														class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
-													>{g.vuln_id}</a>
-													{#each [...g.sources] as src}
-														<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
-													{/each}
-												</div>
-												{#if g.title}
-													<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{g.title}</p>
-												{/if}
-											</td>
-											<td class="px-5 py-3 whitespace-nowrap">
-												<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium {severityClass(g.severity)} {severityIcon(g.severity).color}">
-													{#if g.severity?.toUpperCase() === 'CRITICAL' || g.severity?.toUpperCase() === 'HIGH'}
-														<ShieldX class="h-3 w-3" />
-													{:else}
-														<ShieldAlert class="h-3 w-3" />
+									{#each Array.from({ length: Math.max(0, vulnVirt.end - vulnVirt.start) }, (_, i) => vulnVirt.start + i) as idx (idx)}
+										{@const g = getVulnAt(idx)}
+										{#if g}
+											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
+												<td class="px-5 py-3">
+													<div class="flex flex-wrap items-center gap-2">
+														<a
+															href={vulnUrl(g.vuln_id)}
+															target="_blank"
+															rel="noopener noreferrer"
+															class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
+														>{g.vuln_id}</a>
+														{#each g.sources as src}
+															<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
+														{/each}
+													</div>
+													{#if g.title}
+														<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{g.title}</p>
 													{/if}
-													{g.severity}
-												</span>
-											</td>
-											<td class="px-5 py-3">
-												<p class="font-mono text-xs text-[var(--text-muted)] break-all">{g.pkg_name}{g.installed_version ? `@${g.installed_version}` : ''}</p>
-												{#if g.fixed_version}
-													<p class="mt-0.5 font-mono text-xs text-green-400"><span class="font-sans text-[var(--text-muted)]">fix:</span> {g.fixed_version}</p>
-												{:else}
-													<p class="mt-0.5 text-xs text-[var(--text-muted)]/50">no fix available</p>
-												{/if}
-											</td>
-											<td class="px-5 py-3">
-												<div class="flex flex-col gap-1">
-													{#each g.repos as repo}
-														<button
-															type="button"
-															class="text-left text-xs text-[var(--accent)] hover:underline break-all"
-															onclick={() => openRepo(repo.repo_id)}
-														>{repo.repo_slug}</button>
-													{/each}
-												</div>
-											</td>
-										</tr>
+												</td>
+												<td class="px-5 py-3 whitespace-nowrap">
+													<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium {severityClass(g.severity)} {severityIcon(g.severity).color}">
+														{#if g.severity?.toUpperCase() === 'CRITICAL' || g.severity?.toUpperCase() === 'HIGH'}
+															<ShieldX class="h-3 w-3" />
+														{:else}
+															<ShieldAlert class="h-3 w-3" />
+														{/if}
+														{g.severity}
+													</span>
+												</td>
+												<td class="px-5 py-3">
+													<p class="font-mono text-xs text-[var(--text-muted)] break-all">{g.pkg_name}{g.installed_version ? `@${g.installed_version}` : ''}</p>
+													{#if g.fixed_version}
+														<p class="mt-0.5 font-mono text-xs text-green-400"><span class="font-sans text-[var(--text-muted)]">fix:</span> {g.fixed_version}</p>
+													{:else}
+														<p class="mt-0.5 text-xs text-[var(--text-muted)]/50">no fix available</p>
+													{/if}
+												</td>
+												<td class="px-5 py-3">
+													<div class="flex flex-col gap-1">
+														{#each g.assets as a}
+															{#if a.type === 'repo'}
+																<button
+																	type="button"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline break-all"
+																	onclick={() => openRepo(a.id)}
+																>
+																	<GitBranch class="h-3 w-3 shrink-0" />
+																	<span>{a.slug}</span>
+																</button>
+															{:else}
+																<button
+																	type="button"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] break-all"
+																	onclick={() => openImageDrawer(a.id)}
+																>
+																	<Container class="h-3 w-3 shrink-0" />
+																	<span>{a.slug}</span>
+																</button>
+															{/if}
+														{/each}
+													</div>
+												</td>
+											</tr>
+										{:else}
+											<tr style="height:{VULN_ROW_HEIGHT}px">
+												<td class="px-5 py-3" colspan="4">
+													<div class="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+														<div class="h-3 w-3 animate-spin rounded-full border border-[var(--text-muted)] border-t-transparent"></div>
+														<span>loading…</span>
+													</div>
+												</td>
+											</tr>
+										{/if}
 									{/each}
 									{#if vulnVirt.bottomPad > 0}<tr style="height:{vulnVirt.bottomPad}px"><td colspan="4"></td></tr>{/if}
 								</tbody>
