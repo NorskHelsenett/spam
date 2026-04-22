@@ -221,17 +221,29 @@
 		}
 	};
 
+	// Inflight flags — the hostsFetched / imagesFetched booleans only
+	// flip true AFTER the response lands, which leaves a window where
+	// two rapid calls (e.g. loadMain's internal call + an explicit call
+	// from the same event handler) both pass the guard and fire parallel
+	// requests. These flags block re-entry while a fetch is already in
+	// flight.
+	let imagesInFlight = false;
+	let hostsInFlight = false;
+
 	const loadImages = async () => {
-		if (imagesFetched) return;
+		if (imagesFetched || imagesInFlight) return;
+		imagesInFlight = true;
 		try {
 			const res = await fetch(`/api/clusters/images/detail${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) imageDetails = (await res.json()) ?? [];
 			imagesFetched = true;
 		} catch { /* silent */ }
+		finally { imagesInFlight = false; }
 	};
 
 	const loadHosts = async () => {
-		if (hostsFetched) return;
+		if (hostsFetched || hostsInFlight) return;
+		hostsInFlight = true;
 		try {
 			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) {
@@ -239,6 +251,7 @@
 			}
 			hostsFetched = true;
 		} catch { /* silent */ }
+		finally { hostsInFlight = false; }
 	};
 
 	// Lazy-load metadata only for hosts visible in the virtual scroll viewport.
@@ -302,9 +315,14 @@
 
 		const es = new EventSource('/api/app/stream');
 		es.addEventListener('scam_ingest', () => {
+			// loadMain triggers loadHosts internally; reset the cache
+			// flags first so the refresh actually fetches. The inFlight
+			// guards inside loadHosts / loadImages prevent duplicate
+			// requests even if this handler fires rapidly.
+			hostsFetched = false;
+			if (imagesFetched) imagesFetched = false;
 			loadMain();
-			if (imagesFetched) { imagesFetched = false; loadImages(); }
-			if (hostsFetched) { hostsFetched = false; loadHosts(); }
+			if (activeTab === 'images') loadImages();
 		});
 
 		return () => {
