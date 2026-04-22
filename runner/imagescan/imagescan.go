@@ -297,7 +297,9 @@ func (p Pipeline) exportRootfs(ctx context.Context, rootfsDir string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	tarCmd := exec.CommandContext(ctx, "tar", "-x", "-C", rootfsDir)
+	// Skip dev/* — mknod requires CAP_MKNOD which the scanner pod lacks,
+	// and device files aren't useful for secrets/SBOM scanning anyway.
+	tarCmd := exec.CommandContext(ctx, "tar", "-x", "--exclude=dev/*", "-C", rootfsDir)
 	tarCmd.Stdin = stdout
 	tarCmd.Stderr = &lineWriter{prefix: "tar: ", log: p.Log}
 	if err := tarCmd.Run(); err != nil {
