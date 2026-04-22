@@ -182,23 +182,24 @@ churn for 9 hours).
 
 Server thresholds:
 
-- `sessionIdleGap = 2 min` — any silence longer than this on the next
-  push rolls the session (stale state cleared).
-- `sessionLiveWindow = 15 min` — cluster is "dark" after this much
+- `sessionLiveWindow = 1 h` (default; override via
+  `SPAM_CLUSTER_LIVE_WINDOW`) — cluster is "dark" after this much
   silence; UI shows nothing.
 
 Agent-side work: spawn a goroutine alongside the event watchers that
 ticks every 60s and POSTs `/api/scam/heartbeat` with the cluster_id.
 ~10 lines of code, no state.
 
-### Fast-restart rollover
+### Agent-side re-INITIAL on reconnect
 
-If the agent crashes + restarts in <2 min (fast liveness probe or
-systemd restart), `touchClusterSession` won't detect the gap and the
-prior session's stale rows linger. Proper fix: agent emits a
-`session_id` (random UUID per process start) in each record; server
-detects session_id change → roll over unconditionally. Until then,
-stale state clears on the next genuine >2 min gap.
+Session rollover logic was removed from the server because the agent
+doesn't reliably re-snapshot — a reconnect used to wipe all prior
+resources until deltas trickled in. Liveness (last_push_at) alone is
+the current visibility gate. To keep data canonical across very long
+agent outages or re-deployments with changed state, the agent should
+periodically (hourly?) resend INITIAL events for all currently-tracked
+resources. Until then, stale resources from a decommissioned cluster
+only fade out after `sessionLiveWindow` of total silence.
 
 ## Smaller follow-ups (from recent work)
 

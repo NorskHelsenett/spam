@@ -35,19 +35,22 @@ const resourceKeyExpr = `(
 )`
 
 // liveCTE deduplicates cluster_record rows to one-per-resource-identity
-// AND restricts to the agent's current session. Combined:
+// AND restricts to currently-live clusters. Combined:
 //
 //	- DISTINCT ON takes the latest non-DELETE row per resource (belt-
 //	  and-braces against any residual msg-duplication; the
 //	  20260420_dedupe_cluster_record_msg migration plus the resource-
 //	  keyed unique index normally guarantee this).
-//	- Join to cluster_sessions filters out rows from prior agent
-//	  sessions (received_at < session_started_at) and silent clusters
-//	  (last_push_at too old).
+//	- Join to cluster_sessions filters out silent clusters whose
+//	  agent hasn't heartbeated within sessionLiveWindow. Heartbeats
+//	  and data pushes both bump last_push_at, so a quiet-but-alive
+//	  cluster stays visible. We deliberately don't gate on
+//	  session_started_at — agent reconnects shouldn't wipe prior
+//	  resources, since the agent doesn't reliably re-INITIAL.
 //
 // Every live-state query reads FROM live and gets both behaviours
 // for free — no per-query session-filter boilerplate.
-const liveCTE = `WITH live AS (
+var liveCTE = `WITH live AS (
 	SELECT DISTINCT ON (
 		cr.data->>'cluster_id',
 		CASE WHEN cr.data->>'kind' = 'Container'
@@ -58,8 +61,7 @@ const liveCTE = `WITH live AS (
 	FROM cluster_record cr
 	JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
 	WHERE cr.data->>'msg' != 'DELETE'
-	  AND cr.received_at >= cs.session_started_at
-	  AND cs.last_push_at >= NOW() - INTERVAL '15 minutes'
+	  AND cs.last_push_at >= NOW() - ` + liveWindowInterval() + `
 	ORDER BY cr.data->>'cluster_id',
 		CASE WHEN cr.data->>'kind' = 'Container'
 		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')

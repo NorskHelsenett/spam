@@ -12,6 +12,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/scam"
 	"gorm.io/gorm"
 )
 
@@ -538,7 +539,7 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			  MAX(received_at) AS last_seen
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
+			  AND data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
 			  AND data->>'digest' = ?
 			GROUP BY 1, 2
 			ORDER BY last_seen DESC
@@ -721,7 +722,7 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			       COUNT(DISTINCT data->>'pod_uid')  AS pods
 			FROM cluster_record
 			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE' AND EXISTS (SELECT 1 FROM cluster_sessions cs WHERE cs.cluster_id = data->>'cluster_id' AND received_at >= cs.session_started_at AND cs.last_push_at >= NOW() - INTERVAL '15 minutes')
+			  AND data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
 			  AND data->>'pod_phase' = 'Running'
 			  AND data->>'digest' IN ?
 			GROUP BY 1, 2, 3, 4, 5, 6
