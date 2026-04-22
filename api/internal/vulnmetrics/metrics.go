@@ -14,6 +14,7 @@ import (
 const (
 	summaryCacheKey = "vuln:summary:v1"
 	reposCacheKey   = "vuln:repos:v1"
+	facetsCacheKey  = "vuln:facets:v1"
 	summaryCacheTTL = 7 * 24 * time.Hour
 )
 
@@ -235,6 +236,82 @@ func LoadRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// Facets is the set of filter options the UI can show without risking
+// zero-result selections — every value listed has at least one matching
+// row somewhere in either the repo-side or image-side unified vuln view.
+type Facets struct {
+	Sources []string `json:"sources"`
+	Years   []string `json:"years"`
+}
+
+type cachedFacets struct {
+	Version summaryVersion `json:"version"`
+	Facets  Facets         `json:"facets"`
+}
+
+// LoadFacets returns the distinct sources + CVE years currently present
+// in the unified vuln views. Versioned against the same summaryVersion
+// (scan / OSV / VEX / image-scan watermarks) as LoadSummary so the cache
+// drops the moment any scan activity could have introduced new values.
+func LoadFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
+	store := cache.NewPostgresStore(db)
+
+	version, err := querySummaryVersion(ctx, db)
+	if err != nil {
+		return Facets{}, err
+	}
+
+	if entry, ok, err := cache.GetJSON[cachedFacets](ctx, store, facetsCacheKey); err == nil && ok {
+		if sameVersion(entry.Version, version) {
+			return entry.Facets, nil
+		}
+	}
+
+	facets, err := computeFacets(ctx, db)
+	if err != nil {
+		return Facets{}, err
+	}
+
+	if err := cache.SetJSON(ctx, store, facetsCacheKey, cachedFacets{
+		Version: version,
+		Facets:  facets,
+	}, summaryCacheTTL); err != nil {
+		return Facets{}, err
+	}
+	return facets, nil
+}
+
+func computeFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
+	out := Facets{Sources: []string{}, Years: []string{}}
+
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT source
+		FROM (
+			SELECT source FROM view_unified_repositories_vulnerabilities
+			UNION ALL
+			SELECT source FROM view_unified_image_vulnerabilities
+		) u
+		WHERE source IS NOT NULL AND source <> ''
+		ORDER BY source
+	`).Scan(&out.Sources).Error; err != nil {
+		return Facets{}, err
+	}
+
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT substring(vuln_id FROM 'CVE-(\d{4})-') AS year
+		FROM (
+			SELECT vuln_id FROM view_unified_repositories_vulnerabilities
+			UNION ALL
+			SELECT vuln_id FROM view_unified_image_vulnerabilities
+		) u
+		WHERE vuln_id ~ '^CVE-\d{4}-'
+		ORDER BY year DESC
+	`).Scan(&out.Years).Error; err != nil {
+		return Facets{}, err
+	}
+	return out, nil
 }
 
 // LoadListPage returns a paginated page of grouped vulnerabilities,

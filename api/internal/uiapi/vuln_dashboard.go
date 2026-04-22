@@ -139,52 +139,25 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // VulnFacetsHandler returns the distinct sources + CVE years that
 // currently appear in either the repo-side or image-side unified
 // vuln view. The frontend uses these to populate filter dropdowns
-// so they never show options that would yield zero results.
+// so they never show options that would yield zero results. Backed
+// by vulnmetrics.LoadFacets which caches against the same summary
+// version as LoadSummary — recomputes whenever new scan activity
+// could have introduced new values.
 //
 // GET /api/vuln/facets
 //
 // Response: {"sources": ["grype", "osv"], "years": ["2024", "2023", ...]}
 func VulnFacetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
-	type response struct {
-		Sources []string `json:"sources"`
-		Years   []string `json:"years"`
-	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
-
-		resp := response{Sources: []string{}, Years: []string{}}
-
-		if err := db.WithContext(r.Context()).Raw(`
-			SELECT DISTINCT source
-			FROM (
-				SELECT source FROM view_unified_repositories_vulnerabilities
-				UNION ALL
-				SELECT source FROM view_unified_image_vulnerabilities
-			) u
-			WHERE source IS NOT NULL AND source <> ''
-			ORDER BY source
-		`).Scan(&resp.Sources).Error; err != nil {
-			http.Error(w, "failed to load vuln sources", http.StatusInternalServerError)
+		facets, err := vulnmetrics.LoadFacets(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load vuln facets", http.StatusInternalServerError)
 			return
 		}
-
-		if err := db.WithContext(r.Context()).Raw(`
-			SELECT DISTINCT substring(vuln_id FROM 'CVE-(\d{4})-') AS year
-			FROM (
-				SELECT vuln_id FROM view_unified_repositories_vulnerabilities
-				UNION ALL
-				SELECT vuln_id FROM view_unified_image_vulnerabilities
-			) u
-			WHERE vuln_id ~ '^CVE-\d{4}-'
-			ORDER BY year DESC
-		`).Scan(&resp.Years).Error; err != nil {
-			http.Error(w, "failed to load vuln years", http.StatusInternalServerError)
-			return
-		}
-
-		writeJSON(w, http.StatusOK, resp)
+		writeJSON(w, http.StatusOK, facets)
 	}
 }
 
