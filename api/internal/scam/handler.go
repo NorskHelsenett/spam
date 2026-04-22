@@ -59,9 +59,24 @@ var liveCTE = buildLiveCTE(false)
 var allCTE = buildLiveCTE(true)
 
 func buildLiveCTE(includeInactive bool) string {
+	return buildLiveCTEWithACL(includeInactive, "")
+}
+
+// buildLiveCTEWithACL is the variant that threads an ACL filter into
+// the CTE's WHERE clause, so summary-style handlers only see records
+// for clusters the caller can read. The fragment is pre-parameterised
+// and its bind args are passed separately at handler level.
+//
+// Passing "" or "TRUE" as the fragment yields the same output as
+// buildLiveCTE.
+func buildLiveCTEWithACL(includeInactive bool, aclFragment string) string {
 	liveness := `AND cs.last_push_at >= NOW() - ` + liveWindowInterval()
 	if includeInactive {
 		liveness = ""
+	}
+	aclAnd := ""
+	if aclFragment != "" && aclFragment != "TRUE" {
+		aclAnd = "AND " + aclFragment
 	}
 	return `WITH live AS (
 		SELECT DISTINCT ON (
@@ -75,6 +90,7 @@ func buildLiveCTE(includeInactive bool) string {
 		JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
 		WHERE cr.data->>'msg' != 'DELETE'
 		  ` + liveness + `
+		  ` + aclAnd + `
 		ORDER BY cr.data->>'cluster_id',
 			CASE WHEN cr.data->>'kind' = 'Container'
 			     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
@@ -94,6 +110,13 @@ func cteFor(r *http.Request) string {
 		return allCTE
 	}
 	return liveCTE
+}
+
+// cteForWithACL is cteFor plus an injected ACL filter on the CTE's
+// cluster_id selection. The returned SQL has one `?` placeholder per
+// entry in the ACL filter's args slice (handled by the caller).
+func cteForWithACL(r *http.Request, aclFragment string) string {
+	return buildLiveCTEWithACL(isTruthy(r.URL.Query().Get("include_inactive")), aclFragment)
 }
 
 func isTruthy(v string) bool {
@@ -391,7 +414,12 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		rows := []row{}
-		err := db.Raw(cteFor(r) + `
+		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		if deny {
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+		err := db.Raw(cteForWithACL(r, aclFrag)+`
 			SELECT
 				data->>'cluster'     AS cluster,
 				data->>'cluster_id'  AS cluster_id,
@@ -411,7 +439,7 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			FROM live
 			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
 			ORDER BY last_seen DESC
-		`).Scan(&rows).Error
+		`, aclArgs...).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -428,7 +456,12 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		rows := []row{}
-		err := db.Raw(cteFor(r) + `
+		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		if deny {
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+		err := db.Raw(cteForWithACL(r, aclFrag)+`
 			SELECT
 				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
 				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
@@ -438,7 +471,7 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			  AND COALESCE(data->>'digest', '') != ''
 			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
 			ORDER BY image_count DESC
-		`).Scan(&rows).Error
+		`, aclArgs...).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -455,7 +488,12 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 			InternalServices int64 `json:"internal_services"`
 		}
 		var res result
-		err := db.Raw(liveCTE + `
+		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		if deny {
+			writeJSON(w, http.StatusOK, res)
+			return
+		}
+		err := db.Raw(buildLiveCTEWithACL(false, aclFrag)+`
 			SELECT
 				COUNT(DISTINCT data->>'uid') FILTER (
 					WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
@@ -464,7 +502,7 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 					WHERE data->>'kind' = 'Service'
 				) AS internal_services
 			FROM live
-		`).Scan(&res).Error
+		`, aclArgs...).Scan(&res).Error
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -496,7 +534,12 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			VulnUnknown    int       `json:"vuln_unknown"`
 		}
 		rows := []row{}
-		err := db.Raw(cteFor(r) + `,
+		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		if deny {
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+		err := db.Raw(cteForWithACL(r, aclFrag)+`,
 			agg AS (
 				SELECT
 					data->>'registry' AS raw_registry,
@@ -551,7 +594,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			 AND id.digest     = agg.digest
 			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
 			ORDER BY agg.container_count DESC, agg.image
-		`).Scan(&rows).Error
+		`, aclArgs...).Scan(&rows).Error
 		if err != nil {
 			log.Printf("clusters/images/detail: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -582,10 +625,15 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen      time.Time `json:"last_seen"`
 		}
 		rows := []row{}
+		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		if deny {
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
 		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
 		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
 		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
-		err := db.Raw(cteFor(r) + `,
+		err := db.Raw(cteForWithACL(r, aclFrag)+`,
 			ingress_hosts AS (
 				SELECT
 					r->>'host' AS host,
@@ -688,7 +736,7 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			) w ON true
 			WHERE h.host IS NOT NULL AND h.host != ''
 			ORDER BY h.host, h.cluster
-		`).Scan(&rows).Error
+		`, aclArgs...).Scan(&rows).Error
 		if err != nil {
 			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -723,6 +771,12 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 		clusterID := r.URL.Query().Get("cluster_id")
 		if clusterID == "" {
 			http.Error(w, "missing cluster_id", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+			// Return the same shape as a missing cluster — never leak
+			// existence via differential error messages.
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 
@@ -1112,6 +1166,10 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 		namespace := r.URL.Query().Get("namespace")
 		if host == "" || clusterID == "" || namespace == "" {
 			http.Error(w, "missing host, cluster_id, or namespace", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
 

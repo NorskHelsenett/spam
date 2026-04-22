@@ -210,6 +210,10 @@ func SBOMDownloadHandler(db *gorm.DB, authService *auth.Service) http.HandlerFun
 			http.Error(w, "sbom ID required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadSBOM(r, db, sbomID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		sbom, err := artifacts.FindSBOM(r.Context(), db, sbomID)
 		if err != nil {
@@ -238,6 +242,10 @@ func SBOMGetHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		sbomID := r.PathValue("id")
 		if sbomID == "" {
 			http.Error(w, "sbom ID required", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadSBOM(r, db, sbomID); err != nil || !ok {
+			notFoundOrForbidden(w)
 			return
 		}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
@@ -394,22 +395,39 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 		}
 
 		var img struct {
-			ID         string
-			Registry   string
-			Repository string
-			Digest     string
-			CreatedAt  time.Time
+			ID             string
+			Registry       string
+			Repository     string
+			Digest         string
+			CreatedAt      time.Time
+			SourceRepoID   string
+			VerifiedSource bool
 		}
 		if err := db.WithContext(r.Context()).
 			Table("image_digests").
-			Select("id, registry, repository, digest, created_at").
+			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
 			Where("id = ?", id).
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				http.Error(w, "image not found", http.StatusNotFound)
+				notFoundOrForbidden(w)
 				return
 			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Image access inheritance is only granted when the source
+		// repo is cryptographically verified. Unsigned images fall
+		// back to admin-only until an explicit image grant path is
+		// wired in Phase 4. 404 hides the existence of images the
+		// caller can't see.
+		if img.VerifiedSource && img.SourceRepoID != "" {
+			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 
@@ -566,6 +584,10 @@ func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		type row struct {
 			ID         string    `json:"id"`
@@ -618,6 +640,10 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		repoID := r.PathValue("repo_id")
 		if repoID == "" {
 			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
 			return
 		}
 

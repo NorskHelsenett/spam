@@ -34,6 +34,10 @@ func RepoContributorsHandler(db *gorm.DB, authService *auth.Service, store *prov
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		// Look up provider type, org, slug, and provider_instance_id from the repo UUID.
 		var repo struct {

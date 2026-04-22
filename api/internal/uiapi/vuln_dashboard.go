@@ -42,6 +42,21 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		readable, unrestricted, err := readableRepoIDSet(r, db)
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		if !unrestricted {
+			filtered := rows[:0]
+			for _, row := range rows {
+				if _, ok := readable[row.RepoID]; ok {
+					filtered = append(filtered, row)
+				}
+			}
+			rows = filtered
+		}
+
 		writeJSON(w, http.StatusOK, rows)
 	}
 }
@@ -56,6 +71,16 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 		}
 
 		repoID := r.URL.Query().Get("repo_id")
+		// Fast path: caller scoped the request to a specific repo —
+		// gate up-front by ACL so we don't load and discard rows the
+		// caller can't see.
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		}
+
 		rows, err := vulnmetrics.LoadList(r.Context(), db)
 		if err != nil {
 			http.Error(w, "failed to load vulnerability list", http.StatusInternalServerError)
@@ -69,6 +94,21 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 				}
 			}
 			rows = filtered
+		} else {
+			readable, unrestricted, err := readableRepoIDSet(r, db)
+			if err != nil {
+				http.Error(w, "failed to scope results", http.StatusInternalServerError)
+				return
+			}
+			if !unrestricted {
+				filtered := rows[:0]
+				for _, row := range rows {
+					if _, ok := readable[row.RepoID]; ok {
+						filtered = append(filtered, row)
+					}
+				}
+				rows = filtered
+			}
 		}
 
 		writeJSON(w, http.StatusOK, rows)

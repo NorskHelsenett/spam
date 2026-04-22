@@ -68,4 +68,15 @@ type ImageDigest struct {
 	SourceLabel     string `gorm:"size:512"`
 	CreatedAt       time.Time
 	CreatedByUserID string `gorm:"size:36"`
+
+	// VerifiedSource gates ACL inheritance from SourceRepoID. The
+	// OCI `org.opencontainers.image.source` label is self-reported by
+	// the image producer, so an image claiming a private source repo
+	// must not grant the reader access to that repo's cluster slot
+	// unless the claim is cryptographically verified (cosign, sigstore,
+	// or a signed attestation). Populated by the image scanner when a
+	// valid signature chain is present; left false otherwise.
+	VerifiedSource     bool       `gorm:"not null;default:false"`
+	VerificationMethod string     `gorm:"size:32"`
+	VerifiedAt         *time.Time
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
@@ -411,9 +412,56 @@ func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error
 // ever runs, so a newly-added endpoint cannot accidentally leak data.
 // Per-handler requireAdmin checks still apply on top for write-role
 // granularity.
+//
+// APIGuard also builds an acl.Subject (user id, group slugs, admin
+// flag) and stashes it in the request context so Phase 3 scope
+// helpers can filter data without re-querying the user_groups table
+// per handler.
 func (s *Service) APIGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := s.RequireAdminOrGlobalReader(r); err != nil {
+		user, err := s.RequireAdminOrGlobalReader(r)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		subj, err := s.buildSubject(r.Context(), user.ID)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(acl.WithSubject(r.Context(), subj)))
+	})
+}
+
+// buildSubject loads the group slugs for userID and tags the Subject
+// with IsAdmin when the admin slug is present. Returns an error if the
+// lookup fails so APIGuard can fail closed rather than allow access
+// with an empty group list.
+func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject, error) {
+	groups, err := s.userGroupSlugs(ctx, userID)
+	if err != nil {
+		return acl.Subject{}, err
+	}
+	subj := acl.Subject{UserID: userID, GroupSlugs: groups}
+	for _, slug := range groups {
+		if slug == GroupAdmin {
+			subj.IsAdmin = true
+			break
+		}
+	}
+	return subj, nil
+}
+
+// AdminGuard restricts a subrouter to admin sessions only. Use this to
+// wrap groups of endpoints whose data would leak credentials or secret
+// values to global_reader (e.g. /api/secrets/*, raw run-secret bodies).
+// Pairs with APIGuard — APIGuard runs first at the enclosing group and
+// AdminGuard tightens the requirement to admin on the inner route.
+func (s *Service) AdminGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := s.RequireAdmin(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

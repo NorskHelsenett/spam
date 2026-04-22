@@ -830,6 +830,18 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		source := r.URL.Query().Get("source") // "sbom", "manifest", or empty for both
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order") // "asc" or "desc"
+
+		// When scoped to a specific repo, gate by ACL up-front so we
+		// never expose dependencies of a repo the caller can't read.
+		// The cross-repo aggregate path is not ACL-filtered in Phase 3
+		// and falls back to the migration grant — Phase 4 will scope
+		// aggregates per-subject.
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		}
 		parsedSearch, err := parseDependencySearchQuery(search)
 		if err != nil {
 			http.Error(w, "invalid dependency search query: "+err.Error(), http.StatusBadRequest)
@@ -1671,6 +1683,10 @@ func RepoDependenciesListHandler(db *gorm.DB, authService *auth.Service) http.Ha
 		repoID := strings.TrimSpace(r.URL.Query().Get("repo_id"))
 		if repoID == "" {
 			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
 			return
 		}
 

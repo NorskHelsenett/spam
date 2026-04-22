@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/events"
@@ -24,6 +26,11 @@ type RouterOptions struct {
 	ProviderStore *providerconfig.Store
 	Cache         cache.Store
 	HMACKey       string
+	// ACLProvider is the access-control grant source that handlers
+	// reach via acl.ProviderFromRequest. Built once at startup so the
+	// provider chain (LocalProvider today, later also OIDC-derived /
+	// GitHub-App / external RBAC) stays out of handler signatures.
+	ACLProvider acl.Provider
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -31,17 +38,44 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	r := chi.NewRouter()
 	var providerStore *providerconfig.Store
 	var appCache cache.Store
+	var aclProvider acl.Provider
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
+		aclProvider = opts.ACLProvider
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
 	}
 
+	// Injects the configured ACL Provider into the request context
+	// for every gated route. Handlers fetch it via
+	// acl.ProviderFromRequest; a nil provider is treated as
+	// fail-closed by the scope helpers, so the middleware is safe to
+	// install even when the caller forgot to supply an ACLProvider.
+	aclProviderInjector := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(acl.WithProvider(r.Context(), aclProvider)))
+		})
+	}
+
 	var syncMgr *uiapi.SyncManager
 	if providerStore != nil {
 		syncMgr = uiapi.NewSyncManager(db, providerStore, appCache)
+	}
+
+	// Resolves the current user id for audit records. Returns "" when no
+	// session is loadable (the audit middleware only records successful
+	// 2xx responses, so unauthenticated hits do not reach it).
+	auditUserID := func(r *http.Request) string {
+		if authService == nil {
+			return ""
+		}
+		sess, err := authService.LoadSession(r)
+		if err != nil || sess == nil {
+			return ""
+		}
+		return sess.UserID
 	}
 
 	// ---------------------------------------------------------------
@@ -106,6 +140,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			sse.Use(middleware.Recoverer)
 			sse.Use(cache.Middleware)
 			sse.Use(authService.APIGuard)
+			sse.Use(aclProviderInjector)
 
 			sse.Get("/api/app/stream", events.AppStreamHandler(authService.SessionInfo, shutdown))
 			sse.Get("/api/runs/active/stream", uiapi.RunsActiveStreamHandler(db, authService))
@@ -132,6 +167,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			priv.Use(cache.Middleware)
 			priv.Use(middleware.Timeout(60 * time.Second))
 			priv.Use(authService.APIGuard)
+			priv.Use(aclProviderInjector)
 
 			priv.Route("/api", func(api chi.Router) {
 				api.Get("/sboms/{id}", uiapi.SBOMGetHandler(db, authService))
@@ -139,13 +175,17 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/users", uiapi.AdminUsersListHandler(db, authService))
 				api.Patch("/admin/users/{userID}", uiapi.AdminUserRoleHandler(db, authService))
 				api.Patch("/admin/users/{userID}/hidden", uiapi.AdminUserHiddenHandler(db, authService))
-				api.Get("/admin/providers", uiapi.AdminProvidersListHandler(authService, providerStore))
-				api.Post("/admin/providers", uiapi.AdminProvidersCreateHandler(authService, providerStore))
-				api.Patch("/admin/providers/{id}", uiapi.AdminProvidersUpdateHandler(authService, providerStore))
-				api.Post("/admin/providers/{id}/rotate", uiapi.AdminProvidersRotateHandler(authService, providerStore))
-				api.Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(authService, providerStore, syncMgr))
+				// Provider routes return PAT fingerprints and rotate
+				// secrets; every successful hit is audited so admin
+				// reads/writes leave a trail.
+				providerAudit := audit.Middleware(db, auditUserID, "admin.providers")
+				api.With(providerAudit).Get("/admin/providers", uiapi.AdminProvidersListHandler(authService, providerStore))
+				api.With(providerAudit).Post("/admin/providers", uiapi.AdminProvidersCreateHandler(authService, providerStore))
+				api.With(providerAudit).Patch("/admin/providers/{id}", uiapi.AdminProvidersUpdateHandler(authService, providerStore))
+				api.With(providerAudit).Post("/admin/providers/{id}/rotate", uiapi.AdminProvidersRotateHandler(authService, providerStore))
+				api.With(providerAudit).Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(authService, providerStore, syncMgr))
 				api.Get("/admin/providers/sync/status", uiapi.AdminProvidersSyncStatusHandler(authService, providerStore, syncMgr))
-				api.Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
+				api.With(providerAudit).Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
@@ -229,7 +269,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// scan-all is registered in the no-timeout SSE group above
 				api.Get("/runs/{id}", uiapi.RunGetHandler(db, authService))
 				api.Post("/runs/{id}/retry", uiapi.RunRetryHandler(db, authService))
-				api.Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
+				// Run-secrets returns raw scan findings; gated admin-only
+				// via AdminGuard, and every successful read is audited.
+				api.With(
+					authService.AdminGuard,
+					audit.Middleware(db, auditUserID, "runs.secrets.read"),
+				).Get("/runs/{id}/secrets", uiapi.RunSecretsHandler(db, authService))
 
 				// Image-scan artifact download — per-artifact raw bytes.
 				// The /runs/{id} endpoint already returns summaries as part
@@ -261,7 +306,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
 			})
+			// The /api/secrets subrouter exposes discovered secret
+			// findings and per-repo secret tables. These responses
+			// can carry real-looking credentials, so the whole
+			// subrouter is admin-only (AdminGuard) and every
+			// successful read is written to audit_log.
 			priv.Route("/api/secrets", func(s chi.Router) {
+				s.Use(authService.AdminGuard)
+				s.Use(audit.Middleware(db, auditUserID, "secrets.read"))
 				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
 				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))

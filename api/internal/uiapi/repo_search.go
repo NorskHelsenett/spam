@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -65,8 +66,20 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 		providerID := r.URL.Query().Get("provider_id")
 
+		// Compile the ACL filter once and splice it into both queries
+		// below. Missing Subject => zero-Subject => public-only view,
+		// which is the fail-closed behavior we want if middleware was
+		// somehow skipped.
+		subj := acl.SubjectFromRequest(r)
+		repoClause, err := acl.ReadableRepoClause(r.Context(), acl.ProviderFromRequest(r), subj, "r")
+		if err != nil {
+			http.Error(w, "search failed", http.StatusInternalServerError)
+			return
+		}
+		aclWhere, aclArgs := aclWhereFragment(repoClause)
+
 		var rows []RepoSearchResult
-		err := db.WithContext(r.Context()).Raw(`
+		err = db.WithContext(r.Context()).Raw(`
 			SELECT
 				r.id,
 				r.provider,
@@ -100,6 +113,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			)
 			AND pi.id IS NOT NULL
 			AND (? = '' OR pi.id = ?)
+			AND `+aclWhere+`
 			ORDER BY
 				CASE
 					WHEN LOWER(r.slug) = LOWER(?) THEN 0
@@ -147,11 +161,14 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				LOWER(r.slug) ASC
 			LIMIT ? OFFSET ?
 			`,
-			q, q, q,
-			q, q, q, q, q, q, q,
-			providerID, providerID,
-			q, q, q, q, q, q, q, q, q, q,
-			limit+1, offset,
+			append(append([]any{
+				q, q, q,
+				q, q, q, q, q, q, q,
+				providerID, providerID,
+			}, aclArgs...),
+				q, q, q, q, q, q, q, q, q, q,
+				limit+1, offset,
+			)...,
 		).Scan(&rows).Error
 		if err != nil {
 			http.Error(w, "search failed", http.StatusInternalServerError)
@@ -167,7 +184,9 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			rows = rows[:limit]
 		}
 
-		// Find matching groups (distinct org paths that contain the query)
+		// Find matching groups (distinct org paths that contain the query).
+		// The ACL filter is applied again here so aggregate counts don't
+		// leak the existence of private repos the caller can't read.
 		var groups []GroupSearchResult
 		_ = db.WithContext(r.Context()).Raw(`
 			SELECT
@@ -183,6 +202,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			WHERE r.org ILIKE '%' || ? || '%'
 				AND pi.id IS NOT NULL
 				AND (? = '' OR pi.id = ?)
+				AND `+aclWhere+`
 			GROUP BY r.org, pi.id
 			ORDER BY
 				CASE WHEN LOWER(r.org) = LOWER(?) THEN 0
@@ -191,7 +211,7 @@ func RepoSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 				END,
 				repo_count DESC
 			LIMIT 10
-		`, q, providerID, providerID, q, q).Scan(&groups).Error
+		`, append(append([]any{q, providerID, providerID}, aclArgs...), q, q)...).Scan(&groups).Error
 
 		if groups == nil {
 			groups = []GroupSearchResult{}

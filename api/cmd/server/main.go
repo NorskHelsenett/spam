@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
+	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
@@ -90,6 +92,9 @@ func run() error {
 		&secretprobe.SecretDismissal{},
 		&scam.Record{},
 		&scam.ClusterSession{},
+		&scam.Cluster{},
+		&audit.Log{},
+		&acl.Grant{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
@@ -122,6 +127,8 @@ func run() error {
 		"migrations/20260416_create_scam_indexes.sql",
 		"migrations/20260420_dedupe_cluster_record_msg.sql",
 		"migrations/20260421_rename_trivy_adhoc_job_type.sql",
+		"migrations/20260422_create_acl_constraints.sql",
+		"migrations/20260422_seed_acl_migration.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -175,6 +182,11 @@ func run() error {
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	// ACL chain: LocalProvider reads acl_grants. Future stages
+	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
+	routerOpts.ACLProvider = &acl.ChainProvider{
+		Providers: []acl.Provider{acl.NewLocalProvider(gormDB)},
+	}
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
 			log.Printf("WARNING: provider secret key: %s", w)

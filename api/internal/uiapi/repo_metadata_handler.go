@@ -29,6 +29,10 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		cacheKey := "repo:metadata:" + repoID
 		if cached, ok, _ := cache.GetJSON[RepoMetadataResponse](r.Context(), c, cacheKey); ok {
