@@ -83,6 +83,30 @@
 	}
 	function hideVulnTooltip() { vulnTooltip = null; }
 
+	// Generic date tooltip — same pattern as vulnTooltip. The "Deployed
+	// at" cell shows a relative age (e.g. "14m ago") and this surfaces
+	// the absolute timestamp on hover without shipping a full tooltip
+	// component.
+	type DateTooltip = { x: number; y: number; iso: string } | null;
+	let dateTooltip: DateTooltip = $state(null);
+	function dateTooltipFromCell(el: HTMLElement, iso: string) {
+		const rect = el.getBoundingClientRect();
+		dateTooltip = { x: rect.left + rect.width / 2, y: rect.top, iso };
+	}
+	function hideDateTooltip() { dateTooltip = null; }
+	const formatFullDate = (iso: string) => {
+		if (!iso) return '';
+		const d = new Date(iso);
+		if (isNaN(d.getTime())) return '';
+		const dy = String(d.getDate()).padStart(2, '0');
+		const mo = String(d.getMonth() + 1).padStart(2, '0');
+		const yr = String(d.getFullYear());
+		const hr = String(d.getHours()).padStart(2, '0');
+		const mi = String(d.getMinutes()).padStart(2, '0');
+		const sc = String(d.getSeconds()).padStart(2, '0');
+		return `${dy}.${mo}.${yr} ${hr}:${mi}:${sc}`;
+	};
+
 	type HostRow = {
 		host: string;
 		kind: string;
@@ -840,13 +864,13 @@
 							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
 									<th class="sortable-th w-[12%] px-5 py-3 text-left" onclick={si('registry')}>Registry <ChevronDown class="sort-icon {imageSortKey === 'registry' ? 'active' : ''} {imageSortKey === 'registry' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th w-[22%] px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[min(22%,368px)] px-5 py-3 text-left" onclick={si('image')}>Image <ChevronDown class="sort-icon {imageSortKey === 'image' ? 'active' : ''} {imageSortKey === 'image' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="w-[12%] px-5 py-3 text-left">Digest</th>
 									<th class="w-[12%] px-5 py-3 text-left">Tags</th>
 									<th class="sortable-th w-[12%] px-5 py-3 text-left" onclick={si('vulns')}>Vulns <ChevronDown class="sort-icon {imageSortKey === 'vulns' ? 'active' : ''} {imageSortKey === 'vulns' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="sortable-th w-[9%] px-5 py-3 text-right" onclick={si('cluster_count')}>Clusters <ChevronDown class="sort-icon {imageSortKey === 'cluster_count' ? 'active' : ''} {imageSortKey === 'cluster_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 									<th class="sortable-th w-[10%] px-5 py-3 text-right" onclick={si('container_count')}>Containers <ChevronDown class="sort-icon {imageSortKey === 'container_count' ? 'active' : ''} {imageSortKey === 'container_count' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
-									<th class="sortable-th w-[11%] px-5 py-3 text-left" onclick={si('last_seen')}>Last seen <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
+									<th class="sortable-th w-[11%] px-5 py-3 text-left" onclick={si('last_seen')}>Deployed at <ChevronDown class="sort-icon {imageSortKey === 'last_seen' ? 'active' : ''} {imageSortKey === 'last_seen' && imageSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								</tr>
 							</thead>
 							<tbody class="text-[var(--text-secondary)]">
@@ -858,7 +882,7 @@
 										onclick={() => { if (img.digest_id) openImageDrawer(img.digest_id); }}
 									>
 										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
-										<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>
+										<td class="truncate px-0 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>
 											{#if img.digest_id}
 												<a class="hover:text-[var(--accent)] hover:underline" href={`/app/images/${img.digest_id}`} onclick={(e) => e.stopPropagation()}>{img.image}</a>
 											{:else}
@@ -900,7 +924,13 @@
 										</td>
 										<td class="px-5 py-3 text-right">{img.cluster_count}</td>
 										<td class="px-5 py-3 text-right font-semibold">{img.container_count}</td>
-										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">{timeAgo(img.last_seen, tick)}</td>
+										<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+											<span
+												class="date-cell"
+												onmouseenter={(e) => dateTooltipFromCell(e.currentTarget as HTMLElement, img.last_seen)}
+												onmouseleave={hideDateTooltip}
+											>{timeAgo(img.last_seen, tick)}</span>
+										</td>
 									</tr>
 								{/each}
 								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="8"></td></tr>{/if}
@@ -1122,6 +1152,19 @@
 
 </div>
 
+<!-- Date tooltip for "Deployed at" cells. Top-level so it escapes
+     the images table's scroll overflow. -->
+{#if dateTooltip}
+	{@const d = dateTooltip}
+	<div
+		class="pointer-events-none fixed z-[60] -translate-x-1/2 -translate-y-full rounded-lg border border-[var(--border-color)] bg-[var(--bg-soft)] px-3 py-2 shadow-xl"
+		style="left: {d.x}px; top: {d.y - 8}px;"
+	>
+		<div class="mb-1 text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">Deployed at</div>
+		<div class="font-mono text-xs tabular-nums text-[var(--text-bright)]">{formatFullDate(d.iso)}</div>
+	</div>
+{/if}
+
 <!-- Vuln tooltip. Top-level so it escapes the scroll overflow of the
      images table; position:fixed anchored to the hovered cell. -->
 {#if vulnTooltip}
@@ -1149,6 +1192,16 @@
 		user-select: none;
 		white-space: nowrap;
 		transition: color 150ms ease;
+	}
+
+	.date-cell {
+		cursor: help;
+		border-bottom: 1px dotted transparent;
+		transition: border-color 120ms ease;
+	}
+
+	.date-cell:hover {
+		border-bottom-color: var(--text-tertiary);
 	}
 
 	.sortable-th:hover {
