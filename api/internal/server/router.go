@@ -97,7 +97,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// ---------------------------------------------------------------
 
 	r.Get("/api/healthz", health.Handler(db))
-	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db))
+	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db, appCache))
 	r.Post("/api/scam/heartbeat", scam.HeartbeatHandler(db))
 
 	if authService != nil {
@@ -262,7 +262,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/clusters/exposure", scam.ExposureHandler(db))
 				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
 				api.Get("/clusters/chain", scam.ClusterChainHandler(db))
-				api.Get("/clusters/hosts", scam.HostsHandler(db))
+				api.Get("/clusters/hosts", scam.HostsHandler(db, appCache))
 				api.Get("/clusters/hosts/chain", scam.HostChainHandler(db))
 				api.Get("/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
 				api.Get("/clusters/hosts/meta", scam.HostMetaHandler(appCache))

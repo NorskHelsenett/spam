@@ -107,6 +107,21 @@
 		return `${dy}.${mo}.${yr} ${hr}:${mi}:${sc}`;
 	};
 
+	type HostResolve = {
+		ips: string[];
+		is_local: boolean;
+		error?: string;
+	};
+
+	type HostMeta = {
+		title: string;
+		has_favicon: boolean;
+	};
+
+	// `resolved` / `meta` are inlined by the API from its per-host cache
+	// when available (present on every row after the cache warms). When
+	// absent, the per-row $effect falls back to /resolve + /meta, which
+	// in turn populates the cache for the next list response.
 	type HostRow = {
 		host: string;
 		kind: string;
@@ -121,17 +136,8 @@
 		backends: string;
 		workload_count: number;
 		last_seen: string;
-	};
-
-	type HostResolve = {
-		ips: string[];
-		is_local: boolean;
-		error?: string;
-	};
-
-	type HostMeta = {
-		title: string;
-		has_favicon: boolean;
+		resolved?: HostResolve;
+		meta?: HostMeta;
 	};
 
 	let clusters: ClusterRow[] = $state([]);
@@ -248,6 +254,18 @@
 			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) {
 				hosts = (await res.json()) ?? [];
+				// Seed the per-host maps from inline fields so the
+				// virtual-scroll $effect sees a cache hit and skips
+				// the fallback /resolve + /meta round-trip for every
+				// row the backend already knows about.
+				const seedRes: Record<string, HostResolve> = {};
+				const seedMeta: Record<string, HostMeta> = {};
+				for (const h of hosts) {
+					if (h.resolved) seedRes[h.host] = h.resolved;
+					if (h.meta) seedMeta[h.host] = h.meta;
+				}
+				if (Object.keys(seedRes).length) hostResolutions = { ...hostResolutions, ...seedRes };
+				if (Object.keys(seedMeta).length) hostMetas = { ...hostMetas, ...seedMeta };
 			}
 			hostsFetched = true;
 		} catch { /* silent */ }

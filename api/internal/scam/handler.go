@@ -1,8 +1,10 @@
 package scam
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -130,7 +132,10 @@ func isTruthy(v string) bool {
 // CallcenterHandler accepts a JSON array of SCAM records, validates each one,
 // and upserts live-state rows. DELETE events are stored (not physically removed)
 // so the history is preserved. No authentication required.
-func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
+//
+// The cache Store is used only to invalidate derived caches (hosts:list:*)
+// after a successful batch — the ingest path itself doesn't read from it.
+func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -245,6 +250,15 @@ func CallcenterHandler(db *gorm.DB) http.HandlerFunc {
 				"rejected": rejected,
 			})
 			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
+
+			// Fresh ingest may change which hosts/backends exist and
+			// how many running workloads back them — invalidate the
+			// list cache so the next /clusters/hosts request rebuilds.
+			// resolve: / hostmeta: / hostfav: are intentionally not
+			// touched (they track host-external state).
+			if cs != nil {
+				_ = cache.DeleteByPrefix(r.Context(), cs, hostsListCachePrefix)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{
@@ -609,35 +623,95 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// hostsListCachePrefix keys the cached result of HostsHandler's DB query.
+// CallcenterHandler invalidates the whole prefix on ingest so a new push
+// always shows up on the next page render; resolve:/hostmeta:/hostfav:
+// entries are left alone (they track host-external state).
+const hostsListCachePrefix = "hosts:list:"
+
+// hostsListCacheTTL is a safety-net TTL. The real freshness signal is
+// ingest-driven invalidation in CallcenterHandler; this keeps the cache
+// from growing unbounded if a tenant goes silent.
+const hostsListCacheTTL = 1 * time.Hour
+
+// HostRow is the shape returned by HostsHandler. Resolved/Meta are
+// inlined from the per-host resolve / hostmeta caches at response time
+// (nil on cache miss — the frontend falls back to the per-host
+// endpoints, which in turn warm the cache for the next list request).
+type HostRow struct {
+	Host          string         `json:"host"`
+	Kind          string         `json:"kind"`
+	Name          string         `json:"name"`
+	Namespace     string         `json:"namespace"`
+	Cluster       string         `json:"cluster"`
+	ClusterID     string         `json:"cluster_id"`
+	Environment   string         `json:"environment"`
+	TLS           bool           `json:"tls"`
+	LBIPs         string         `json:"lb_ips"`
+	IngressClass  string         `json:"ingress_class"`
+	Backends      string         `json:"backends"`
+	WorkloadCount int64          `json:"workload_count"`
+	LastSeen      time.Time      `json:"last_seen"`
+	Resolved      *resolveResult `json:"resolved,omitempty" gorm:"-"`
+	Meta          *hostMetaLite  `json:"meta,omitempty" gorm:"-"`
+}
+
+// hostMetaLite is the subset of hostMeta the list response needs.
+// The full hostMeta (with internal faviconBytes) stays behind the
+// /meta and /favicon endpoints.
+type hostMetaLite struct {
+	Title      string `json:"title,omitempty"`
+	HasFavicon bool   `json:"has_favicon"`
+}
+
 // HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and IngressRoute.
-func HostsHandler(db *gorm.DB) http.HandlerFunc {
+func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeOnly := r.URL.Query().Get("active_only") == "true"
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
 
-		type row struct {
-			Host          string    `json:"host"`
-			Kind          string    `json:"kind"`
-			Name          string    `json:"name"`
-			Namespace     string    `json:"namespace"`
-			Cluster       string    `json:"cluster"`
-			ClusterID     string    `json:"cluster_id"`
-			Environment   string    `json:"environment"`
-			TLS           bool      `json:"tls"`
-			LBIPs         string    `json:"lb_ips"`
-			IngressClass  string    `json:"ingress_class"`
-			Backends      string    `json:"backends"`
-			WorkloadCount int64     `json:"workload_count"`
-			LastSeen      time.Time `json:"last_seen"`
-		}
-		rows := []row{}
+		rows := []HostRow{}
 		aclFrag, aclArgs, deny := clusterACLFilter(r)
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
-		// Ingress: hosts from rules array, backends from rules[].paths[].backend_name
-		// HTTPRoute/GRPCRoute/TLSRoute: hosts from hostnames array
-		// IngressRoute/IngressRouteTCP: hosts from hosts array, backends from backends[].name
+
+		// Scope-hashed cache key: two users with the same ACL scope +
+		// include_inactive flag share a cache entry; changes to either
+		// produce a different key. Collision on an 8-byte fnv-64a is
+		// irrelevant here — worst case a user sees another scope's
+		// (different) result for up to hostsListCacheTTL, which the
+		// ingest invalidation clears anyway.
+		h := fnv.New64a()
+		_, _ = h.Write([]byte(aclFrag))
+		for _, a := range aclArgs {
+			fmt.Fprintf(h, "|%v", a)
+		}
+		if includeInactive {
+			_, _ = h.Write([]byte("|inactive"))
+		}
+		cacheKey := fmt.Sprintf("%s%x", hostsListCachePrefix, h.Sum64())
+
+		ctx := r.Context()
+		if cached, ok, _ := cache.GetJSON[[]HostRow](ctx, cs, cacheKey); ok {
+			writeAndFilterHosts(w, cached, cs, ctx, activeOnly)
+			return
+		}
+
+		// Query structure:
+		//   hosts_raw           — flattened hostnames from Ingress /
+		//                         HTTPRoute / IngressRoute variants
+		//   services            — every Service with a JSONB selector
+		//   service_workloads   — ONE pass matching running containers
+		//                         to services via pod_labels @> selector,
+		//                         aggregated per (cluster,namespace,service)
+		//
+		// The old query did the label-match inside a LATERAL subquery
+		// per host row (N_hosts × N_services × N_containers). The new
+		// shape runs the label-match once, then a cheap hash join on
+		// (cluster, namespace, backend_name) to attach a workload count
+		// to each host.
 		err := db.Raw(cteForWithACL(r, aclFrag)+`,
 			ingress_hosts AS (
 				SELECT
@@ -710,36 +784,50 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND jsonb_array_length(data->'hosts') > 0
-			)
-			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
-			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
-			       COALESCE(w.cnt, 0) AS workload_count, h.last_seen
-			FROM (
+			),
+			hosts_raw AS (
 				SELECT * FROM ingress_hosts
 				UNION ALL
 				SELECT * FROM route_hosts
 				UNION ALL
 				SELECT * FROM traefik_hosts
-			) h
+			),
+			services AS (
+				SELECT
+					data->>'cluster_id' AS cluster_id,
+					data->>'namespace'  AS namespace,
+					data->>'name'       AS name,
+					data->'selector'    AS selector
+				FROM live
+				WHERE data->>'kind' = 'Service'
+				  AND jsonb_typeof(data->'selector') = 'object'
+			),
+			service_workloads AS (
+				SELECT s.cluster_id, s.namespace, s.name,
+				       COUNT(DISTINCT c.data->>'pod_uid')::bigint AS cnt
+				FROM services s
+				JOIN live c
+				  ON c.data->>'kind' = 'Container'
+				 AND c.data->>'pod_phase' = 'Running'
+				 AND c.data->>'cluster_id' = s.cluster_id
+				 AND c.data->>'namespace'  = s.namespace
+				 AND (c.data->'pod_labels') @> s.selector
+				GROUP BY s.cluster_id, s.namespace, s.name
+			)
+			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
+			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
+			       COALESCE(w.total, 0) AS workload_count, h.last_seen
+			FROM hosts_raw h
 			LEFT JOIN LATERAL (
-				SELECT COUNT(*) AS cnt
-				FROM live c
-				WHERE c.data->>'kind' = 'Container'
-				  AND c.data->>'pod_phase' = 'Running'
-				  AND c.data->>'cluster_id' = h.cluster_id
-				  AND c.data->>'namespace' = h.namespace
-				  AND h.backends != ''
-				  AND EXISTS (
-				    SELECT 1 FROM live s
-				    WHERE s.data->>'kind' = 'Service'
-				      AND s.data->>'cluster_id' = h.cluster_id
-				      AND s.data->>'namespace' = h.namespace
-				      AND s.data->>'name' = ANY(string_to_array(h.backends, ', '))
-				      AND jsonb_typeof(s.data->'selector') = 'object'
-				      AND (c.data->'pod_labels') @> (s.data->'selector')
-				  )
-			) w ON true
-			WHERE h.host IS NOT NULL AND h.host != ''
+				SELECT SUM(sw.cnt)::bigint AS total
+				FROM unnest(string_to_array(h.backends, ', ')) AS be(name)
+				JOIN service_workloads sw
+				  ON sw.cluster_id = h.cluster_id
+				 AND sw.namespace  = h.namespace
+				 AND sw.name       = be.name
+				WHERE be.name <> ''
+			) w ON TRUE
+			WHERE h.host IS NOT NULL AND h.host <> ''
 			ORDER BY h.host, h.cluster
 		`, aclArgs...).Scan(&rows).Error
 		if err != nil {
@@ -747,17 +835,53 @@ func HostsHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		if activeOnly {
-			filtered := rows[:0]
-			for _, row := range rows {
-				if row.WorkloadCount > 0 {
-					filtered = append(filtered, row)
-				}
-			}
-			rows = filtered
-		}
-		writeJSON(w, http.StatusOK, rows)
+
+		_ = cache.SetJSON(ctx, cs, cacheKey, rows, hostsListCacheTTL)
+		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// writeAndFilterHosts applies the activeOnly filter, inlines resolve +
+// meta from their per-host caches (nil on miss — frontend falls back),
+// and writes the response. Kept separate so cache-hit and cache-miss
+// paths share identical output logic.
+func writeAndFilterHosts(w http.ResponseWriter, rows []HostRow, cs cache.Store, ctx context.Context, activeOnly bool) {
+	if activeOnly {
+		filtered := rows[:0]
+		for _, row := range rows {
+			if row.WorkloadCount > 0 {
+				filtered = append(filtered, row)
+			}
+		}
+		rows = filtered
+	}
+
+	// Inline resolve + meta at serialize time. Deduplicate lookups
+	// per host since the same FQDN appears once per cluster/namespace
+	// (e.g. shared *.apps wildcard rolled out to every cluster).
+	type hostCaches struct {
+		resolved *resolveResult
+		meta     *hostMetaLite
+	}
+	seen := make(map[string]hostCaches, len(rows))
+	for i := range rows {
+		host := rows[i].Host
+		hc, ok := seen[host]
+		if !ok {
+			if res, found, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCachePrefix+host); found {
+				r := res
+				hc.resolved = &r
+			}
+			if m, found, _ := cache.GetJSON[hostMeta](ctx, cs, metaCachePrefix+host); found {
+				hc.meta = &hostMetaLite{Title: m.Title, HasFavicon: m.HasFavicon}
+			}
+			seen[host] = hc
+		}
+		rows[i].Resolved = hc.resolved
+		rows[i].Meta = hc.meta
+	}
+
+	writeJSON(w, http.StatusOK, rows)
 }
 
 // labelsMatch returns true if podLabels contains all key-value pairs from selector.
@@ -1564,18 +1688,32 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// resolveResult is the DNS lookup shape cached under resolveCachePrefix
+// and inlined into HostsHandler's list response. Kept package-level so
+// both the standalone handler and the list aggregator share one type.
+type resolveResult struct {
+	Host    string   `json:"host"`
+	IPs     []string `json:"ips"`
+	IsLocal bool     `json:"is_local"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// resolveCachePrefix / resolveTTL gate the DNS lookup cache. 24h TTL
+// matches hostmeta: for operator-facing infra hosts (ingress/routes),
+// DNS changes on cluster reconfigs — days to weeks, not minutes. The
+// old 1h value produced a live lookup per host per hour of page use
+// with no actual freshness win.
+const (
+	resolveCachePrefix = "resolve:"
+	resolveTTL         = 24 * time.Hour
+)
+
 // ResolveHostHandler does a DNS lookup for a given host and returns the IPs.
+// Used as a per-host fallback when HostsHandler's list response ships
+// without an inline resolve entry (first time a host is seen after
+// ingest; HostsHandler's cache lookup missed). A successful fallback
+// populates the cache so the next list response picks it up for free.
 func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
-	const resolveTTL = 1 * time.Hour
-	const resolvePrefix = "resolve:"
-
-	type result struct {
-		Host    string   `json:"host"`
-		IPs     []string `json:"ips"`
-		IsLocal bool     `json:"is_local"`
-		Error   string   `json:"error,omitempty"`
-	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
 		host := r.URL.Query().Get("host")
 		if host == "" {
@@ -1584,16 +1722,16 @@ func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		cacheKey := resolvePrefix + host
+		cacheKey := resolveCachePrefix + host
 
-		if cached, ok, _ := cache.GetJSON[result](ctx, cs, cacheKey); ok {
+		if cached, ok, _ := cache.GetJSON[resolveResult](ctx, cs, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
 		ips, err := net.LookupHost(host)
 		if err != nil {
-			res := result{Host: host, Error: "unresolvable"}
+			res := resolveResult{Host: host, Error: "unresolvable"}
 			_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
 			writeJSON(w, http.StatusOK, res)
 			return
@@ -1604,7 +1742,7 @@ func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
 			local = isPrivateIP(ips[0])
 		}
 
-		res := result{Host: host, IPs: ips, IsLocal: local}
+		res := resolveResult{Host: host, IPs: ips, IsLocal: local}
 		_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
 		writeJSON(w, http.StatusOK, res)
 	}
