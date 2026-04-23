@@ -2,7 +2,7 @@
 	import { goto } from '$app/navigation';
 	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -228,8 +228,13 @@
 		vulnSearchTimer = setTimeout(() => { vulnSearchDebounced = v; }, 250);
 	}
 
-	const vulnUrl = (id: string) => {
+	// Primary link: internal detail page so operators land on affected
+	// repos / clusters / contributors, not a bare advisory page.
+	const vulnDetailHref = (id: string) => `/app/vulnerabilities/${encodeURIComponent(id)}`;
+	// Secondary external link kept as a small icon next to the ID.
+	const vulnUpstreamUrl = (id: string) => {
 		if (id.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
+		if (id.startsWith('GHSA-')) return `https://github.com/advisories/${id}`;
 		return `https://osv.dev/vulnerability/${id}`;
 	};
 
@@ -991,11 +996,19 @@
 												<td class="px-5 py-3">
 													<div class="flex flex-wrap items-center gap-2">
 														<a
-															href={vulnUrl(g.vuln_id)}
-															target="_blank"
-															rel="noopener noreferrer"
+															href={vulnDetailHref(g.vuln_id)}
 															class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
 														>{g.vuln_id}</a>
+														<a
+															href={vulnUpstreamUrl(g.vuln_id)}
+															target="_blank"
+															rel="noopener noreferrer"
+															class="text-[var(--text-muted)] transition-colors hover:text-[var(--accent)]"
+															aria-label="Open upstream advisory"
+															onclick={(e) => e.stopPropagation()}
+														>
+															<ExternalLink class="h-3 w-3" />
+														</a>
 														{#each g.sources as src}
 															<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
 														{/each}

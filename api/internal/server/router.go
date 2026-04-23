@@ -314,6 +314,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
 				v.Get("/facets", uiapi.VulnFacetsHandler(db, authService))
 			})
+			// /api/vulnerabilities/{vuln_id} — full detail view.
+			// Kept separate from /api/vuln/* because the plural form
+			// matches the /app/vulnerabilities/{vuln_id} route and
+			// resource-style paths, whereas /api/vuln/* is the list-
+			// oriented dashboard namespace.
+			priv.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
 			// /api/secrets is split into two trust bands. Aggregate
 			// endpoints (counts + trends + per-asset tallies) carry
 			// no credential text and so are safe for global_readers.

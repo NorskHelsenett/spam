@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/cache"
@@ -12,10 +15,12 @@ import (
 )
 
 const (
-	summaryCacheKey = "vuln:summary:v1"
-	reposCacheKey   = "vuln:repos:v1"
-	facetsCacheKey  = "vuln:facets:v1"
-	summaryCacheTTL = 7 * 24 * time.Hour
+	summaryCacheKey   = "vuln:summary:v1"
+	reposCacheKey     = "vuln:repos:v1"
+	facetsCacheKey    = "vuln:facets:v1"
+	listCachePrefix   = "vuln:list:"
+	summaryCacheTTL   = 7 * 24 * time.Hour
+	refreshMaxRuntime = 2 * time.Minute
 )
 
 type Summary struct {
@@ -144,6 +149,57 @@ func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	}
 
 	return Refresh(ctx, db, time.Now().UTC())
+}
+
+// refreshGate coalesces concurrent TriggerRefresh calls. A single worker
+// goroutine runs Refresh serially; additional triggers while a refresh
+// is in flight flip `pending`, which schedules exactly one follow-up
+// refresh after the current one — enough to capture the newest change
+// without spawning N concurrent compute passes when scans batch-
+// complete (common under the reconciler).
+var refreshGate struct {
+	mu       sync.Mutex
+	inflight bool
+	pending  bool
+}
+
+// TriggerRefresh proactively warms the summary / repos caches in the
+// background. Call from any scan-completion hook (SBOM, OSV batch,
+// image scan finish, VEX edit) so the next user hits a warm cache
+// instead of paying the recompute cost on their page load. Safe to
+// call from multiple goroutines and rapid sequences — see refreshGate.
+func TriggerRefresh(db *gorm.DB) {
+	refreshGate.mu.Lock()
+	if refreshGate.inflight {
+		refreshGate.pending = true
+		refreshGate.mu.Unlock()
+		return
+	}
+	refreshGate.inflight = true
+	refreshGate.mu.Unlock()
+
+	go func() {
+		for {
+			// context.Background so a cancelled scanner/HTTP request
+			// doesn't abort the refresh mid-flight; timeout bounds
+			// us against a hung DB query.
+			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
+			if _, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
+				log.Printf("vulnmetrics: background refresh: %v", err)
+			}
+			cancel()
+
+			refreshGate.mu.Lock()
+			if !refreshGate.pending {
+				refreshGate.inflight = false
+				refreshGate.mu.Unlock()
+				return
+			}
+			refreshGate.pending = false
+			refreshGate.mu.Unlock()
+			// Loop to absorb the trigger that arrived mid-refresh.
+		}
+	}()
 }
 
 func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, error) {
@@ -314,9 +370,44 @@ func computeFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
 	return out, nil
 }
 
+type cachedListEntry struct {
+	Version  summaryVersion   `json:"version"`
+	Response VulnListResponse `json:"response"`
+}
+
+// listCacheKey hashes every input that affects the list response —
+// filters, pagination, and the caller's ACL fragments (which implicitly
+// scope results per-user). Collision on an 8-byte fnv-64a is harmless:
+// a cache hit with mismatched params still runs the sameVersion check
+// and, if versions match, we'd return someone else's page shaped
+// identically to this request — which by construction produces the
+// same rows (ACL args are part of the hash input).
+func listCacheKey(version summaryVersion, p VulnListParams) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(version)
+	_ = enc.Encode(struct {
+		Limit, Offset              int
+		Severities, Sources, Years []string
+		Query                      string
+		FixOnly                    bool
+		RepoID                     string
+		RepoSQL, ImageSQL          string
+		RepoArgs, ImageArgs        []any
+	}{
+		p.Limit, p.Offset, p.Severities, p.Sources, p.Years,
+		p.Query, p.FixOnly, p.RepoID, p.RepoSQL, p.ImageSQL,
+		p.RepoArgs, p.ImageArgs,
+	})
+	return fmt.Sprintf("%s%x", listCachePrefix, h.Sum64())
+}
+
 // LoadListPage returns a paginated page of grouped vulnerabilities,
-// plus the total group count for the same filters. Results are
-// per-caller (ACL-dependent) so the output is not cached.
+// plus the total group count for the same filters. Cached per
+// (version, filters, ACL scope, page); invalidated implicitly via
+// summaryVersion — any scan / OSV / VEX / image-scan completion
+// changes the version hash, so stale keys are orphaned and expire
+// via TTL. Fresh after every scan without a manual bust.
 func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
 	if p.Limit <= 0 {
 		p.Limit = 100
@@ -326,6 +417,18 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	}
 	if p.Offset < 0 {
 		p.Offset = 0
+	}
+
+	store := cache.NewPostgresStore(db)
+	version, versionErr := querySummaryVersion(ctx, db)
+	var cacheKey string
+	if versionErr == nil {
+		cacheKey = listCacheKey(version, p)
+		if entry, ok, err := cache.GetJSON[cachedListEntry](ctx, store, cacheKey); err == nil && ok {
+			if sameVersion(entry.Version, version) {
+				return entry.Response, nil
+			}
+		}
 	}
 
 	base, args := buildAssetUnionSQL(p)
@@ -473,12 +576,21 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		})
 	}
 
-	return VulnListResponse{
+	resp := VulnListResponse{
 		Total:  total,
 		Limit:  p.Limit,
 		Offset: p.Offset,
 		Items:  items,
-	}, nil
+	}
+
+	if versionErr == nil && cacheKey != "" {
+		_ = cache.SetJSON(ctx, store, cacheKey, cachedListEntry{
+			Version:  version,
+			Response: resp,
+		}, summaryCacheTTL)
+	}
+
+	return resp, nil
 }
 
 // buildAssetUnionSQL returns the CTE body plus its bind args. Repo and

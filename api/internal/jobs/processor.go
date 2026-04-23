@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmeta"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
@@ -60,6 +62,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processSBOMAdhocScan(ctx, job, runExecutor)
 	case JobTypeProbeSecrets:
 		return processProbeSecrets(ctx, db, job)
+	case JobTypeVulnMetaFetch:
+		return processVulnMetaFetch(ctx, db, job)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -90,9 +94,15 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 	if err != nil {
 		return result, err
 	}
-	if _, err := vulnmetrics.Refresh(ctx, db, time.Now().UTC()); err != nil {
-		return result, fmt.Errorf("refresh vulnerability dashboard metrics: %w", err)
-	}
+	// Coalesced background refresh — a batch scan can complete while
+	// other scan events are also firing; TriggerRefresh ensures we
+	// run at most one recompute per burst instead of serialising the
+	// job on the expensive summary+repos query.
+	vulnmetrics.TriggerRefresh(db)
+	// Any new vuln_ids from this batch need advisory metadata
+	// fetched from OSV/EUVD. Bounded per-call; successive calls
+	// drain the backlog.
+	EnqueueMissingVulnMeta(ctx, db)
 	return result, nil
 }
 
@@ -124,6 +134,91 @@ func processSBOMAdhocScan(ctx context.Context, job *Job, runExecutor RunExecutor
 	}
 
 	return map[string]string{"status": "created", "cronjob": cronJobName}, nil
+}
+
+// processVulnMetaFetch pulls advisory metadata for a single vuln_id
+// from OSV (primary) and EUVD (CVE-prefix supplement) and caches the
+// merged record in vuln_metadata. Emitted by enqueueVulnMetaFetches
+// after new vuln_ids land from an OSV / Grype scan.
+//
+// Errors from the external APIs are non-retryable — a transient 5xx
+// means "try later", not "try again right now." We return nil with a
+// logged error; a follow-up scan pass will re-enqueue if the row is
+// still missing.
+func processVulnMetaFetch(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {
+	var payload VulnMetaFetchPayload
+	if len(job.Payload) > 0 {
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return nil, NonRetryable(fmt.Errorf("invalid VULN_META_FETCH payload: %w", err))
+		}
+	}
+	if payload.VulnID == "" {
+		return nil, NonRetryable(errors.New("VULN_META_FETCH missing vuln_id"))
+	}
+	meta, err := vulnmeta.Enrich(ctx, db, payload.VulnID)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil {
+		return map[string]string{"vuln_id": payload.VulnID, "status": "not_found_upstream"}, nil
+	}
+	return map[string]string{"vuln_id": payload.VulnID, "status": "enriched"}, nil
+}
+
+// vulnMetaEnqueueCap bounds how many VULN_META_FETCH jobs a single
+// scan-complete hook will create per call. Backfills after a cold
+// start can otherwise enqueue thousands of jobs at once, starving
+// the worker's other queues. At the cap, any remaining missing IDs
+// are picked up on the next scan-complete hook — steady state
+// converges within a few ingest cycles.
+const vulnMetaEnqueueCap = 1000
+
+// EnqueueVulnMetaFetches creates one VULN_META_FETCH job per vuln_id
+// that doesn't already have a cached metadata row. Best-effort — a
+// failure to enqueue is logged but does not fail the calling scan.
+// Safe to call with duplicates or unknown IDs; the store dedupes.
+func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) {
+	missing, err := vulnmeta.IDsMissingMetadata(ctx, db, vulnIDs)
+	if err != nil {
+		log.Printf("vulnmeta: list missing: %v", err)
+		return
+	}
+	for _, id := range missing {
+		if _, err := CreateJob(ctx, db, CreateJobInput{
+			Type:    JobTypeVulnMetaFetch,
+			Payload: VulnMetaFetchPayload{VulnID: id},
+		}); err != nil {
+			log.Printf("vulnmeta: enqueue %s: %v", id, err)
+		}
+	}
+}
+
+// EnqueueMissingVulnMeta is the bulk variant: walks the union of
+// component_vulnerabilities + image_vuln_findings, finds every
+// vuln_id without a vuln_metadata row, and enqueues a fetch job
+// for each (up to vulnMetaEnqueueCap). Call from every scan-
+// completion hook — the LEFT JOIN filter means steady-state is
+// cheap; only new vulns actually enqueue.
+func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
+	var ids []string
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT vuln_id FROM (
+			SELECT vuln_id FROM component_vulnerabilities
+			WHERE vuln_id <> '_none' AND vuln_id <> ''
+			UNION ALL
+			SELECT vuln_id FROM image_vuln_findings
+			WHERE vuln_id <> '_none' AND vuln_id <> ''
+		) u
+		WHERE vuln_id NOT IN (SELECT vuln_id FROM vuln_metadata)
+		LIMIT ?
+	`, vulnMetaEnqueueCap).Scan(&ids).Error; err != nil {
+		log.Printf("vulnmeta: scan for missing: %v", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	EnqueueVulnMetaFetches(ctx, db, ids)
 }
 
 func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {

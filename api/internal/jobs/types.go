@@ -10,7 +10,16 @@ const (
 	JobTypeSBOMAdhocScan    JobType = "SBOM_ADHOC_SCAN"
 	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
 	JobTypeImageScan        JobType = "IMAGE_SCAN"
+	JobTypeVulnMetaFetch    JobType = "VULN_META_FETCH"
 )
+
+// VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
+// one vuln_id per job. Kept single-id so a flaky external fetch
+// only retries one ID at a time and the worker can parallelize
+// across IDs by claiming multiple jobs.
+type VulnMetaFetchPayload struct {
+	VulnID string `json:"vuln_id"`
+}
 
 // SBOMAdhocPayload is the payload for SBOM_ADHOC_SCAN jobs. The ad-hoc
 // run clones the SBOM scanner CronJob's pod template to force a scan

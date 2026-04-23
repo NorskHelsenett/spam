@@ -7,6 +7,39 @@ import (
 	"gorm.io/gorm"
 )
 
+// readableClusterIDSet returns the set of cluster_ids the subject can
+// see plus a bool indicating "unrestricted" (admin / global_reader /
+// wildcard grant). Clusters default to deny so a subject with no
+// grants returns an empty set with unrestricted=false — the caller
+// filters everything out.
+//
+// This helper lives here (not in scam/acl.go) so uiapi can reuse it
+// without reaching into the scam package's unexported filter.
+func readableClusterIDSet(r *http.Request, _ *gorm.DB) (map[string]struct{}, bool, error) {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return nil, true, nil
+	}
+	provider := acl.ProviderFromRequest(r)
+	if provider == nil {
+		return map[string]struct{}{}, false, nil
+	}
+	patterns, err := provider.Grants(r.Context(), subj, acl.ScopeCluster)
+	if err != nil {
+		return nil, false, err
+	}
+	set := make(map[string]struct{}, len(patterns))
+	for _, p := range patterns {
+		if p.IsWildcard() {
+			return nil, true, nil
+		}
+		if p.ClusterID != "" {
+			set[p.ClusterID] = struct{}{}
+		}
+	}
+	return set, false, nil
+}
+
 // aclWhereFragment turns an acl.Clause into a (sql, args) pair suitable
 // for splicing into a raw SQL WHERE list with `AND ` + fragment.
 //

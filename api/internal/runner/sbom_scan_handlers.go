@@ -11,6 +11,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -199,6 +200,12 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
+		// Same story as sbomScanResultHandler: fresh vuln rows just
+		// landed, warm the dashboard cache before an operator hits
+		// the list page.
+		vulnmetrics.TriggerRefresh(db)
+		jobs.EnqueueMissingVulnMeta(r.Context(), db)
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -239,9 +246,12 @@ func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 			return
 		}
 
-		if _, err := vulnmetrics.Refresh(r.Context(), db, time.Now().UTC()); err != nil {
-			log.Printf("sbom-scan/result: refresh dashboard metrics for %s: %v", sbomID, err)
-		}
+		// Warm the dashboard cache in the background so the next
+		// operator page load hits a ready result instead of paying
+		// the recompute cost on the UI thread. Coalesced so a batch
+		// of completions produces at most one refresh + one follow-up.
+		vulnmetrics.TriggerRefresh(db)
+		jobs.EnqueueMissingVulnMeta(r.Context(), db)
 
 		w.WriteHeader(http.StatusNoContent)
 	}
