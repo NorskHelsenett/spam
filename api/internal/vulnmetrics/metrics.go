@@ -488,11 +488,21 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		whereClause = "WHERE " + strings.Join(where, " AND ")
 	}
 
-	// Total count = distinct vuln_id after filters.
+	// Count + group queries both go through a canonicalised
+	// asset_vulns row: LEFT JOIN vuln_metadata, and the display/
+	// grouping id is COALESCE(vm.canonical_id, av.vuln_id). Rows
+	// without an enrichment row fall through as their own id; rows
+	// with one collapse CVE / GHSA / BIT variants of the same
+	// advisory into a single group.
+
+	// Total count = distinct canonical id after filters.
 	var total int
 	countSQL := fmt.Sprintf(`
 		WITH asset_vulns AS (%s)
-		SELECT COUNT(DISTINCT vuln_id)::int FROM asset_vulns %s
+		SELECT COUNT(DISTINCT COALESCE(vm.canonical_id, asset_vulns.vuln_id))::int
+		FROM asset_vulns
+		LEFT JOIN vuln_metadata vm ON vm.vuln_id = asset_vulns.vuln_id
+		%s
 	`, base, whereClause)
 	countArgs := append([]any{}, args...)
 	countArgs = append(countArgs, whereArgs...)
@@ -500,23 +510,29 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		return VulnListResponse{}, err
 	}
 
-	// Grouped page.
+	// Grouped page. The ranked CTE attaches the canonical id per row
+	// via the same LEFT JOIN; the outer SELECT aggregates across all
+	// scanner-stored ids that map to the same canonical. Pick the
+	// canonical itself as the displayed vuln_id so aliased duplicates
+	// collapse into one row.
 	groupSQL := fmt.Sprintf(`
 		WITH asset_vulns AS (%s),
 		ranked AS (
-			SELECT *,
-				CASE severity
+			SELECT av.*,
+				COALESCE(vm.canonical_id, av.vuln_id) AS canonical_id,
+				CASE av.severity
 					WHEN 'CRITICAL' THEN 1
 					WHEN 'HIGH'     THEN 2
 					WHEN 'MEDIUM'   THEN 3
 					WHEN 'LOW'      THEN 4
 					ELSE 5
 				END AS sev_rank
-			FROM asset_vulns
+			FROM asset_vulns av
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = av.vuln_id
 			%s
 		)
 		SELECT
-			vuln_id,
+			canonical_id AS vuln_id,
 			MIN(sev_rank) AS sev_rank,
 			(ARRAY_AGG(severity ORDER BY sev_rank ASC, asset_id ASC))[1]           AS severity,
 			(ARRAY_AGG(pkg_name ORDER BY sev_rank ASC, asset_id ASC))[1]           AS pkg_name,
@@ -534,8 +550,8 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
 			COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
 		FROM ranked
-		GROUP BY vuln_id
-		ORDER BY sev_rank ASC, vuln_id ASC
+		GROUP BY canonical_id
+		ORDER BY sev_rank ASC, canonical_id ASC
 		LIMIT ? OFFSET ?
 	`, base, whereClause)
 
@@ -593,27 +609,49 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		})
 	}
 
-	// Attach per-group aliases from vuln_metadata so the UI can
-	// show cross-references (CVE ↔ GHSA ↔ BIT) beside the primary
-	// ID. One bulk lookup over the page's vuln_ids — rows without
-	// enrichment just don't have an entry and Aliases stays nil.
+	// One bulk metadata lookup serves two purposes for the page:
+	//   - Aliases per group so the UI can show cross-references
+	//     (CVE ↔ GHSA ↔ BIT) beside the canonical id.
+	//   - OSV affected-ranges data for the fix-version override —
+	//     scanners sometimes report the first range's fix on multi-
+	//     interval advisories even when the installed version lives
+	//     in a later interval (valkey 8.1.3-0 getting fix=7.2.11 when
+	//     the applicable fix is 8.1.4).
+	//
+	// items[i].VulnID is the canonical from the GROUP BY, so we
+	// query MetadataForMany which matches on canonical_id OR vuln_id.
 	if len(items) > 0 {
 		ids := make([]string, 0, len(items))
 		for _, it := range items {
 			ids = append(ids, it.VulnID)
 		}
-		if aliasMap, err := vulnmeta.AliasesForMany(ctx, db, ids); err == nil {
+		if metas, err := vulnmeta.MetadataForMany(ctx, db, ids); err == nil {
 			for i := range items {
-				if aliases, ok := aliasMap[items[i].VulnID]; ok && len(aliases) > 0 {
-					// Strip the primary id itself — the UI already
-					// shows it as the main label.
-					out := aliases[:0]
-					for _, a := range aliases {
-						if a != items[i].VulnID {
-							out = append(out, a)
-						}
+				meta := metas[items[i].VulnID]
+				if meta == nil {
+					continue
+				}
+				// Aliases: strip the canonical itself from the list
+				// shown as cross-references.
+				aliases := vulnmeta.Aliases(meta)
+				out := aliases[:0]
+				for _, a := range aliases {
+					if a != items[i].VulnID {
+						out = append(out, a)
 					}
+				}
+				if len(out) > 0 {
 					items[i].Aliases = out
+				}
+				// Fix-version override: use OSV's own range data when
+				// available. Scanner value stays when no OSV affected
+				// entry matches the package / installed version.
+				if fix := vulnmeta.ApplicableFix(
+					vulnmeta.ExtractOSVAffected(meta),
+					items[i].PkgName,
+					items[i].InstalledVersion,
+				); fix != "" {
+					items[i].FixedVersion = fix
 				}
 			}
 		}

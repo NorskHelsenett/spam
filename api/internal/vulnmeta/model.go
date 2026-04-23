@@ -29,8 +29,15 @@ type Reference struct {
 
 // Metadata is the enriched payload stored per vuln_id. Nil timestamps
 // mean "not reported by any source yet" — don't mistake for "epoch".
+//
+// CanonicalID is the preferred identifier for the advisory across its
+// aliases (CVE > GHSA > BIT > OSV > self). Dashboards and counts group
+// by canonical_id so an advisory stored under BIT-X with CVE-X in its
+// aliases appears once, under CVE-X. Nil-tolerant: callers use
+// `COALESCE(canonical_id, vuln_id)` for rows without a metadata row.
 type Metadata struct {
 	VulnID      string         `json:"vuln_id"       gorm:"column:vuln_id;primaryKey"`
+	CanonicalID string         `json:"canonical_id"  gorm:"column:canonical_id"`
 	Title       string         `json:"title"         gorm:"column:title"`
 	Description string         `json:"description"   gorm:"column:description"`
 	Severity    string         `json:"severity"      gorm:"column:severity"`

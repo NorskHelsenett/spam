@@ -61,6 +61,11 @@ func Enrich(ctx context.Context, db *gorm.DB, vulnID string) (*Metadata, error) 
 		return nil, nil
 	}
 
+	// Compute canonical_id from the final (possibly merged) alias set
+	// so count queries and dashboards collapse CVE / GHSA / BIT
+	// variants of the same advisory to one row.
+	m.CanonicalID = PickCanonical(m.VulnID, Aliases(m))
+
 	if err := Upsert(ctx, db, m); err != nil {
 		return nil, fmt.Errorf("upsert: %w", err)
 	}

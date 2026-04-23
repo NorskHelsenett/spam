@@ -132,6 +132,7 @@ func run() error {
 		"migrations/20260422_rename_trivy_scan_to_sbom_scan.sql",
 		"migrations/20260423_create_view_unified_image_vulnerabilities.sql",
 		"migrations/20260423_create_vuln_metadata.sql",
+		"migrations/20260423_add_vuln_metadata_canonical_id.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

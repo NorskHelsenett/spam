@@ -10,6 +10,57 @@ import (
 	"gorm.io/gorm"
 )
 
+// canonicalPrefixPriority orders alias prefixes so the "canonical"
+// identifier for an advisory is deterministic: CVE first (widest
+// cross-ecosystem recognition), then GHSA (GitHub advisories, rich
+// content), then BIT (Bitnami feed) and OSV (generic fallback). Any
+// id not matching these prefixes falls through to the self id.
+var canonicalPrefixPriority = []string{"CVE-", "GHSA-", "BIT-", "OSV-"}
+
+// PickCanonical returns the preferred display / grouping id from an
+// alias set. Preference order is canonicalPrefixPriority; within a
+// prefix, lexical sort gives a stable pick when an advisory lists
+// multiple ids of the same family (rare but legal in OSV).
+//
+// Falls back to vulnID when no alias matches — so the function is
+// total: every caller gets a non-empty result.
+func PickCanonical(vulnID string, aliases []string) string {
+	// Include vulnID itself in the search set. Scanner-stored rows
+	// frequently *are* the canonical, so a nil / short aliases list
+	// still yields the right answer.
+	candidates := make([]string, 0, len(aliases)+1)
+	seen := map[string]struct{}{}
+	add := func(s string) {
+		if s == "" {
+			return
+		}
+		if _, ok := seen[s]; ok {
+			return
+		}
+		seen[s] = struct{}{}
+		candidates = append(candidates, s)
+	}
+	add(vulnID)
+	for _, a := range aliases {
+		add(a)
+	}
+	for _, prefix := range canonicalPrefixPriority {
+		var best string
+		for _, c := range candidates {
+			if !strings.HasPrefix(c, prefix) {
+				continue
+			}
+			if best == "" || c < best {
+				best = c
+			}
+		}
+		if best != "" {
+			return best
+		}
+	}
+	return vulnID
+}
+
 // Aliases extracts the aliases array from a stored metadata row. Used
 // wherever a handler needs to show cross-references or widen an
 // identity match to include every alias an advisory publishes. Returns
@@ -46,34 +97,50 @@ func AliasSet(vulnID string, meta *Metadata) []string {
 	return out
 }
 
-// AliasesForMany pulls the aliases JSONB for a batch of vuln_ids in
-// one query. Returns a map keyed by vuln_id so callers can attach the
-// result to their own response rows. IDs without an enrichment row
-// are simply absent from the map.
-//
-// Used by the list endpoint to surface cross-references per group
-// without running N queries over the page.
-func AliasesForMany(ctx context.Context, db *gorm.DB, vulnIDs []string) (map[string][]string, error) {
-	if len(vulnIDs) == 0 {
-		return map[string][]string{}, nil
+// MetadataForMany pulls a batch of metadata rows matching any of the
+// given ids against EITHER vuln_id or canonical_id. Callers typically
+// pass canonical ids (the list endpoint groups by canonical, the
+// detail endpoint resolves requested → canonical). Returns a map
+// keyed by canonical_id — when two rows share a canonical (two
+// prefixes of the same advisory, both enriched separately), the
+// first-seen row wins.
+func MetadataForMany(ctx context.Context, db *gorm.DB, ids []string) (map[string]*Metadata, error) {
+	if len(ids) == 0 {
+		return map[string]*Metadata{}, nil
 	}
-	type row struct {
-		VulnID  string `gorm:"column:vuln_id"`
-		Aliases []byte `gorm:"column:aliases"`
-	}
-	var rows []row
+	var rows []Metadata
 	if err := db.WithContext(ctx).
-		Raw(`SELECT vuln_id, aliases FROM vuln_metadata WHERE vuln_id IN ?`, vulnIDs).
-		Scan(&rows).Error; err != nil {
+		Where("vuln_id IN ? OR canonical_id IN ?", ids, ids).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	out := make(map[string][]string, len(rows))
-	for _, r := range rows {
-		var aliases []string
-		if len(r.Aliases) > 0 {
-			_ = json.Unmarshal(r.Aliases, &aliases)
+	out := make(map[string]*Metadata, len(rows))
+	for i := range rows {
+		// Key by canonical when present so a group keyed by canonical
+		// in the caller's output finds its metadata; fall back to
+		// vuln_id for rows predating the canonical_id backfill.
+		key := rows[i].CanonicalID
+		if key == "" {
+			key = rows[i].VulnID
 		}
-		out[r.VulnID] = aliases
+		if _, exists := out[key]; !exists {
+			out[key] = &rows[i]
+		}
+	}
+	return out, nil
+}
+
+// AliasesByCanonical is a thin wrapper over MetadataForMany that
+// returns only the aliases, keyed by canonical_id. Convenience for
+// list rendering where the full Metadata isn't needed.
+func AliasesByCanonical(ctx context.Context, db *gorm.DB, canonicalIDs []string) (map[string][]string, error) {
+	metas, err := MetadataForMany(ctx, db, canonicalIDs)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(metas))
+	for k, m := range metas {
+		out[k] = Aliases(m)
 	}
 	return out, nil
 }

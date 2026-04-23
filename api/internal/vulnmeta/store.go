@@ -50,6 +50,7 @@ func Upsert(ctx context.Context, db *gorm.DB, m *Metadata) error {
 		Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "vuln_id"}},
 			DoUpdates: clause.AssignmentColumns([]string{
+				"canonical_id",
 				"title", "description", "severity",
 				"cvss_score", "cvss_vector",
 				"cwes", "references", "aliases", "sources",
