@@ -60,7 +60,11 @@ type VulnAffectedImage struct {
 	FixedVersion     string                `json:"fixed_version"`
 	Source           string                `json:"source"`
 	ScannedAt        *time.Time            `json:"scanned_at"`
-	Clusters         []VulnClusterPresence `json:"clusters"`
+	// Clusters is populated by attachClusterPresence after the main
+	// query runs, not by the scanner — `gorm:"-"` tells GORM not to
+	// treat it as a relation (which fails association-resolution on
+	// the raw Scan path).
+	Clusters []VulnClusterPresence `json:"clusters" gorm:"-"`
 }
 
 // VulnDetailResponse is the full payload for GET /api/vulnerabilities/{id}.
@@ -149,13 +153,16 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		repoSQL, repoArgs := aclWhereFragment(repoClause)
 
 		var repoRows []VulnAffectedRepo
+		// repos.id is varchar(36); the view already returns repo_id as
+		// text so no cast is needed on the join — casting either side
+		// to uuid collides with the varchar column type.
 		if err := db.WithContext(ctx).Raw(`
 			SELECT v.repo_id, v.repo_slug,
 			       r.provider, r.provider_instance_id, r.org, r.slug, r.is_private,
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_repositories_vulnerabilities v
-			JOIN repos r ON r.id = v.repo_id::uuid
+			JOIN repos r ON r.id = v.repo_id
 			WHERE v.vuln_id = ? AND (`+repoSQL+`)
 			ORDER BY v.scanned_at DESC NULLS LAST, v.repo_slug
 		`, append([]any{vulnID}, repoArgs...)...).Scan(&repoRows).Error; err != nil {
