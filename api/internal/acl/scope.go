@@ -34,7 +34,7 @@ func (c Clause) Deny() bool {
 // caller should check Deny(); otherwise the OR with is_private=false
 // still lets public rows through, which is the intended behavior.
 func ReadableRepoClause(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return Clause{Unrestricted: true}, nil
 	}
 	alias = strings.TrimSpace(alias)
@@ -70,7 +70,7 @@ func ReadableRepoClause(ctx context.Context, p Provider, subj Subject, alias str
 // If the subject has no matching grants, the returned Clause denies
 // everything (SQL = "1 = 0").
 func ReadableClusterClause(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return Clause{Unrestricted: true}, nil
 	}
 	alias = strings.TrimSpace(alias)
@@ -105,7 +105,7 @@ func ReadableClusterClause(ctx context.Context, p Provider, subj Subject, alias 
 // signing lands. Images with no source_repo_id also require an
 // explicit grant.
 func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return Clause{Unrestricted: true}, nil
 	}
 	alias = strings.TrimSpace(alias)

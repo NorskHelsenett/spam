@@ -80,7 +80,7 @@ func notFoundOrForbidden(w http.ResponseWriter) {
 // a post-Phase-3 follow-up.
 func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
 	subj := acl.SubjectFromRequest(r)
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return true
 	}
 	patterns, err := acl.ProviderFromRequest(r).Grants(r.Context(), subj, acl.ScopeRepo)

@@ -7,12 +7,15 @@ import (
 
 // Subject is the authenticated principal for a request. It is built
 // once per request by the middleware and stashed in the request
-// context. Admins bypass all ACL checks; everything else is resolved
+// context. Admins bypass all ACL checks; global_readers bypass the
+// read-path scoping in Readable*Clause but do not gain admin write
+// rights (AdminGuard still blocks them). Regular users are resolved
 // through the configured Provider chain.
 type Subject struct {
-	UserID     string
-	GroupSlugs []string
-	IsAdmin    bool
+	UserID         string
+	GroupSlugs     []string
+	IsAdmin        bool
+	IsGlobalReader bool
 }
 
 type ctxKey int

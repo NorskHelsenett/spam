@@ -446,9 +446,11 @@ func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject,
 	}
 	subj := acl.Subject{UserID: userID, GroupSlugs: groups}
 	for _, slug := range groups {
-		if slug == GroupAdmin {
+		switch slug {
+		case GroupAdmin:
 			subj.IsAdmin = true
-			break
+		case GroupGlobalReader:
+			subj.IsGlobalReader = true
 		}
 	}
 	return subj, nil
@@ -462,6 +464,21 @@ func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject,
 func (s *Service) AdminGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.RequireAdmin(r); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// AdminOrGlobalReaderGuard allows admins and global_readers through,
+// and blocks everyone else. For endpoints whose payloads are aggregate
+// / metadata only (counts, trends, per-asset tallies) — safe for a
+// cross-tenant read role but not safe for random users. Endpoints that
+// surface raw credential text must still use AdminGuard.
+func (s *Service) AdminOrGlobalReaderGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := s.RequireAdminOrGlobalReader(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}

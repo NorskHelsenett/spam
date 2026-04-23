@@ -314,20 +314,29 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				v.Get("/list", uiapi.VulnListHandler(db, authService))
 				v.Get("/facets", uiapi.VulnFacetsHandler(db, authService))
 			})
-			// The /api/secrets subrouter exposes discovered secret
-			// findings and per-repo secret tables. These responses
-			// can carry real-looking credentials, so the whole
-			// subrouter is admin-only (AdminGuard) and every
-			// successful read is written to audit_log.
+			// /api/secrets is split into two trust bands. Aggregate
+			// endpoints (counts + trends + per-asset tallies) carry
+			// no credential text and so are safe for global_readers.
+			// Raw findings + dismiss (which flips finding state) stay
+			// admin-only. Every successful read is audited either way.
 			priv.Route("/api/secrets", func(s chi.Router) {
-				s.Use(authService.AdminGuard)
 				s.Use(audit.Middleware(db, auditUserID, "secrets.read"))
-				s.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
-				s.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
-				s.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
-				s.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
-				s.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
-				s.Get("/images", uiapi.ImageSecretsTableHandler(db, authService))
+
+				// Aggregate / metadata — admin or global_reader.
+				s.Group(func(meta chi.Router) {
+					meta.Use(authService.AdminOrGlobalReaderGuard)
+					meta.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
+					meta.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
+					meta.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
+					meta.Get("/images", uiapi.ImageSecretsTableHandler(db, authService))
+				})
+
+				// Raw credential text + state mutation — admin only.
+				s.Group(func(raw chi.Router) {
+					raw.Use(authService.AdminGuard)
+					raw.Get("/findings", uiapi.SecretsFindingsHandler(db, authService))
+					raw.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
+				})
 			})
 		})
 	}
