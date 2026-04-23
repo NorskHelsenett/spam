@@ -89,11 +89,18 @@
 				error = `Failed to load (${res.status})`;
 				return;
 			}
-			data = (await res.json()) as DetailResponse;
+			const body = (await res.json()) as DetailResponse;
+			// Normalize nullable arrays so the template can trust
+			// .length without optional chaining on every access —
+			// Go returns nil slices as JSON null, not [].
+			body.affected_repos = body.affected_repos ?? [];
+			body.affected_images = body.affected_images ?? [];
+			body.sources = body.sources ?? [];
+			data = body;
 			// Kick off contributor fetches for the visible repos so the
 			// page fills in progressively. Cap at the first 20 to avoid
 			// hammering provider APIs on a vuln that hit a hundred repos.
-			const firstRepos = (data.affected_repos ?? []).slice(0, 20);
+			const firstRepos = data.affected_repos.slice(0, 20);
 			for (const r of firstRepos) {
 				loadContributors(r.repo_id);
 			}

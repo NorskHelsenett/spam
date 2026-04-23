@@ -168,8 +168,13 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		`, append([]any{vulnID}, repoArgs...)...).Scan(&repoRows).Error; err != nil {
 			log.Printf("vuln-detail: repo query %s: %v", vulnID, err)
 		}
-		resp.AffectedRepos = repoRows
-		resp.RepoCount = len(repoRows)
+		// Preserve the empty-slice init on nil results — a nil slice
+		// marshals to JSON `null`, which trips the frontend's `.length`
+		// check and leaves the page stuck on its loading skeleton.
+		if repoRows != nil {
+			resp.AffectedRepos = repoRows
+		}
+		resp.RepoCount = len(resp.AffectedRepos)
 
 		// Affected images — scoped by image ACL.
 		imageClause, err := acl.ReadableImageClause(ctx, acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "d")
@@ -189,14 +194,20 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 
 		var imageRows []VulnAffectedImage
+		// DISTINCT ON (image_id) collapses the row-per-finding output of
+		// view_unified_image_vulnerabilities down to one row per image.
+		// A single image can carry multiple findings for the same CVE
+		// (re-scans, multi-matcher overlap), and the detail page wants
+		// the latest per image — the most recent scanned_at wins.
 		if err := db.WithContext(ctx).Raw(`
-			SELECT v.image_id, v.image_slug, v.image_digest,
+			SELECT DISTINCT ON (v.image_id)
+			       v.image_id, v.image_slug, v.image_digest,
 			       v.source_repo_id, v.verified_source,
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_image_vulnerabilities v
 			WHERE v.vuln_id = ? AND (`+imageACLSQL+`)
-			ORDER BY v.scanned_at DESC NULLS LAST, v.image_slug
+			ORDER BY v.image_id, v.scanned_at DESC NULLS LAST
 		`, append([]any{vulnID}, imageACLArgs...)...).Scan(&imageRows).Error; err != nil {
 			log.Printf("vuln-detail: image query %s: %v", vulnID, err)
 		}
@@ -207,8 +218,10 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		if len(imageRows) > 0 {
 			imageRows = attachClusterPresence(ctx, r, db, imageRows)
 		}
-		resp.AffectedImages = imageRows
-		resp.ImageCount = len(imageRows)
+		if imageRows != nil {
+			resp.AffectedImages = imageRows
+		}
+		resp.ImageCount = len(resp.AffectedImages)
 
 		writeJSON(w, http.StatusOK, resp)
 	}
