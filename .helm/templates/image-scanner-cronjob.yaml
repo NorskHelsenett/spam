@@ -126,10 +126,12 @@ spec:
               emptyDir: {}
             - name: trivy-cache
               emptyDir: {}
+            # /tmp is disk-backed (not tmpfs) so image-layer extraction can
+            # exceed pod memory without OOMing. sizeLimit caps node
+            # ephemeral-storage use per pod. See imageScanner.tmpSizeLimit.
             - name: tmp
               emptyDir:
-                medium: Memory
-                sizeLimit: 512Mi
+                sizeLimit: {{ .Values.imageScanner.tmpSizeLimit | default "8Gi" }}
             - name: home
               emptyDir:
                 medium: Memory

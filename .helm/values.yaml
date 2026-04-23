@@ -484,6 +484,13 @@ imageScanner:
   # against a single pathological image hanging the whole tick).
   scanDeadlineSeconds: 900
 
+  # /tmp scratch volume for crane/syft/grype. Was 512Mi tmpfs (RAM-backed)
+  # which ran out on any image >300MB because image extraction can briefly
+  # duplicate layers on disk. Now a disk-backed emptyDir pulling from node
+  # ephemeral storage — doesn't count against pod memory. Bump if a fat
+  # image still fills it (runtime: `kubectl -n spam exec <pod> -- df /tmp`).
+  tmpSizeLimit: 8Gi
+
   # Extra env forwarded to each scan subprocess. Typical keys:
   #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
   #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY
