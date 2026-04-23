@@ -310,7 +310,20 @@
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{error}</div>
 		{/if}
 
-		{#if dependencies.length === 0 && !loading}
+		{#if loading && dependencies.length === 0}
+			<div class="flex flex-1 items-center justify-center">
+				<div class="flex flex-col items-center gap-4 text-center">
+					<Package class="h-10 w-10 text-[var(--accent)]" aria-hidden="true" />
+					<div>
+						<p class="text-sm font-semibold text-[var(--text-bright)]">Loading dependencies</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">Fetching packages from SBOMs and manifests</p>
+					</div>
+					<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
+						<div class="deps-loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
+					</div>
+				</div>
+			</div>
+		{:else if dependencies.length === 0 && !loading}
 			<div class="flex flex-1 items-center justify-center">
 				<div class="flex flex-col items-center gap-3 text-center">
 					{#if hasActiveSearch}
@@ -527,3 +540,23 @@
 		{/if}
 	</section>
 </div>
+
+<style>
+	.deps-loading-bar {
+		position: relative;
+		width: 35%;
+		left: 0%;
+		animation: deps-loading-slide 2s linear infinite alternate;
+	}
+
+	@keyframes deps-loading-slide {
+		0% {
+			left: 0%;
+			transform: translateX(-95%);
+		}
+		100% {
+			left: 100%;
+			transform: translateX(-5%);
+		}
+	}
+</style>
