@@ -70,7 +70,7 @@ func (s *Server) Start(ctx context.Context) error {
 		})
 	})
 
-	// Trivy scanner endpoints are served by the worker listener so scanner jobs
+	// SBOM scanner endpoints are served by the worker listener so scanner jobs
 	// can talk directly to the worker service.
 	r.Group(func(r chi.Router) {
 		r.Use(auth.HMACMiddleware(string(s.cfg.HMACKey)))

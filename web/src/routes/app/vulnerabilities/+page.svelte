@@ -356,16 +356,14 @@
 		return list;
 	})();
 
-	// Server-side filtering now — filteredVulns no longer exists.
-	// getVulnAt(idx) returns the group at position idx in the current
-	// filtered result, fetching the backing page if it's not in cache.
-	function getVulnAt(idx: number): VulnGroup | undefined {
+	// Server-side filtering now — filteredVulns no longer exists. A pure
+	// lookup (no side effects): fetches are kicked off by the reactive
+	// block watching vulnVirt so a keyed each-block doesn't silently skip
+	// re-running when vulnPages updates.
+	function getVulnAt(idx: number, pages: Map<number, VulnGroup[]>): VulnGroup | undefined {
 		const page = Math.floor(idx / VULN_PAGE_SIZE);
 		const within = idx % VULN_PAGE_SIZE;
-		const cached = vulnPages.get(page);
-		if (cached) return cached[within];
-		void fetchVulnPage(page);
-		return undefined;
+		return pages.get(page)?.[within];
 	}
 
 	// Dynamic MultiSelect options derived from the current data set.
@@ -373,23 +371,27 @@
 		.sort()
 		.map((r) => ({ value: r, label: r } as MultiSelectOption));
 
-	// Source + year filter options are now static (we can't survey the
-	// full set of groups without fetching every page). Three scanners
-	// produce vulns today; years span a reasonable CVE window.
-	const vulnSourceFilterOptions: MultiSelectOption[] = [
-		{ value: 'trivy', label: 'trivy' },
-		{ value: 'osv', label: 'osv' },
-		{ value: 'grype', label: 'grype' }
-	];
+	// Source + year filter options come from /api/vuln/facets so we
+	// only ever show values that actually appear in the data — no
+	// stale "trivy" option after the sbom-scanner migrated to grype,
+	// no 2015-2025 dropdown when the oldest row is from 2019.
+	let vulnSourceFilterOptions: MultiSelectOption[] = [];
+	let vulnYearFilterOptions: MultiSelectOption[] = [];
+	let facetsLoaded = false;
 
-	const vulnYearFilterOptions: MultiSelectOption[] = (() => {
-		const now = new Date().getUTCFullYear();
-		const years: MultiSelectOption[] = [];
-		for (let y = now; y >= 2015; y--) {
-			years.push({ value: String(y), label: String(y) });
+	async function loadVulnFacets() {
+		if (facetsLoaded) return;
+		try {
+			const res = await fetch('/api/vuln/facets', { credentials: 'include' });
+			if (!res.ok) return;
+			const data = (await res.json()) as { sources: string[]; years: string[] };
+			vulnSourceFilterOptions = (data.sources ?? []).map((s) => ({ value: s, label: s }));
+			vulnYearFilterOptions = (data.years ?? []).map((y) => ({ value: y, label: y }));
+			facetsLoaded = true;
+		} catch {
+			// swallow — dropdowns stay empty; user can retry by toggling tab
 		}
-		return years;
-	})();
+	}
 
 	// Badge counts per tab.
 	$: repoActiveFilterCount =
@@ -438,6 +440,20 @@
 		}
 	}
 
+	// Pre-resolve the visible slice reactively against vulnPages so that
+	// rows re-render when a page fetch lands. A {@const getVulnAt(idx)}
+	// inside a keyed {#each ... (idx)} block does NOT re-evaluate on
+	// existing rows when only vulnPages changes (Svelte reconciles same
+	// keys as unchanged), so fast scrolls left rows stuck on "loading…"
+	// even after the fetch resolved.
+	$: vulnRows = (() => {
+		const rows: Array<{ idx: number; group: VulnGroup | undefined }> = [];
+		for (let i = vulnVirt.start; i < vulnVirt.end; i++) {
+			rows.push({ idx: i, group: getVulnAt(i, vulnPages) });
+		}
+		return rows;
+	})();
+
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
 	const parseTags = (t: string) => (t ? t.split(',').map((x) => x.trim()).filter(Boolean) : []);
 
@@ -451,6 +467,14 @@
 			imageDrawerOpen = true;
 		}
 	};
+
+	// Toggle a value in a string array — used by the severity pill
+	// buttons to flip selection state. Returns a new array so Svelte's
+	// reactivity picks it up.
+	function togglePill(list: string[], value: string): string[] {
+		const next = list.filter((v) => v !== value);
+		return next.length === list.length ? [...list, value] : next;
+	}
 
 	onMount(async () => {
 		try {
@@ -473,6 +497,10 @@
 		} finally {
 			loading = false;
 		}
+
+		// Facets are cheap + independent of the three main loads, so fire
+		// them alongside rather than blocking the dashboard render.
+		void loadVulnFacets();
 	});
 </script>
 
@@ -639,7 +667,17 @@
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Has severity</span>
-							<MultiSelect bind:selected={repoSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
+							<div class="flex flex-wrap items-center gap-2 h-[28px]">
+								{#each severityFilterOptions as opt (opt.value)}
+									<button
+										type="button"
+										class={`btn btn-sm ${repoSelectedSeverities.includes(opt.value) ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+										onclick={() => { repoSelectedSeverities = togglePill(repoSelectedSeverities, opt.value); }}
+									>
+										{opt.label}
+									</button>
+								{/each}
+							</div>
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Clean repos</span>
@@ -670,7 +708,17 @@
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Severity</span>
-							<MultiSelect bind:selected={imageSelectedSeverities} options={severityFilterOptions} placeholder="Any severity" size="sm" />
+							<div class="flex flex-wrap items-center gap-2 h-[28px]">
+								{#each severityFilterOptions as opt (opt.value)}
+									<button
+										type="button"
+										class={`btn btn-sm ${imageSelectedSeverities.includes(opt.value) ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+										onclick={() => { imageSelectedSeverities = togglePill(imageSelectedSeverities, opt.value); }}
+									>
+										{opt.label}
+									</button>
+								{/each}
+							</div>
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Clean images</span>
@@ -697,7 +745,17 @@
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Severity</span>
-							<MultiSelect bind:selected={vulnSelectedSeverities} options={severityFilterOptions} placeholder="Any" size="sm" />
+							<div class="flex flex-wrap items-center gap-2 h-[28px]">
+								{#each severityFilterOptions as opt (opt.value)}
+									<button
+										type="button"
+										class={`btn btn-sm ${vulnSelectedSeverities.includes(opt.value) ? 'btn-secondary filter-active' : 'btn-ghost'}`}
+										onclick={() => { vulnSelectedSeverities = togglePill(vulnSelectedSeverities, opt.value); }}
+									>
+										{opt.label}
+									</button>
+								{/each}
+							</div>
 						</div>
 						<div class="flex flex-col gap-1">
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Source</span>
@@ -926,8 +984,8 @@
 								</thead>
 								<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
 									{#if vulnVirt.topPad > 0}<tr style="height:{vulnVirt.topPad}px"><td colspan="4"></td></tr>{/if}
-									{#each Array.from({ length: Math.max(0, vulnVirt.end - vulnVirt.start) }, (_, i) => vulnVirt.start + i) as idx (idx)}
-										{@const g = getVulnAt(idx)}
+									{#each vulnRows as row (row.idx)}
+										{@const g = row.group}
 										{#if g}
 											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
 												<td class="px-5 py-3">
@@ -1013,6 +1071,24 @@
 </div>
 
 <style>
+	/* Severity + source pill buttons — mirrors the filter chip pattern
+	   on the runs page so the accent tint reads as "selected" across
+	   the app. btn / btn-ghost / btn-secondary come from app.css; this
+	   only adds the tinted selected state. */
+	.filter-active {
+		border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
+		background: color-mix(in srgb, var(--accent) 16%, transparent);
+		color: var(--text-bright);
+	}
+
+	/* btn-sm: slightly shorter pills so they sit cleanly in the 28px
+	   filter row alongside Toggle + Search. */
+	:global(.btn-sm) {
+		padding: 0.25rem 0.75rem;
+		font-size: 0.72rem;
+		line-height: 1;
+	}
+
 	/* Filter chrome mirrors the clusters page (host-*) so the page feels
 	   like one unified tool. */
 	.host-filter-toggle {

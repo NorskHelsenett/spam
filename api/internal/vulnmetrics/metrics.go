@@ -14,6 +14,7 @@ import (
 const (
 	summaryCacheKey = "vuln:summary:v1"
 	reposCacheKey   = "vuln:repos:v1"
+	facetsCacheKey  = "vuln:facets:v1"
 	summaryCacheTTL = 7 * 24 * time.Hour
 )
 
@@ -112,7 +113,7 @@ type VulnListParams struct {
 }
 
 type summaryVersion struct {
-	LastTrivyAt     *time.Time `json:"last_trivy_at" gorm:"column:last_trivy_at"`
+	LastScanAt      *time.Time `json:"last_scan_at" gorm:"column:last_scan_at"`
 	LastOSVAt       *time.Time `json:"last_osv_at" gorm:"column:last_osv_at"`
 	LastVEXAt       *time.Time `json:"last_vex_at" gorm:"column:last_vex_at"`
 	LastImageScanAt *time.Time `json:"last_image_scan_at" gorm:"column:last_image_scan_at"`
@@ -235,6 +236,82 @@ func LoadRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
 		return nil, err
 	}
 	return rows, nil
+}
+
+// Facets is the set of filter options the UI can show without risking
+// zero-result selections — every value listed has at least one matching
+// row somewhere in either the repo-side or image-side unified vuln view.
+type Facets struct {
+	Sources []string `json:"sources"`
+	Years   []string `json:"years"`
+}
+
+type cachedFacets struct {
+	Version summaryVersion `json:"version"`
+	Facets  Facets         `json:"facets"`
+}
+
+// LoadFacets returns the distinct sources + CVE years currently present
+// in the unified vuln views. Versioned against the same summaryVersion
+// (scan / OSV / VEX / image-scan watermarks) as LoadSummary so the cache
+// drops the moment any scan activity could have introduced new values.
+func LoadFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
+	store := cache.NewPostgresStore(db)
+
+	version, err := querySummaryVersion(ctx, db)
+	if err != nil {
+		return Facets{}, err
+	}
+
+	if entry, ok, err := cache.GetJSON[cachedFacets](ctx, store, facetsCacheKey); err == nil && ok {
+		if sameVersion(entry.Version, version) {
+			return entry.Facets, nil
+		}
+	}
+
+	facets, err := computeFacets(ctx, db)
+	if err != nil {
+		return Facets{}, err
+	}
+
+	if err := cache.SetJSON(ctx, store, facetsCacheKey, cachedFacets{
+		Version: version,
+		Facets:  facets,
+	}, summaryCacheTTL); err != nil {
+		return Facets{}, err
+	}
+	return facets, nil
+}
+
+func computeFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
+	out := Facets{Sources: []string{}, Years: []string{}}
+
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT source
+		FROM (
+			SELECT source FROM view_unified_repositories_vulnerabilities
+			UNION ALL
+			SELECT source FROM view_unified_image_vulnerabilities
+		) u
+		WHERE source IS NOT NULL AND source <> ''
+		ORDER BY source
+	`).Scan(&out.Sources).Error; err != nil {
+		return Facets{}, err
+	}
+
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT substring(vuln_id FROM 'CVE-(\d{4})-') AS year
+		FROM (
+			SELECT vuln_id FROM view_unified_repositories_vulnerabilities
+			UNION ALL
+			SELECT vuln_id FROM view_unified_image_vulnerabilities
+		) u
+		WHERE vuln_id ~ '^CVE-\d{4}-'
+		ORDER BY year DESC
+	`).Scan(&out.Years).Error; err != nil {
+		return Facets{}, err
+	}
+	return out, nil
 }
 
 // LoadListPage returns a paginated page of grouped vulnerabilities,
@@ -483,7 +560,7 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	var meta scanMeta
 	if err := db.WithContext(ctx).Raw(`
 		WITH sboms_all AS (
-			SELECT sbom_id FROM trivy_scan_results
+			SELECT sbom_id FROM sbom_scan_results
 			UNION
 			SELECT sb.sbom_id
 			FROM sbom_bindings sb
@@ -492,7 +569,7 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 			  AND isr.finished_at IS NOT NULL
 		),
 		ts AS (
-			SELECT MAX(scanned_at) AS t FROM trivy_scan_results
+			SELECT MAX(scanned_at) AS t FROM sbom_scan_results
 			UNION ALL
 			SELECT MAX(finished_at) FROM image_scan_runs
 		)
@@ -514,7 +591,7 @@ func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, erro
 	var version summaryVersion
 	err := db.WithContext(ctx).Raw(`
 		SELECT
-			(SELECT MAX(scanned_at) FROM trivy_scan_results)        AS last_trivy_at,
+			(SELECT MAX(scanned_at) FROM sbom_scan_results)         AS last_scan_at,
 			(SELECT MAX(checked_at) FROM component_vulnerabilities) AS last_osv_at,
 			(SELECT MAX(created_at) FROM component_vex)             AS last_vex_at,
 			(SELECT MAX(finished_at) FROM image_scan_runs)          AS last_image_scan_at
@@ -576,7 +653,7 @@ func upsertSnapshot(ctx context.Context, db *gorm.DB, capturedAt time.Time, summ
 }
 
 func sameVersion(a, b summaryVersion) bool {
-	return sameTime(a.LastTrivyAt, b.LastTrivyAt) &&
+	return sameTime(a.LastScanAt, b.LastScanAt) &&
 		sameTime(a.LastOSVAt, b.LastOSVAt) &&
 		sameTime(a.LastVEXAt, b.LastVEXAt) &&
 		sameTime(a.LastImageScanAt, b.LastImageScanAt)

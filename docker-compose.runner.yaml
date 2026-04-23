@@ -33,7 +33,7 @@ services:
       RUNNER_ENABLED: "true"
       RUNNER_LOCAL_MODE: "true"
       RUNNER_HMAC_KEY: "test-hmac-key-at-least-32-bytes-long-for-security"
-      RUNNER_IMAGE: spam-runner:local
+      RUNNER_IMAGE: spam-repo-runner:local
       RUNNER_NAMESPACE: local
       RUNNER_SERVICE_ACCOUNT: local
       RUNNER_WORKER_URL: "http://worker:8081"
@@ -50,16 +50,18 @@ services:
     networks:
       - default
 
-  # Runner container - only used with 'docker-compose --profile test run runner'
+  # repo-runner container — only used with 'docker-compose --profile test run runner'
   runner:
     build:
       context: ./runner
+      dockerfile: Dockerfile.repo-runner
+    image: spam-repo-runner:local
     profiles: ["test"]
     environment:
       WORKER_URL: "http://worker:8081"
       RUN_ID: "test-run-${RUN_ID:-local}"
       RUN_TOKEN: "dummy"
-      REPO_CLONE_URL: "${REPO_CLONE_URL:-https://github.com/aquasecurity/trivy.git}"
+      REPO_CLONE_URL: "${REPO_CLONE_URL:-https://github.com/jonasbg/picoblog.git}"
       REPO_REF: "${REPO_REF:-}"
     depends_on:
       - worker

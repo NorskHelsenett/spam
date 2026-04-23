@@ -2,12 +2,12 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: "{{ .Release.Name }}-runner-networkpolicy-test"
+  name: "{{ .Release.Name }}-repo-runner-networkpolicy-test"
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-runner
+    app.kubernetes.io/name: {{ .Chart.Name }}-repo-runner
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
-    app.kubernetes.io/component: runner
+    app.kubernetes.io/component: repo-runner
     app.kubernetes.io/managed-by: Helm
   annotations:
     "helm.sh/hook": test
@@ -46,6 +46,6 @@ spec:
             exit 1
           fi
 
-          echo "Runner network policy looks active"
+          echo "repo-runner network policy looks active"
   restartPolicy: Never
 {{- end }}

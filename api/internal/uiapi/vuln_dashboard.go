@@ -136,6 +136,31 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	}
 }
 
+// VulnFacetsHandler returns the distinct sources + CVE years that
+// currently appear in either the repo-side or image-side unified
+// vuln view. The frontend uses these to populate filter dropdowns
+// so they never show options that would yield zero results. Backed
+// by vulnmetrics.LoadFacets which caches against the same summary
+// version as LoadSummary — recomputes whenever new scan activity
+// could have introduced new values.
+//
+// GET /api/vuln/facets
+//
+// Response: {"sources": ["grype", "osv"], "years": ["2024", "2023", ...]}
+func VulnFacetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		facets, err := vulnmetrics.LoadFacets(r.Context(), db)
+		if err != nil {
+			http.Error(w, "failed to load vuln facets", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, facets)
+	}
+}
+
 // VulnTrendHandler returns daily aggregate vulnerability counts for the last N days.
 //
 // GET /api/vuln/trend?days=30

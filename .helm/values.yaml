@@ -6,13 +6,27 @@
 # For production with load balancing, increase to 2+ for high availability
 replicaCount: 1
 
-# Deployment strategy
-# RollingUpdate ensures zero-downtime deployments
+# Deployment strategy — zero-downtime rollouts.
+# maxUnavailable: 0 means we never drop below replicaCount during an
+# upgrade. maxSurge: 1 lets one extra pod come up and pass readiness
+# before the old pod is drained, so at least one replica is always
+# serving traffic across a restart. Pair with pdb below to get the
+# same guarantee for voluntary disruptions (node drains, evictions).
 strategy:
   type: RollingUpdate
   rollingUpdate:
-    maxSurge: 1        # Maximum number of pods that can be created above desired count
-    maxUnavailable: 0  # Maximum number of pods that can be unavailable during update
+    maxSurge: 1
+    maxUnavailable: 0
+
+# PodDisruptionBudget — keep at least one api pod serving during
+# voluntary disruptions (node drain, autoscaler eviction). The Deployment
+# strategy above handles rollouts; this handles everything else. With
+# replicaCount: 1 and minAvailable: 1 a drain will BLOCK until you first
+# bump replicas or delete the PDB — that's the point, it prevents
+# accidental takedowns of a single-replica deployment.
+pdb:
+  enabled: true
+  minAvailable: 1
 
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
@@ -344,13 +358,15 @@ worker:
     #   memory: 128Mi
 
 # Runner configuration
-# The runner executes scans (SBOM generation, secret scanning) in Kubernetes jobs
+# repo-runner: clones a repo in a K8s Job and produces artifacts —
+# syft-generated SBOM, betterleaks secret scan, dependency manifests.
+# (sbom-scanner / image-scanner handle the vuln side; see their blocks.)
 runner:
   enabled: false
 
-  # Runner container image
+  # repo-runner container image
   image:
-    repository: spam-runner
+    repository: spam-repo-runner
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -405,9 +421,9 @@ runner:
 # SBOM scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.
-# Named "sbom-scanner" because the tool inside is interchangeable (trivy today;
-# grype once the backend grype-result ingest lands) — the input is always an
-# SBOM, so the scanner's identity is the input shape, not the binary.
+# Named "sbom-scanner" because the tool inside is interchangeable — the input
+# is always an SBOM, so the scanner's identity is the input shape, not the
+# binary. Grype is the current producer.
 sbomScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
@@ -415,7 +431,7 @@ sbomScanner:
   activeDeadlineSeconds: 14400  # 4h max runtime
 
   # Dedicated sbom-scanner image (built from runner/Dockerfile.sbom-scanner).
-  # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
+  # Contains ONLY grype + the scanner binary — no git, syft, or betterleaks.
   image:
     repository: spam-sbom-scanner
     tag: ""

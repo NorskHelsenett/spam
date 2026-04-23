@@ -181,7 +181,7 @@ func loadRunnerConfig() (RunnerConfig, error) {
 
 	cfg := RunnerConfig{
 		Enabled:        true,
-		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Image:          getEnv("RUNNER_IMAGE", "spam-repo-runner:latest"),
 		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
 		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
 		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
@@ -235,7 +235,7 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 
 	cfg := RunnerConfig{
 		Enabled:        true,
-		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Image:          getEnv("RUNNER_IMAGE", "spam-repo-runner:latest"),
 		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
 		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
 		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),

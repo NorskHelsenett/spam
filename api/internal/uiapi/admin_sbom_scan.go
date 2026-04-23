@@ -10,9 +10,7 @@ import (
 )
 
 // sbomScanRun summarises one day of vulnerability-scan activity for the
-// admin page's "recent runs" list. The underlying storage table is still
-// named trivy_scan_results: the scanner binary migrated to grype but the
-// table kept its name to avoid a heavyweight data migration.
+// admin page's "recent runs" list.
 type sbomScanRun struct {
 	StartedAt     string `json:"started_at"`
 	FinishedAt    string `json:"finished_at"`
@@ -64,14 +62,14 @@ func AdminSBOMScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Han
 
 		// Count distinct scanned SBOMs.
 		db.WithContext(r.Context()).
-			Table("trivy_scan_results").
+			Table("sbom_scan_results").
 			Distinct("sbom_id").
 			Count(&status.ScannedCount)
 
 		// Last scan timestamp.
 		var lastAt time.Time
 		if err := db.WithContext(r.Context()).
-			Table("trivy_scan_results").
+			Table("sbom_scan_results").
 			Select("MAX(scanned_at)").
 			Row().Scan(&lastAt); err == nil && !lastAt.IsZero() {
 			status.LastScannedAt = lastAt.UTC().Format("2006-01-02T15:04:05Z")
@@ -105,7 +103,7 @@ func AdminSBOMScanStatusHandler(db *gorm.DB, authService *auth.Service) http.Han
 				COUNT(DISTINCT sbom_id)       AS sbom_count,
 				SUM(critical_count)           AS critical_count,
 				SUM(high_count)               AS high_count
-			FROM trivy_scan_results
+			FROM sbom_scan_results
 			GROUP BY DATE_TRUNC('day', scanned_at)
 			ORDER BY day DESC
 			LIMIT 10
