@@ -215,7 +215,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
 
 				// Ecosystems endpoint
-				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService))
+				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService, appCache))
 
 				// Manifest endpoints
 				api.Get("/manifests", uiapi.ManifestsListHandler(db, authService))

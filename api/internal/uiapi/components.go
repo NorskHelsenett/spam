@@ -3,8 +3,10 @@ package uiapi
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -12,16 +14,29 @@ import (
 const (
 	defaultPageSize = 50
 	maxPageSize     = 200
+
+	ecosystemsCacheKey = "components:ecosystems"
+	ecosystemsCacheTTL = 15 * time.Minute
 )
 
+type ecosystemsResponse struct {
+	Ecosystems []string `json:"ecosystems"`
+}
+
 // EcosystemsListHandler returns distinct ecosystems from both SBOMs and manifests.
-func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// The result set changes only when new SBOMs/manifests are ingested, so it is
+// cached in kv_store for ecosystemsCacheTTL.
+func EcosystemsListHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
 
-		// Get ecosystems from both sbom_component_view and manifest_dependencies
+		if cached, ok, _ := cache.GetJSON[ecosystemsResponse](r.Context(), c, ecosystemsCacheKey); ok {
+			writeJSON(w, http.StatusOK, cached)
+			return
+		}
+
 		var ecosystems []string
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT DISTINCT ecosystem FROM (
@@ -37,7 +52,9 @@ func EcosystemsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerF
 			return
 		}
 
-		writeJSON(w, http.StatusOK, map[string][]string{"ecosystems": ecosystems})
+		resp := ecosystemsResponse{Ecosystems: ecosystems}
+		_ = cache.SetJSON(r.Context(), c, ecosystemsCacheKey, resp, ecosystemsCacheTTL)
+		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
