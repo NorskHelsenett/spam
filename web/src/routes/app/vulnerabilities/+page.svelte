@@ -79,6 +79,10 @@
 		description: string;
 		sources: string[];
 		assets: VulnAsset[];
+		// Aliases come from the backend's vuln_metadata lookup — cross-
+		// references across CVE / GHSA / BIT / OSV prefixes for the
+		// same advisory. Omitted when no enrichment row exists.
+		aliases?: string[];
 		repo_count: number;
 		image_count: number;
 	};
@@ -1011,6 +1015,13 @@
 														</a>
 														{#each g.sources as src}
 															<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
+														{/each}
+														{#each g.aliases ?? [] as alias}
+															<a
+																href={vulnDetailHref(alias)}
+																class="inline-flex items-center rounded-full border border-[var(--border-color)]/70 bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-tertiary)] transition hover:text-[var(--accent)]"
+																title="Alias for this advisory"
+															>{alias}</a>
 														{/each}
 													</div>
 													{#if g.title}

@@ -144,6 +144,16 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			resp.EnrichmentLoading = true
 		}
 
+		// Asset queries run against the union of the requested vuln_id
+		// plus every alias we've learned from upstream — clicking
+		// "CVE-2025-49844" should surface the same images that were
+		// stored under the canonical "BIT-valkey-2025-49844" advisory.
+		// Scanner-stored rows carry whatever prefix the scanner chose
+		// (Grype favours BIT-*, OSV emits the canonical ID); aliases
+		// bridge both.
+		vulnIDs := vulnmeta.AliasSet(vulnID, meta)
+		osvAffected := vulnmeta.ExtractOSVAffected(meta)
+
 		// Affected repos — scoped by ACL.
 		repoClause, err := acl.ReadableRepoClause(ctx, acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")
 		if err != nil {
@@ -163,10 +173,19 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			       v.source, v.scanned_at
 			FROM view_unified_repositories_vulnerabilities v
 			JOIN repos r ON r.id = v.repo_id
-			WHERE v.vuln_id = ? AND (`+repoSQL+`)
+			WHERE v.vuln_id IN ? AND (`+repoSQL+`)
 			ORDER BY v.scanned_at DESC NULLS LAST, v.repo_slug
-		`, append([]any{vulnID}, repoArgs...)...).Scan(&repoRows).Error; err != nil {
+		`, append([]any{vulnIDs}, repoArgs...)...).Scan(&repoRows).Error; err != nil {
 			log.Printf("vuln-detail: repo query %s: %v", vulnID, err)
+		}
+		// Override scanner-reported fix with the OSV-derived one when
+		// we can compute it — grype and trivy sometimes report the
+		// first range's fix (7.2.11) even when the installed version
+		// is in a later range whose applicable fix is different (8.1.4).
+		for i := range repoRows {
+			if fix := vulnmeta.ApplicableFix(osvAffected, repoRows[i].PkgName, repoRows[i].InstalledVersion); fix != "" {
+				repoRows[i].FixedVersion = fix
+			}
 		}
 		// Preserve the empty-slice init on nil results — a nil slice
 		// marshals to JSON `null`, which trips the frontend's `.length`
@@ -206,9 +225,9 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_image_vulnerabilities v
-			WHERE v.vuln_id = ? AND (`+imageACLSQL+`)
+			WHERE v.vuln_id IN ? AND (`+imageACLSQL+`)
 			ORDER BY v.image_id, v.scanned_at DESC NULLS LAST
-		`, append([]any{vulnID}, imageACLArgs...)...).Scan(&imageRows).Error; err != nil {
+		`, append([]any{vulnIDs}, imageACLArgs...)...).Scan(&imageRows).Error; err != nil {
 			log.Printf("vuln-detail: image query %s: %v", vulnID, err)
 		}
 
@@ -217,6 +236,12 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		// list is typically <10 items.
 		if len(imageRows) > 0 {
 			imageRows = attachClusterPresence(ctx, r, db, imageRows)
+		}
+		// Same OSV-derived fix-version override as the repo branch.
+		for i := range imageRows {
+			if fix := vulnmeta.ApplicableFix(osvAffected, imageRows[i].PkgName, imageRows[i].InstalledVersion); fix != "" {
+				imageRows[i].FixedVersion = fix
+			}
 		}
 		if imageRows != nil {
 			resp.AffectedImages = imageRows

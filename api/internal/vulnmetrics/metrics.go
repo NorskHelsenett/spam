@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/vulnmeta"
 	"gorm.io/gorm"
 )
 
@@ -69,6 +70,11 @@ type VulnAsset struct {
 // pkg_name / installed_version come from the worst-severity row
 // contributing to the group, which is almost always stable across
 // sources for the same advisory.
+//
+// Aliases is populated from vuln_metadata when an enrichment row
+// exists — lets the UI show cross-references (e.g. CVE-* ↔ GHSA-* ↔
+// BIT-*) and lets search queries find a row by any of its known
+// identifiers.
 type VulnGroup struct {
 	VulnID           string      `json:"vuln_id"`
 	Severity         string      `json:"severity"`
@@ -79,6 +85,7 @@ type VulnGroup struct {
 	Description      string      `json:"description"`
 	Sources          []string    `json:"sources"`
 	Assets           []VulnAsset `json:"assets"`
+	Aliases          []string    `json:"aliases,omitempty"`
 	RepoCount        int         `json:"repo_count"`
 	ImageCount       int         `json:"image_count"`
 }
@@ -450,9 +457,19 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	}
 	if q := strings.TrimSpace(p.Query); q != "" {
 		needle := "%" + strings.ToLower(q) + "%"
+		// Alias-aware search: a scan may have stored a row under
+		// BIT-valkey-2025-49844 while the user searches for its
+		// CVE alias. The EXISTS subquery against vuln_metadata
+		// brings those rows back without requiring the caller to
+		// know which prefix the scanner picked.
 		where = append(where,
-			"(LOWER(vuln_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(pkg_name) LIKE ? OR LOWER(asset_slug) LIKE ?)")
-		whereArgs = append(whereArgs, needle, needle, needle, needle)
+			`(LOWER(vuln_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(pkg_name) LIKE ? OR LOWER(asset_slug) LIKE ?
+			   OR EXISTS (
+			     SELECT 1 FROM vuln_metadata vm
+			     WHERE vm.vuln_id = asset_vulns.vuln_id
+			       AND LOWER(vm.aliases::text) LIKE ?
+			   ))`)
+		whereArgs = append(whereArgs, needle, needle, needle, needle, needle)
 	}
 	if len(p.Years) > 0 {
 		// vuln_id pattern is "<prefix>-YYYY-NNNN" (CVE-2024-1234,
@@ -574,6 +591,32 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			RepoCount:        r.RepoCount,
 			ImageCount:       r.ImageCount,
 		})
+	}
+
+	// Attach per-group aliases from vuln_metadata so the UI can
+	// show cross-references (CVE ↔ GHSA ↔ BIT) beside the primary
+	// ID. One bulk lookup over the page's vuln_ids — rows without
+	// enrichment just don't have an entry and Aliases stays nil.
+	if len(items) > 0 {
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.VulnID)
+		}
+		if aliasMap, err := vulnmeta.AliasesForMany(ctx, db, ids); err == nil {
+			for i := range items {
+				if aliases, ok := aliasMap[items[i].VulnID]; ok && len(aliases) > 0 {
+					// Strip the primary id itself — the UI already
+					// shows it as the main label.
+					out := aliases[:0]
+					for _, a := range aliases {
+						if a != items[i].VulnID {
+							out = append(out, a)
+						}
+					}
+					items[i].Aliases = out
+				}
+			}
+		}
 	}
 
 	resp := VulnListResponse{
