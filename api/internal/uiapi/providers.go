@@ -1336,6 +1336,11 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 
 		// DB cache fallback: serve from persisted data if fresh enough.
 		// Use repo_id directly when provided (skips the org/slug lookup).
+		//
+		// Commits are intentionally NOT pulled from the cached snapshot —
+		// runner enrichment writes author/message/signed/image counts
+		// directly to repo_commits, so live DB reads are always fresher
+		// than whatever was serialized last poll cycle.
 		cacheTTL := store.GetPollInterval(r.Context(), providerID, defaultRepoDetailsCacheTTL)
 		if db != nil {
 			if repoID != "" {
@@ -1346,6 +1351,13 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 						var contribs []providers.ContributorInfo
 						_ = json.Unmarshal([]byte(dbCache.CommitsJSON), &commits)
 						_ = json.Unmarshal([]byte(dbCache.ContributorsJSON), &contribs)
+						if dbCommits := loadCommitsFromRepoCommits(r.Context(), db, repoID, 50, nil); len(dbCommits) > 0 {
+							for i := range dbCommits {
+								dbCommits[i].CommitURL = commitWebURL(instance.Type, instance.BaseURL, repoPath, dbCommits[i].SHA)
+							}
+							dbCommits = enrichCommits(dbCommits, contribs)
+							commits = dbCommits
+						}
 						resp := RepoDetailsResponse{
 							Details:      &details,
 							Readme:       dbCache.ReadmeContent,
