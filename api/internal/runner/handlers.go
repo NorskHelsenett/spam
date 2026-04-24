@@ -50,6 +50,23 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 	// Get commit_hash if provided
 	commitHash := r.FormValue("commit_hash")
 
+	// Commit metadata captured by the runner via `git log -1` on the
+	// pinned commit. Empty means older runner or capture failed — the
+	// upsert tolerates missing fields by leaving them NULL.
+	commitAuthorName := r.FormValue("commit_author_name")
+	commitAuthorEmail := r.FormValue("commit_author_email")
+	commitAuthorDateRaw := r.FormValue("commit_author_date")
+	commitSigned := r.FormValue("commit_signed")
+	commitMessage := r.FormValue("commit_message")
+	var commitAuthorDate *time.Time
+	if commitAuthorDateRaw != "" {
+		if t, err := time.Parse(time.RFC3339, commitAuthorDateRaw); err == nil {
+			commitAuthorDate = &t
+		} else {
+			log.Printf("run %s: unparseable commit_author_date %q: %v", runID, commitAuthorDateRaw, err)
+		}
+	}
+
 	// Get run to find repo_id
 	var run Run
 	if err := s.db.WithContext(r.Context()).Where("id = ?", runID).First(&run).Error; err != nil {
@@ -87,9 +104,14 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 				var binding *artifacts.BindingInput
 				if payload.RepoID != "" && verifiedCommitSHA != "" {
 					commit, err := assets.UpsertRepoCommit(r.Context(), tx, assets.RepoCommitInput{
-						RepoID:    payload.RepoID,
-						CommitSHA: verifiedCommitSHA,
-						Ref:       payload.Ref,
+						RepoID:      payload.RepoID,
+						CommitSHA:   verifiedCommitSHA,
+						Ref:         payload.Ref,
+						AuthorName:  commitAuthorName,
+						AuthorEmail: commitAuthorEmail,
+						AuthorDate:  commitAuthorDate,
+						Signed:      commitSigned,
+						Message:     commitMessage,
 					})
 					if err != nil {
 						log.Printf("failed to upsert repo commit: %v", err)

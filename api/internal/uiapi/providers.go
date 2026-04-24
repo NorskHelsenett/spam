@@ -19,6 +19,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/providers"
+	"github.com/NorskHelsenett/spam/internal/scam"
 	"gorm.io/gorm"
 )
 
@@ -647,6 +648,160 @@ type RepoDetailsResponse struct {
 	RepoID       string                      `json:"repo_id,omitempty"`
 }
 
+// commitWebURL builds the provider-side web URL for a commit. Used
+// to fill in CommitURL on DB-sourced commits (git doesn't know the
+// provider's URL scheme, so the runner can't carry this field).
+func commitWebURL(providerType, baseURL, repoPath, sha string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	repoPath = strings.Trim(strings.TrimSpace(repoPath), "/")
+	if baseURL == "" || repoPath == "" || sha == "" {
+		return ""
+	}
+	switch providerType {
+	case providerconfig.ProviderGitLab:
+		return baseURL + "/" + repoPath + "/-/commit/" + sha
+	case providerconfig.ProviderGitHub, providerconfig.ProviderGitea, providerconfig.ProviderForgejo:
+		return baseURL + "/" + repoPath + "/commit/" + sha
+	default:
+		return ""
+	}
+}
+
+// loadCommitsFromRepoCommits returns enriched commits written by the
+// runner (runner/handlers.go → UpsertRepoCommit). Only rows with an
+// author_date are returned — that's the marker that the runner ran the
+// enrichment pass. Callers fall back to a live provider fetch when this
+// returns empty (legacy/new repo, no scans yet).
+//
+// commitURLFn builds the provider-side web URL for a commit SHA; git
+// doesn't know the provider's URL scheme so we compute it at query time
+// from the provider instance's base URL + path.
+func loadCommitsFromRepoCommits(ctx context.Context, db *gorm.DB, repoDBID string, limit int, commitURLFn func(sha string) string) []providers.CommitInfo {
+	if db == nil || repoDBID == "" || limit <= 0 {
+		return nil
+	}
+	type row struct {
+		CommitSHA        string
+		AuthorName       string
+		AuthorEmail      string
+		AuthorDate       time.Time
+		Signed           string
+		Message          string
+		ImageCount       int
+		LivePodCount     int
+		LiveClusterCount int
+	}
+	// Two LATERAL joins attach the "built → live" signals that drive the
+	// status-icon cluster on each commit row. Both are indexed:
+	// sbom_bindings.commit_sha (idx_sbom_binding_commit_sha), and
+	// cluster_record's live filter is the same EXISTS predicate used by
+	// the workloads view.
+	query := `
+		SELECT rc.commit_sha,
+		       rc.author_name,
+		       rc.author_email,
+		       rc.author_date,
+		       COALESCE(rc.signed, '')  AS signed,
+		       COALESCE(rc.message, '') AS message,
+		       COALESCE(b.image_count, 0)       AS image_count,
+		       COALESCE(l.live_pod_count, 0)    AS live_pod_count,
+		       COALESCE(l.live_cluster_count,0) AS live_cluster_count
+		FROM repo_commits rc
+		LEFT JOIN LATERAL (
+		    SELECT COUNT(DISTINCT asset_ref_id) AS image_count
+		    FROM sbom_bindings
+		    WHERE commit_sha = rc.commit_sha
+		      AND asset_type = 'IMAGE_DIGEST'
+		) b ON true
+		LEFT JOIN LATERAL (
+		    SELECT COUNT(DISTINCT data->>'pod_uid')  AS live_pod_count,
+		           COUNT(DISTINCT data->>'cluster_id') AS live_cluster_count
+		    FROM cluster_record
+		    WHERE data->>'kind'      = 'Container'
+		      AND data->>'msg'       != 'DELETE'` + scam.LiveRecordFilter + `
+		      AND data->>'pod_phase' = 'Running'
+		      AND data->>'digest' IN (
+		          SELECT asset_ref_id FROM sbom_bindings
+		          WHERE commit_sha = rc.commit_sha
+		            AND asset_type = 'IMAGE_DIGEST'
+		      )
+		) l ON true
+		WHERE rc.repo_id = ?
+		  AND rc.author_date IS NOT NULL
+		ORDER BY rc.author_date DESC
+		LIMIT ?
+	`
+	var rows []row
+	if err := db.WithContext(ctx).Raw(query, repoDBID, limit).Scan(&rows).Error; err != nil {
+		log.Printf("loadCommitsFromRepoCommits %s: %v", repoDBID, err)
+		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]providers.CommitInfo, 0, len(rows))
+	shas := make([]string, 0, len(rows))
+	for _, r := range rows {
+		var commitURL string
+		if commitURLFn != nil {
+			commitURL = commitURLFn(r.CommitSHA)
+		}
+		out = append(out, providers.CommitInfo{
+			SHA:              r.CommitSHA,
+			Message:          r.Message,
+			AuthorName:       r.AuthorName,
+			AuthorEmail:      r.AuthorEmail,
+			AuthorDate:       r.AuthorDate,
+			CommitURL:        commitURL,
+			Signed:           r.Signed,
+			ImageCount:       r.ImageCount,
+			LivePodCount:     r.LivePodCount,
+			LiveClusterCount: r.LiveClusterCount,
+		})
+		if r.ImageCount > 0 {
+			shas = append(shas, r.CommitSHA)
+		}
+	}
+
+	// Batch-fetch image refs for commits that actually built something —
+	// the dialog renders a copy-to-pull button per image, so we need
+	// registry/repo/digest not just the count.
+	if len(shas) > 0 {
+		type imgRow struct {
+			CommitSHA  string
+			Registry   string
+			Repository string
+			Digest     string
+		}
+		var imgRows []imgRow
+		if err := db.WithContext(ctx).Raw(`
+			SELECT sb.commit_sha, id.registry, id.repository, id.digest
+			FROM sbom_bindings sb
+			JOIN image_digests id ON id.id = sb.asset_ref_id
+			WHERE sb.asset_type = 'IMAGE_DIGEST'
+			  AND sb.commit_sha IN ?
+			ORDER BY id.created_at DESC
+		`, shas).Scan(&imgRows).Error; err != nil {
+			log.Printf("loadCommitsFromRepoCommits %s images: %v", repoDBID, err)
+		} else if len(imgRows) > 0 {
+			bySHA := make(map[string][]providers.CommitImage, len(shas))
+			for _, ir := range imgRows {
+				bySHA[ir.CommitSHA] = append(bySHA[ir.CommitSHA], providers.CommitImage{
+					Registry:   ir.Registry,
+					Repository: ir.Repository,
+					Digest:     ir.Digest,
+				})
+			}
+			for i := range out {
+				if imgs, ok := bySHA[out[i].SHA]; ok {
+					out[i].Images = imgs
+				}
+			}
+		}
+	}
+	return out
+}
+
 // enrichContributors fills in missing contributor data from commits and generates
 // Gravatar avatar URLs for contributors without an avatar.
 func enrichContributors(contributors []providers.ContributorInfo, commits []providers.CommitInfo) []providers.ContributorInfo {
@@ -1211,6 +1366,12 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 		var commits []providers.CommitInfo
 		var contributors []providers.ContributorInfo
 
+		// Prefer runner-enriched commits from repo_commits. Built before the
+		// provider switch so each branch's goroutines skip the live commit
+		// fetch when DB has real data. Fallback keeps brand-new / unscanned
+		// repos working without code duplication.
+		dbCommits := loadCommitsFromRepoCommits(r.Context(), db, repoID, 50, nil)
+
 		// handleNotFound returns a specific error when a repo exists in our DB
 		// (was discovered during sync) but the provider API can't fetch its details.
 		handleNotFound := func(msg string) {
@@ -1256,7 +1417,17 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			var wg sync.WaitGroup
 			wg.Add(3)
 			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), parts[0], parts[1]) }()
-			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10) }()
+			go func() {
+				defer wg.Done()
+				if len(dbCommits) > 0 {
+					commits = dbCommits
+					for i := range commits {
+						commits[i].CommitURL = commitWebURL(instance.Type, instance.BaseURL, repoPath, commits[i].SHA)
+					}
+					return
+				}
+				commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10)
+			}()
 			go func() {
 				defer wg.Done()
 				contributors, _ = client.GetContributors(r.Context(), repoPath, 10)
@@ -1282,7 +1453,17 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			var wg sync.WaitGroup
 			wg.Add(3)
 			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), repoPath) }()
-			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), repoPath, 10) }()
+			go func() {
+				defer wg.Done()
+				if len(dbCommits) > 0 {
+					commits = dbCommits
+					for i := range commits {
+						commits[i].CommitURL = commitWebURL(instance.Type, instance.BaseURL, repoPath, commits[i].SHA)
+					}
+					return
+				}
+				commits, _ = client.GetCommitLog(r.Context(), repoPath, 10)
+			}()
 			go func() { defer wg.Done(); contributors, _ = client.GetContributors(r.Context(), repoPath, 10) }()
 			wg.Wait()
 
@@ -1310,7 +1491,17 @@ func ProviderRepoDetailsHandler(authService *auth.Service, store *providerconfig
 			var wg sync.WaitGroup
 			wg.Add(3)
 			go func() { defer wg.Done(); readme, _ = client.GetReadme(r.Context(), parts[0], parts[1]) }()
-			go func() { defer wg.Done(); commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10) }()
+			go func() {
+				defer wg.Done()
+				if len(dbCommits) > 0 {
+					commits = dbCommits
+					for i := range commits {
+						commits[i].CommitURL = commitWebURL(instance.Type, instance.BaseURL, repoPath, commits[i].SHA)
+					}
+					return
+				}
+				commits, _ = client.GetCommitLog(r.Context(), parts[0], parts[1], 10)
+			}()
 			go func() {
 				defer wg.Done()
 				contributors, _ = client.GetContributors(r.Context(), repoPath, 10)

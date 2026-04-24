@@ -16,6 +16,8 @@
 	import EmptyCommits from '$lib/components/icons/EmptyCommits.svelte';
 	import EmptyContributors from '$lib/components/icons/EmptyContributors.svelte';
 	import EmptyRuns from '$lib/components/icons/EmptyRuns.svelte';
+	import CommitStatusIcons from '$lib/components/CommitStatusIcons.svelte';
+	import CommitDetailDialog from '$lib/components/CommitDetailDialog.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -49,6 +51,12 @@
 		size: number;
 	};
 
+	type CommitImage = {
+		registry: string;
+		repository: string;
+		digest: string;
+	};
+
 	type CommitInfo = {
 		sha: string;
 		message: string;
@@ -58,6 +66,11 @@
 		author_login?: string;
 		author_avatar?: string;
 		commit_url?: string;
+		signed?: string; // git %G?: G/B/U/X/Y/R/E/N (empty for provider-API-sourced)
+		image_count?: number;
+		live_pod_count?: number;
+		live_cluster_count?: number;
+		images?: CommitImage[];
 	};
 
 	type ContributorInfo = {
@@ -143,6 +156,8 @@
 	let readme = $state('');
 	let commits: CommitInfo[] = $state([]);
 	let contributors: ContributorInfo[] = $state([]);
+	let commitDialogOpen = $state(false);
+	let selectedCommit: CommitInfo | null = $state(null);
 	let loading = $state(true);
 	let error = $state('');
 	// Resolved params (may differ from URL when page loads via repo_id only)
@@ -1134,6 +1149,7 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 						{:else}
 							<div class="space-y-2">
 								{#each commits as commit}
+								{@const subject = commit.message.split('\n', 1)[0]}
 									<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
 										{#if commit.author_avatar}
 											<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
@@ -1143,18 +1159,28 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 											</div>
 										{/if}
 										<div class="min-w-0 flex-1">
-											<div class="flex items-center gap-2">
-												{#if commit.commit_url}
-													<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-														{commit.message}
-													</a>
-												{:else}
-													<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
-												{/if}
-											</div>
-											<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+											<button
+												type="button"
+												class="block w-full truncate text-left text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]"
+												title={commit.message}
+												onclick={() => { selectedCommit = commit; commitDialogOpen = true; }}
+											>
+												{subject}
+											</button>
+											<div class="mt-1 flex items-center gap-2 text-xs leading-none text-[var(--text-muted)]">
+												<span class="inline-flex items-center leading-none">
+													<CommitStatusIcons
+														signed={commit.signed}
+														imageCount={commit.image_count}
+														livePodCount={commit.live_pod_count}
+														liveClusterCount={commit.live_cluster_count}
+													/>
+												</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span>{commit.author_login || commit.author_name}</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span>committed {formatDate(commit.author_date)}</span>
 											</div>
 										</div>
@@ -1214,6 +1240,8 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 </div>
 
 <DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} />
+
+<CommitDetailDialog bind:open={commitDialogOpen} commit={selectedCommit} />
 
 <!-- Vulnerabilities dialog -->
 {#if vulnDialogOpen}

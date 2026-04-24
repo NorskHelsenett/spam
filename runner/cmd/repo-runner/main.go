@@ -56,7 +56,15 @@ type Runner struct {
 	wsConn        *websocket.Conn
 	logChan       chan string
 	commitHash    string
-	runnerMode    string // "clone" or "scan"
+	// Captured from `git log -1` on the pinned commit. Shipped to the
+	// API on SBOM upload so repo_commits carries authoritative metadata
+	// rather than a provider-API sample.
+	commitAuthorName  string
+	commitAuthorEmail string
+	commitAuthorDate  string // RFC3339 (%aI)
+	commitSigned      string // git %G? — one of G/B/U/X/Y/R/E/N
+	commitMessage     string // full message (%B), unbounded
+	runnerMode        string // "clone" or "scan"
 }
 
 func main() {
@@ -250,6 +258,29 @@ func (r *Runner) runPipeline() int {
 		}
 	}
 
+	// Capture authoritative commit metadata straight from git. %x1f (ASCII
+	// unit separator) delimits fields so the message body — which may
+	// contain arbitrary newlines — stays intact as the final field.
+	if r.commitHash != "" {
+		const sep = "\x1f"
+		format := "%an" + sep + "%ae" + sep + "%aI" + sep + "%G?" + sep + "%B"
+		metaCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "log", "-1", "--format="+format, r.commitHash)
+		if metaOut, err := metaCmd.Output(); err == nil {
+			parts := strings.SplitN(string(metaOut), sep, 5)
+			if len(parts) == 5 {
+				r.commitAuthorName = strings.TrimSpace(parts[0])
+				r.commitAuthorEmail = strings.TrimSpace(parts[1])
+				r.commitAuthorDate = strings.TrimSpace(parts[2])
+				r.commitSigned = strings.TrimSpace(parts[3])
+				// %B trails with a newline git appends; keep the body
+				// itself verbatim but strip that single training char.
+				r.commitMessage = strings.TrimRight(parts[4], "\n")
+			}
+		} else {
+			r.log(fmt.Sprintf("git log metadata capture failed: %v", err))
+		}
+	}
+
 	// Run SBOM generation
 	r.log("Running syft for SBOM generation...")
 	sbomPath := filepath.Join(r.artifactDir, "sbom.json")
@@ -431,6 +462,24 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 	// Add commit_hash field if available
 	if r.commitHash != "" {
 		if err := writer.WriteField("commit_hash", r.commitHash); err != nil {
+			return err
+		}
+	}
+
+	// Attach commit metadata on the SBOM upload so the API can enrich
+	// repo_commits in the same transaction. Empty fields are skipped so
+	// an older API receiver ignores them gracefully.
+	for field, value := range map[string]string{
+		"commit_author_name":  r.commitAuthorName,
+		"commit_author_email": r.commitAuthorEmail,
+		"commit_author_date":  r.commitAuthorDate,
+		"commit_signed":       r.commitSigned,
+		"commit_message":      r.commitMessage,
+	} {
+		if value == "" {
+			continue
+		}
+		if err := writer.WriteField(field, value); err != nil {
 			return err
 		}
 	}

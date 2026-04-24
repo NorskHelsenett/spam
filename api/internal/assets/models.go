@@ -38,13 +38,27 @@ type Repo struct {
 }
 
 // RepoCommit identifies a commit within a repository.
+//
+// AuthorName/Email/Date, Signed, and Message are captured by the runner
+// via `git log -1 <sha>` on the clone (authoritative, no provider API).
+// They stay nullable so rows from older runners survive unchanged; the
+// UI's Commits tab filters out rows missing AuthorDate.
+//
+// Signed mirrors git's %G? verbatim: G=good, B=bad, U=good-unknown,
+// X=good-expired, Y=good-expired-key, R=good-revoked-key, E=check-failed,
+// N=no-signature.
 type RepoCommit struct {
-	ID        string `gorm:"primaryKey;size:36"`
-	RepoID    string `gorm:"size:36;not null;uniqueIndex:ux_repo_commit"`
-	Repo      Repo   `gorm:"constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;"`
-	CommitSHA string `gorm:"size:64;not null;uniqueIndex:ux_repo_commit"`
-	Ref       string `gorm:"size:255"`
-	CreatedAt time.Time
+	ID          string     `gorm:"primaryKey;size:36"`
+	RepoID      string     `gorm:"size:36;not null;uniqueIndex:ux_repo_commit"`
+	Repo        Repo       `gorm:"constraint:OnUpdate:CASCADE,OnDelete:RESTRICT;"`
+	CommitSHA   string     `gorm:"size:64;not null;uniqueIndex:ux_repo_commit"`
+	Ref         string     `gorm:"size:255"`
+	AuthorName  string     `gorm:"type:text"`
+	AuthorEmail string     `gorm:"type:text"`
+	AuthorDate  *time.Time
+	Signed      string     `gorm:"size:1"`
+	Message     string     `gorm:"type:text"`
+	CreatedAt   time.Time
 }
 
 // ImageDigest identifies a container image by digest.

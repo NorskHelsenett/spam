@@ -82,16 +82,40 @@ type RepoDetails struct {
 	Size    int64     `json:"size"` // in KB
 }
 
+// CommitImage identifies one image built from a commit with enough
+// detail for the UI to render a docker-pullable reference — copy
+// `{registry}/{repository}@{digest}` and paste into docker pull/inspect.
+type CommitImage struct {
+	Registry   string `json:"registry"`
+	Repository string `json:"repository"`
+	Digest     string `json:"digest"`
+}
+
 // CommitInfo represents a single commit from a git provider.
+//
+// Signed is empty for provider-API-sourced commits. Runner-sourced
+// commits in repo_commits carry git's %G? output (G/B/U/X/Y/R/E/N)
+// so the UI can render signature state.
+//
+// ImageCount / LivePodCount / LiveClusterCount are populated only by
+// the DB-backed path (loadCommitsFromRepoCommits) — they drive the
+// three-icon "signed → built → live" status cluster on each commit
+// row. Zero on provider-API-sourced commits. Images carries the
+// concrete list (registry/repo/digest) for the commit-detail dialog.
 type CommitInfo struct {
-	SHA          string    `json:"sha"`
-	Message      string    `json:"message"`
-	AuthorName   string    `json:"author_name"`
-	AuthorEmail  string    `json:"author_email"`
-	AuthorDate   time.Time `json:"author_date"`
-	AuthorLogin  string    `json:"author_login,omitempty"`
-	AuthorAvatar string    `json:"author_avatar,omitempty"`
-	CommitURL    string    `json:"commit_url,omitempty"`
+	SHA              string        `json:"sha"`
+	Message          string        `json:"message"`
+	AuthorName       string        `json:"author_name"`
+	AuthorEmail      string        `json:"author_email"`
+	AuthorDate       time.Time     `json:"author_date"`
+	AuthorLogin      string        `json:"author_login,omitempty"`
+	AuthorAvatar     string        `json:"author_avatar,omitempty"`
+	CommitURL        string        `json:"commit_url,omitempty"`
+	Signed           string        `json:"signed,omitempty"`
+	ImageCount       int           `json:"image_count"`
+	LivePodCount     int           `json:"live_pod_count"`
+	LiveClusterCount int           `json:"live_cluster_count"`
+	Images           []CommitImage `json:"images,omitempty"`
 }
 
 // ContributorInfo represents a contributor to a repository.
