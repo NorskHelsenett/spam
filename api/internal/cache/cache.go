@@ -59,6 +59,29 @@ func SetJSON[T any](ctx context.Context, s Store, key string, value T, ttl time.
 	return s.Set(ctx, key, raw, ttl)
 }
 
+// GetBytes returns a raw cached byte slice, honouring the request-
+// scoped Cache-Control policy set by Middleware. Use this for binary
+// payloads (images, artifact blobs) where JSON encoding isn't
+// applicable — callers going through GetJSON already get the same
+// bypass behaviour for free.
+func GetBytes(ctx context.Context, s Store, key string) ([]byte, bool, error) {
+	if ShouldBypass(ctx) {
+		return nil, false, nil
+	}
+	return s.Get(ctx, key)
+}
+
+// SetBytes writes raw bytes, honouring the request-scoped
+// Cache-Control policy. no-op when `Cache-Control: no-store` was set
+// on the request so the caller can blindly warm the cache after
+// computing a fresh value.
+func SetBytes(ctx context.Context, s Store, key string, value []byte, ttl time.Duration) error {
+	if !ShouldStore(ctx) {
+		return nil
+	}
+	return s.Set(ctx, key, value, ttl)
+}
+
 // Delete removes a cache entry. Callers should prefer this helper over
 // invoking the store directly so cache access remains centralized in this
 // package.
