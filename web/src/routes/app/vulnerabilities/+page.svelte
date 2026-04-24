@@ -114,6 +114,54 @@
 	let imageDrawerOpen = false;
 	let imageDrawerId = '';
 
+	// SvelteKit snapshot: preserves filter + search + tab state when the
+	// user navigates away (e.g. into a CVE detail page) and back via
+	// history.back(). Scroll restoration is handled separately by
+	// SvelteKit's default scroll behaviour — no manual capture needed
+	// beyond the state that a re-mounted component can't re-derive.
+	//
+	// vulnPages is deliberately not captured: the page contents depend
+	// on server-side scan state that may have changed during the user's
+	// side-trip; dropping the cached pages forces a fresh fetch with
+	// the restored filters applied, which is the right freshness trade.
+	export const snapshot = {
+		capture: () => ({
+			activeTab,
+			vulnSearch,
+			vulnSelectedSeverities,
+			vulnSelectedSources,
+			vulnSelectedYears,
+			vulnFixAvailable,
+			imageSearch,
+			imageSelectedRegistries,
+			imageSelectedSeverities,
+			hideClean,
+		}),
+		restore: (value: {
+			activeTab?: string;
+			vulnSearch?: string;
+			vulnSelectedSeverities?: string[];
+			vulnSelectedSources?: string[];
+			vulnSelectedYears?: string[];
+			vulnFixAvailable?: boolean;
+			imageSearch?: string;
+			imageSelectedRegistries?: string[];
+			imageSelectedSeverities?: string[];
+			hideClean?: boolean;
+		}) => {
+			if (value.activeTab !== undefined) activeTab = value.activeTab;
+			if (value.vulnSearch !== undefined) vulnSearch = value.vulnSearch;
+			if (value.vulnSelectedSeverities) vulnSelectedSeverities = value.vulnSelectedSeverities;
+			if (value.vulnSelectedSources) vulnSelectedSources = value.vulnSelectedSources;
+			if (value.vulnSelectedYears) vulnSelectedYears = value.vulnSelectedYears;
+			if (value.vulnFixAvailable !== undefined) vulnFixAvailable = value.vulnFixAvailable;
+			if (value.imageSearch !== undefined) imageSearch = value.imageSearch;
+			if (value.imageSelectedRegistries) imageSelectedRegistries = value.imageSelectedRegistries;
+			if (value.imageSelectedSeverities) imageSelectedSeverities = value.imageSelectedSeverities;
+			if (value.hideClean !== undefined) hideClean = value.hideClean;
+		},
+	};
+
 	// --- Virtual scroll helpers for tables ---
 	// ROW_HEIGHT = flat single-line rows (repos, images). VULN_ROW_HEIGHT
 	// is taller because those rows stack title+pkg+fix inside one tr.

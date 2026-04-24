@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { ArrowLeft, CheckCircle, XCircle, Clock, Loader2, GitBranch, GitCommit, Package, Shield, FileCode, Eye, Download, Activity, ExternalLink } from 'lucide-svelte';
 	import RunTimeline from '$lib/components/RunTimeline.svelte';
@@ -608,8 +609,17 @@
 		return `${Math.floor(diff / 3600000)}h ${Math.floor((diff % 3600000) / 60000)}m`;
 	};
 
+	// Prefer history.back() so the list page's scroll + filter state
+	// (via its SvelteKit snapshot) restores; fall back to the list
+	// URL when the user hit this detail via a direct link and has no
+	// prior history to pop.
 	const goBack = () => {
-		if (browser) history.back();
+		if (!browser) return;
+		if (window.history.length > 1) {
+			history.back();
+		} else {
+			goto('/app/runs');
+		}
 	};
 
 	const getCommitUrl = (cloneUrl: string, provider: string, sha: string): string | null => {

@@ -443,9 +443,15 @@
 		return `${(kb / 1024).toFixed(1)} MB`;
 	};
 
+	// Prefer history.back() so the list page's scroll + filter state
+	// restores; fall back to the providers index when the user hit
+	// this detail via a direct link with no prior history.
 	const goBack = () => {
-		if (browser) {
+		if (!browser) return;
+		if (window.history.length > 1) {
 			history.back();
+		} else {
+			goto('/app/providers');
 		}
 	};
 

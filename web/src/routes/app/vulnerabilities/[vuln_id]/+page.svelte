@@ -221,7 +221,20 @@
 
 <div class="space-y-6 pb-16">
 	<nav>
-		<a href="/app/vulnerabilities" class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]">
+		<!-- Prefer history.back() so SvelteKit's scroll restoration and
+		     any retained list-page state (filters, virtual-scroll
+		     position) are preserved. Falls back to the bare href on a
+		     fresh load (user opened the CVE page directly). -->
+		<a
+			href="/app/vulnerabilities"
+			onclick={(e) => {
+				if (typeof window !== 'undefined' && window.history.length > 1) {
+					e.preventDefault();
+					window.history.back();
+				}
+			}}
+			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
+		>
 			<ArrowLeft class="h-4 w-4" /> Back
 		</a>
 	</nav>

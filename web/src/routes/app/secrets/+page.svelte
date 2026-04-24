@@ -229,8 +229,16 @@
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
 
+	// Prefer history.back() so the caller's page state restores;
+	// fall back to the app index when this was loaded directly (no
+	// history entry to pop).
 	const goBack = () => {
-		if (browser) history.back();
+		if (!browser) return;
+		if (window.history.length > 1) {
+			history.back();
+		} else {
+			goto('/app');
+		}
 	};
 
 	type SortKey = 'repo' | 'secret_type' | 'unique_finding_count' | 'is_private';
