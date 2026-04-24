@@ -170,6 +170,68 @@
 	let imageDrawerOpen = $state(false);
 	let imageDrawerId: string | null = $state(null);
 
+	// Pending scroll restores — set by snapshot.restore, applied by
+	// the $effect below once the corresponding tab's scroll element
+	// has bound AND its data has landed (setting scrollTop on an
+	// empty container won't stick). Cleared on application.
+	let restoreClusterScroll = $state<number | null>(null);
+	let restoreImageScroll = $state<number | null>(null);
+	let restoreHostScroll = $state<number | null>(null);
+
+	// SvelteKit snapshot: preserves tab + filter + scroll state when
+	// navigating to a detail route (image, host chain, cluster chain)
+	// and back via history.back(). The three inner-div scrolls aren't
+	// covered by SvelteKit's window-level scroll restoration, so we
+	// capture them explicitly.
+	export const snapshot = {
+		capture: () => ({
+			activeTab,
+			includeInactive,
+			clusterSearch,
+			imageSearch,
+			imageSelectedRegistries,
+			hostSearch,
+			hostSelectedClusters,
+			hostSelectedNamespaces,
+			hostSelectedKinds,
+			hostActiveWorkloadsOnly,
+			scroll: {
+				cluster: clusterScrollTop,
+				image: imageScrollTop,
+				host: hostScrollTop,
+			},
+		}),
+		restore: (v: {
+			activeTab?: string;
+			includeInactive?: boolean;
+			clusterSearch?: string;
+			imageSearch?: string;
+			imageSelectedRegistries?: string[];
+			hostSearch?: string;
+			hostSelectedClusters?: string[];
+			hostSelectedNamespaces?: string[];
+			hostSelectedKinds?: string[];
+			hostActiveWorkloadsOnly?: boolean;
+			scroll?: { cluster?: number; image?: number; host?: number };
+		}) => {
+			if (v.activeTab !== undefined) activeTab = v.activeTab;
+			if (v.includeInactive !== undefined) includeInactive = v.includeInactive;
+			if (v.clusterSearch !== undefined) clusterSearch = v.clusterSearch;
+			if (v.imageSearch !== undefined) imageSearch = v.imageSearch;
+			if (v.imageSelectedRegistries) imageSelectedRegistries = v.imageSelectedRegistries;
+			if (v.hostSearch !== undefined) hostSearch = v.hostSearch;
+			if (v.hostSelectedClusters) hostSelectedClusters = v.hostSelectedClusters;
+			if (v.hostSelectedNamespaces) hostSelectedNamespaces = v.hostSelectedNamespaces;
+			if (v.hostSelectedKinds) hostSelectedKinds = v.hostSelectedKinds;
+			if (v.hostActiveWorkloadsOnly !== undefined) hostActiveWorkloadsOnly = v.hostActiveWorkloadsOnly;
+			if (v.scroll) {
+				if (v.scroll.cluster) restoreClusterScroll = v.scroll.cluster;
+				if (v.scroll.image) restoreImageScroll = v.scroll.image;
+				if (v.scroll.host) restoreHostScroll = v.scroll.host;
+			}
+		},
+	};
+
 	function openImageDrawer(digestId: string) {
 		if (imageDrawerOpen && imageDrawerId === digestId) {
 			imageDrawerOpen = false;
@@ -619,6 +681,33 @@
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
 	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH));
 	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH));
+
+	// Apply pending scroll restores once the target tab's DOM has
+	// mounted (scrollEl bound) and its data has landed (rows > 0).
+	// Each $effect fires exactly once per snapshot restore: the self-
+	// clearing null assignment flips the guard so the effect doesn't
+	// re-run on subsequent data changes.
+	$effect(() => {
+		if (restoreClusterScroll !== null && clusterScrollEl && sortedClusters.length > 0) {
+			clusterScrollEl.scrollTop = restoreClusterScroll;
+			clusterScrollTop = restoreClusterScroll;
+			restoreClusterScroll = null;
+		}
+	});
+	$effect(() => {
+		if (restoreImageScroll !== null && imageScrollEl && sortedImages.length > 0) {
+			imageScrollEl.scrollTop = restoreImageScroll;
+			imageScrollTop = restoreImageScroll;
+			restoreImageScroll = null;
+		}
+	});
+	$effect(() => {
+		if (restoreHostScroll !== null && hostScrollEl && sortedHosts.length > 0) {
+			hostScrollEl.scrollTop = restoreHostScroll;
+			hostScrollTop = restoreHostScroll;
+			restoreHostScroll = null;
+		}
+	});
 </script>
 
 <svelte:head>

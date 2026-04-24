@@ -42,6 +42,45 @@
 	let detailOpen = $state(false);
 	let selectedDependency: UnifiedDependency | null = $state(null);
 
+	// SvelteKit snapshot: preserves search + filter + pagination +
+	// sort state when navigating away and back via history.back().
+	// The list renders in the page's normal flow (no inner scroll
+	// container), so SvelteKit's default scroll restoration handles
+	// window scroll on its own — we only need the filter/page state
+	// the re-mounted component can't re-derive.
+	//
+	// dependencies + ecosystems are intentionally not captured: they
+	// re-fetch on mount via the existing load* functions, which
+	// apply the restored filters to hit the right page.
+	export const snapshot = {
+		capture: () => ({
+			searchQuery,
+			selectedEcosystem,
+			selectedSource,
+			page,
+			pageSize,
+			sortColumn,
+			sortDirection,
+		}),
+		restore: (v: {
+			searchQuery?: string;
+			selectedEcosystem?: string;
+			selectedSource?: string;
+			page?: number;
+			pageSize?: number;
+			sortColumn?: string;
+			sortDirection?: 'asc' | 'desc';
+		}) => {
+			if (v.searchQuery !== undefined) searchQuery = v.searchQuery;
+			if (v.selectedEcosystem !== undefined) selectedEcosystem = v.selectedEcosystem;
+			if (v.selectedSource !== undefined) selectedSource = v.selectedSource;
+			if (v.page !== undefined) page = v.page;
+			if (v.pageSize !== undefined) pageSize = v.pageSize;
+			if (v.sortColumn !== undefined) sortColumn = v.sortColumn;
+			if (v.sortDirection !== undefined) sortDirection = v.sortDirection;
+		},
+	};
+
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 	const sourceOptions = [
 		{ value: '', label: 'All sources' },
