@@ -220,12 +220,10 @@
 </svelte:head>
 
 <div class="space-y-6 pb-16">
-	<nav class="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
-		<a href="/app/vulnerabilities" class="inline-flex items-center gap-1 rounded-full border border-[var(--border-color)] px-2.5 py-1 transition hover:text-[var(--text-bright)]">
-			<ArrowLeft class="h-3 w-3" /> All vulnerabilities
+	<nav>
+		<a href="/app/vulnerabilities" class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]">
+			<ArrowLeft class="h-4 w-4" /> Back
 		</a>
-		<span class="text-[var(--text-muted)]">/</span>
-		<span class="font-mono text-[var(--text-secondary)]">{vulnId}</span>
 	</nav>
 
 	{#if loading && !data}

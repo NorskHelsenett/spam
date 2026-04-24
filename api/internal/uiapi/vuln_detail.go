@@ -166,15 +166,21 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		// repos.id is varchar(36); the view already returns repo_id as
 		// text so no cast is needed on the join — casting either side
 		// to uuid collides with the varchar column type.
+		//
+		// DISTINCT ON (v.repo_id) collapses alias duplicates. The
+		// alias set expansion can return multiple rows per repo (one
+		// per scanner-reported vuln_id — BIT-X, CVE-X, GHSA-X), which
+		// otherwise breaks the frontend's keyed {#each} over repo_id.
 		if err := db.WithContext(ctx).Raw(`
-			SELECT v.repo_id, v.repo_slug,
+			SELECT DISTINCT ON (v.repo_id)
+			       v.repo_id, v.repo_slug,
 			       r.provider, r.provider_instance_id, r.org, r.slug, r.is_private,
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_repositories_vulnerabilities v
 			JOIN repos r ON r.id = v.repo_id
 			WHERE v.vuln_id IN ? AND (`+repoSQL+`)
-			ORDER BY v.scanned_at DESC NULLS LAST, v.repo_slug
+			ORDER BY v.repo_id, v.scanned_at DESC NULLS LAST
 		`, append([]any{vulnIDs}, repoArgs...)...).Scan(&repoRows).Error; err != nil {
 			log.Printf("vuln-detail: repo query %s: %v", vulnID, err)
 		}
