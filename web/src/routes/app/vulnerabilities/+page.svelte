@@ -114,16 +114,29 @@
 	let imageDrawerOpen = false;
 	let imageDrawerId = '';
 
-	// SvelteKit snapshot: preserves filter + search + tab state when the
-	// user navigates away (e.g. into a CVE detail page) and back via
-	// history.back(). Scroll restoration is handled separately by
-	// SvelteKit's default scroll behaviour — no manual capture needed
-	// beyond the state that a re-mounted component can't re-derive.
+	// Pending scroll restores — each is set when the snapshot restore
+	// captures a non-zero scrollTop for the corresponding tab, then
+	// applied by a reactive block once the tab's scroll element is
+	// bound AND its data has landed (setting scrollTop on an empty
+	// container would stick at 0). Cleared on application so they
+	// fire exactly once per snapshot restore.
+	let restoreRepoScroll: number | null = null;
+	let restoreImageScroll: number | null = null;
+	let restoreVulnScroll: number | null = null;
+
+	// SvelteKit snapshot: preserves filter + search + tab + scroll
+	// state when the user navigates away (e.g. into a CVE detail
+	// page) and back via history.back(). The inner-div scrolls on
+	// each tab aren't covered by SvelteKit's window-level scroll
+	// restoration, so we capture / restore them explicitly.
 	//
-	// vulnPages is deliberately not captured: the page contents depend
-	// on server-side scan state that may have changed during the user's
-	// side-trip; dropping the cached pages forces a fresh fetch with
-	// the restored filters applied, which is the right freshness trade.
+	// vulnPages is deliberately not captured: the page contents
+	// depend on server-side scan state that may have changed during
+	// the user's side-trip; dropping the cached pages forces a fresh
+	// fetch with the restored filters applied, which is the right
+	// freshness trade. The virt slice reactively re-triggers page
+	// fetches for whatever visible range the restored scrollTop
+	// implies.
 	export const snapshot = {
 		capture: () => ({
 			activeTab,
@@ -136,6 +149,11 @@
 			imageSelectedRegistries,
 			imageSelectedSeverities,
 			hideClean,
+			scroll: {
+				repo: repoScrollTop,
+				image: imageScrollTop,
+				vuln: vulnScrollTop,
+			},
 		}),
 		restore: (value: {
 			activeTab?: string;
@@ -148,6 +166,7 @@
 			imageSelectedRegistries?: string[];
 			imageSelectedSeverities?: string[];
 			hideClean?: boolean;
+			scroll?: { repo?: number; image?: number; vuln?: number };
 		}) => {
 			if (value.activeTab !== undefined) activeTab = value.activeTab;
 			if (value.vulnSearch !== undefined) vulnSearch = value.vulnSearch;
@@ -159,6 +178,11 @@
 			if (value.imageSelectedRegistries) imageSelectedRegistries = value.imageSelectedRegistries;
 			if (value.imageSelectedSeverities) imageSelectedSeverities = value.imageSelectedSeverities;
 			if (value.hideClean !== undefined) hideClean = value.hideClean;
+			if (value.scroll) {
+				if (value.scroll.repo) restoreRepoScroll = value.scroll.repo;
+				if (value.scroll.image) restoreImageScroll = value.scroll.image;
+				if (value.scroll.vuln) restoreVulnScroll = value.scroll.vuln;
+			}
 		},
 	};
 
@@ -485,6 +509,32 @@
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
 	$: imageVirt = virtSlice(filteredImages.length, ROW_HEIGHT, imageScrollTop, imageViewH);
 	$: vulnVirt = virtSlice(vulnTotal, VULN_ROW_HEIGHT, vulnScrollTop, vulnViewH);
+
+	// Apply pending scroll restores once the target tab's DOM has
+	// mounted (scrollEl bound) and its data has landed (rows/items
+	// count > 0). The snapshot restore runs before either of those
+	// conditions is true, so we can't just scroll in restore(); we
+	// wait here for the reactive chain to catch up.
+	//
+	// Setting scrollTop on the element triggers the onscroll handler
+	// which writes back into xxxScrollTop — hence we also update the
+	// state directly so the virt slice reacts immediately rather than
+	// on the next browser paint.
+	$: if (restoreRepoScroll !== null && repoScrollEl && filteredRepos.length > 0) {
+		repoScrollEl.scrollTop = restoreRepoScroll;
+		repoScrollTop = restoreRepoScroll;
+		restoreRepoScroll = null;
+	}
+	$: if (restoreImageScroll !== null && imageScrollEl && filteredImages.length > 0) {
+		imageScrollEl.scrollTop = restoreImageScroll;
+		imageScrollTop = restoreImageScroll;
+		restoreImageScroll = null;
+	}
+	$: if (restoreVulnScroll !== null && vulnScrollEl && vulnTotal > 0) {
+		vulnScrollEl.scrollTop = restoreVulnScroll;
+		vulnScrollTop = restoreVulnScroll;
+		restoreVulnScroll = null;
+	}
 
 	// Whenever the visible window shifts, kick off fetches for any
 	// page that isn't yet cached. The virt slice overscan already
