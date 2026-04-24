@@ -728,20 +728,46 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	var summary Summary
 
-	// Count across both repo-side and image-side vulns.
+	// Count across both repo-side and image-side vulns, collapsing
+	// CVE / GHSA / BIT variants of the same advisory to one row per
+	// (canonical, asset). Scanners occasionally store an advisory
+	// twice under different prefixes — that double-counts severity
+	// totals unless we dedupe here.
+	//
+	// MIN(sev_rank) picks the worst severity reported for each
+	// (canonical, asset) pair when the two prefixes disagree, which
+	// matches the principle of "report the most serious view".
 	if err := db.WithContext(ctx).Raw(`
 		WITH u AS (
-			SELECT severity FROM view_unified_repositories_vulnerabilities
+			SELECT 'repo'::text AS asset_type, repo_id AS asset_id, vuln_id, severity
+			FROM view_unified_repositories_vulnerabilities
 			UNION ALL
-			SELECT severity FROM view_unified_image_vulnerabilities
+			SELECT 'image'::text AS asset_type, image_id AS asset_id, vuln_id, severity
+			FROM view_unified_image_vulnerabilities
+		),
+		canonical AS (
+			SELECT
+				u.asset_type,
+				u.asset_id,
+				COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
+				MIN(CASE u.severity
+					WHEN 'CRITICAL' THEN 1
+					WHEN 'HIGH'     THEN 2
+					WHEN 'MEDIUM'   THEN 3
+					WHEN 'LOW'      THEN 4
+					ELSE 5
+				END) AS sev_rank
+			FROM u
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
+			GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
 		)
 		SELECT
-			COUNT(*) FILTER (WHERE severity = 'CRITICAL')::int AS total_critical,
-			COUNT(*) FILTER (WHERE severity = 'HIGH')::int     AS total_high,
-			COUNT(*) FILTER (WHERE severity = 'MEDIUM')::int   AS total_medium,
-			COUNT(*) FILTER (WHERE severity = 'LOW')::int      AS total_low,
-			COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::int AS total_unknown
-		FROM u
+			COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+			COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+			COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+			COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+			COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+		FROM canonical
 	`).Scan(&summary).Error; err != nil {
 		return Summary{}, err
 	}
@@ -794,17 +820,37 @@ func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, erro
 
 func computeRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
 	var rows []RepoRow
+	// Same canonical-aware dedup as computeSummary, scoped per repo:
+	// collapse (canonical, repo) pairs to one row at worst severity,
+	// then bucket those rows by severity.
 	if err := db.WithContext(ctx).Raw(`
+		WITH canonical AS (
+			SELECT
+				v.repo_id,
+				MAX(v.repo_slug) AS repo_slug,
+				COALESCE(vm.canonical_id, v.vuln_id) AS canonical_id,
+				MIN(CASE v.severity
+					WHEN 'CRITICAL' THEN 1
+					WHEN 'HIGH'     THEN 2
+					WHEN 'MEDIUM'   THEN 3
+					WHEN 'LOW'      THEN 4
+					ELSE 5
+				END) AS sev_rank,
+				MAX(v.scanned_at) AS scanned_at
+			FROM view_unified_repositories_vulnerabilities v
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+			GROUP BY v.repo_id, COALESCE(vm.canonical_id, v.vuln_id)
+		)
 		SELECT
 			repo_id,
 			MAX(repo_slug) AS repo_slug,
-			COUNT(*) FILTER (WHERE severity = 'CRITICAL')::int AS critical_count,
-			COUNT(*) FILTER (WHERE severity = 'HIGH')::int     AS high_count,
-			COUNT(*) FILTER (WHERE severity = 'MEDIUM')::int   AS medium_count,
-			COUNT(*) FILTER (WHERE severity = 'LOW')::int      AS low_count,
-			COUNT(*) FILTER (WHERE severity NOT IN ('CRITICAL','HIGH','MEDIUM','LOW'))::int AS unknown_count,
+			COUNT(*) FILTER (WHERE sev_rank = 1)::int AS critical_count,
+			COUNT(*) FILTER (WHERE sev_rank = 2)::int AS high_count,
+			COUNT(*) FILTER (WHERE sev_rank = 3)::int AS medium_count,
+			COUNT(*) FILTER (WHERE sev_rank = 4)::int AS low_count,
+			COUNT(*) FILTER (WHERE sev_rank = 5)::int AS unknown_count,
 			MAX(scanned_at) AS last_scanned_at
-		FROM view_unified_repositories_vulnerabilities
+		FROM canonical
 		GROUP BY repo_id
 		ORDER BY critical_count DESC, high_count DESC, medium_count DESC
 	`).Scan(&rows).Error; err != nil {

@@ -14,6 +14,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/scam"
+	"github.com/NorskHelsenett/spam/internal/vulnmeta"
 	"gorm.io/gorm"
 )
 
@@ -154,14 +155,36 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		`).
 		Limit(1000).
 		Find(&findings).Error; err == nil {
+		// Load metadata for every distinct vuln_id so we can override
+		// the scanner-reported fix_version per row with the OSV-
+		// derived applicable fix. Cache miss keeps the scanner value.
+		ids := make([]string, 0, len(findings))
+		seen := map[string]struct{}{}
+		for _, f := range findings {
+			if _, ok := seen[f.VulnID]; ok {
+				continue
+			}
+			seen[f.VulnID] = struct{}{}
+			ids = append(ids, f.VulnID)
+		}
+		metas, _ := vulnmeta.MetadataForMany(r.Context(), db, ids)
+
 		response.ImageVulns = make([]ImageVulnListRow, 0, len(findings))
 		for _, f := range findings {
+			fix := f.FixedVersion
+			if m := metas[f.VulnID]; m != nil {
+				if applicable := vulnmeta.ApplicableFix(
+					vulnmeta.ExtractOSVAffected(m), f.PkgName, f.InstalledVersion,
+				); applicable != "" {
+					fix = applicable
+				}
+			}
 			response.ImageVulns = append(response.ImageVulns, ImageVulnListRow{
 				VulnID:           f.VulnID,
 				Severity:         f.Severity,
 				PkgName:          f.PkgName,
 				InstalledVersion: f.InstalledVersion,
-				FixedVersion:     f.FixedVersion,
+				FixedVersion:     fix,
 				Title:            f.Title,
 				Target:           f.Target,
 				Scanner:          f.Scanner,

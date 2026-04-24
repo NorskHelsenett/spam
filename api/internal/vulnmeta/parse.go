@@ -130,6 +130,84 @@ func MetadataForMany(ctx context.Context, db *gorm.DB, ids []string) (map[string
 	return out, nil
 }
 
+// ResolveCanonicals maps a set of vuln ids to their canonical form.
+// When no enrichment row exists — or no known alias match — the id
+// maps to itself, so callers can always index on the result without
+// guarding for missing keys.
+//
+// Used by VEX resolution: a user-set VEX under BIT-X should still
+// apply to scanner-reported CVE-X findings when the two are aliases
+// of the same advisory. Both sides route through the canonical.
+func ResolveCanonicals(ctx context.Context, db *gorm.DB, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			out[id] = id
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	type row struct {
+		VulnID      string `gorm:"column:vuln_id"`
+		CanonicalID string `gorm:"column:canonical_id"`
+		Aliases     []byte `gorm:"column:aliases"`
+	}
+	var rows []row
+	// Match on vuln_id OR aliases-contains-any-id. The EXISTS
+	// subquery avoids Postgres jsonb-operator escaping issues with
+	// GORM's `?` placeholder.
+	if err := db.WithContext(ctx).Raw(`
+		SELECT vuln_id, canonical_id, aliases
+		FROM vuln_metadata
+		WHERE vuln_id IN ?
+		   OR EXISTS (
+		       SELECT 1 FROM jsonb_array_elements_text(aliases) elem
+		       WHERE elem IN ?
+		   )
+	`, ids, ids).Scan(&rows).Error; err != nil {
+		return out, err
+	}
+	for _, r := range rows {
+		canonical := r.CanonicalID
+		if canonical == "" {
+			canonical = r.VulnID
+		}
+		var aliases []string
+		if len(r.Aliases) > 0 {
+			_ = json.Unmarshal(r.Aliases, &aliases)
+		}
+		for _, id := range ids {
+			if id == r.VulnID {
+				out[id] = canonical
+				continue
+			}
+			for _, a := range aliases {
+				if a == id {
+					out[id] = canonical
+					break
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// ResolveCanonical is the single-id variant. Returns the canonical
+// identifier for vulnID, or vulnID unchanged when no metadata row
+// exists. Cheaper than ResolveCanonicals for callers that only have
+// one id to map (e.g. VEX upsert).
+func ResolveCanonical(ctx context.Context, db *gorm.DB, vulnID string) string {
+	if vulnID == "" {
+		return vulnID
+	}
+	m, err := ResolveCanonicals(ctx, db, []string{vulnID})
+	if err != nil {
+		return vulnID
+	}
+	return m[vulnID]
+}
+
 // AliasesByCanonical is a thin wrapper over MetadataForMany that
 // returns only the aliases, keyed by canonical_id. Convenience for
 // list rendering where the full Metadata isn't needed.
@@ -267,13 +345,31 @@ func ApplicableFix(affected []osvAffectedPackage, pkgName, installed string) str
 // empty introduced means "from the beginning", so any installed
 // matches the lower bound.
 func inInterval(installed, introduced, fixed string) bool {
-	if introduced != "" && introduced != "0" && cmpVersion(installed, introduced) < 0 {
+	return InInterval(installed, introduced, fixed)
+}
+
+// InInterval is the exported form of inInterval — reuses the tolerant
+// version comparator so callers outside this package can pick
+// applicable fixes from OSV-shaped data without reimplementing the
+// range semantics.
+func InInterval(installed, introduced, fixed string) bool {
+	if introduced != "" && introduced != "0" && CompareVersion(installed, introduced) < 0 {
 		return false
 	}
-	if cmpVersion(installed, fixed) >= 0 {
+	if CompareVersion(installed, fixed) >= 0 {
 		return false
 	}
 	return true
+}
+
+// CompareVersion is the exported wrapper over the internal comparator.
+// See cmpVersion for semantics (numeric > alphanumeric, pre-release <
+// release, etc.). Used by callers that have their own OSV-shaped
+// affected data (e.g. `internal/vulnerabilities` walks OSV's live
+// /v1/query response and needs to pick the applicable fix per PURL
+// version).
+func CompareVersion(a, b string) int {
+	return cmpVersion(a, b)
 }
 
 // cmpVersion is a tolerant comparator for common version schemes —
