@@ -30,19 +30,76 @@ func euvdEnabled() bool {
 	return v != "false" && v != "0" && v != "no" && v != "off"
 }
 
+// euvdTime parses EUVD's "Apr 9, 2026, 2:49:02 PM" timestamp format.
+// EUVD does not publish its schema, and the production API emits
+// localised strings rather than RFC3339 — so stdlib time.Time
+// unmarshal fails and every enrichment silently returns nothing.
+// We also accept RFC3339 defensively in case the endpoint gets
+// normalised in future.
+type euvdTime struct{ time.Time }
+
+func (t *euvdTime) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	if s == "" || s == "null" {
+		return nil
+	}
+	for _, layout := range []string{
+		time.RFC3339,
+		"Jan 2, 2006, 3:04:05 PM",
+		"Jan _2, 2006, 3:04:05 PM",
+	} {
+		if ts, err := time.Parse(layout, s); err == nil {
+			t.Time = ts
+			return nil
+		}
+	}
+	return fmt.Errorf("euvd time: cannot parse %q", s)
+}
+
+// euvdStringList accepts either a JSON array of strings or a single
+// newline-separated string. EUVD's /api/search returns aliases and
+// references as "CVE-…\nCVE-…\n" blobs, but the schema is undocumented
+// and could switch to arrays at any point — we tolerate both.
+type euvdStringList []string
+
+func (l *euvdStringList) UnmarshalJSON(data []byte) error {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		*l = cleanStringList(arr)
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	*l = cleanStringList(strings.Split(s, "\n"))
+	return nil
+}
+
+func cleanStringList(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // euvdEntry is the subset of EUVD's response we use. EUVD's schema
 // still evolves, so new fields are carried through via RawJSON in
 // Metadata and only the well-defined ones are surfaced here.
 type euvdEntry struct {
-	ID            string    `json:"id"`             // EUVD-YYYY-NNNN
-	Description   string    `json:"description"`
-	DatePublished time.Time `json:"datePublished"`
-	DateUpdated   time.Time `json:"dateUpdated"`
-	BaseScore     float32   `json:"baseScore"`      // CVSS base
-	BaseScoreVers string    `json:"baseScoreVers"`  // e.g. "3.1", "4.0"
-	BaseScoreVec  string    `json:"baseScoreVector"`
-	Aliases       []string  `json:"aliases"`        // cross-ref IDs (CVE-…)
-	References    []string  `json:"references"`     // plain URLs
+	ID            string         `json:"id"` // EUVD-YYYY-NNNN
+	Description   string         `json:"description"`
+	DatePublished euvdTime       `json:"datePublished"`
+	DateUpdated   euvdTime       `json:"dateUpdated"`
+	BaseScore     float32        `json:"baseScore"`         // CVSS base
+	BaseScoreVers string         `json:"baseScoreVersion"`  // e.g. "3.1", "4.0"
+	BaseScoreVec  string         `json:"baseScoreVector"`
+	Aliases       euvdStringList `json:"aliases"`    // cross-ref IDs (CVE-…)
+	References    euvdStringList `json:"references"` // plain URLs
 }
 
 // euvdSearchResult mirrors /api/search's top-level shape.
@@ -151,10 +208,10 @@ func (e *euvdEntry) mergeInto(m *Metadata, raw []byte) {
 	}
 
 	// Aliases + references: set-union, preserve existing order.
-	m.Aliases = marshalJSON(mergeStringSet(decodeStringArray(m.Aliases), e.Aliases))
+	m.Aliases = marshalJSON(mergeStringSet(decodeStringArray(m.Aliases), []string(e.Aliases)))
 	m.References = marshalJSON(mergeReferenceSet(
 		decodeReferenceArray(m.References),
-		refsFromEUVDURLs(e.References),
+		refsFromEUVDURLs([]string(e.References)),
 	))
 
 	// Sources: add "euvd" without dropping prior sources.

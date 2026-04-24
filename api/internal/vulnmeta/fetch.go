@@ -2,6 +2,7 @@ package vulnmeta
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"regexp"
@@ -14,6 +15,13 @@ import (
 // where EUVD supplement is worth attempting. GHSA-* / BIT-* / PYSEC-*
 // IDs are resolved in OSV only.
 var cvePattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
+
+// ErrUpstreamTransient is returned when Enrich found no metadata AND at
+// least one upstream fetch failed with a transient error (403, 429, 5xx,
+// decode mismatch, network timeout). Callers should distinguish this
+// from a true "(nil, nil)" not-found, since caching the miss would
+// suppress later successful fetches of the same vuln_id.
+var ErrUpstreamTransient = errors.New("vulnmeta: upstream transient error")
 
 // Enrich fetches metadata for vuln_id from external sources and
 // upserts into vuln_metadata. OSV is always tried first; for CVE-
@@ -31,9 +39,11 @@ func Enrich(ctx context.Context, db *gorm.DB, vulnID string) (*Metadata, error) 
 		return nil, nil
 	}
 
+	var transient bool
 	osvVuln, osvRaw, err := fetchOSV(ctx, vulnID)
 	if err != nil {
 		log.Printf("vulnmeta: osv fetch %s: %v", vulnID, err)
+		transient = true
 	}
 
 	var m *Metadata
@@ -47,6 +57,7 @@ func Enrich(ctx context.Context, db *gorm.DB, vulnID string) (*Metadata, error) 
 		euvd, euvdRaw, err := fetchEUVD(ctx, vulnID)
 		if err != nil {
 			log.Printf("vulnmeta: euvd fetch %s: %v", vulnID, err)
+			transient = true
 		}
 		if euvd != nil {
 			if m == nil {
@@ -58,6 +69,9 @@ func Enrich(ctx context.Context, db *gorm.DB, vulnID string) (*Metadata, error) 
 	}
 
 	if m == nil {
+		if transient {
+			return nil, ErrUpstreamTransient
+		}
 		return nil, nil
 	}
 
@@ -91,8 +105,8 @@ func euvdToMetadata(vulnID string, e *euvdEntry, raw []byte) *Metadata {
 		t := e.DateUpdated.UTC()
 		m.ModifiedAt = &t
 	}
-	m.Aliases = marshalJSON(mergeStringSet([]string{vulnID}, e.Aliases))
-	m.References = marshalJSON(refsFromEUVDURLs(e.References))
+	m.Aliases = marshalJSON(mergeStringSet([]string{vulnID}, []string(e.Aliases)))
+	m.References = marshalJSON(refsFromEUVDURLs([]string(e.References)))
 	m.Sources = marshalJSON([]string{"euvd"})
 	m.CWEs = marshalJSON([]string{})
 	m.Severity = cvssVectorToLabel(e.BaseScoreVec)

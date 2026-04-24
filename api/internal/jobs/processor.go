@@ -156,6 +156,13 @@ func processVulnMetaFetch(ctx context.Context, db *gorm.DB, job *Job) (interface
 		return nil, NonRetryable(errors.New("VULN_META_FETCH missing vuln_id"))
 	}
 	meta, err := vulnmeta.Enrich(ctx, db, payload.VulnID)
+	if errors.Is(err, vulnmeta.ErrUpstreamTransient) {
+		// Transient upstream failure (403/429/5xx, decode mismatch, timeout).
+		// Don't retry now — a follow-up scan pass will re-enqueue if the row
+		// is still missing. Recording "not_found_upstream" here would be a
+		// lie: we don't actually know whether the vuln exists upstream.
+		return map[string]string{"vuln_id": payload.VulnID, "status": "upstream_error"}, nil
+	}
 	if err != nil {
 		return nil, err
 	}
