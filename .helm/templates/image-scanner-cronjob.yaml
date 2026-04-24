@@ -119,13 +119,19 @@ spec:
           volumes:
             # Scratch space for the extracted image rootfs (filesystem
             # scanners like betterleaks/trivy need real filesystem, not
-            # tmpfs — layers can be hundreds of MB).
+            # tmpfs — layers can be hundreds of MB). sizeLimit caps the
+            # per-pod charge against node ephemeral storage so one
+            # runaway scan can't fill the node and trigger DiskPressure
+            # eviction of other pods. See imageScanner.workSizeLimit.
             - name: work
-              emptyDir: {}
+              emptyDir:
+                sizeLimit: {{ .Values.imageScanner.workSizeLimit | default "8Gi" }}
             - name: grype-cache
-              emptyDir: {}
+              emptyDir:
+                sizeLimit: {{ .Values.imageScanner.grypeCacheSizeLimit | default "2Gi" }}
             - name: trivy-cache
-              emptyDir: {}
+              emptyDir:
+                sizeLimit: {{ .Values.imageScanner.trivyCacheSizeLimit | default "2Gi" }}
             # /tmp is disk-backed (not tmpfs) so image-layer extraction can
             # exceed pod memory without OOMing. sizeLimit caps node
             # ephemeral-storage use per pod. See imageScanner.tmpSizeLimit.

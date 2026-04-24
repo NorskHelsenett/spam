@@ -491,6 +491,21 @@ imageScanner:
   # image still fills it (runtime: `kubectl -n spam exec <pod> -- df /tmp`).
   tmpSizeLimit: 8Gi
 
+  # Per-volume caps on the other disk-backed emptyDirs. Each is counted
+  # against node ephemeral storage, so bounding them (rather than leaving
+  # {} = unbounded) is what stops a single scanner from filling the node
+  # and triggering DiskPressure eviction of neighbouring pods.
+  #
+  #  work           — extracted image rootfs; scales with largest layer
+  #  grypeCache     — grype vulnerability DB (~1 GiB uncompressed)
+  #  trivyCache     — trivy vulnerability DB (similar size)
+  #
+  # Sum of tmp + work + grype + trivy should fit inside the container's
+  # ephemeral-storage limit below (see resources.limits.ephemeral-storage).
+  workSizeLimit: 8Gi
+  grypeCacheSizeLimit: 2Gi
+  trivyCacheSizeLimit: 2Gi
+
   # Extra env forwarded to each scan subprocess. Typical keys:
   #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
   #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY
@@ -501,9 +516,19 @@ imageScanner:
     requests:
       cpu: 200m
       memory: 512Mi
+      # ephemeral-storage request is required to move the pod out of the
+      # BestEffort eviction class for disk. Without it the scanner is
+      # first in line when any neighbour fills the node. Size to cover
+      # expected simultaneous use of the emptyDirs above.
+      ephemeral-storage: 8Gi
     limits:
       cpu: "2"
       memory: 4Gi
+      # Hard ceiling — if the pod exceeds this (sum of emptyDirs +
+      # writable layer + logs) the kubelet evicts the pod rather than the
+      # node. Matches the sum of tmp + work + grype + trivy caps above,
+      # with a small buffer for logs and the writable layer.
+      ephemeral-storage: 22Gi
 
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured
