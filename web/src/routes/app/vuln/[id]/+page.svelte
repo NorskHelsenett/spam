@@ -72,7 +72,11 @@
 		image_count: number;
 	};
 
-	const vulnId = $derived($page.params.vuln_id ?? '');
+	// Route is /app/vuln/[id] — short URL for manual typing. The
+	// API endpoint stays at /api/vulnerabilities/{vuln_id} since
+	// that's the public-shape resource name; only the UI route
+	// was shortened.
+	const vulnId = $derived($page.params.id ?? '');
 
 	let data = $state<DetailResponse | null>(null);
 	let loading = $state(true);
@@ -350,7 +354,7 @@
 								<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Also known as</p>
 								<div class="mt-2 flex flex-wrap gap-2">
 									{#each aliases as alias}
-										<a href="/app/vulnerabilities/{alias}" class="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--hover-bg)] px-2 py-0.5 font-mono text-xs text-[var(--text-secondary)] transition hover:text-[var(--accent)]">{alias}</a>
+										<a href="/app/vuln/{alias}" class="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--hover-bg)] px-2 py-0.5 font-mono text-xs text-[var(--text-secondary)] transition hover:text-[var(--accent)]">{alias}</a>
 									{/each}
 								</div>
 							</div>

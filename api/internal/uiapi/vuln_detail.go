@@ -39,6 +39,7 @@ type VulnAffectedRepo struct {
 	Org                string     `json:"org"`
 	Slug               string     `json:"slug"`
 	IsPrivate          bool       `json:"is_private"`
+	Severity           string     `json:"severity"`
 	PkgName            string     `json:"pkg_name"`
 	InstalledVersion   string     `json:"installed_version"`
 	FixedVersion       string     `json:"fixed_version"`
@@ -55,6 +56,7 @@ type VulnAffectedImage struct {
 	ImageDigest      string                `json:"image_digest"`
 	SourceRepoID     string                `json:"source_repo_id,omitempty"`
 	VerifiedSource   bool                  `json:"verified_source"`
+	Severity         string                `json:"severity"`
 	PkgName          string                `json:"pkg_name"`
 	InstalledVersion string                `json:"installed_version"`
 	FixedVersion     string                `json:"fixed_version"`
@@ -175,6 +177,7 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			SELECT DISTINCT ON (v.repo_id)
 			       v.repo_id, v.repo_slug,
 			       r.provider, r.provider_instance_id, r.org, r.slug, r.is_private,
+			       v.severity,
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_repositories_vulnerabilities v
@@ -228,6 +231,7 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			SELECT DISTINCT ON (v.image_id)
 			       v.image_id, v.image_slug, v.image_digest,
 			       v.source_repo_id, v.verified_source,
+			       v.severity,
 			       v.pkg_name, v.installed_version, v.fixed_version,
 			       v.source, v.scanned_at
 			FROM view_unified_image_vulnerabilities v
@@ -254,8 +258,64 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		}
 		resp.ImageCount = len(resp.AffectedImages)
 
+		// Severity fallback: OSV often publishes bare CVE-YYYY ids
+		// without a database_specific.severity label, so the metadata
+		// row's Severity can be empty even when the scanner rightly
+		// rated the finding as HIGH / CRITICAL. Pick the worst
+		// severity across the affected assets when metadata didn't
+		// give us one.
+		if resp.Severity == "" {
+			resp.Severity = worstAssetSeverity(resp.AffectedRepos, resp.AffectedImages)
+		}
+
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// worstAssetSeverity picks the most severe label reported by any
+// scanner row backing this vuln. Returns "" when nothing rates — the
+// UI then shows "UNKNOWN" which is the correct outcome.
+func worstAssetSeverity(repos []VulnAffectedRepo, images []VulnAffectedImage) string {
+	best := 6
+	for _, r := range repos {
+		if rank := severityRank(r.Severity); rank < best {
+			best = rank
+		}
+	}
+	for _, im := range images {
+		if rank := severityRank(im.Severity); rank < best {
+			best = rank
+		}
+	}
+	switch best {
+	case 1:
+		return "CRITICAL"
+	case 2:
+		return "HIGH"
+	case 3:
+		return "MEDIUM"
+	case 4:
+		return "LOW"
+	case 5:
+		return "UNKNOWN"
+	}
+	return ""
+}
+
+func severityRank(s string) int {
+	switch strings.ToUpper(strings.TrimSpace(s)) {
+	case "CRITICAL":
+		return 1
+	case "HIGH":
+		return 2
+	case "MEDIUM":
+		return 3
+	case "LOW":
+		return 4
+	case "UNKNOWN", "":
+		return 5
+	}
+	return 5
 }
 
 // attachClusterPresence joins affected-image rows against cluster_record

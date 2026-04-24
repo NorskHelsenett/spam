@@ -281,8 +281,10 @@
 	}
 
 	// Primary link: internal detail page so operators land on affected
-	// repos / clusters / contributors, not a bare advisory page.
-	const vulnDetailHref = (id: string) => `/app/vulnerabilities/${encodeURIComponent(id)}`;
+	// repos / clusters / contributors, not a bare advisory page. The
+	// route lives at /app/vuln/[id] (shorter than /app/vulnerabilities/
+	// for the manual-typing case).
+	const vulnDetailHref = (id: string) => `/app/vuln/${encodeURIComponent(id)}`;
 	// Secondary external link kept as a small icon next to the ID.
 	const vulnUpstreamUrl = (id: string) => {
 		if (id.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
