@@ -12,8 +12,14 @@ SELECT rc.id
 FROM repo_commits rc
 JOIN tmp_bad_repos r ON r.id = rc.repo_id;
 
-DELETE FROM repo_caches
-WHERE repo_id IN (SELECT id FROM tmp_bad_repos);
+-- repo_caches existed only on installs from the d371158→65632a7 era; the
+-- table moved to kv_store afterwards, so guard so fresh installs don't fail.
+DO $$
+BEGIN
+    IF to_regclass('public.repo_caches') IS NOT NULL THEN
+        EXECUTE 'DELETE FROM repo_caches WHERE repo_id IN (SELECT id FROM tmp_bad_repos)';
+    END IF;
+END $$;
 
 DELETE FROM manifest_dependencies
 WHERE manifest_id IN (
