@@ -109,7 +109,7 @@
 	let vulnsLoading = false;
 	let imagesLoading = false;
 	let error = '';
-	let activeTab = 'repositories';
+	let activeTab = 'vulnerabilities';
 	let imageDrawerOpen = false;
 	let imageDrawerId = '';
 
@@ -687,9 +687,9 @@
 			<div class="pt-2">
 				<TabSelector
 					options={[
+						{ value: 'vulnerabilities', label: 'Vulnerabilities' },
 						{ value: 'repositories', label: 'Repositories' },
-						{ value: 'images', label: 'Images' },
-						{ value: 'vulnerabilities', label: 'Vulnerabilities' }
+						{ value: 'images', label: 'Images' }
 					]}
 					bind:value={activeTab}
 				/>
