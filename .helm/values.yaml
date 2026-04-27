@@ -163,6 +163,31 @@ ingress:
         - path: /
           pathType: ImplementationSpecific
 
+# Arbitrary extra manifests rendered alongside the chart. Useful for
+# Gateway API resources (HTTPRoute, ReferenceGrant), NetworkPolicies,
+# CRs from other operators, etc., so an ArgoCD app that points at this
+# chart can ship them as a single unit. Each entry is rendered as-is
+# through `tpl`, so Go template expressions referencing chart values
+# (e.g. `{{ .Release.Namespace }}`) are supported.
+extraResources: []
+  # - apiVersion: gateway.networking.k8s.io/v1
+  #   kind: HTTPRoute
+  #   metadata:
+  #     name: spam
+  #     namespace: {{ .Release.Namespace }}
+  #   spec:
+  #     parentRefs:
+  #       - name: spam-gateway
+  #         namespace: gateways
+  #         sectionName: spam.sikkerhet.nhn.no
+  #     hostnames:
+  #       - spam.sikkerhet.nhn.no
+  #     rules:
+  #       - backendRefs:
+  #           - kind: Service
+  #             name: spam
+  #             port: 8080
+
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
   # choice for the user. This also increases chances charts run on environments with little
