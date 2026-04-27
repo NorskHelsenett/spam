@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
-	import { ArrowLeft, ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
+	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -333,10 +332,6 @@
 		goto(`/app/providers/repo?repo_id=${encodeURIComponent(repoId)}`);
 	};
 
-	const goBack = () => {
-		if (browser) history.back();
-	};
-
 	const severityClass = (s: string) => {
 		switch (s?.toUpperCase()) {
 			case 'CRITICAL': return 'border-red-500/30 bg-red-500/5';
@@ -618,18 +613,6 @@
 </svelte:head>
 
 <div class="space-y-4">
-	<!-- Back button -->
-	<div>
-		<button
-			type="button"
-			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-			onclick={goBack}
-		>
-			<ArrowLeft class="h-4 w-4" />
-			Back
-		</button>
-	</div>
-
 	<!-- Stats + charts panel -->
 	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header>

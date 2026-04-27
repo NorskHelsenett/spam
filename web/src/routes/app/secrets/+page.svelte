@@ -1,9 +1,8 @@
 <script lang="ts">
-	import { browser } from '$app/environment';
 	import { onMount } from 'svelte';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
-	import { ArrowLeft, KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert, Container } from 'lucide-svelte';
+	import { KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert, Container } from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import { goto } from '$app/navigation';
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -229,18 +228,6 @@
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
 
-	// Prefer history.back() so the caller's page state restores;
-	// fall back to the app index when this was loaded directly (no
-	// history entry to pop).
-	const goBack = () => {
-		if (!browser) return;
-		if (window.history.length > 1) {
-			history.back();
-		} else {
-			goto('/app');
-		}
-	};
-
 	type SortKey = 'repo' | 'secret_type' | 'unique_finding_count' | 'is_private';
 	let sortKey: SortKey = $state('repo');
 	let sortAsc = $state(true);
@@ -330,18 +317,6 @@
 </svelte:head>
 
 <div class="space-y-4">
-	<!-- Back button -->
-	<div>
-		<button
-			type="button"
-			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-			onclick={goBack}
-		>
-			<ArrowLeft class="h-4 w-4" />
-			Back
-		</button>
-	</div>
-
 	<!-- Stats + charts panel -->
 	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<!-- Header -->
