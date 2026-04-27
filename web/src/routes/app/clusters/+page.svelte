@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search, Bot } from 'lucide-svelte';
 	import { slide, fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
@@ -737,7 +737,7 @@
 			</div>
 		{:else if clusters.length === 0}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
-				<Server class="h-12 w-12 text-[var(--yellow)]" />
+				<Bot class="h-12 w-12 text-[var(--yellow)]" />
 				<p class="text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
 				<p class="text-sm text-[var(--text-muted)]">Deploy a SCAM agent to start collecting container inventory.</p>
 				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
