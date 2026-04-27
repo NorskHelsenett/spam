@@ -7,6 +7,7 @@
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
 	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
 	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
+	import DeployScamDialog from '$lib/components/DeployScamDialog.svelte';
 
 	// --- Virtual scroll helpers for tables ---
 	const ROW_HEIGHT = 48;
@@ -148,6 +149,7 @@
 	let hostMetas = $state<Record<string, HostMeta>>({});
 	let loading = $state(true);
 	let error = $state('');
+	let deployDialogOpen = $state(false);
 	let activeTab = $state('clusters');
 	let imagesFetched = $state(false);
 	let hostsFetched = $state(false);
@@ -743,6 +745,13 @@
 				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
 					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
 				</div>
+				<button
+					type="button"
+					class="mt-2 inline-flex items-center gap-2 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+					onclick={() => (deployDialogOpen = true)}
+				>
+					Show install instructions
+				</button>
 			</div>
 		{:else}
 			<!-- Metric cards -->
@@ -1276,6 +1285,8 @@
 	{/if}
 
 </div>
+
+<DeployScamDialog bind:open={deployDialogOpen} />
 
 <!-- Date tooltip for "Deployed at" cells. Top-level so it escapes
      the images table's scroll overflow. -->
