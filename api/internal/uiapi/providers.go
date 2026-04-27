@@ -134,6 +134,23 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
 
+		// Gate the route on a configured provider. Without this, the handler
+		// silently relays to public github.com — meaning admins who delete a
+		// provider would still see its repos served here.
+		providerIDParam := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+		if providerIDParam == "" {
+			match, err := providerconfig.FindProviderMatch(r.Context(), db, providerconfig.ProviderGitHub, "", owner)
+			if err != nil {
+				http.Error(w, "provider lookup failed", http.StatusInternalServerError)
+				return
+			}
+			if match == nil {
+				http.Error(w, "no provider configured for this owner", http.StatusNotFound)
+				return
+			}
+			providerIDParam = match.ID
+		}
+
 		cacheKey := fmt.Sprintf("github:repos:%s:p%d:ps%d:s%s:o%s", owner, page, pageSize, sortColumn, sortOrder)
 		if cached, ok, _ := cache.GetJSON[GitHubReposResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
@@ -141,7 +158,6 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 		}
 
 		// Serve from provider-level repo list cache (populated by sync/warm).
-		providerIDParam := r.URL.Query().Get("provider_id")
 		if served := serveFromProviderRepoList(w, r, c, store, db, providerIDParam, owner, page, pageSize, sortColumn, sortOrder,
 			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
 				return GitHubReposResponse{Repos: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
@@ -149,7 +165,7 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			return
 		}
 
-		token, err := resolveProviderToken(r, store)
+		token, err := store.GetActiveToken(r.Context(), providerIDParam)
 		if err != nil {
 			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
@@ -190,8 +206,8 @@ func GitHubReposHandler(authService *auth.Service, store *providerconfig.Store, 
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
-		indexReposAsync(db, providerconfig.ProviderGitHub, r.URL.Query().Get("provider_id"), repos)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, store.GetPollInterval(r.Context(), providerIDParam, defaultListCacheTTL))
+		indexReposAsync(db, providerconfig.ProviderGitHub, providerIDParam, repos)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
@@ -216,25 +232,32 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 		sortColumn := r.URL.Query().Get("sort")
 		sortOrder := r.URL.Query().Get("order")
 
+		// Gate the route on a configured provider (resolved up front so the
+		// gate also applies to the cached-response and provider-list paths).
+		// Without this, the handler silently relays to public gitlab.com when
+		// no provider exists.
+		providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, rawBaseURL, group)
+		if err != nil {
+			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
+			return
+		}
+		if baseURL == "" {
+			http.Error(w, "no GitLab provider configured for this group", http.StatusNotFound)
+			return
+		}
+
 		cacheKey := fmt.Sprintf("gitlab:projects:%s:%s:p%d:ps%d:sub%v:s%s:o%s", rawBaseURL, group, page, pageSize, includeSubgroups, sortColumn, sortOrder)
 		if cached, ok, _ := cache.GetJSON[GitLabProjectsResponse](r.Context(), c, cacheKey); ok {
 			writeJSON(w, http.StatusOK, cached)
 			return
 		}
 
-		providerID := r.URL.Query().Get("provider_id")
-
 		// Serve from provider-level repo list cache (populated by sync/warm).
 		if served := serveFromProviderRepoList(w, r, c, store, db, providerID, group, page, pageSize, sortColumn, sortOrder,
 			func(repos []providers.RepoData, total, pg, ps int, hasNext bool, next int) any {
 				return GitLabProjectsResponse{Projects: repos, TotalCount: total, Page: pg, PageSize: ps, HasNextPage: hasNext, NextPage: next}
 			}); served {
-			return
-		}
-
-		baseURL, token, err := store.ResolveProviderAccess(r.Context(), providerID, providerconfig.ProviderGitLab, rawBaseURL, group)
-		if err != nil {
-			http.Error(w, "failed to load provider token", http.StatusInternalServerError)
 			return
 		}
 
@@ -274,8 +297,8 @@ func GitLabProjectsHandler(authService *auth.Service, store *providerconfig.Stor
 			HasNextPage: pageInfo.HasNextPage,
 			NextPage:    pageInfo.NextPage,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, resolvePollTTL(r, store))
-		indexReposAsync(db, providerconfig.ProviderGitLab, r.URL.Query().Get("provider_id"), projects)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, store.GetPollInterval(r.Context(), providerID, defaultListCacheTTL))
+		indexReposAsync(db, providerconfig.ProviderGitLab, providerID, projects)
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

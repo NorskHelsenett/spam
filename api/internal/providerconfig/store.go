@@ -88,39 +88,6 @@ type PublicProvider struct {
 	IsPublic  bool   `json:"is_public"`
 }
 
-func EnsureDefaults(ctx context.Context, db *gorm.DB) error {
-	var count int64
-	if err := db.WithContext(ctx).Model(&ProviderInstance{}).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-
-	defaults := []ProviderInstance{
-		{
-			ID:           uuid.NewString(),
-			Type:         ProviderGitHub,
-			BaseURL:      "https://github.com",
-			OwnerPath:    "NorskHelsenett",
-			DisplayName:  "github.com/NorskHelsenett",
-			Enabled:      true,
-			HealthStatus: ProviderHealthUnknown,
-		},
-		{
-			ID:           uuid.NewString(),
-			Type:         ProviderGitLab,
-			BaseURL:      "https://gitlab.com",
-			OwnerPath:    "",
-			DisplayName:  "gitlab.com",
-			Enabled:      true,
-			HealthStatus: ProviderHealthUnknown,
-		},
-	}
-
-	return db.WithContext(ctx).Create(&defaults).Error
-}
-
 func (s *Store) ListAdmin(ctx context.Context) ([]AdminProvider, error) {
 	var providers []ProviderInstance
 	if err := s.db.WithContext(ctx).Order("created_at desc").Find(&providers).Error; err != nil {

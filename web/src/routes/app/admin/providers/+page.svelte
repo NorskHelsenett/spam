@@ -4,7 +4,7 @@
 	import { slide, fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { browser } from '$app/environment';
-	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning } from 'lucide-svelte';
+	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning, PlugZap } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
 	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
 	import X from 'lucide-svelte/icons/x';
@@ -1597,7 +1597,26 @@
 		{#if loading}
 			<p class="text-sm text-[var(--text-secondary)]">Loading providers...</p>
 		{:else if providers.length === 0}
-			<p class="text-sm text-[var(--text-secondary)]">No providers configured yet.</p>
+			<div class="flex flex-col items-center justify-center gap-4 py-12 text-center">
+				<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-[var(--text-tertiary)]">
+					<PlugZap size={32} />
+				</div>
+				<div class="space-y-1">
+					<h3 class="text-lg font-semibold text-[var(--text-bright)]">No providers configured</h3>
+					<p class="max-w-md text-sm text-[var(--text-tertiary)]">
+						Connect a GitHub, GitLab, Gitea, or Forgejo instance to start ingesting repositories.
+					</p>
+				</div>
+				{#if !showAddProvider}
+					<button
+						type="button"
+						class="btn btn-primary inline-flex items-center gap-2"
+						onclick={toggleAddProvider}
+					>
+						Add Provider
+					</button>
+				{/if}
+			</div>
 		{:else}
 			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">

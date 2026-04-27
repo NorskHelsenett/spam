@@ -99,10 +99,6 @@ func run() error {
 		return fmt.Errorf("migrate database: %w", err)
 	}
 
-	if err := providerconfig.EnsureDefaults(ctx, gormDB); err != nil {
-		return fmt.Errorf("seed provider defaults: %w", err)
-	}
-
 	if err := db.EnsureViews(ctx, gormDB,
 		"migrations/20260211_create_unique_active_create_run_jobs.sql",
 		"migrations/20260223_create_unique_active_refresh_sbom_views_jobs.sql",
