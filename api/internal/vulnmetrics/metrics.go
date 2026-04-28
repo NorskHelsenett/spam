@@ -19,7 +19,10 @@ const (
 	summaryCacheKey   = "vuln:summary:v1"
 	reposCacheKey     = "vuln:repos:v1"
 	facetsCacheKey    = "vuln:facets:v1"
-	listCachePrefix   = "vuln:list:"
+	// Bump the prefix when the list ORDER BY or shape changes — the
+	// summaryVersion only tracks data freshness, so old entries would
+	// keep serving the previous ordering until their 7-day TTL.
+	listCachePrefix = "vuln:list:v2:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -441,19 +444,23 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	base, args := buildAssetUnionSQL(p)
 
 	// Row-level filters on the UNION result (apply before GROUP BY so
-	// they reduce the set the aggregate sees).
+	// they reduce the set the aggregate sees). Both the count and the
+	// ranked CTE LEFT JOIN vuln_metadata vm, which exposes its own
+	// vuln_id/title/severity columns — bare references would be
+	// ambiguous, so every column here is qualified with the av alias
+	// applied in both query bodies below.
 	var where []string
 	var whereArgs []any
 	if len(p.Severities) > 0 {
-		where = append(where, "severity IN ?")
+		where = append(where, "av.severity IN ?")
 		whereArgs = append(whereArgs, p.Severities)
 	}
 	if len(p.Sources) > 0 {
-		where = append(where, "source IN ?")
+		where = append(where, "av.source IN ?")
 		whereArgs = append(whereArgs, p.Sources)
 	}
 	if p.FixOnly {
-		where = append(where, "fixed_version <> ''")
+		where = append(where, "av.fixed_version <> ''")
 	}
 	if q := strings.TrimSpace(p.Query); q != "" {
 		needle := "%" + strings.ToLower(q) + "%"
@@ -463,11 +470,11 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		// brings those rows back without requiring the caller to
 		// know which prefix the scanner picked.
 		where = append(where,
-			`(LOWER(vuln_id) LIKE ? OR LOWER(title) LIKE ? OR LOWER(pkg_name) LIKE ? OR LOWER(asset_slug) LIKE ?
+			`(LOWER(av.vuln_id) LIKE ? OR LOWER(av.title) LIKE ? OR LOWER(av.pkg_name) LIKE ? OR LOWER(av.asset_slug) LIKE ?
 			   OR EXISTS (
-			     SELECT 1 FROM vuln_metadata vm
-			     WHERE vm.vuln_id = asset_vulns.vuln_id
-			       AND LOWER(vm.aliases::text) LIKE ?
+			     SELECT 1 FROM vuln_metadata vm2
+			     WHERE vm2.vuln_id = av.vuln_id
+			       AND LOWER(vm2.aliases::text) LIKE ?
 			   ))`)
 		whereArgs = append(whereArgs, needle, needle, needle, needle, needle)
 	}
@@ -477,7 +484,7 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		// literal "-YYYY-" substring.
 		var parts []string
 		for _, y := range p.Years {
-			parts = append(parts, "vuln_id ILIKE ?")
+			parts = append(parts, "av.vuln_id ILIKE ?")
 			whereArgs = append(whereArgs, "%-"+y+"-%")
 		}
 		where = append(where, "("+strings.Join(parts, " OR ")+")")
@@ -499,9 +506,9 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	var total int
 	countSQL := fmt.Sprintf(`
 		WITH asset_vulns AS (%s)
-		SELECT COUNT(DISTINCT COALESCE(vm.canonical_id, asset_vulns.vuln_id))::int
-		FROM asset_vulns
-		LEFT JOIN vuln_metadata vm ON vm.vuln_id = asset_vulns.vuln_id
+		SELECT COUNT(DISTINCT COALESCE(vm.canonical_id, av.vuln_id))::int
+		FROM asset_vulns av
+		LEFT JOIN vuln_metadata vm ON vm.vuln_id = av.vuln_id
 		%s
 	`, base, whereClause)
 	countArgs := append([]any{}, args...)
@@ -520,6 +527,8 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		ranked AS (
 			SELECT av.*,
 				COALESCE(vm.canonical_id, av.vuln_id) AS canonical_id,
+				vm.cvss_score  AS cvss_score,
+				vm.cvss_vector AS cvss_vector,
 				CASE av.severity
 					WHEN 'CRITICAL' THEN 1
 					WHEN 'HIGH'     THEN 2
@@ -534,6 +543,18 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		SELECT
 			canonical_id AS vuln_id,
 			MIN(sev_rank) AS sev_rank,
+			-- exploit_boost: CVSS >= 9 AND attack vector = Network — a
+			-- proxy for "weaponizable from outside" until we ingest a
+			-- real KEV/EPSS feed. Sorts the worst, most-reachable
+			-- advisories above younger but less-exposed CVEs.
+			COALESCE(
+				BOOL_OR(cvss_score >= 9.0 AND cvss_vector ILIKE '%%AV:N%%'),
+				FALSE
+			) AS exploit_boost,
+			-- Year extracted from the canonical id ("<prefix>-YYYY-NNNN")
+			-- so we can break ties by recency. NULL when the prefix
+			-- doesn't carry a year (e.g. some GHSA-only ids).
+			substring(canonical_id from '-(\d{4})-')::int AS cve_year,
 			(ARRAY_AGG(severity ORDER BY sev_rank ASC, asset_id ASC))[1]           AS severity,
 			(ARRAY_AGG(pkg_name ORDER BY sev_rank ASC, asset_id ASC))[1]           AS pkg_name,
 			(ARRAY_AGG(installed_version ORDER BY sev_rank ASC, asset_id ASC))[1]  AS installed_version,
@@ -551,7 +572,10 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
 		FROM ranked
 		GROUP BY canonical_id
-		ORDER BY sev_rank ASC, canonical_id ASC
+		ORDER BY exploit_boost DESC,
+		         sev_rank      ASC,
+		         cve_year      DESC NULLS LAST,
+		         canonical_id  ASC
 		LIMIT ? OFFSET ?
 	`, base, whereClause)
 
