@@ -216,6 +216,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// a glance.
 				api.Get("/admin/jobs", uiapi.AdminJobsHandler(db, authService))
 
+				// Bulk vuln-feed refresh (CISA KEV, FIRST.org EPSS).
+				// Manual trigger jumps the auto-schedule queue; status is
+				// poll-friendly for the admin UI's progress bar.
+				api.Post("/admin/feeds/{feed}/refresh", uiapi.AdminFeedRefreshHandler(db, authService))
+				api.Get("/admin/feeds/status", uiapi.AdminFeedsStatusHandler(db, authService))
+
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))

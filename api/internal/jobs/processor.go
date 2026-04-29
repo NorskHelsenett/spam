@@ -9,6 +9,10 @@ import (
 	"os"
 	"strings"
 	"time"
+	// Embed IANA tzdata so time.LoadLocation works in the scratch
+	// runtime image. ~450 KB; required for the EPSS daily-fetch
+	// schedule pinned to Europe/Oslo.
+	_ "time/tzdata"
 
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
@@ -67,7 +71,7 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 	case JobTypeFetchKEV:
 		return processFetchKEV(ctx, db)
 	case JobTypeFetchEPSS:
-		return processFetchEPSS(ctx, db)
+		return processFetchEPSS(ctx, db, job.ID)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -232,11 +236,59 @@ func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 	EnqueueVulnMetaFetches(ctx, db, ids)
 }
 
-// feedRefreshInterval is how often the bulk feeds (KEV, EPSS) are
-// repulled. CISA and FIRST.org both publish at most once per UTC day,
-// so 24 h matches their refresh cadence — anything tighter wastes
-// downloads on identical data.
-const feedRefreshInterval = 24 * time.Hour
+// kevRefreshInterval is how often we re-pull the CISA KEV catalog.
+// CISA edits the list a few times per week without pre-announcement,
+// so a tighter cadence than EPSS catches a fresh exploited-in-the-wild
+// CVE within ~kevRefreshInterval instead of waiting up to a day.
+// Bytes are negligible (~1.5k rows JSON).
+const kevRefreshInterval = 6 * time.Hour
+
+// epssDailyHourLocal is the local hour-of-day for the EPSS daily
+// refresh. FIRST.org publishes a single CSV per UTC day; we pin the
+// fetch to early-morning local time so analysts arriving for the day
+// see scoring that's at most a few hours behind upstream rather than
+// up-to-24h-stale carryover from the previous workday.
+const epssDailyHourLocal = 5
+
+// epssLocation is the timezone the EPSS daily-fetch hour is anchored
+// to. Picked once at package init so DST transitions are handled
+// correctly without re-resolving the zone on every schedule call.
+// Falls back to UTC if the zoneinfo data isn't shipped (alpine
+// containers without tzdata, etc.) — analysts then see fetches at
+// 05:00 UTC, which is still within "before work".
+var epssLocation = mustLoadLocation("Europe/Oslo")
+
+func mustLoadLocation(name string) *time.Location {
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		log.Printf("vuln-feeds: failed to load timezone %s, falling back to UTC: %v", name, err)
+		return time.UTC
+	}
+	return loc
+}
+
+// nextFeedRunAt returns when the given feed type should next refresh
+// relative to `from`. KEV uses a fixed 6h interval; EPSS pins to the
+// next 05:00 in Europe/Oslo so the daily snapshot lands just before
+// the workday starts.
+func nextFeedRunAt(jobType JobType, from time.Time) time.Time {
+	switch jobType {
+	case JobTypeFetchEPSS:
+		local := from.In(epssLocation)
+		next := time.Date(local.Year(), local.Month(), local.Day(), epssDailyHourLocal, 0, 0, 0, epssLocation)
+		if !next.After(from) {
+			next = next.Add(24 * time.Hour)
+		}
+		return next
+	case JobTypeFetchKEV:
+		return from.Add(kevRefreshInterval)
+	default:
+		// Unknown feed type — return a safe default; the caller
+		// shouldn't reach here, the switch above is exhaustive over
+		// the FETCH_* types EnsureFeedRefreshScheduled iterates.
+		return from.Add(24 * time.Hour)
+	}
+}
 
 // processFetchKEV pulls the CISA KEV catalog into cisa_kev_entries
 // and enqueues the next refresh +24 h out. The unique index on
@@ -256,9 +308,19 @@ func processFetchKEV(ctx context.Context, db *gorm.DB) (interface{}, error) {
 }
 
 // processFetchEPSS pulls the FIRST.org EPSS daily snapshot and
-// reschedules the same way as KEV.
-func processFetchEPSS(ctx context.Context, db *gorm.DB) (interface{}, error) {
-	count, err := vulnmeta.IngestEPSS(ctx, db)
+// reschedules. Streams progress (rows-written running total) into
+// Job.Result every batch so the admin UI can render a live progress
+// indicator without polling the upstream feed itself.
+func processFetchEPSS(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	progress := func(written int) {
+		if data, jsonErr := json.Marshal(map[string]any{
+			"status":       "ingesting",
+			"rows_written": written,
+		}); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", data)
+		}
+	}
+	count, err := vulnmeta.IngestEPSS(ctx, db, progress)
 	if err != nil {
 		return nil, err
 	}
@@ -267,12 +329,12 @@ func processFetchEPSS(ctx context.Context, db *gorm.DB) (interface{}, error) {
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
-// scheduleNextFeedRefresh enqueues a follow-up FETCH_* job with
-// run_at = now + feedRefreshInterval. Failures are logged but not
-// fatal — the EnsureFeedRefreshScheduled startup hook covers the
-// case where a follow-up didn't get queued.
+// scheduleNextFeedRefresh enqueues a follow-up FETCH_* job at the
+// next slot dictated by nextFeedRunAt for the given feed type.
+// Failures are logged but not fatal — the EnsureFeedRefreshScheduled
+// startup hook covers the case where a follow-up didn't get queued.
 func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) {
-	runAt := time.Now().Add(feedRefreshInterval)
+	runAt := nextFeedRunAt(jobType, time.Now())
 	if _, err := CreateJob(ctx, db, CreateJobInput{
 		Type:  jobType,
 		RunAt: runAt,
@@ -287,12 +349,14 @@ func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) 
 }
 
 // EnsureFeedRefreshScheduled queues a FETCH_KEV / FETCH_EPSS job at
-// startup if neither is already pending and the last successful run
-// is older than feedRefreshInterval. Idempotent via the partial
-// unique index — duplicate queue attempts no-op silently. Call from
-// the worker boot path so a fresh deploy picks up feeds without
-// waiting for the previous schedule to fire.
+// startup if neither is already pending. If the most recent successful
+// run is recent enough that the next scheduled slot hasn't yet arrived,
+// we enqueue at the upcoming slot; otherwise we fire immediately.
+// Idempotent via the partial unique index — duplicate queue attempts
+// no-op silently. Call from the worker boot path so a fresh deploy
+// picks up feeds without waiting for the previous schedule to fire.
 func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
+	now := time.Now()
 	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS} {
 		// If a queued/retry job already exists, the unique index
 		// would reject a fresh insert anyway — but checking first
@@ -304,18 +368,20 @@ func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
 			continue
 		}
 
-		// If we ran successfully recently enough, defer to the
-		// already-scheduled +24 h follow-up rather than firing a
-		// duplicate. cutoff = now - interval.
+		// If we ran successfully recently enough, the next slot is
+		// after now — schedule there so we don't double-fetch on a
+		// quick restart cycle. Otherwise fetch immediately.
 		var lastSuccess time.Time
 		_ = db.WithContext(ctx).Model(&Job{}).
 			Select("COALESCE(MAX(finished_at), '1970-01-01')").
 			Where("type = ? AND status = ?", jobType, JobStatusSucceeded).
 			Scan(&lastSuccess).Error
 
-		runAt := time.Now()
-		if !lastSuccess.IsZero() && time.Since(lastSuccess) < feedRefreshInterval {
-			runAt = lastSuccess.Add(feedRefreshInterval)
+		runAt := now
+		if !lastSuccess.IsZero() {
+			if next := nextFeedRunAt(jobType, lastSuccess); next.After(now) {
+				runAt = next
+			}
 		}
 
 		if _, err := CreateJob(ctx, db, CreateJobInput{

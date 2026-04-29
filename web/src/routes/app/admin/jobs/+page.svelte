@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { Layers, RefreshCw, Cpu, Database, Container, AlertCircle } from 'lucide-svelte';
+	import { Layers, RefreshCw, Cpu, Database, Container, AlertCircle, Rss } from 'lucide-svelte';
 
 	type JobCount = {
 		type: string;
@@ -32,7 +32,35 @@
 		pools: Pool[];
 	};
 
+	// Result payload written by the FETCH_KEV / FETCH_EPSS workers.
+	// Two shapes: while running, EPSS streams `{status: "ingesting",
+	// rows_written}`; after success, both feeds set
+	// `{status: "ingested", rows}`. KEV stays empty mid-flight (small
+	// payload, ingest is fast enough that progress reporting would
+	// add noise).
+	type FeedResult = {
+		status?: string;
+		rows?: number;
+		rows_written?: number;
+	};
+	type FeedStatus = {
+		feed: 'kev' | 'epss';
+		job_id?: string;
+		status?: string;
+		created_at?: string | null;
+		started_at?: string | null;
+		finished_at?: string | null;
+		error?: string;
+		result?: FeedResult;
+		next_scheduled_at?: string | null;
+	};
+	type FeedsResponse = {
+		fetched_at: string;
+		feeds: FeedStatus[];
+	};
+
 	let data = $state<Response | null>(null);
+	let feeds = $state<FeedStatus[]>([]);
 	let loading = $state(true);
 	let error = $state('');
 	// Loading flag for poll cycles other than the first; lets the UI
@@ -40,6 +68,10 @@
 	// (no jarring flash).
 	let refreshing = $state(false);
 	let lastUpdated = $state<Date | null>(null);
+	// Per-feed manual-trigger state — disables the button between
+	// click and the next poll cycle so a user can't double-fire while
+	// the optimistic state is in flight.
+	let triggering = $state<Record<string, boolean>>({ kev: false, epss: false });
 
 	// Poll cadence: 3s. Counts move quickly when the queue is active;
 	// any longer than this and "what's running right now" gets stale.
@@ -50,13 +82,20 @@
 		if (initial) loading = true;
 		else refreshing = true;
 		try {
-			const res = await fetch('/api/admin/jobs', { credentials: 'include' });
-			if (!res.ok) {
-				if (res.status === 403) error = 'Admin access required.';
-				else error = `Failed to load (${res.status})`;
+			const [jobsRes, feedsRes] = await Promise.all([
+				fetch('/api/admin/jobs', { credentials: 'include' }),
+				fetch('/api/admin/feeds/status', { credentials: 'include' })
+			]);
+			if (!jobsRes.ok) {
+				if (jobsRes.status === 403) error = 'Admin access required.';
+				else error = `Failed to load (${jobsRes.status})`;
 				return;
 			}
-			data = (await res.json()) as Response;
+			data = (await jobsRes.json()) as Response;
+			if (feedsRes.ok) {
+				const fr = (await feedsRes.json()) as FeedsResponse;
+				feeds = fr.feeds ?? [];
+			}
 			lastUpdated = new Date();
 			error = '';
 		} catch {
@@ -64,6 +103,32 @@
 		} finally {
 			loading = false;
 			refreshing = false;
+		}
+	};
+
+	const triggerFeedRefresh = async (feed: 'kev' | 'epss') => {
+		triggering = { ...triggering, [feed]: true };
+		try {
+			const res = await fetch(`/api/admin/feeds/${feed}/refresh`, {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ reason: 'manual admin refresh' })
+			});
+			if (!res.ok && res.status !== 409) {
+				// 409 = already running, which is fine — the next poll
+				// will surface the existing job's progress.
+				const text = await res.text();
+				error = text || `Failed to trigger ${feed.toUpperCase()} refresh`;
+			} else {
+				// Force an immediate refresh so the user sees the
+				// queued/running state without waiting for the 3s tick.
+				await fetchJobs(false);
+			}
+		} catch {
+			error = `Network error triggering ${feed.toUpperCase()} refresh`;
+		} finally {
+			triggering = { ...triggering, [feed]: false };
 		}
 	};
 
@@ -108,6 +173,44 @@
 		if (diff < 5) return 'just now';
 		if (diff < 60) return `${diff}s ago`;
 		return `${Math.floor(diff / 60)}m ago`;
+	};
+
+	const fmtRelativeISO = (iso: string | null | undefined) => {
+		if (!iso) return '—';
+		const t = new Date(iso).getTime();
+		if (isNaN(t)) return '—';
+		const diffSec = Math.floor((Date.now() - t) / 1000);
+		if (diffSec < 0) {
+			// Future timestamp — used for next_scheduled_at.
+			const ahead = -diffSec;
+			if (ahead < 60) return `in ${ahead}s`;
+			if (ahead < 3600) return `in ${Math.floor(ahead / 60)}m`;
+			if (ahead < 86400) return `in ${Math.floor(ahead / 3600)}h ${Math.floor((ahead % 3600) / 60)}m`;
+			return `in ${Math.floor(ahead / 86400)}d`;
+		}
+		if (diffSec < 60) return `${diffSec}s ago`;
+		if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+		if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+		return `${Math.floor(diffSec / 86400)}d ago`;
+	};
+
+	// EPSS publishes ~250k rows daily — used to estimate progress
+	// percentage when the worker reports rows_written without a total.
+	// Slight overshoot on a smaller daily snapshot just caps the bar
+	// near 100%, which is fine.
+	const EPSS_EXPECTED_ROWS = 250_000;
+
+	const feedByName = (name: 'kev' | 'epss') => feeds.find((f) => f.feed === name);
+
+	const isFeedRunning = (f: FeedStatus | undefined) =>
+		!!f && (f.status === 'RUNNING' || f.status === 'QUEUED' || f.status === 'RETRY');
+
+	const feedProgressPct = (f: FeedStatus | undefined): number | null => {
+		if (!f || f.status !== 'RUNNING') return null;
+		const written = f.result?.rows_written ?? 0;
+		if (written <= 0) return null;
+		const pct = Math.min(99, (written / EPSS_EXPECTED_ROWS) * 100);
+		return pct;
 	};
 </script>
 
@@ -203,6 +306,77 @@
 							</tbody>
 						</table>
 					</div>
+
+					<!-- Bulk vuln feeds (KEV + EPSS) — only attached to the
+					     main pool because that's where these jobs run. -->
+					{#if pool.name === 'main'}
+						<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
+							<div class="mb-2 flex items-center gap-2">
+								<Rss class="h-3 w-3 text-[var(--accent)]" />
+								<h3 class="text-[0.65rem] font-semibold uppercase tracking-[0.18em] text-[var(--text-tertiary)]">Vuln feeds</h3>
+							</div>
+							<ul class="space-y-2">
+								{#each [{ key: 'kev', label: 'CISA KEV', cadence: 'every 6h' }, { key: 'epss', label: 'FIRST.org EPSS', cadence: 'daily 05:00 Oslo' }] as row (row.key)}
+									{@const f = feedByName(row.key as 'kev' | 'epss')}
+									{@const running = isFeedRunning(f)}
+									{@const pct = feedProgressPct(f)}
+									<li class="space-y-1">
+										<div class="flex items-center justify-between gap-2">
+											<div class="min-w-0 flex-1">
+												<div class="flex items-center gap-2">
+													<span class="font-mono text-[10px] font-semibold text-[var(--text-bright)]">{row.label}</span>
+													{#if running}
+														<span class="inline-flex items-center gap-1 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-1.5 py-0 text-[10px] text-[var(--accent)]">
+															<RefreshCw class="h-2.5 w-2.5 animate-spin" />
+															{f?.status?.toLowerCase() ?? 'running'}
+														</span>
+													{:else if f?.status === 'FAILED'}
+														<span class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-1.5 py-0 text-[10px] text-red-400">failed</span>
+													{:else if f?.status === 'SUCCEEDED'}
+														<span class="text-[10px] text-[var(--text-muted)]">·</span>
+													{/if}
+												</div>
+												<div class="text-[10px] text-[var(--text-muted)]">
+													{row.cadence}
+													{#if f?.finished_at && f.status === 'SUCCEEDED'}
+														· last refreshed {fmtRelativeISO(f.finished_at)}
+														{#if f.result?.rows}<span class="text-[var(--text-tertiary)]"> · {fmt(f.result.rows)} rows</span>{/if}
+													{:else if f?.status === 'FAILED' && f?.error}
+														· <span class="text-red-400" title={f.error}>{f.error.length > 50 ? f.error.slice(0, 50) + '…' : f.error}</span>
+													{/if}
+													{#if !running && f?.next_scheduled_at}
+														· next {fmtRelativeISO(f.next_scheduled_at)}
+													{/if}
+												</div>
+											</div>
+											<button
+												type="button"
+												class="shrink-0 rounded-full border border-[var(--border-color)] px-2.5 py-1 text-[10px] font-medium text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+												disabled={running || triggering[row.key]}
+												onclick={() => triggerFeedRefresh(row.key as 'kev' | 'epss')}
+											>
+												Refresh
+											</button>
+										</div>
+										{#if running && pct !== null}
+											<div class="space-y-0.5">
+												<div class="h-1 w-full overflow-hidden rounded-full bg-[var(--hover-bg)]">
+													<div class="h-full bg-[var(--accent)] transition-all duration-500" style="width: {pct}%"></div>
+												</div>
+												<div class="text-[10px] text-[var(--text-muted)]">
+													{fmt(f?.result?.rows_written ?? 0)} rows
+												</div>
+											</div>
+										{:else if running && f?.status === 'RUNNING'}
+											<div class="h-1 w-full overflow-hidden rounded-full bg-[var(--hover-bg)]">
+												<div class="h-full w-1/3 animate-pulse bg-[var(--accent)]"></div>
+											</div>
+										{/if}
+									</li>
+								{/each}
+							</ul>
+						</div>
+					{/if}
 
 					<!-- Currently running -->
 					<div>

@@ -28,7 +28,13 @@ var epssClient = &http.Client{Timeout: 5 * time.Minute}
 // and replaces epss_entries inside a transaction. Streams through
 // gzip+CSV so peak memory stays bounded at ~the batch size below
 // instead of holding the full ~250k rows in memory at once.
-func IngestEPSS(ctx context.Context, db *gorm.DB) (int, error) {
+//
+// progress is called after each batch flush with the running total of
+// rows written. Pass nil to disable. Used by the FETCH_EPSS job to
+// stream a live row count into the admin UI's progress bar — the
+// callback runs inside the ingest transaction, so it must not perform
+// long-running work.
+func IngestEPSS(ctx context.Context, db *gorm.DB, progress func(written int)) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, epssFeedURL, nil)
 	if err != nil {
 		return 0, err
@@ -91,6 +97,9 @@ func IngestEPSS(ctx context.Context, db *gorm.DB) (int, error) {
 		}
 		total += len(batch)
 		batch = batch[:0]
+		if progress != nil {
+			progress(total)
+		}
 		return nil
 	}
 
