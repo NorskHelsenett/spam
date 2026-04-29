@@ -274,6 +274,14 @@ func run() error {
 		scannerOpTick = scannerOpTicker.C
 	}
 
+	// Dedicated pool for VULN_META_FETCH. The main pool (above) excludes
+	// this type so a large vuln-meta backfill cannot FIFO-starve
+	// user-facing CREATE_RUN dispatches. Sized independently of the main
+	// pool via WORKER_VULN_META_CONCURRENCY.
+	vulnMetaWorkerID := workerID + "-vulnmeta"
+	log.Printf("vuln-meta pool started: %s (concurrency=%d)", vulnMetaWorkerID, cfg.VulnMetaConcurrency)
+	go runVulnMetaPool(ctx, gormDB, &wg, vulnMetaWorkerID, cfg.VulnMetaConcurrency, pollInterval)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -357,7 +365,12 @@ func run() error {
 				// IMAGE_SCAN jobs are always excluded: they are leased and
 				// executed by the dedicated spam-image-scanner pod, which
 				// keeps the grype/trivy vuln DB warm across many digests.
-				excludeTypes := []jobs.JobType{jobs.JobTypeImageScan}
+				//
+				// VULN_META_FETCH is also excluded: it has its own dedicated
+				// goroutine pool (started below) so a large vuln-meta
+				// backfill cannot FIFO-starve user-facing CREATE_RUN
+				// dispatches in the main pool.
+				excludeTypes := []jobs.JobType{jobs.JobTypeImageScan, jobs.JobTypeVulnMetaFetch}
 				if runningRuns >= int64(cfg.Concurrency) {
 					excludeTypes = append(excludeTypes, jobs.JobTypeCreateRun)
 				}
@@ -389,6 +402,60 @@ func run() error {
 				}(job)
 			}
 		nextTick:
+		}
+	}
+}
+
+// runVulnMetaPool drives a dedicated goroutine pool that exclusively
+// claims VULN_META_FETCH jobs. The main worker pool excludes this type,
+// so a backlog (often tens of thousands of jobs after a fresh OSV scan)
+// cannot FIFO-starve user-facing CREATE_RUN dispatches.
+//
+// Stale-job requeue is intentionally not duplicated here — the main loop
+// calls jobs.RequeueStaleJobs across all types every tick.
+func runVulnMetaPool(ctx context.Context, db *gorm.DB, wg *sync.WaitGroup, workerID string, concurrency int, pollInterval time.Duration) {
+	sem := make(chan struct{}, concurrency)
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for {
+				select {
+				case sem <- struct{}{}:
+				default:
+					goto next
+				}
+
+				select {
+				case <-ctx.Done():
+					<-sem
+					return
+				default:
+				}
+
+				job, err := jobs.ClaimNextJobOfType(ctx, db, workerID, time.Now(), jobs.JobTypeVulnMetaFetch)
+				if err != nil {
+					log.Printf("vuln-meta claim error: %v", err)
+					<-sem
+					goto next
+				}
+				if job == nil {
+					<-sem
+					goto next
+				}
+
+				wg.Add(1)
+				go func(job *jobs.Job) {
+					defer wg.Done()
+					defer func() { <-sem }()
+					processJob(ctx, db, job, workerID)
+				}(job)
+			}
+		next:
 		}
 	}
 }
