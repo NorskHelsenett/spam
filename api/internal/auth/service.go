@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"strings"
@@ -65,6 +66,7 @@ type userResponse struct {
 	Subject  string                 `json:"subject"`
 	Email    string                 `json:"email,omitempty"`
 	Name     string                 `json:"name,omitempty"`
+	Picture  string                 `json:"picture,omitempty"`
 	Claims   map[string]interface{} `json:"claims,omitempty"`
 	Groups   []string               `json:"groups,omitempty"`
 	Role     string                 `json:"role,omitempty"`
@@ -236,6 +238,17 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			}
 		}
 
+		// Best-effort avatar refresh from Microsoft Graph. Failure here must
+		// not block login — Gravatar fallback covers users without a photo
+		// and tenants whose tokens lack Graph access.
+		if userResult.user.ID != "" && token.AccessToken != "" {
+			if dataURL, gerr := fetchAzurePhotoDataURL(r.Context(), token.AccessToken); gerr == nil && dataURL != "" && dataURL != userResult.user.Picture {
+				if uerr := s.db.WithContext(r.Context()).Model(&User{}).Where("id = ?", userResult.user.ID).Update("picture", dataURL).Error; uerr != nil {
+					log.Printf("update user picture: %v", uerr)
+				}
+			}
+		}
+
 		sessionID, err := randomString(48)
 		if err != nil {
 			http.Error(w, "failed to start session", http.StatusInternalServerError)
@@ -300,6 +313,13 @@ func (s *Service) MeHandler() http.HandlerFunc {
 				response.Groups = groups
 				response.Role = role
 				response.Approved = approved
+			}
+
+			var user User
+			if err := s.db.WithContext(r.Context()).Select("picture").First(&user, "id = ?", session.UserID).Error; err == nil {
+				response.Picture = pictureOrGravatar(user.Picture, session.Email)
+			} else {
+				response.Picture = pictureOrGravatar("", session.Email)
 			}
 		}
 

@@ -14,6 +14,7 @@ type UserSummary struct {
 	Subject     string     `json:"subject"`
 	Email       string     `json:"email,omitempty"`
 	Name        string     `json:"name,omitempty"`
+	Picture     string     `json:"picture,omitempty"`
 	Approved    bool       `json:"approved"`
 	Hidden      bool       `json:"hidden"`
 	Role        string     `json:"role"`
@@ -106,6 +107,7 @@ func (s *Service) ListUsers(ctx context.Context) ([]UserSummary, error) {
 			Subject:     user.Subject,
 			Email:       user.Email,
 			Name:        user.Name,
+			Picture:     pictureOrGravatar(user.Picture, user.Email),
 			Approved:    approved,
 			Hidden:      user.HiddenAt != nil,
 			Role:        role,
@@ -201,6 +203,7 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID, role, approvedBy s
 			Subject:     user.Subject,
 			Email:       user.Email,
 			Name:        user.Name,
+			Picture:     pictureOrGravatar(user.Picture, user.Email),
 			Approved:    approved,
 			Role:        roleFromGroups(groups, approved),
 			Groups:      groups,
@@ -373,6 +376,7 @@ func (s *Service) SetUserHidden(ctx context.Context, userID string, hidden bool)
 		Subject:     user.Subject,
 		Email:       user.Email,
 		Name:        user.Name,
+		Picture:     pictureOrGravatar(user.Picture, user.Email),
 		Approved:    approved,
 		Hidden:      hidden,
 		Role:        roleFromGroups(groups, approved),
