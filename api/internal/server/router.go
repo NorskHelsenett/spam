@@ -210,6 +210,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.With(aclAudit).Post("/admin/acl/grants", uiapi.AdminACLGrantsCreateHandler(db, authService))
 				api.With(aclAudit).Delete("/admin/acl/grants/{id}", uiapi.AdminACLGrantsDeleteHandler(db, authService))
 
+				// Admin jobs view — read-only, no audit wrap (it's a poll
+				// target). Returns the queue grouped by worker pool so an
+				// operator can see what's running across the three pools at
+				// a glance.
+				api.Get("/admin/jobs", uiapi.AdminJobsHandler(db, authService))
+
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))

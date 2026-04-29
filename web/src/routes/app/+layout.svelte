@@ -197,7 +197,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
@@ -217,10 +217,12 @@ let isAdmin = $state(false);
 	] as const;
 
 	// Admin-only nav — Runs exposes the job queue (CREATE_RUN artifacts
-	// can contain credentials surfaced in scan history), Settings covers
-	// provider config + user management.
+	// can contain credentials surfaced in scan history), Jobs is the
+	// live queue view across all worker pools, Settings covers provider
+	// config + user management.
 	const adminNavLinks = [
-		{ href: '/app/runs', label: 'Runs', icon: Play }
+		{ href: '/app/runs', label: 'Runs', icon: Play },
+		{ href: '/app/admin/jobs', label: 'Jobs', icon: Layers }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
