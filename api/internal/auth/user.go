@@ -14,6 +14,10 @@ type User struct {
 	Subject          string `gorm:"size:255;uniqueIndex;not null"`
 	Email            string `gorm:"size:255;index"`
 	Name             string `gorm:"size:255"`
+	// Picture stores a self-contained data URL ("data:image/jpeg;base64,...")
+	// fetched from Microsoft Graph at login. Falls back to Gravatar at the
+	// API boundary when empty.
+	Picture          string `gorm:"type:text"`
 	ApprovedAt       *time.Time
 	ApprovedByUserID *string    `gorm:"size:36"`
 	HiddenAt         *time.Time

@@ -68,6 +68,7 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 					Subject:   user.Subject,
 					Email:     user.Email,
 					Name:      user.Name,
+					Picture:   pictureOrGravatar("", user.Email),
 					Approved:  false,
 					Hidden:    false,
 					Role:      "pending",
