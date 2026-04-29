@@ -22,7 +22,7 @@ const (
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v2:"
+	listCachePrefix = "vuln:list:v3:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -91,6 +91,18 @@ type VulnGroup struct {
 	Aliases          []string    `json:"aliases,omitempty"`
 	RepoCount        int         `json:"repo_count"`
 	ImageCount       int         `json:"image_count"`
+
+	// Exploitation signals from the bulk feeds. KEVKnown is the
+	// authoritative "actually exploited in the wild" flag; EPSSScore
+	// (0-1) and EPSSPercentile (0-1) come from FIRST.org's daily
+	// model. Both are 0 / false when neither feed has the CVE — the
+	// API always returns the fields so clients can render badges
+	// without a presence check.
+	KEVKnown            bool       `json:"kev_known"`
+	KEVKnownRansomware  bool       `json:"kev_known_ransomware"`
+	KEVDateAdded        *time.Time `json:"kev_date_added,omitempty"`
+	EPSSScore           float32    `json:"epss_score"`
+	EPSSPercentile      float32    `json:"epss_percentile"`
 }
 
 // VulnListResponse is the paginated shape of /api/vuln/list. Total
@@ -517,18 +529,21 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		return VulnListResponse{}, err
 	}
 
-	// Grouped page. The ranked CTE attaches the canonical id per row
-	// via the same LEFT JOIN; the outer SELECT aggregates across all
-	// scanner-stored ids that map to the same canonical. Pick the
-	// canonical itself as the displayed vuln_id so aliased duplicates
-	// collapse into one row.
+	// Grouped page. Two CTEs:
+	//   ranked  — attaches canonical_id + sev_rank per asset row.
+	//   grouped — collapses to one row per canonical_id with the
+	//             aggregates the response shape needs.
+	// The outer SELECT then LEFT JOINs the bulk-fetched KEV / EPSS
+	// feeds on canonical_id (CVE-prefixed, which both feeds use as
+	// their key) so the ORDER BY can prefer "actually exploited" >
+	// "high exploit probability" > "worst severity" > "most recent".
+	// LEFT JOINs leave non-CVE ids (GHSA-*, BIT-*) unboosted, which
+	// is correct: KEV / EPSS only score CVE identifiers.
 	groupSQL := fmt.Sprintf(`
 		WITH asset_vulns AS (%s),
 		ranked AS (
 			SELECT av.*,
 				COALESCE(vm.canonical_id, av.vuln_id) AS canonical_id,
-				vm.cvss_score  AS cvss_score,
-				vm.cvss_vector AS cvss_vector,
 				CASE av.severity
 					WHEN 'CRITICAL' THEN 1
 					WHEN 'HIGH'     THEN 2
@@ -539,43 +554,51 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			FROM asset_vulns av
 			LEFT JOIN vuln_metadata vm ON vm.vuln_id = av.vuln_id
 			%s
+		),
+		grouped AS (
+			SELECT
+				canonical_id AS vuln_id,
+				MIN(sev_rank) AS sev_rank,
+				-- Year extracted from the canonical id
+				-- ("<prefix>-YYYY-NNNN") for the recency tiebreak.
+				-- NULL when the prefix doesn't carry a year.
+				substring(canonical_id from '-(\d{4})-')::int AS cve_year,
+				(ARRAY_AGG(severity ORDER BY sev_rank ASC, asset_id ASC))[1]           AS severity,
+				(ARRAY_AGG(pkg_name ORDER BY sev_rank ASC, asset_id ASC))[1]           AS pkg_name,
+				(ARRAY_AGG(installed_version ORDER BY sev_rank ASC, asset_id ASC))[1]  AS installed_version,
+				(ARRAY_AGG(fixed_version ORDER BY sev_rank ASC, asset_id ASC))[1]      AS fixed_version,
+				(ARRAY_AGG(title ORDER BY sev_rank ASC, asset_id ASC))[1]              AS title,
+				(ARRAY_AGG(description ORDER BY sev_rank ASC, asset_id ASC))[1]        AS description,
+				COALESCE(
+					(SELECT jsonb_agg(DISTINCT s) FROM unnest(ARRAY_AGG(source)) AS s WHERE s IS NOT NULL AND s <> ''),
+					'[]'::jsonb
+				) AS sources,
+				jsonb_agg(DISTINCT jsonb_build_object(
+					'type', asset_type, 'id', asset_id, 'slug', asset_slug
+				)) AS assets,
+				COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
+				COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
+			FROM ranked
+			GROUP BY canonical_id
 		)
 		SELECT
-			canonical_id AS vuln_id,
-			MIN(sev_rank) AS sev_rank,
-			-- exploit_boost: CVSS >= 9 AND attack vector = Network — a
-			-- proxy for "weaponizable from outside" until we ingest a
-			-- real KEV/EPSS feed. Sorts the worst, most-reachable
-			-- advisories above younger but less-exposed CVEs.
-			COALESCE(
-				BOOL_OR(cvss_score >= 9.0 AND cvss_vector ILIKE '%%AV:N%%'),
-				FALSE
-			) AS exploit_boost,
-			-- Year extracted from the canonical id ("<prefix>-YYYY-NNNN")
-			-- so we can break ties by recency. NULL when the prefix
-			-- doesn't carry a year (e.g. some GHSA-only ids).
-			substring(canonical_id from '-(\d{4})-')::int AS cve_year,
-			(ARRAY_AGG(severity ORDER BY sev_rank ASC, asset_id ASC))[1]           AS severity,
-			(ARRAY_AGG(pkg_name ORDER BY sev_rank ASC, asset_id ASC))[1]           AS pkg_name,
-			(ARRAY_AGG(installed_version ORDER BY sev_rank ASC, asset_id ASC))[1]  AS installed_version,
-			(ARRAY_AGG(fixed_version ORDER BY sev_rank ASC, asset_id ASC))[1]      AS fixed_version,
-			(ARRAY_AGG(title ORDER BY sev_rank ASC, asset_id ASC))[1]              AS title,
-			(ARRAY_AGG(description ORDER BY sev_rank ASC, asset_id ASC))[1]        AS description,
-			COALESCE(
-				(SELECT jsonb_agg(DISTINCT s) FROM unnest(ARRAY_AGG(source)) AS s WHERE s IS NOT NULL AND s <> ''),
-				'[]'::jsonb
-			) AS sources,
-			jsonb_agg(DISTINCT jsonb_build_object(
-				'type', asset_type, 'id', asset_id, 'slug', asset_slug
-			)) AS assets,
-			COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
-			COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
-		FROM ranked
-		GROUP BY canonical_id
-		ORDER BY exploit_boost DESC,
-		         sev_rank      ASC,
-		         cve_year      DESC NULLS LAST,
-		         canonical_id  ASC
+			g.vuln_id, g.sev_rank, g.cve_year,
+			g.severity, g.pkg_name, g.installed_version, g.fixed_version,
+			g.title, g.description, g.sources, g.assets,
+			g.repo_count, g.image_count,
+			(kev.cve_id IS NOT NULL)            AS kev_known,
+			COALESCE(kev.known_ransomware, FALSE) AS kev_known_ransomware,
+			kev.date_added                       AS kev_date_added,
+			COALESCE(epss.score, 0)::float       AS epss_score,
+			COALESCE(epss.percentile, 0)::float  AS epss_percentile
+		FROM grouped g
+		LEFT JOIN cisa_kev_entries kev ON kev.cve_id = g.vuln_id
+		LEFT JOIN epss_entries     epss ON epss.cve_id = g.vuln_id
+		ORDER BY (kev.cve_id IS NOT NULL)        DESC,
+		         COALESCE(epss.score, 0)         DESC,
+		         g.sev_rank                      ASC,
+		         g.cve_year                      DESC NULLS LAST,
+		         g.vuln_id                       ASC
 		LIMIT ? OFFSET ?
 	`, base, whereClause)
 
@@ -584,18 +607,24 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	groupArgs = append(groupArgs, p.Limit, p.Offset)
 
 	type groupRow struct {
-		VulnID           string          `gorm:"column:vuln_id"`
-		SevRank          int             `gorm:"column:sev_rank"`
-		Severity         string          `gorm:"column:severity"`
-		PkgName          string          `gorm:"column:pkg_name"`
-		InstalledVersion string          `gorm:"column:installed_version"`
-		FixedVersion     string          `gorm:"column:fixed_version"`
-		Title            string          `gorm:"column:title"`
-		Description      string          `gorm:"column:description"`
-		Sources          json.RawMessage `gorm:"column:sources"`
-		Assets           json.RawMessage `gorm:"column:assets"`
-		RepoCount        int             `gorm:"column:repo_count"`
-		ImageCount       int             `gorm:"column:image_count"`
+		VulnID             string          `gorm:"column:vuln_id"`
+		SevRank            int             `gorm:"column:sev_rank"`
+		CVEYear            *int            `gorm:"column:cve_year"`
+		Severity           string          `gorm:"column:severity"`
+		PkgName            string          `gorm:"column:pkg_name"`
+		InstalledVersion   string          `gorm:"column:installed_version"`
+		FixedVersion       string          `gorm:"column:fixed_version"`
+		Title              string          `gorm:"column:title"`
+		Description        string          `gorm:"column:description"`
+		Sources            json.RawMessage `gorm:"column:sources"`
+		Assets             json.RawMessage `gorm:"column:assets"`
+		RepoCount          int             `gorm:"column:repo_count"`
+		ImageCount         int             `gorm:"column:image_count"`
+		KEVKnown           bool            `gorm:"column:kev_known"`
+		KEVKnownRansomware bool            `gorm:"column:kev_known_ransomware"`
+		KEVDateAdded       *time.Time      `gorm:"column:kev_date_added"`
+		EPSSScore          float32         `gorm:"column:epss_score"`
+		EPSSPercentile     float32         `gorm:"column:epss_percentile"`
 	}
 	var raws []groupRow
 	if err := db.WithContext(ctx).Raw(groupSQL, groupArgs...).Scan(&raws).Error; err != nil {
@@ -619,17 +648,22 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			assets = []VulnAsset{}
 		}
 		items = append(items, VulnGroup{
-			VulnID:           r.VulnID,
-			Severity:         r.Severity,
-			PkgName:          r.PkgName,
-			InstalledVersion: r.InstalledVersion,
-			FixedVersion:     r.FixedVersion,
-			Title:            r.Title,
-			Description:      r.Description,
-			Sources:          sources,
-			Assets:           assets,
-			RepoCount:        r.RepoCount,
-			ImageCount:       r.ImageCount,
+			VulnID:             r.VulnID,
+			Severity:           r.Severity,
+			PkgName:            r.PkgName,
+			InstalledVersion:   r.InstalledVersion,
+			FixedVersion:       r.FixedVersion,
+			Title:              r.Title,
+			Description:        r.Description,
+			Sources:            sources,
+			Assets:             assets,
+			RepoCount:          r.RepoCount,
+			ImageCount:         r.ImageCount,
+			KEVKnown:           r.KEVKnown,
+			KEVKnownRansomware: r.KEVKnownRansomware,
+			KEVDateAdded:       r.KEVDateAdded,
+			EPSSScore:          r.EPSSScore,
+			EPSSPercentile:     r.EPSSPercentile,
 		})
 	}
 

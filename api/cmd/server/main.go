@@ -129,6 +129,8 @@ func run() error {
 		"migrations/20260423_create_view_unified_image_vulnerabilities.sql",
 		"migrations/20260423_create_vuln_metadata.sql",
 		"migrations/20260423_add_vuln_metadata_canonical_id.sql",
+		"migrations/20260429_create_cisa_kev_and_epss.sql",
+		"migrations/20260429_create_unique_active_kev_epss_jobs.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

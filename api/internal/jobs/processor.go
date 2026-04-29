@@ -64,6 +64,10 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processProbeSecrets(ctx, db, job)
 	case JobTypeVulnMetaFetch:
 		return processVulnMetaFetch(ctx, db, job)
+	case JobTypeFetchKEV:
+		return processFetchKEV(ctx, db)
+	case JobTypeFetchEPSS:
+		return processFetchEPSS(ctx, db)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -226,6 +230,104 @@ func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 		return
 	}
 	EnqueueVulnMetaFetches(ctx, db, ids)
+}
+
+// feedRefreshInterval is how often the bulk feeds (KEV, EPSS) are
+// repulled. CISA and FIRST.org both publish at most once per UTC day,
+// so 24 h matches their refresh cadence — anything tighter wastes
+// downloads on identical data.
+const feedRefreshInterval = 24 * time.Hour
+
+// processFetchKEV pulls the CISA KEV catalog into cisa_kev_entries
+// and enqueues the next refresh +24 h out. The unique index on
+// (type, status IN QUEUED|RETRY) makes the re-enqueue idempotent
+// across replicas.
+func processFetchKEV(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	count, err := vulnmeta.IngestKEV(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	scheduleNextFeedRefresh(ctx, db, JobTypeFetchKEV)
+	// KEV is the strongest exploitation signal we surface; warm the
+	// dashboard cache so the next list view picks up the new boost
+	// rather than serving the previous order from cache.
+	vulnmetrics.TriggerRefresh(db)
+	return map[string]any{"status": "ingested", "rows": count}, nil
+}
+
+// processFetchEPSS pulls the FIRST.org EPSS daily snapshot and
+// reschedules the same way as KEV.
+func processFetchEPSS(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	count, err := vulnmeta.IngestEPSS(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	scheduleNextFeedRefresh(ctx, db, JobTypeFetchEPSS)
+	vulnmetrics.TriggerRefresh(db)
+	return map[string]any{"status": "ingested", "rows": count}, nil
+}
+
+// scheduleNextFeedRefresh enqueues a follow-up FETCH_* job with
+// run_at = now + feedRefreshInterval. Failures are logged but not
+// fatal — the EnsureFeedRefreshScheduled startup hook covers the
+// case where a follow-up didn't get queued.
+func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) {
+	runAt := time.Now().Add(feedRefreshInterval)
+	if _, err := CreateJob(ctx, db, CreateJobInput{
+		Type:  jobType,
+		RunAt: runAt,
+	}); err != nil {
+		// Duplicate-key collisions just mean another replica already
+		// queued the next refresh; treat them as success.
+		if !strings.Contains(err.Error(), "duplicate key") &&
+			!strings.Contains(err.Error(), "ux_jobs_fetch_") {
+			log.Printf("schedule next %s: %v", jobType, err)
+		}
+	}
+}
+
+// EnsureFeedRefreshScheduled queues a FETCH_KEV / FETCH_EPSS job at
+// startup if neither is already pending and the last successful run
+// is older than feedRefreshInterval. Idempotent via the partial
+// unique index — duplicate queue attempts no-op silently. Call from
+// the worker boot path so a fresh deploy picks up feeds without
+// waiting for the previous schedule to fire.
+func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
+	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS} {
+		// If a queued/retry job already exists, the unique index
+		// would reject a fresh insert anyway — but checking first
+		// keeps the log clean.
+		var pending int64
+		if err := db.WithContext(ctx).Model(&Job{}).
+			Where("type = ? AND status IN ?", jobType, []JobStatus{JobStatusQueued, JobStatusRetry}).
+			Count(&pending).Error; err == nil && pending > 0 {
+			continue
+		}
+
+		// If we ran successfully recently enough, defer to the
+		// already-scheduled +24 h follow-up rather than firing a
+		// duplicate. cutoff = now - interval.
+		var lastSuccess time.Time
+		_ = db.WithContext(ctx).Model(&Job{}).
+			Select("COALESCE(MAX(finished_at), '1970-01-01')").
+			Where("type = ? AND status = ?", jobType, JobStatusSucceeded).
+			Scan(&lastSuccess).Error
+
+		runAt := time.Now()
+		if !lastSuccess.IsZero() && time.Since(lastSuccess) < feedRefreshInterval {
+			runAt = lastSuccess.Add(feedRefreshInterval)
+		}
+
+		if _, err := CreateJob(ctx, db, CreateJobInput{
+			Type:  jobType,
+			RunAt: runAt,
+		}); err != nil {
+			if !strings.Contains(err.Error(), "duplicate key") &&
+				!strings.Contains(err.Error(), "ux_jobs_fetch_") {
+				log.Printf("ensure %s scheduled: %v", jobType, err)
+			}
+		}
+	}
 }
 
 func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {

@@ -374,13 +374,20 @@ worker:
     timeoutSeconds: 5
     failureThreshold: 3
 
-  resources: {}
-    # limits:
-    #   cpu: 200m
-    #   memory: 256Mi
-    # requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+  # Sized to move the pod out of BestEffort (on cpu, memory, and
+  # especially ephemeral-storage). Without an ephemeral-storage request
+  # the worker was first in the eviction queue when any neighbour filled
+  # the node. The worker itself uses little disk — mostly the writable
+  # rootfs + stdout logs — but 0 request meant 0 guarantee.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 2Gi
 
 # Runner configuration
 # repo-runner: clones a repo in a K8s Job and produces artifacts —

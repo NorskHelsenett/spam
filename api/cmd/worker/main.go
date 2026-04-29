@@ -200,6 +200,12 @@ func run() error {
 		log.Printf("requeued %d stale running jobs on startup", n)
 	}
 
+	// Bulk feed refresh: queue FETCH_KEV / FETCH_EPSS if neither is
+	// pending and the last successful run is stale. Each handler then
+	// self-schedules its +24 h follow-up; the partial unique index
+	// makes this safe to call from every replica.
+	jobs.EnsureFeedRefreshScheduled(ctx, gormDB)
+
 	// Semaphore to limit concurrent job processing
 	sem := make(chan struct{}, cfg.Concurrency)
 
