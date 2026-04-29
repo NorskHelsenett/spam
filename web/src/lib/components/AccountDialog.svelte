@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Dialog from './Dialog.svelte';
-	import { User, Mail, LogOut, Users } from 'lucide-svelte';
+	import { User, Mail, LogOut, Users, Building2 } from 'lucide-svelte';
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
 
@@ -15,6 +15,7 @@
 		email: string;
 		avatar: string;
 		groups: string[];
+		entraGroups: string[];
 		role: string;
 	};
 
@@ -44,6 +45,7 @@
 					// has an EntraID photo, else Gravatar URL derived from email.
 					avatar: data.picture || '',
 					groups: Array.isArray(data.groups) ? data.groups : [],
+					entraGroups: Array.isArray(data.entra_groups) ? data.entra_groups : [],
 					role: data.role || ''
 				};
 			}
@@ -164,6 +166,28 @@
 							</div>
 						</div>
 					</div>
+
+					{#if user.entraGroups.length > 0}
+						<div class="rounded-lg border border-[var(--hover-bg)] bg-[var(--card-bg)]/40 p-4">
+							<div class="flex items-start gap-3">
+								<div class="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--hover-bg)]">
+									<Building2 size={18} class="text-[var(--text-bright)]" />
+								</div>
+								<div class="flex-1 min-w-0">
+									<div class="text-xs text-[var(--text-quaternary)] mb-2">EntraID Groups ({user.entraGroups.length})</div>
+									<div class="max-h-48 overflow-y-auto pr-1">
+										<div class="flex flex-wrap gap-1.5">
+											{#each user.entraGroups as name (name)}
+												<span class="inline-flex items-center rounded-full border border-[var(--hover-bg)] bg-[var(--hover-bg)]/40 px-2.5 py-0.5 text-xs font-medium text-[var(--text-bright)]">
+													{name}
+												</span>
+											{/each}
+										</div>
+									</div>
+								</div>
+							</div>
+						</div>
+					{/if}
 				</div>
 			</div>
 

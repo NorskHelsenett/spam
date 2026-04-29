@@ -63,15 +63,16 @@ type userClaims struct {
 }
 
 type userResponse struct {
-	UserID   string                 `json:"user_id,omitempty"`
-	Subject  string                 `json:"subject"`
-	Email    string                 `json:"email,omitempty"`
-	Name     string                 `json:"name,omitempty"`
-	Picture  string                 `json:"picture,omitempty"`
-	Claims   map[string]interface{} `json:"claims,omitempty"`
-	Groups   []string               `json:"groups,omitempty"`
-	Role     string                 `json:"role,omitempty"`
-	Approved bool                   `json:"approved"`
+	UserID      string                 `json:"user_id,omitempty"`
+	Subject     string                 `json:"subject"`
+	Email       string                 `json:"email,omitempty"`
+	Name        string                 `json:"name,omitempty"`
+	Picture     string                 `json:"picture,omitempty"`
+	Claims      map[string]interface{} `json:"claims,omitempty"`
+	Groups      []string               `json:"groups,omitempty"`
+	EntraGroups []string               `json:"entra_groups,omitempty"`
+	Role        string                 `json:"role,omitempty"`
+	Approved    bool                   `json:"approved"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -239,14 +240,23 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			}
 		}
 
-		// Best-effort avatar refresh from Microsoft Graph. Failure here must
-		// not block login — Gravatar fallback covers users without a photo
-		// and tenants whose tokens lack Graph access.
+		// Best-effort avatar + EntraID groups refresh from Microsoft Graph.
+		// Failures here must not block login — Gravatar covers missing photos
+		// and the groups list silently empties when the token lacks scope.
 		if userResult.user.ID != "" && token.AccessToken != "" {
 			if dataURL, gerr := fetchAzurePhotoDataURL(r.Context(), token.AccessToken); gerr == nil && dataURL != "" && dataURL != userResult.user.Picture {
 				if uerr := s.db.WithContext(r.Context()).Model(&User{}).Where("id = ?", userResult.user.ID).Update("picture", dataURL).Error; uerr != nil {
 					log.Printf("update user picture: %v", uerr)
 				}
+			}
+			if names, gerr := fetchAzureGroupNames(r.Context(), token.AccessToken); gerr == nil && names != nil {
+				if encoded, merr := json.Marshal(names); merr == nil {
+					if uerr := s.db.WithContext(r.Context()).Model(&User{}).Where("id = ?", userResult.user.ID).Update("entra_groups", string(encoded)).Error; uerr != nil {
+						log.Printf("update user entra_groups: %v", uerr)
+					}
+				}
+			} else if gerr != nil {
+				log.Printf("fetch entra groups: %v", gerr)
 			}
 		}
 
@@ -317,8 +327,14 @@ func (s *Service) MeHandler() http.HandlerFunc {
 			}
 
 			var user User
-			if err := s.db.WithContext(r.Context()).Select("picture").First(&user, "id = ?", session.UserID).Error; err == nil {
+			if err := s.db.WithContext(r.Context()).Select("picture", "entra_groups").First(&user, "id = ?", session.UserID).Error; err == nil {
 				response.Picture = pictureOrGravatar(user.Picture, session.Email)
+				if user.EntraGroups != "" {
+					var names []string
+					if jerr := json.Unmarshal([]byte(user.EntraGroups), &names); jerr == nil {
+						response.EntraGroups = names
+					}
+				}
 			} else {
 				response.Picture = pictureOrGravatar("", session.Email)
 			}
