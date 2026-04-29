@@ -75,17 +75,30 @@ type VulnAffectedImage struct {
 // requests will include it). The view still renders — title /
 // description / severity come through from the scan-side data.
 type VulnDetailResponse struct {
-	VulnID         string              `json:"vuln_id"`
-	Title          string              `json:"title"`
-	Description    string              `json:"description"`
-	Severity       string              `json:"severity"`
-	Sources        []string            `json:"sources"`
-	Enrichment     *vulnmeta.Metadata  `json:"enrichment,omitempty"`
-	EnrichmentLoading bool             `json:"enrichment_loading"`
-	AffectedRepos  []VulnAffectedRepo  `json:"affected_repos"`
-	AffectedImages []VulnAffectedImage `json:"affected_images"`
-	RepoCount      int                 `json:"repo_count"`
-	ImageCount     int                 `json:"image_count"`
+	VulnID            string              `json:"vuln_id"`
+	Title             string              `json:"title"`
+	Description       string              `json:"description"`
+	Severity          string              `json:"severity"`
+	Sources           []string            `json:"sources"`
+	Enrichment        *vulnmeta.Metadata  `json:"enrichment,omitempty"`
+	EnrichmentLoading bool                `json:"enrichment_loading"`
+	AffectedRepos     []VulnAffectedRepo  `json:"affected_repos"`
+	AffectedImages    []VulnAffectedImage `json:"affected_images"`
+	RepoCount         int                 `json:"repo_count"`
+	ImageCount        int                 `json:"image_count"`
+
+	// Exploitation signals from the bulk feeds. Mirrors the fields
+	// returned by /api/vuln/list — KEVKnown is the authoritative
+	// "actually exploited in the wild" flag from CISA, EPSSScore /
+	// EPSSPercentile come from FIRST.org's daily model. KEV/EPSS
+	// only score CVE identifiers; we look up against the canonical
+	// id and every alias so users who land on a GHSA-* / BIT-* still
+	// see the boost when one of the aliases is a CVE.
+	KEVKnown           bool       `json:"kev_known"`
+	KEVKnownRansomware bool       `json:"kev_known_ransomware"`
+	KEVDateAdded       *time.Time `json:"kev_date_added,omitempty"`
+	EPSSScore          float32    `json:"epss_score"`
+	EPSSPercentile     float32    `json:"epss_percentile"`
 }
 
 // VulnDetailHandler — GET /api/vulnerabilities/{vuln_id}
@@ -155,6 +168,56 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		// bridge both.
 		vulnIDs := vulnmeta.AliasSet(vulnID, meta)
 		osvAffected := vulnmeta.ExtractOSVAffected(meta)
+
+		// KEV / EPSS lookup. Both feeds key on CVE-* only, so we filter
+		// the alias set down to CVE-prefixed ids and pick whichever row
+		// hits. A vuln stored under GHSA-* / BIT-* still surfaces the
+		// boost when one of its aliases is the CVE these feeds know.
+		// Two queries instead of one join: the rows are tiny and either
+		// table may carry the only signal (KEV without an EPSS score
+		// is common for newly-added entries).
+		var cveIDs []string
+		for _, id := range vulnIDs {
+			if strings.HasPrefix(id, "CVE-") {
+				cveIDs = append(cveIDs, id)
+			}
+		}
+		if len(cveIDs) > 0 {
+			var kevRow struct {
+				KnownRansomware bool       `gorm:"column:known_ransomware"`
+				DateAdded       *time.Time `gorm:"column:date_added"`
+			}
+			if err := db.WithContext(ctx).Raw(`
+				SELECT known_ransomware, date_added
+				FROM cisa_kev_entries
+				WHERE cve_id IN ?
+				ORDER BY date_added DESC NULLS LAST
+				LIMIT 1
+			`, cveIDs).Scan(&kevRow).Error; err == nil && kevRow.DateAdded != nil {
+				resp.KEVKnown = true
+				resp.KEVKnownRansomware = kevRow.KnownRansomware
+				resp.KEVDateAdded = kevRow.DateAdded
+			} else if err != nil {
+				log.Printf("vuln-detail: kev lookup %s: %v", vulnID, err)
+			}
+
+			var epssRow struct {
+				Score      float32 `gorm:"column:score"`
+				Percentile float32 `gorm:"column:percentile"`
+			}
+			if err := db.WithContext(ctx).Raw(`
+				SELECT score, percentile
+				FROM epss_entries
+				WHERE cve_id IN ?
+				ORDER BY score DESC
+				LIMIT 1
+			`, cveIDs).Scan(&epssRow).Error; err == nil {
+				resp.EPSSScore = epssRow.Score
+				resp.EPSSPercentile = epssRow.Percentile
+			} else {
+				log.Printf("vuln-detail: epss lookup %s: %v", vulnID, err)
+			}
+		}
 
 		// Affected repos — scoped by ACL.
 		repoClause, err := acl.ReadableRepoClause(ctx, acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")

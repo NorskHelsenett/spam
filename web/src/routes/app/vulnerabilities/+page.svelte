@@ -144,6 +144,7 @@
 			vulnSelectedSources,
 			vulnSelectedYears,
 			vulnFixAvailable,
+			vulnKEVOnly,
 			imageSearch,
 			imageSelectedRegistries,
 			imageSelectedSeverities,
@@ -161,6 +162,7 @@
 			vulnSelectedSources?: string[];
 			vulnSelectedYears?: string[];
 			vulnFixAvailable?: boolean;
+			vulnKEVOnly?: boolean;
 			imageSearch?: string;
 			imageSelectedRegistries?: string[];
 			imageSelectedSeverities?: string[];
@@ -173,6 +175,7 @@
 			if (value.vulnSelectedSources) vulnSelectedSources = value.vulnSelectedSources;
 			if (value.vulnSelectedYears) vulnSelectedYears = value.vulnSelectedYears;
 			if (value.vulnFixAvailable !== undefined) vulnFixAvailable = value.vulnFixAvailable;
+			if (value.vulnKEVOnly !== undefined) vulnKEVOnly = value.vulnKEVOnly;
 			if (value.imageSearch !== undefined) imageSearch = value.imageSearch;
 			if (value.imageSelectedRegistries) imageSelectedRegistries = value.imageSelectedRegistries;
 			if (value.imageSelectedSeverities) imageSelectedSeverities = value.imageSelectedSeverities;
@@ -234,6 +237,10 @@
 	let vulnSelectedSources: string[] = [];
 	let vulnSelectedYears: string[] = [];
 	let vulnFixAvailable = false;
+	// Known-exploited filter: shows only advisories listed in the CISA
+	// KEV catalog (i.e., observed in real-world attacks). Backed by the
+	// kev=1 query param on /api/vuln/list.
+	let vulnKEVOnly = false;
 
 	const severityFilterOptions: MultiSelectOption[] = [
 		{ value: 'CRITICAL', label: 'Critical' },
@@ -264,6 +271,7 @@
 		if (vulnSelectedSources.length) params.set('source', vulnSelectedSources.join(','));
 		if (vulnSelectedYears.length) params.set('year', vulnSelectedYears.join(','));
 		if (vulnFixAvailable) params.set('fix', '1');
+		if (vulnKEVOnly) params.set('kev', '1');
 		const q = vulnSearch.trim();
 		if (q) params.set('q', q);
 		try {
@@ -378,7 +386,8 @@
 		vulnSelectedSeverities.slice().sort(),
 		vulnSelectedSources.slice().sort(),
 		vulnSelectedYears.slice().sort(),
-		vulnFixAvailable
+		vulnFixAvailable,
+		vulnKEVOnly
 	]);
 	let prevVulnFiltersKey = '';
 	$: if (activeTab === 'vulnerabilities' && vulnFiltersKey !== prevVulnFiltersKey) {
@@ -488,7 +497,8 @@
 		(vulnSelectedSeverities.length > 0 ? 1 : 0) +
 		(vulnSelectedSources.length > 0 ? 1 : 0) +
 		(vulnSelectedYears.length > 0 ? 1 : 0) +
-		(vulnFixAvailable ? 1 : 0);
+		(vulnFixAvailable ? 1 : 0) +
+		(vulnKEVOnly ? 1 : 0);
 
 	function clearRepoFilters() {
 		repoSearch = ''; repoSelectedSeverities = []; repoHideClean = false;
@@ -498,7 +508,7 @@
 	}
 	function clearVulnFilters() {
 		vulnSearch = ''; vulnSelectedSeverities = []; vulnSelectedSources = [];
-		vulnSelectedYears = []; vulnFixAvailable = false;
+		vulnSelectedYears = []; vulnFixAvailable = false; vulnKEVOnly = false;
 	}
 
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
@@ -861,6 +871,12 @@
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Has fix</span>
 							<div class="flex items-center h-[28px]">
 								<Toggle bind:checked={vulnFixAvailable} label="Fixable only" />
+							</div>
+						</div>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5" title="Listed in CISA's Known Exploited Vulnerabilities catalog — observed in real-world attacks.">Exploitation</span>
+							<div class="flex items-center h-[28px]">
+								<Toggle bind:checked={vulnKEVOnly} label="Known exploited" />
 							</div>
 						</div>
 						{#if vulnActiveFilterCount > 0}

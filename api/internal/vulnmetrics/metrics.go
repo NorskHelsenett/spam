@@ -124,8 +124,13 @@ type VulnListParams struct {
 	Query      string
 	Sources    []string
 	FixOnly    bool
-	Years      []string
-	RepoID     string
+	// KEVOnly restricts results to advisories with a CISA KEV entry —
+	// "actually exploited in the wild." Implemented as an EXISTS
+	// subquery against cisa_kev_entries on the canonical id, so the
+	// count + items queries stay consistent.
+	KEVOnly bool
+	Years   []string
+	RepoID  string
 
 	// RepoSQL filters rows from the repo-side UNION branch. Fragment is
 	// interpolated verbatim as a WHERE predicate on the repos-view row;
@@ -413,12 +418,13 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 		Severities, Sources, Years []string
 		Query                      string
 		FixOnly                    bool
+		KEVOnly                    bool
 		RepoID                     string
 		RepoSQL, ImageSQL          string
 		RepoArgs, ImageArgs        []any
 	}{
 		p.Limit, p.Offset, p.Severities, p.Sources, p.Years,
-		p.Query, p.FixOnly, p.RepoID, p.RepoSQL, p.ImageSQL,
+		p.Query, p.FixOnly, p.KEVOnly, p.RepoID, p.RepoSQL, p.ImageSQL,
 		p.RepoArgs, p.ImageArgs,
 	})
 	return fmt.Sprintf("%s%x", listCachePrefix, h.Sum64())
@@ -473,6 +479,14 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	}
 	if p.FixOnly {
 		where = append(where, "av.fixed_version <> ''")
+	}
+	if p.KEVOnly {
+		// EXISTS keyed on the canonical id (or the raw scanner-reported
+		// id when no enrichment row exists yet). KEV is CVE-only, so
+		// non-CVE advisories without a CVE alias correctly drop out.
+		// Pushed into the same WHERE the count + ranked CTEs share so
+		// total and items stay in lockstep.
+		where = append(where, "EXISTS (SELECT 1 FROM cisa_kev_entries kev WHERE kev.cve_id = COALESCE(vm.canonical_id, av.vuln_id))")
 	}
 	if q := strings.TrimSpace(p.Query); q != "" {
 		needle := "%" + strings.ToLower(q) + "%"

@@ -70,6 +70,14 @@
 		affected_images: AffectedImage[];
 		repo_count: number;
 		image_count: number;
+		// Exploitation signals from CISA KEV + FIRST.org EPSS, joined on
+		// CVE id (or any CVE alias). Both default to false / 0 when the
+		// advisory isn't a CVE or the feeds don't know it yet.
+		kev_known: boolean;
+		kev_known_ransomware: boolean;
+		kev_date_added: string | null;
+		epss_score: number;
+		epss_percentile: number;
 	};
 
 	// Route is /app/vuln/[id] — short URL for manual typing. The
@@ -277,6 +285,22 @@
 								<RefreshCw class="h-3 w-3 animate-spin" /> enriching
 							</span>
 						{/if}
+						{#if data.kev_known}
+							<span
+								class="inline-flex items-center gap-1 rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400"
+								title="Listed in the CISA Known Exploited Vulnerabilities catalog{data.kev_date_added ? ` (added ${fmtDate(data.kev_date_added)})` : ''}"
+							>
+								<ShieldX class="h-3 w-3" /> Known Exploited
+							</span>
+						{/if}
+						{#if data.kev_known_ransomware}
+							<span
+								class="inline-flex items-center gap-1 rounded-full border border-orange-500/40 bg-orange-500/10 px-2 py-0.5 text-xs font-semibold text-orange-400"
+								title="Used in known ransomware campaigns (CISA KEV)"
+							>
+								Ransomware
+							</span>
+						{/if}
 						{#each data.sources ?? [] as src}
 							<span class="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--hover-bg)] px-2 py-0.5 text-xs text-[var(--text-secondary)]">{src}</span>
 						{/each}
@@ -290,8 +314,8 @@
 				</a>
 			</div>
 
-			<!-- Published / Modified / CVSS metric cards -->
-			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+			<!-- Published / Modified / CVSS / EPSS / Exposure metric cards -->
+			<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
 				<div class="metric-card rounded-2xl border border-[var(--border-color)]/60 p-4">
 					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Published</p>
 					<p class="mt-2 text-sm font-semibold text-[var(--text-bright)]">{fmtDate(data.enrichment?.published_at)}</p>
@@ -311,6 +335,16 @@
 					{/if}
 					{#if cvssDisplay(data.enrichment).vector}
 						<p class="truncate text-[10px] font-mono text-[var(--text-tertiary)]" title={cvssDisplay(data.enrichment).vector}>{cvssDisplay(data.enrichment).vector}</p>
+					{/if}
+				</div>
+				<div class="metric-card rounded-2xl border border-[var(--border-color)]/60 p-4" title="FIRST.org Exploit Prediction Scoring System — daily-updated probability that this CVE is exploited within 30 days, plus its rank against all scored CVEs.">
+					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">EPSS</p>
+					{#if data.epss_score > 0 || data.epss_percentile > 0}
+						<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">{(data.epss_score * 100).toFixed(2)}%</p>
+						<p class="text-xs text-[var(--text-tertiary)]">{(data.epss_percentile * 100).toFixed(1)} percentile</p>
+					{:else}
+						<p class="mt-2 text-sm font-semibold text-[var(--text-muted)]">—</p>
+						<p class="text-xs text-[var(--text-tertiary)]">no score</p>
 					{/if}
 				</div>
 				<div class="metric-card rounded-2xl border border-[var(--border-color)]/60 p-4">
