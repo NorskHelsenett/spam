@@ -19,6 +19,259 @@
 		loading = true;
 		window.location.href = '/api/auth/login';
 	}
+
+	// ---- Procedural 3D dependency graph (right panel) ----
+	type WorldNode = {
+		id: number;
+		x: number;
+		y: number;
+		z: number;
+		bornMs: number;
+		removedAt: number | null;
+	};
+	type WorldEdge = {
+		id: number;
+		from: number;
+		to: number;
+		startMs: number;
+	};
+
+	const SPAWN_INTERVAL = 700; // ms — new edge appears every 0.7s
+	const EDGE_DURATION = 1800; // ms — each edge takes 1.8s to draw
+	const NODE_CAP = 60; // recycle when graph reaches this size
+	const RECYCLE_FADE = 900; // ms fade-out for recycled leaves
+	const COMFORT_PX = 230; // target screen radius for the graph
+	const ROTATION_SPEED = 0.00009; // rad/ms around Y axis
+	const TILT = 0.32; // X-axis tilt (radians)
+	const FOCAL = 6; // perspective focal — larger = flatter
+
+	let nextNodeId = 1;
+	let nextEdgeId = 0;
+	let worldNodes = $state<WorldNode[]>([
+		{ id: 0, x: 0, y: 0, z: 0, bornMs: 0, removedAt: null }
+	]);
+	let worldEdges = $state<WorldEdge[]>([]);
+
+	let elapsed = $state(0);
+	let zoom = $state(180);
+	let lastSpawnMs = -SPAWN_INTERVAL;
+	let reduced = $state(false);
+
+	$effect(() => {
+		if (typeof window === 'undefined') return;
+		const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+		reduced = mq.matches;
+		const onChange = () => (reduced = mq.matches);
+		mq.addEventListener('change', onChange);
+		return () => mq.removeEventListener('change', onChange);
+	});
+
+	$effect(() => {
+		if (reduced) {
+			seedStaticGraph();
+			return;
+		}
+		let raf = 0;
+		let start: number | null = null;
+		const tick = (t: number) => {
+			if (start === null) start = t;
+			const e = t - start;
+			elapsed = e;
+
+			if (e - lastSpawnMs >= SPAWN_INTERVAL) {
+				spawn(e);
+				lastSpawnMs = e;
+			}
+			sweep(e);
+
+			const target = computeTargetZoom();
+			zoom += (target - zoom) * 0.04;
+
+			raf = requestAnimationFrame(tick);
+		};
+		raf = requestAnimationFrame(tick);
+		return () => cancelAnimationFrame(raf);
+	});
+
+	function easeOutCubic(x: number) {
+		return 1 - Math.pow(1 - x, 3);
+	}
+
+	function spawn(t: number) {
+		if (worldNodes.filter((n) => n.removedAt === null).length >= NODE_CAP) {
+			recycleOldestLeaf(t);
+		}
+		const parent = pickParent();
+		const theta = Math.random() * Math.PI * 2;
+		const phi = Math.acos(2 * Math.random() - 1);
+		const r = 0.55 + Math.random() * 0.45;
+		const dx = r * Math.sin(phi) * Math.cos(theta);
+		const dy = r * Math.sin(phi) * Math.sin(theta);
+		const dz = r * Math.cos(phi);
+		const node: WorldNode = {
+			id: nextNodeId++,
+			x: parent.x + dx,
+			y: parent.y + dy,
+			z: parent.z + dz,
+			bornMs: t,
+			removedAt: null
+		};
+		worldNodes.push(node);
+		worldEdges.push({ id: nextEdgeId++, from: parent.id, to: node.id, startMs: t });
+	}
+
+	function pickParent(): WorldNode {
+		const childCount = new Map<number, number>();
+		for (const e of worldEdges) {
+			const from = worldNodes.find((n) => n.id === e.from);
+			if (!from || from.removedAt !== null) continue;
+			childCount.set(e.from, (childCount.get(e.from) ?? 0) + 1);
+		}
+		const candidates = worldNodes.filter(
+			(n) => n.removedAt === null && (childCount.get(n.id) ?? 0) < 3
+		);
+		if (candidates.length === 0) return worldNodes[0];
+		// Light bias toward newer nodes so growth keeps pushing outward
+		const weights = candidates.map((n) => 1 + n.bornMs / 8000);
+		const total = weights.reduce((a, b) => a + b, 0);
+		let pick = Math.random() * total;
+		for (let i = 0; i < candidates.length; i++) {
+			pick -= weights[i];
+			if (pick <= 0) return candidates[i];
+		}
+		return candidates[candidates.length - 1];
+	}
+
+	function recycleOldestLeaf(t: number) {
+		const hasChildren = new Set<number>();
+		for (const e of worldEdges) {
+			const to = worldNodes.find((n) => n.id === e.to);
+			if (to && to.removedAt === null) hasChildren.add(e.from);
+		}
+		const leaves = worldNodes
+			.filter((n) => n.id !== 0 && n.removedAt === null && !hasChildren.has(n.id))
+			.sort((a, b) => a.bornMs - b.bornMs);
+		if (leaves.length > 0) leaves[0].removedAt = t;
+	}
+
+	function sweep(t: number) {
+		for (let i = worldNodes.length - 1; i >= 0; i--) {
+			const n = worldNodes[i];
+			if (n.removedAt !== null && t - n.removedAt > RECYCLE_FADE) {
+				const id = n.id;
+				worldNodes.splice(i, 1);
+				for (let j = worldEdges.length - 1; j >= 0; j--) {
+					if (worldEdges[j].from === id || worldEdges[j].to === id) {
+						worldEdges.splice(j, 1);
+					}
+				}
+			}
+		}
+	}
+
+	function computeTargetZoom(): number {
+		let maxR = 0.5;
+		for (const n of worldNodes) {
+			if (n.removedAt !== null) continue;
+			const r = Math.sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+			if (r > maxR) maxR = r;
+		}
+		return COMFORT_PX / maxR;
+	}
+
+	function seedStaticGraph() {
+		const layout = [
+			{ x: 1, y: -0.8, z: 0.2 },
+			{ x: -1, y: -0.5, z: -0.4 },
+			{ x: 0.6, y: 0.9, z: 0.5 },
+			{ x: -0.7, y: 0.7, z: -0.3 },
+			{ x: 1.6, y: -1.2, z: 0.9 },
+			{ x: -1.5, y: -0.9, z: -0.7 }
+		];
+		for (let i = 0; i < layout.length; i++) {
+			const parent = i < 4 ? worldNodes[0] : worldNodes[i - 3];
+			worldNodes.push({
+				id: nextNodeId++,
+				x: parent.x + layout[i].x,
+				y: parent.y + layout[i].y,
+				z: parent.z + layout[i].z,
+				bornMs: 0,
+				removedAt: null
+			});
+			worldEdges.push({
+				id: nextEdgeId++,
+				from: parent.id,
+				to: nextNodeId - 1,
+				startMs: -EDGE_DURATION
+			});
+		}
+		zoom = computeTargetZoom();
+	}
+
+	type Projected = { id: number; sx: number; sy: number; depth: number; z: number };
+
+	const projected = $derived.by<Projected[]>(() => {
+		const ay = elapsed * ROTATION_SPEED;
+		const cosY = Math.cos(ay);
+		const sinY = Math.sin(ay);
+		const cosX = Math.cos(TILT);
+		const sinX = Math.sin(TILT);
+		const out: Projected[] = [];
+		for (const n of worldNodes) {
+			const x1 = n.x * cosY + n.z * sinY;
+			const z1 = -n.x * sinY + n.z * cosY;
+			const y1 = n.y * cosX - z1 * sinX;
+			const z2 = n.y * sinX + z1 * cosX;
+			const depth = FOCAL / (FOCAL + z2);
+			out.push({
+				id: n.id,
+				sx: x1 * depth * zoom + 300,
+				sy: y1 * depth * zoom + 300,
+				depth,
+				z: z2
+			});
+		}
+		return out;
+	});
+
+	const projMap = $derived.by(() => {
+		const m = new Map<number, Projected>();
+		for (const p of projected) m.set(p.id, p);
+		return m;
+	});
+
+	const sortedNodes = $derived.by(() => {
+		const indexed = worldNodes.map((n, i) => ({ n, p: projected[i] }));
+		indexed.sort((a, b) => b.p.z - a.p.z); // far first
+		return indexed;
+	});
+
+	function edgeProgress(edge: WorldEdge, t: number): number {
+		const local = t - edge.startMs;
+		if (local <= 0) return 0;
+		if (local >= EDGE_DURATION) return 1;
+		return easeOutCubic(local / EDGE_DURATION);
+	}
+
+	function nodeAlpha(n: WorldNode, t: number): number {
+		if (n.removedAt !== null) {
+			return Math.max(0, 1 - (t - n.removedAt) / RECYCLE_FADE);
+		}
+		if (n.id === 0) return 1;
+		const incoming = worldEdges.find((e) => e.to === n.id);
+		if (!incoming) return 0;
+		return 0.2 + 0.8 * edgeProgress(incoming, t);
+	}
+
+	function edgeAlpha(e: WorldEdge, t: number): number {
+		const from = worldNodes.find((n) => n.id === e.from);
+		const to = worldNodes.find((n) => n.id === e.to);
+		if (!from || !to) return 0;
+		const fromFade =
+			from.removedAt !== null ? Math.max(0, 1 - (t - from.removedAt) / RECYCLE_FADE) : 1;
+		const toFade = to.removedAt !== null ? Math.max(0, 1 - (t - to.removedAt) / RECYCLE_FADE) : 1;
+		return Math.min(fromFade, toFade);
+	}
 </script>
 
 <svelte:head>
@@ -59,79 +312,65 @@
 		</footer>
 	</aside>
 
-	<section class="hero" aria-hidden="true">
+	<div class="hero" aria-hidden="true">
 		<div class="hero-glow"></div>
 		<div class="hero-grid"></div>
 
 		<svg
 			class="hero-art"
 			viewBox="0 0 600 600"
+			preserveAspectRatio="xMidYMid meet"
 			fill="none"
 			xmlns="http://www.w3.org/2000/svg"
 		>
-			<defs>
-				<linearGradient id="topFace" x1="0.5" y1="0" x2="0.5" y2="1">
-					<stop offset="0%" stop-color="var(--accent)" stop-opacity="0.45" />
-					<stop offset="100%" stop-color="var(--accent)" stop-opacity="0.15" />
-				</linearGradient>
-				<linearGradient id="leftFace" x1="0" y1="0" x2="1" y2="1">
-					<stop offset="0%" stop-color="var(--warning)" stop-opacity="0.28" />
-					<stop offset="100%" stop-color="var(--warning)" stop-opacity="0.06" />
-				</linearGradient>
-				<linearGradient id="rightFace" x1="1" y1="0" x2="0" y2="1">
-					<stop offset="0%" stop-color="var(--accent-dark)" stop-opacity="0.22" />
-					<stop offset="100%" stop-color="var(--accent-dark)" stop-opacity="0.04" />
-				</linearGradient>
-			</defs>
-
-			<!-- 3 visible faces of an isometric cube -->
-			<polygon points="300,100 473,200 300,300 127,200" fill="url(#topFace)" />
-			<polygon points="127,200 300,300 300,500 127,400" fill="url(#leftFace)" />
-			<polygon points="473,200 473,400 300,500 300,300" fill="url(#rightFace)" />
-
-			<!-- Outer silhouette -->
-			<polygon
-				points="300,100 473,200 473,400 300,500 127,400 127,200"
-				stroke="var(--accent)"
-				stroke-width="1.5"
-				stroke-opacity="0.7"
-				stroke-linejoin="round"
-			/>
-
-			<!-- Interior Y (3 edges meeting at front-bottom corner) -->
-			<g stroke="var(--accent)" stroke-opacity="0.55" stroke-width="1.25" stroke-linecap="round">
-				<line x1="300" y1="100" x2="300" y2="300" />
-				<line x1="127" y1="200" x2="300" y2="300" />
-				<line x1="473" y1="200" x2="300" y2="300" />
+			<!-- Edges (drawn behind nodes). Each line traces from its parent toward the child as edgeProgress climbs from 0→1. -->
+			<g stroke="var(--accent)" stroke-width="1.25" stroke-linecap="round">
+				{#each worldEdges as edge (edge.id)}
+					{@const a = projMap.get(edge.from)}
+					{@const b = projMap.get(edge.to)}
+					{#if a && b}
+						{@const p = edgeProgress(edge, elapsed)}
+						{@const alpha = edgeAlpha(edge, elapsed)}
+						{@const avgDepth = (a.depth + b.depth) / 2}
+						<line
+							x1={a.sx}
+							y1={a.sy}
+							x2={a.sx + (b.sx - a.sx) * p}
+							y2={a.sy + (b.sy - a.sy) * p}
+							stroke-opacity={0.65 * alpha * (0.55 + 0.45 * avgDepth)}
+						/>
+					{/if}
+				{/each}
 			</g>
 
-			<!-- Vertex nodes (read as "components" / SBOM) -->
+			<!-- Nodes: back-to-front depth-sorted; size and brightness scale with perspective factor -->
 			<g fill="var(--accent)">
-				<circle cx="300" cy="100" r="4" />
-				<circle cx="473" cy="200" r="4" />
-				<circle cx="473" cy="400" r="4" />
-				<circle cx="300" cy="500" r="4" />
-				<circle cx="127" cy="400" r="4" />
-				<circle cx="127" cy="200" r="4" />
-				<circle cx="300" cy="300" r="5" />
+				{#each sortedNodes as item (item.n.id)}
+					{@const n = item.n}
+					{@const p = item.p}
+					{@const isRoot = n.id === 0}
+					{@const baseR = isRoot ? 5 : 3.2}
+					{@const r = baseR * (0.55 + 0.45 * p.depth)}
+					<circle
+						cx={p.sx}
+						cy={p.sy}
+						{r}
+						opacity={nodeAlpha(n, elapsed) * (0.55 + 0.45 * p.depth)}
+					/>
+				{/each}
 			</g>
 
-			<!-- Faint orbital cube hint -->
-			<g
-				stroke="var(--accent)"
-				stroke-opacity="0.18"
-				stroke-width="0.75"
-				stroke-dasharray="3 5"
-				fill="none"
-			>
-				<polygon points="300,40 545,180 545,420 300,560 55,420 55,180" />
-			</g>
+			<!-- Soft halo at the root, follows its projected position -->
+			{#if projMap.get(0)}
+				{@const root = projMap.get(0)!}
+				<circle cx={root.sx} cy={root.sy} r={12 * root.depth} fill="var(--accent)" opacity="0.18" />
+			{/if}
 		</svg>
 
 		<div class="hero-caption">
 			<p class="caption-line">Inventory · Advisories · Provenance</p>
 		</div>
-	</section>
+	</div>
 </div>
 
 <style>
@@ -238,6 +477,11 @@
 	.hero {
 		position: relative;
 		overflow: hidden;
+		min-height: 100vh;
+		margin: 0;
+		padding: 0;
+		border: none;
+		box-shadow: none;
 		background:
 			radial-gradient(
 				ellipse at 75% 15%,
@@ -284,20 +528,9 @@
 		position: absolute;
 		top: 50%;
 		left: 50%;
-		width: min(70%, 640px);
-		transform: translate(-50%, -52%);
-		animation: float 18s ease-in-out infinite;
-		filter: drop-shadow(0 24px 60px rgba(0, 0, 0, 0.35));
-	}
-
-	@keyframes float {
-		0%,
-		100% {
-			transform: translate(-50%, -52%);
-		}
-		50% {
-			transform: translate(-50%, -55%);
-		}
+		width: min(72%, 680px);
+		aspect-ratio: 1;
+		transform: translate(-50%, -50%);
 	}
 
 	.hero-caption {
@@ -327,12 +560,6 @@
 
 		.panel {
 			padding: 2.5em 2em;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.hero-art {
-			animation: none;
 		}
 	}
 </style>
