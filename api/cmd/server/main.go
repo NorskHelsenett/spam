@@ -31,6 +31,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/server"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 )
 
 func main() {
@@ -131,6 +132,7 @@ func run() error {
 		"migrations/20260423_add_vuln_metadata_canonical_id.sql",
 		"migrations/20260429_create_cisa_kev_and_epss.sql",
 		"migrations/20260429_create_unique_active_kev_epss_jobs.sql",
+		"migrations/20260430_create_materialized_unified_vuln_views.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -150,6 +152,15 @@ func run() error {
 	}); err != nil {
 		log.Printf("startup view refresh job (may already be queued): %v", err)
 	}
+
+	// Populate the unified-vuln materialized views asynchronously. The
+	// migration creates them WITH NO DATA so init is instant; this kicks
+	// off the first build in the background so HTTP serving starts now
+	// rather than after a multi-minute populate. TriggerRefresh debounces
+	// so this coalesces with any concurrent scan-completion triggers.
+	// Endpoints that read the MVs short-circuit to empty until the first
+	// populate lands (see vulnmetrics.unifiedViewsReady).
+	vulnmetrics.TriggerRefresh(gormDB)
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {

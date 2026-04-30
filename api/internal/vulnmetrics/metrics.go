@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/cache"
+	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
 	"gorm.io/gorm"
 )
@@ -22,7 +25,7 @@ const (
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v3:"
+	listCachePrefix = "vuln:list:v4:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -190,6 +193,31 @@ var refreshGate struct {
 	pending  bool
 }
 
+// unifiedViewsReadyCache flips to true the first time both unified vuln
+// MVs are observed populated and stays true. The MVs only ever go back
+// to unpopulated if a migration drops + recreates them WITH NO DATA;
+// when that happens the process restarts (CREATE MATERIALIZED VIEW runs
+// at boot) so the in-memory flag is reset by the restart anyway.
+var unifiedViewsReadyCache atomic.Bool
+
+// unifiedViewsReady returns true when both unified vuln MVs are
+// populated and queries against them will succeed. Until the first
+// async populate finishes (typically the first scan after deploy) this
+// returns false and callers should short-circuit to an empty result —
+// otherwise the bare SELECT raises SQLSTATE 55000 ("materialized view
+// has not been populated").
+func unifiedViewsReady(ctx context.Context, db *gorm.DB) bool {
+	if unifiedViewsReadyCache.Load() {
+		return true
+	}
+	ok, err := spamdb.VulnUnifiedViewsPopulated(ctx, db)
+	if err != nil || !ok {
+		return false
+	}
+	unifiedViewsReadyCache.Store(true)
+	return true
+}
+
 // TriggerRefresh proactively warms the summary / repos caches in the
 // background. Call from any scan-completion hook (SBOM, OSV batch,
 // image scan finish, VEX edit) so the next user hits a warm cache
@@ -230,6 +258,17 @@ func TriggerRefresh(db *gorm.DB) {
 }
 
 func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, error) {
+	// Refresh the unified vuln MVs first so computeSummary / computeRepos
+	// observe the freshest scan data. ErrRefreshLockHeld means another
+	// replica is already refreshing — its result will land before ours
+	// would have, so treat it as a no-op rather than an error. Other
+	// failures fall through; computeSummary will then either see stale
+	// data (acceptable) or, on first start, return zero-value rows
+	// (handled by the unpopulated guard in LoadSummary / LoadListPage).
+	if err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+		log.Printf("vulnmetrics: refresh unified views: %v", err)
+	}
+
 	summary, err := computeSummary(ctx, db)
 	if err != nil {
 		return Summary{}, err
@@ -369,6 +408,10 @@ func LoadFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
 func computeFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
 	out := Facets{Sources: []string{}, Years: []string{}}
 
+	if !unifiedViewsReady(ctx, db) {
+		return out, nil
+	}
+
 	if err := db.WithContext(ctx).Raw(`
 		SELECT DISTINCT source
 		FROM (
@@ -459,6 +502,15 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		}
 	}
 
+	// Short-circuit when the unified vuln MVs are still empty. Querying
+	// them in that state raises SQLSTATE 55000; the UI handles a 0-total
+	// response gracefully (empty state) and a follow-up TriggerRefresh
+	// will populate them shortly. Skipping the cache write here is
+	// deliberate — we don't want to lock in "0 results" for the cache TTL.
+	if !unifiedViewsReady(ctx, db) {
+		return VulnListResponse{Total: 0, Limit: p.Limit, Offset: p.Offset, Items: []VulnGroup{}}, nil
+	}
+
 	base, args := buildAssetUnionSQL(p)
 
 	// Row-level filters on the UNION result (apply before GROUP BY so
@@ -505,15 +557,24 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		whereArgs = append(whereArgs, needle, needle, needle, needle, needle)
 	}
 	if len(p.Years) > 0 {
-		// vuln_id pattern is "<prefix>-YYYY-NNNN" (CVE-2024-1234,
-		// GHSA rarely fits but we don't support it here). Match the
-		// literal "-YYYY-" substring.
-		var parts []string
+		// cve_year is a smallint column on the unified MVs derived from
+		// the vuln_id's "<prefix>-YYYY-NNNN" pattern; using it lets the
+		// year-filter index do the work instead of a leading-wildcard
+		// ILIKE that would force a sequential scan. p.Years holds
+		// stringified ints from the API; convert and skip non-numeric
+		// values defensively.
+		var nums []int
 		for _, y := range p.Years {
-			parts = append(parts, "av.vuln_id ILIKE ?")
-			whereArgs = append(whereArgs, "%-"+y+"-%")
+			n, err := strconv.Atoi(strings.TrimSpace(y))
+			if err != nil || n <= 0 {
+				continue
+			}
+			nums = append(nums, n)
 		}
-		where = append(where, "("+strings.Join(parts, " OR ")+")")
+		if len(nums) > 0 {
+			where = append(where, "av.cve_year IN ?")
+			whereArgs = append(whereArgs, nums)
+		}
 	}
 
 	var whereClause string
@@ -773,7 +834,7 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 			v.repo_slug                                 AS asset_slug,
 			v.vuln_id, v.severity, v.pkg_name,
 			v.installed_version, v.fixed_version,
-			v.title, v.description, v.source
+			v.title, v.description, v.source, v.cve_year
 		FROM view_unified_repositories_vulnerabilities v
 		WHERE %s
 		UNION ALL
@@ -783,7 +844,7 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 			v.image_slug                                AS asset_slug,
 			v.vuln_id, v.severity, v.pkg_name,
 			v.installed_version, v.fixed_version,
-			v.title, v.description, v.source
+			v.title, v.description, v.source, v.cve_year
 		FROM view_unified_image_vulnerabilities v
 		WHERE %s
 	`, repoSQL, imageSQL)
@@ -799,6 +860,14 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 
 func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	var summary Summary
+
+	// Same guard as LoadListPage: avoid SQLSTATE 55000 during the
+	// startup window where the unified MVs are still being populated.
+	// Returns the zero summary so the caller's caches store a coherent
+	// "no findings yet" entry rather than a hard error.
+	if !unifiedViewsReady(ctx, db) {
+		return summary, nil
+	}
 
 	// Count across both repo-side and image-side vulns, collapsing
 	// CVE / GHSA / BIT variants of the same advisory to one row per
@@ -891,6 +960,9 @@ func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, erro
 }
 
 func computeRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
+	if !unifiedViewsReady(ctx, db) {
+		return []RepoRow{}, nil
+	}
 	var rows []RepoRow
 	// Same canonical-aware dedup as computeSummary, scoped per repo:
 	// collapse (canonical, repo) pairs to one row at worst severity,
