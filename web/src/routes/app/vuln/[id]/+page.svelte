@@ -58,6 +58,17 @@
 		modified_at: string | null;
 		fetched_at: string | null;
 	};
+	type AuthorityRating = {
+		vuln_id: string;
+		prefix: string; // CVE | GHSA | BIT | GO | OSV | ''
+		severity?: string;
+		cvss_score?: number;
+		cvss_vector?: string;
+		sources?: string[];
+		published_at?: string | null;
+		modified_at?: string | null;
+		is_primary: boolean;
+	};
 	type DetailResponse = {
 		vuln_id: string;
 		title: string;
@@ -78,6 +89,10 @@
 		kev_date_added: string | null;
 		epss_score: number;
 		epss_percentile: number;
+		// Per-authority ratings — one row per CVE / GHSA / BIT / … the
+		// worker has independently fetched. Empty array when nothing
+		// is enriched yet.
+		authorities: AuthorityRating[];
 	};
 
 	// Route is /app/vuln/[id] — short URL for manual typing. The
@@ -354,6 +369,77 @@
 				</div>
 			</div>
 		</section>
+
+		<!-- Authority ratings — one row per CVE / GHSA / BIT / GO row
+		     in vuln_metadata sharing this advisory's canonical_id.
+		     Hidden when only one authority has data (the hero's metric
+		     cards already cover that case). -->
+		{#if data.authorities && data.authorities.length > 1}
+			<section class="panel-surface space-y-3 px-6 py-6 sm:px-10 sm:py-8">
+				<header>
+					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Authority ratings</h2>
+					<p class="text-xs text-[var(--text-tertiary)]">
+						Side-by-side view of every authority that's published an advisory for this finding. Disagreements on severity or CVSS are real signal — pick the worst-case rating for threat modelling.
+					</p>
+				</header>
+				<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
+						<thead class="text-[10px] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+							<tr>
+								<th class="px-4 py-2 text-left">Authority</th>
+								<th class="px-4 py-2 text-left">Severity</th>
+								<th class="px-4 py-2 text-left">CVSS</th>
+								<th class="px-4 py-2 text-left hidden sm:table-cell">Vector</th>
+								<th class="px-4 py-2 text-left hidden lg:table-cell">Modified</th>
+							</tr>
+						</thead>
+						<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
+							{#each data.authorities as auth (auth.vuln_id)}
+								<tr class={auth.is_primary ? 'bg-[var(--accent)]/5' : ''}>
+									<td class="px-4 py-2 align-top">
+										<div class="flex items-center gap-2">
+											<a href="/app/vuln/{auth.vuln_id}" class="font-mono text-xs text-[var(--accent)] hover:underline">{auth.vuln_id}</a>
+											{#if auth.is_primary}
+												<span class="inline-flex items-center rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-1.5 py-0 text-[10px] text-[var(--accent)]">primary</span>
+											{/if}
+										</div>
+										{#if auth.sources && auth.sources.length}
+											<div class="mt-0.5 text-[10px] text-[var(--text-muted)]">via {auth.sources.join(', ')}</div>
+										{/if}
+									</td>
+									<td class="px-4 py-2 align-top">
+										{#if auth.severity}
+											<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium {severityClass(auth.severity)}">
+												{auth.severity}
+											</span>
+										{:else}
+											<span class="text-xs text-[var(--text-muted)]">—</span>
+										{/if}
+									</td>
+									<td class="px-4 py-2 align-top tabular-nums">
+										{#if auth.cvss_score && auth.cvss_score > 0}
+											<span class="font-semibold text-[var(--text-bright)]">{auth.cvss_score.toFixed(1)}</span>
+										{:else}
+											<span class="text-xs text-[var(--text-muted)]">—</span>
+										{/if}
+									</td>
+									<td class="px-4 py-2 align-top hidden sm:table-cell">
+										{#if auth.cvss_vector}
+											<code class="font-mono text-[10px] text-[var(--text-tertiary)] break-all" title={auth.cvss_vector}>{auth.cvss_vector}</code>
+										{:else}
+											<span class="text-xs text-[var(--text-muted)]">—</span>
+										{/if}
+									</td>
+									<td class="px-4 py-2 align-top hidden lg:table-cell text-xs text-[var(--text-muted)]">
+										{fmtRelative(auth.modified_at)}
+									</td>
+								</tr>
+							{/each}
+						</tbody>
+					</table>
+				</div>
+			</section>
+		{/if}
 
 		<!-- Description, aliases, CWEs -->
 		<section class="panel-surface space-y-5 px-6 py-8 sm:px-10 sm:py-10">

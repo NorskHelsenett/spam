@@ -140,7 +140,7 @@ func LoadWorker() (WorkerConfig, error) {
 	cfg := WorkerConfig{
 		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		Concurrency:         parseIntEnv("WORKER_CONCURRENCY", 4),
-		VulnMetaConcurrency: parseIntEnv("WORKER_VULN_META_CONCURRENCY", 4),
+		VulnMetaConcurrency: parseIntEnv("WORKER_VULN_META_CONCURRENCY", 8),
 	}
 
 	if cfg.DatabaseURL == "" {

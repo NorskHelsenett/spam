@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -69,6 +71,22 @@ type VulnAffectedImage struct {
 	Clusters []VulnClusterPresence `json:"clusters" gorm:"-"`
 }
 
+// VulnAuthorityRating is one authority's view of an advisory — same
+// canonical, but separately fetched (CVE, GHSA, BIT, GO, …). Lets the
+// UI render a side-by-side comparison so an analyst can spot when the
+// authorities disagree on severity / CVSS / fix scope.
+type VulnAuthorityRating struct {
+	VulnID      string   `json:"vuln_id"`
+	Prefix      string   `json:"prefix"`           // "CVE" | "GHSA" | "BIT" | "GO" | ""
+	Severity    string   `json:"severity,omitempty"`
+	CVSSScore   float32  `json:"cvss_score,omitempty"`
+	CVSSVector  string   `json:"cvss_vector,omitempty"`
+	Sources     []string `json:"sources,omitempty"` // upstream feeds that returned data (osv, euvd, …)
+	PublishedAt *time.Time `json:"published_at,omitempty"`
+	ModifiedAt  *time.Time `json:"modified_at,omitempty"`
+	IsPrimary   bool     `json:"is_primary"`        // matches the row vuln_detail.go picked as Enrichment
+}
+
 // VulnDetailResponse is the full payload for GET /api/vulnerabilities/{id}.
 // Enrichment is nil when no external source has returned metadata yet
 // (a VULN_META_FETCH job is enqueued on the spot and subsequent
@@ -99,6 +117,14 @@ type VulnDetailResponse struct {
 	KEVDateAdded       *time.Time `json:"kev_date_added,omitempty"`
 	EPSSScore          float32    `json:"epss_score"`
 	EPSSPercentile     float32    `json:"epss_percentile"`
+
+	// Authorities lists every vuln_metadata row sharing this
+	// advisory's canonical_id (CVE / GHSA / BIT / GO / …).
+	// Each represents one authority's independently-fetched
+	// rating. Always includes the primary `Enrichment` row when
+	// present, plus any aliases the worker has separately
+	// enriched. Empty slice when nothing is enriched yet.
+	Authorities []VulnAuthorityRating `json:"authorities"`
 }
 
 // VulnDetailHandler — GET /api/vulnerabilities/{vuln_id}
@@ -168,6 +194,7 @@ func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		// bridge both.
 		vulnIDs := vulnmeta.AliasSet(vulnID, meta)
 		osvAffected := vulnmeta.ExtractOSVAffected(meta)
+		resp.Authorities = loadAuthorityRatings(ctx, db, vulnIDs, meta)
 
 		// KEV / EPSS lookup. Both feeds key on CVE-* only, so we filter
 		// the alias set down to CVE-prefixed ids and pick whichever row
@@ -461,6 +488,112 @@ func attachClusterPresence(ctx context.Context, r *http.Request, db *gorm.DB, im
 		}
 	}
 	return images
+}
+
+// authorityPrefixRank gives a stable display order for the authority
+// panel: CVE first (most universally trusted), then GitHub's GHSA,
+// Bitnami's BIT, Go advisories, finally everything else. Lower number
+// sorts earlier.
+func authorityPrefixRank(prefix string) int {
+	switch strings.ToUpper(prefix) {
+	case "CVE":
+		return 0
+	case "GHSA":
+		return 1
+	case "BIT":
+		return 2
+	case "GO":
+		return 3
+	case "OSV":
+		return 4
+	default:
+		return 5
+	}
+}
+
+func authorityPrefix(vulnID string) string {
+	if i := strings.IndexByte(vulnID, '-'); i > 0 {
+		return strings.ToUpper(vulnID[:i])
+	}
+	return ""
+}
+
+// loadAuthorityRatings returns the full set of vuln_metadata rows
+// sharing this advisory's canonical_id (or aliases when canonical
+// hasn't been resolved yet). Each is one authority's independent
+// rating — different prefix, possibly different severity / CVSS / fix
+// scope. The list is sorted by display priority (CVE > GHSA > BIT > …)
+// so the UI can render them in a consistent order. The row matching
+// `primary.VulnID` (when present) is flagged IsPrimary so the UI can
+// highlight it as "the one currently driving the page".
+func loadAuthorityRatings(ctx context.Context, db *gorm.DB, vulnIDs []string, primary *vulnmeta.Metadata) []VulnAuthorityRating {
+	if len(vulnIDs) == 0 {
+		return []VulnAuthorityRating{}
+	}
+
+	// Two-axis lookup: any row whose vuln_id is in the alias set,
+	// OR whose canonical_id is the primary's canonical (catches
+	// authorities that don't appear in primary's aliases yet but
+	// share the canonical, e.g. when a third-party ingest landed
+	// after the primary fetch).
+	type row struct {
+		VulnID      string         `gorm:"column:vuln_id"`
+		CanonicalID string         `gorm:"column:canonical_id"`
+		Severity    string         `gorm:"column:severity"`
+		CVSSScore   float32        `gorm:"column:cvss_score"`
+		CVSSVector  string         `gorm:"column:cvss_vector"`
+		Sources     datatypes.JSON `gorm:"column:sources"`
+		PublishedAt *time.Time     `gorm:"column:published_at"`
+		ModifiedAt  *time.Time     `gorm:"column:modified_at"`
+	}
+	var rows []row
+	q := db.WithContext(ctx).
+		Table("vuln_metadata").
+		Select("vuln_id, canonical_id, severity, cvss_score, cvss_vector, sources, published_at, modified_at")
+	if primary != nil && primary.CanonicalID != "" {
+		q = q.Where("vuln_id IN ? OR canonical_id = ?", vulnIDs, primary.CanonicalID)
+	} else {
+		q = q.Where("vuln_id IN ?", vulnIDs)
+	}
+	if err := q.Scan(&rows).Error; err != nil {
+		log.Printf("vuln-detail: authorities query: %v", err)
+		return []VulnAuthorityRating{}
+	}
+
+	primaryID := ""
+	if primary != nil {
+		primaryID = primary.VulnID
+	}
+
+	out := make([]VulnAuthorityRating, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, VulnAuthorityRating{
+			VulnID:      r.VulnID,
+			Prefix:      authorityPrefix(r.VulnID),
+			Severity:    r.Severity,
+			CVSSScore:   r.CVSSScore,
+			CVSSVector:  r.CVSSVector,
+			Sources:     decodeStringArrayJSON(r.Sources),
+			PublishedAt: r.PublishedAt,
+			ModifiedAt:  r.ModifiedAt,
+			IsPrimary:   r.VulnID == primaryID,
+		})
+	}
+
+	// Sort: primary first (so it always anchors the panel), then by
+	// prefix priority, then by id for a stable tie-break.
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsPrimary != out[j].IsPrimary {
+			return out[i].IsPrimary
+		}
+		ri, rj := authorityPrefixRank(out[i].Prefix), authorityPrefixRank(out[j].Prefix)
+		if ri != rj {
+			return ri < rj
+		}
+		return out[i].VulnID < out[j].VulnID
+	})
+
+	return out
 }
 
 // decodeStringArrayJSON unmarshals a JSONB []string into a Go slice.
