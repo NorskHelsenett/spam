@@ -14,6 +14,7 @@
 	import Toggle from '$lib/components/Toggle.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
+	import Loading from '$lib/components/Loading.svelte';
 
 	type TrendPoint = {
 		date: string;
@@ -103,6 +104,7 @@
 	let vulnInflight = new Set<number>();
 	let vulnFilterVersion = 0;
 	let vulnLoaded = false;
+	let vulnError = '';
 	let images: ImageRow[] = [];
 	let hideClean = true;
 	let loading = true;
@@ -262,6 +264,10 @@
 		if (page < 0) return;
 		if (vulnPages.has(page) || vulnInflight.has(page)) return;
 		vulnInflight.add(page);
+		if (page === 0) {
+			vulnsLoading = true;
+			vulnError = '';
+		}
 		const filterAtRequest = vulnFilterVersion;
 		const params = new URLSearchParams({
 			limit: String(VULN_PAGE_SIZE),
@@ -276,18 +282,28 @@
 		if (q) params.set('q', q);
 		try {
 			const res = await fetch(`/api/vuln/list?${params}`, { credentials: 'include' });
-			if (!res.ok) return;
-			const data = (await res.json()) as VulnListResponse;
 			if (filterAtRequest !== vulnFilterVersion) return;
+			if (!res.ok) {
+				if (page === 0) {
+					vulnError = res.status === 504 || res.status === 502
+						? 'Upstream request timed out — narrow your filters or try again.'
+						: `Failed to load vulnerabilities (HTTP ${res.status}).`;
+				}
+				return;
+			}
+			const data = (await res.json()) as VulnListResponse;
 			vulnTotal = data.total ?? 0;
 			const next = new Map(vulnPages);
 			next.set(page, data.items ?? []);
 			vulnPages = next;
 			vulnLoaded = true;
 		} catch {
-			// swallow — next scroll tick will retry
+			if (filterAtRequest === vulnFilterVersion && page === 0) {
+				vulnError = 'Network error — try again.';
+			}
 		} finally {
 			vulnInflight.delete(page);
+			if (page === 0) vulnsLoading = false;
 		}
 	}
 
@@ -297,6 +313,7 @@
 		vulnInflight = new Set();
 		vulnTotal = 0;
 		vulnLoaded = false;
+		vulnError = '';
 		if (vulnScrollEl) vulnScrollEl.scrollTop = 0;
 		vulnScrollTop = 0;
 		void fetchVulnPage(0);
@@ -375,9 +392,8 @@
 	// When the vulns tab is opened, kick off the first fetch. Filter
 	// changes (including the debounced search) bump vulnFilterVersion
 	// and clear caches via the filtersKey watcher below.
-	$: if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0)) {
-		vulnsLoading = true;
-		fetchVulnPage(0).finally(() => { vulnsLoading = false; });
+	$: if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0) && !vulnError) {
+		void fetchVulnPage(0);
 	}
 	$: if (activeTab === 'images') loadImages();
 
@@ -713,7 +729,13 @@
 			<header class="flex items-start justify-between gap-4">
 				<div>
 					<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
-					<p class="text-sm text-[var(--text-tertiary)]">Vulnerability scan results from the latest scans.</p>
+					<p class="text-sm text-[var(--text-tertiary)]">
+						{#if activeTab === 'vulnerabilities' && vulnLoaded && vulnTotal > 0}
+							{fmt(vulnTotal)} unique {vulnTotal === 1 ? 'vulnerability' : 'vulnerabilities'}
+						{:else}
+							Vulnerability scan results from the latest scans.
+						{/if}
+					</p>
 				</div>
 				{#if activeTab === 'repositories' && repos.length > 0}
 					<button
@@ -1059,9 +1081,21 @@
 				{/if}
 
 			{:else if activeTab === 'vulnerabilities'}
-				{#if vulnsLoading && !vulnLoaded}
+				{#if vulnError && !vulnLoaded}
 					<div class="flex flex-1 items-center justify-center">
-						<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+						<div class="flex max-w-sm flex-col items-center gap-3 text-center">
+							<ShieldAlert class="h-8 w-8 text-[var(--orange)]" />
+							<p class="text-sm text-[var(--text-secondary)]">{vulnError}</p>
+							<button
+								type="button"
+								class="text-xs text-[var(--accent)] hover:underline"
+								onclick={() => { vulnError = ''; void fetchVulnPage(0); }}
+							>Retry</button>
+						</div>
+					</div>
+				{:else if vulnsLoading && !vulnLoaded}
+					<div class="flex flex-1 items-center justify-center">
+						<Loading message="Loading vulnerabilities" variant="bar" size="sm" />
 					</div>
 				{:else if vulnLoaded && vulnTotal === 0}
 					<div class="flex flex-1 items-center justify-center">
@@ -1076,9 +1110,6 @@
 						</div>
 					</div>
 				{:else}
-					<div class="flex items-center justify-between pb-2 text-xs text-[var(--text-muted)]">
-						<span>{fmt(vulnTotal)} unique {vulnTotal === 1 ? 'vulnerability' : 'vulnerabilities'}</span>
-					</div>
 					<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 						<div class="flex-1 overflow-y-auto [overflow-anchor:none]" bind:this={vulnScrollEl} onscroll={() => { vulnScrollTop = vulnScrollEl?.scrollTop ?? 0; vulnViewH = vulnScrollEl?.clientHeight ?? 600; }}>
 							<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
