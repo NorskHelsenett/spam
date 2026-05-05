@@ -753,7 +753,11 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 					FALSE AS tls,
 					'' AS lb_ips,
 					'' AS ingress_class,
-					'' AS backends,
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b), '')
+						ELSE '' END AS backends,
 					received_at AS last_seen
 				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
@@ -982,7 +986,11 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 					data->>'name' AS name,
 					'' AS ingress_class,
 					FALSE AS tls,
-					'' AS backends
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b), '')
+						ELSE '' END AS backends
 				FROM live,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
@@ -1445,7 +1453,11 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'' AS ingress_class,
 					FALSE AS tls,
 					'' AS lb_ips,
-					'' AS backends,
+					CASE WHEN jsonb_typeof(data->'backends') = 'array'
+						THEN COALESCE(
+							(SELECT string_agg(DISTINCT b->>'name', ', ')
+							 FROM jsonb_array_elements(data->'backends') AS b), '')
+						ELSE '' END AS backends,
 					'[]' AS paths_json
 				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
