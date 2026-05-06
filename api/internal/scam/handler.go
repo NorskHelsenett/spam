@@ -168,6 +168,7 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		// matches "most recent state".
 		keyed := make(map[string]upsertItem)
 		order := make([]string, 0, len(raw))
+		batchKinds := make(map[string]struct{}, 4)
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -188,6 +189,7 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 				order = append(order, key)
 			}
 			keyed[key] = upsertItem{data: datatypes.JSON(item)}
+			batchKinds[incoming.Kind] = struct{}{}
 		}
 		items := make([]upsertItem, 0, len(keyed))
 		for _, key := range order {
@@ -252,12 +254,21 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
 
 			// Fresh ingest may change which hosts/backends exist and
-			// how many running workloads back them — invalidate the
-			// list cache so the next /clusters/hosts request rebuilds.
-			// resolve: / hostmeta: / hostfav: are intentionally not
-			// touched (they track host-external state).
+			// which Services have ready endpoints behind them. Only
+			// invalidate the hosts list cache when the batch actually
+			// touched a kind that feeds the projection (see
+			// hostRelevantKinds). Container pushes — the bulk of ingest
+			// volume — no longer feed liveness, so they don't blow the
+			// cache away on every pod restart. resolve: / hostmeta: /
+			// hostfav: are intentionally not touched (they track
+			// host-external state).
 			if cs != nil {
-				_ = cache.DeleteByPrefix(r.Context(), cs, hostsListCachePrefix)
+				for kind := range batchKinds {
+					if hostRelevantKinds[kind] {
+						_ = cache.DeleteByPrefix(r.Context(), cs, hostsListCachePrefix)
+						break
+					}
+				}
 			}
 		}
 
@@ -632,7 +643,24 @@ const hostsListCachePrefix = "hosts:list:"
 // hostsListCacheTTL is a safety-net TTL. The real freshness signal is
 // ingest-driven invalidation in CallcenterHandler; this keeps the cache
 // from growing unbounded if a tenant goes silent.
-const hostsListCacheTTL = 1 * time.Hour
+const hostsListCacheTTL = 24 * time.Hour
+
+// hostRelevantKinds is the set of SCAM record kinds whose ingest can
+// change the output of HostsHandler. CallcenterHandler invalidates the
+// hosts list cache only when a batch contains one of these — Container
+// pushes (the bulk of ingest volume) no longer feed the projection
+// since liveness moved from pod-label match to EndpointSlice ready
+// counts, so skipping them keeps the cache warm in busy fleets.
+var hostRelevantKinds = map[string]bool{
+	"Ingress":         true,
+	"HTTPRoute":       true,
+	"GRPCRoute":       true,
+	"TLSRoute":        true,
+	"IngressRoute":    true,
+	"IngressRouteTCP": true,
+	"Service":         true,
+	"EndpointSlice":   true,
+}
 
 // HostRow is the shape returned by HostsHandler. Resolved/Meta are
 // inlined from the per-host resolve / hostmeta caches at response time
@@ -700,18 +728,22 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		}
 
 		// Query structure:
-		//   hosts_raw           — flattened hostnames from Ingress /
-		//                         HTTPRoute / IngressRoute variants
-		//   services            — every Service with a JSONB selector
-		//   service_workloads   — ONE pass matching running containers
-		//                         to services via pod_labels @> selector,
-		//                         aggregated per (cluster,namespace,service)
+		//   hosts_raw          — flattened hostnames from Ingress /
+		//                        HTTPRoute / IngressRoute variants
+		//   service_liveness   — per-Service ready-endpoint count derived
+		//                        from EndpointSlice (the same signal
+		//                        kube-proxy uses to route traffic), with
+		//                        an ExternalName fallback for services
+		//                        that CNAME to external DNS and never
+		//                        get an EndpointSlice
 		//
-		// The old query did the label-match inside a LATERAL subquery
-		// per host row (N_hosts × N_services × N_containers). The new
-		// shape runs the label-match once, then a cheap hash join on
-		// (cluster, namespace, backend_name) to attach a workload count
-		// to each host.
+		// EndpointSlice is the authoritative "is this URL live?" signal:
+		// non-empty ready addresses ⇔ kube-proxy will send traffic. It's
+		// also far cheaper than the previous label-match approach
+		// (pod_labels @> selector across every Container row) and
+		// changes only on readiness transitions, not pod restarts —
+		// which lets CallcenterHandler skip cache invalidation on the
+		// noisy Container ingest path.
 		err := db.Raw(cteForWithACL(r, aclFrag)+`,
 			ingress_hosts AS (
 				SELECT
@@ -796,27 +828,45 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 				UNION ALL
 				SELECT * FROM traefik_hosts
 			),
-			services AS (
+			service_liveness AS (
+				-- Standard selector-backed Services: count distinct ready
+				-- endpoint addresses from their EndpointSlices. Endpoints
+				-- without a conditions.ready flag are treated as ready
+				-- (older kube-proxy / controllers do not always populate
+				-- it; absence is "no opinion" rather than "not ready").
 				SELECT
-					data->>'cluster_id' AS cluster_id,
-					data->>'namespace'  AS namespace,
-					data->>'name'       AS name,
-					data->'selector'    AS selector
-				FROM live
-				WHERE data->>'kind' = 'Service'
-				  AND jsonb_typeof(data->'selector') = 'object'
-			),
-			service_workloads AS (
-				SELECT s.cluster_id, s.namespace, s.name,
-				       COUNT(DISTINCT c.data->>'pod_uid')::bigint AS cnt
-				FROM services s
-				JOIN live c
-				  ON c.data->>'kind' = 'Container'
-				 AND c.data->>'pod_phase' = 'Running'
-				 AND c.data->>'cluster_id' = s.cluster_id
-				 AND c.data->>'namespace'  = s.namespace
-				 AND (c.data->'pod_labels') @> s.selector
-				GROUP BY s.cluster_id, s.namespace, s.name
+					es.data->>'cluster_id'   AS cluster_id,
+					es.data->>'namespace'    AS namespace,
+					es.data->>'service_name' AS name,
+					COUNT(DISTINCT addr)::bigint AS cnt
+				FROM live es
+				CROSS JOIN LATERAL jsonb_array_elements(
+					COALESCE(es.data->'endpoints', '[]'::jsonb)
+				) AS ep
+				CROSS JOIN LATERAL jsonb_array_elements_text(
+					COALESCE(ep->'addresses', '[]'::jsonb)
+				) AS addr
+				WHERE es.data->>'kind' = 'EndpointSlice'
+				  AND es.data->>'service_name' IS NOT NULL
+				  AND es.data->>'service_name' <> ''
+				  AND COALESCE(ep->'conditions'->>'ready', 'true') = 'true'
+				GROUP BY es.data->>'cluster_id', es.data->>'namespace', es.data->>'service_name'
+
+				UNION ALL
+
+				-- ExternalName Services CNAME to external DNS — they have
+				-- no Selector and never get a controller-managed
+				-- EndpointSlice, but they always route somewhere. Treat
+				-- as live by definition so the URL doesn't disappear from
+				-- active_only views just because the target is off-cluster.
+				SELECT
+					s.data->>'cluster_id',
+					s.data->>'namespace',
+					s.data->>'name',
+					1::bigint
+				FROM live s
+				WHERE s.data->>'kind' = 'Service'
+				  AND s.data->>'service_type' = 'ExternalName'
 			)
 			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
 			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
@@ -825,7 +875,7 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			LEFT JOIN LATERAL (
 				SELECT SUM(sw.cnt)::bigint AS total
 				FROM unnest(string_to_array(h.backends, ', ')) AS be(name)
-				JOIN service_workloads sw
+				JOIN service_liveness sw
 				  ON sw.cluster_id = h.cluster_id
 				 AND sw.namespace  = h.namespace
 				 AND sw.name       = be.name
