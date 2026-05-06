@@ -113,11 +113,6 @@
 		void reload();
 	};
 
-	const formatDate = (value: string | null) => {
-		if (!value) return '—';
-		return new Intl.DateTimeFormat('en-US', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
-	};
-
 	const fmt = (n: number) => new Intl.NumberFormat('en-US').format(n);
 
 	// Reason templates — pre-rendered for now; the API returns the
@@ -298,11 +293,6 @@
 						<p class="text-sm text-[var(--text-tertiary)]">Asset-centric "fix this now" view across repos, images, and clusters.</p>
 					</div>
 				</div>
-				{#if triage?.scope.view_refreshed_at}
-					<span class="hidden text-[0.7rem] uppercase tracking-[0.12em] text-[var(--text-muted)] sm:inline">
-						Data as of {formatDate(triage.scope.view_refreshed_at)}
-					</span>
-				{/if}
 			</div>
 		</header>
 
