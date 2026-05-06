@@ -44,15 +44,19 @@ WITH
 -- ---------- chain: digest → internet-exposed? ----------
 -- A digest is internet-exposed when there exists in the same cluster
 -- and namespace: a Container record with that digest, a Service whose
--- selector matches the Container's pod_labels, and an Ingress/HTTPRoute
--- whose rules[].paths[].backend_name equals that Service's name. This
--- mirrors HostChainHandler's traversal in scam/handler.go but as a
--- bulk SET-returning query the MV refresh can run in one shot.
+-- selector matches the Container's pod_labels, and a routing object
+-- pointing at that Service's name. Two backend-ref shapes are stored
+-- in cluster_record:
 --
--- IngressRoute (Traefik CRD) and Gateway/GRPCRoute are not yet covered
--- by this chain — they store backend refs in different JSONB shapes.
--- Phase 2 work to widen the union.
+--   shape A: data.rules[].paths[].backend_name   — k8s Ingress
+--   shape B: data.backends[].name                — Traefik IngressRoute /
+--                                                  IngressRouteTCP, plus
+--                                                  Gateway HTTPRoute /
+--                                                  GRPCRoute / TLSRoute
+--
+-- Mirrors HostChainHandler's traversal in scam/handler.go.
 exposed_digests AS (
+    -- shape A: k8s Ingress
     SELECT DISTINCT
         cont.data->>'digest'     AS digest,
         cont.data->>'cluster_id' AS cluster_id
@@ -61,6 +65,7 @@ exposed_digests AS (
       ON svc.data->>'kind'       = 'Service'
      AND svc.data->>'cluster_id' = ing.data->>'cluster_id'
      AND svc.data->>'namespace'  = ing.data->>'namespace'
+     AND jsonb_typeof(ing.data->'rules') = 'array'
      AND EXISTS (
          SELECT 1
            FROM jsonb_array_elements(ing.data->'rules') AS r,
@@ -73,7 +78,35 @@ exposed_digests AS (
      AND cont.data->>'namespace'  = svc.data->>'namespace'
      AND (cont.data->'pod_labels') @> (svc.data->'selector')
      AND COALESCE(cont.data->>'digest', '') <> ''
-    WHERE ing.data->>'kind' IN ('Ingress', 'HTTPRoute')
+    WHERE ing.data->>'kind' = 'Ingress'
+
+    UNION
+
+    -- shape B: IngressRoute / IngressRouteTCP (Traefik) and
+    -- HTTPRoute / GRPCRoute / TLSRoute (Gateway API). Each stores
+    -- backends as data.backends[].name.
+    SELECT DISTINCT
+        cont.data->>'digest'     AS digest,
+        cont.data->>'cluster_id' AS cluster_id
+    FROM cluster_record ing
+    JOIN cluster_record svc
+      ON svc.data->>'kind'       = 'Service'
+     AND svc.data->>'cluster_id' = ing.data->>'cluster_id'
+     AND svc.data->>'namespace'  = ing.data->>'namespace'
+     AND jsonb_typeof(ing.data->'backends') = 'array'
+     AND EXISTS (
+         SELECT 1
+           FROM jsonb_array_elements(ing.data->'backends') AS b
+          WHERE b->>'name' = svc.data->>'name'
+     )
+    JOIN cluster_record cont
+      ON cont.data->>'kind'       = 'Container'
+     AND cont.data->>'cluster_id' = svc.data->>'cluster_id'
+     AND cont.data->>'namespace'  = svc.data->>'namespace'
+     AND (cont.data->'pod_labels') @> (svc.data->'selector')
+     AND COALESCE(cont.data->>'digest', '') <> ''
+    WHERE ing.data->>'kind' IN
+        ('IngressRoute','IngressRouteTCP','HTTPRoute','GRPCRoute','TLSRoute')
 ),
 
 -- ---------- chain: cluster has any internet exposure at all ----------
@@ -97,7 +130,12 @@ cluster_digests AS (
 
 -- ---------- per-vuln, KEV / EPSS bulk lookups ----------
 -- Surface the canonical_id from vuln_metadata so KEV/EPSS hit even
--- when the scanner stored a non-CVE alias.
+-- when the scanner stored a non-CVE alias. VEX overrides with status
+-- 'not_affected' or 'fixed' are filtered out here so triage threat
+-- counts honour the operator's manual call. VEX is keyed on
+-- (purl, vuln_id) — we bridge to the unified row's asset via
+-- sbom_component_view ↔ sbom_bindings, so the filter only fires for
+-- assets that actually carry a VEX'd PURL in their SBOM.
 repo_vuln_canonical AS (
     SELECT
         v.repo_id,
@@ -107,6 +145,19 @@ repo_vuln_canonical AS (
         v.scanned_at
     FROM view_unified_repositories_vulnerabilities v
     LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM component_vex vex
+        LEFT JOIN vuln_metadata vmx ON vmx.vuln_id = vex.vuln_id
+        JOIN sbom_component_view sc ON sc.purl = vex.p_url
+        JOIN sbom_bindings sb       ON sb.sbom_id      = sc.sbom_id
+                                   AND sb.asset_type  = 'REPO_COMMIT'
+        JOIN repo_commits rc        ON rc.id           = sb.asset_ref_id
+        WHERE vex.status IN ('not_affected', 'fixed')
+          AND COALESCE(vmx.canonical_id, vex.vuln_id)
+              = COALESCE(vm.canonical_id, v.vuln_id)
+          AND rc.repo_id::text = v.repo_id
+    )
 ),
 image_vuln_canonical AS (
     SELECT
@@ -117,6 +168,18 @@ image_vuln_canonical AS (
         v.scanned_at
     FROM view_unified_image_vulnerabilities v
     LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM component_vex vex
+        LEFT JOIN vuln_metadata vmx ON vmx.vuln_id = vex.vuln_id
+        JOIN sbom_component_view sc ON sc.purl = vex.p_url
+        JOIN sbom_bindings sb       ON sb.sbom_id      = sc.sbom_id
+                                   AND sb.asset_type  = 'IMAGE_DIGEST'
+        WHERE vex.status IN ('not_affected', 'fixed')
+          AND COALESCE(vmx.canonical_id, vex.vuln_id)
+              = COALESCE(vm.canonical_id, v.vuln_id)
+          AND sb.asset_ref_id::text = v.image_id
+    )
 ),
 
 -- ---------- repo-side aggregation ----------
@@ -267,54 +330,65 @@ image_signals AS (
 ),
 
 -- ---------- cluster-side aggregation ----------
--- Roll image vulns up to the cluster: each cluster's threat numbers
--- are the worst signals across all images running in any of its
--- containers. Because we own the cluster→digest binding (k8s API), the
--- rollup is honest even before signing wires up Phase 2.
+-- One row per (cluster, canonical_id) — the same advisory is counted
+-- once per cluster regardless of how many images carry it. Worst
+-- severity wins so a CVE reported as MEDIUM in one image and HIGH in
+-- another contributes a single HIGH row to the cluster's tally.
+cluster_canonical AS (
+    SELECT
+        cd.cluster_id,
+        ivc.canonical_id,
+        MIN(CASE ivc.severity
+            WHEN 'CRITICAL' THEN 1
+            WHEN 'HIGH'     THEN 2
+            WHEN 'MEDIUM'   THEN 3
+            WHEN 'LOW'      THEN 4
+            ELSE 5
+        END)                                AS sev_rank,
+        BOOL_OR(ivc.fixed_version <> '')    AS any_fixed,
+        MAX(ivc.scanned_at)                 AS last_scan_at
+    FROM cluster_digests cd
+    JOIN image_digests d         ON d.digest    = cd.digest
+    JOIN image_vuln_canonical ivc ON ivc.image_id = d.id::text
+    GROUP BY cd.cluster_id, ivc.canonical_id
+),
+
+-- Roll cluster_canonical up to the cluster row. KEV is a count of
+-- distinct cluster CVEs that are also in CISA KEV. epss_max is the
+-- worst score across the cluster's CVEs. Because cluster_canonical
+-- is already (cluster, canonical) deduped, the LEFT JOIN to
+-- epss_entries cannot multiply rows.
 cluster_signals AS (
     SELECT
-        'cluster'::text                                 AS asset_type,
-        cluster_id                                      AS asset_id,
-        cluster_id                                      AS asset_slug,
-        cluster_id                                      AS asset_cluster_id,
-        SUM(per_image.critical_count)::bigint           AS critical_count,
-        SUM(per_image.high_count)::bigint               AS high_count,
-        SUM(per_image.kev_count)::bigint                AS kev_count,
-        MAX(per_image.epss_max)::real                   AS epss_max,
-        BOOL_OR(per_image.has_fix_for_critical)         AS has_fix_for_critical,
-        0::bigint                                       AS active_secret_count,
+        'cluster'::text                                                    AS asset_type,
+        c.cluster_id                                                       AS asset_id,
+        c.cluster_id                                                       AS asset_slug,
+        c.cluster_id                                                       AS asset_cluster_id,
+        COUNT(*) FILTER (WHERE cc.sev_rank = 1)::bigint                    AS critical_count,
+        COUNT(*) FILTER (WHERE cc.sev_rank = 2)::bigint                    AS high_count,
+        COUNT(*) FILTER (
+            WHERE EXISTS (SELECT 1 FROM cisa_kev_entries k WHERE k.cve_id = cc.canonical_id)
+        )::bigint                                                          AS kev_count,
+        COALESCE(MAX(e.score), 0)::real                                    AS epss_max,
+        COALESCE(BOOL_OR(cc.sev_rank = 1 AND cc.any_fixed), false)         AS has_fix_for_critical,
+        0::bigint                                                          AS active_secret_count,
         EXISTS (SELECT 1 FROM exposed_clusters ec WHERE ec.cluster_id = c.cluster_id)
-                                                        AS internet_exposed,
-        0::real                                         AS signed_commits_pct,
-        false                                           AS image_signed,
-        EXTRACT(DAY FROM NOW() - MAX(per_image.last_scan_at))::int
-                                                        AS scan_age_days,
-        MAX(per_image.last_scan_at)                     AS last_scan_at,
-        true                                            AS has_sbom,
+                                                                           AS internet_exposed,
+        0::real                                                            AS signed_commits_pct,
+        false                                                              AS image_signed,
+        EXTRACT(DAY FROM NOW() - COALESCE(MAX(cc.last_scan_at), NOW() - INTERVAL '999 days'))::int
+                                                                           AS scan_age_days,
+        MAX(cc.last_scan_at)                                               AS last_scan_at,
+        true                                                               AS has_sbom,
         -- Cluster rows don't carry dep-health themselves; that
         -- signal lives on repos. Defaults match image_signals so
         -- the UNION ALL types align.
-        100::real                                       AS worst_dep_health_score,
-        0::bigint                                       AS archived_dep_count,
-        0::bigint                                       AS deprecated_dep_count
+        100::real                                                          AS worst_dep_health_score,
+        0::bigint                                                          AS archived_dep_count,
+        0::bigint                                                          AS deprecated_dep_count
     FROM (SELECT DISTINCT cluster_id FROM cluster_digests) c
-    LEFT JOIN cluster_digests cd ON cd.cluster_id = c.cluster_id
-    LEFT JOIN image_digests d    ON d.digest = cd.digest
-    LEFT JOIN LATERAL (
-        SELECT
-            COUNT(DISTINCT canonical_id) FILTER (WHERE severity = 'CRITICAL')::bigint AS critical_count,
-            COUNT(DISTINCT canonical_id) FILTER (WHERE severity = 'HIGH')::bigint     AS high_count,
-            COUNT(DISTINCT canonical_id) FILTER (
-                WHERE EXISTS (SELECT 1 FROM cisa_kev_entries k WHERE k.cve_id = canonical_id)
-            )::bigint AS kev_count,
-            (SELECT MAX(score)::real FROM epss_entries e
-              WHERE e.cve_id IN (SELECT DISTINCT canonical_id FROM image_vuln_canonical WHERE image_id = d.id::text))
-                                                                                       AS epss_max,
-            BOOL_OR(severity = 'CRITICAL' AND fixed_version <> '')                     AS has_fix_for_critical,
-            MAX(scanned_at)                                                            AS last_scan_at
-        FROM image_vuln_canonical
-        WHERE image_id = d.id::text
-    ) per_image ON TRUE
+    LEFT JOIN cluster_canonical cc ON cc.cluster_id = c.cluster_id
+    LEFT JOIN epss_entries e       ON e.cve_id     = cc.canonical_id
     GROUP BY c.cluster_id
 )
 
