@@ -132,6 +132,12 @@ type VulnListParams struct {
 	// subquery against cisa_kev_entries on the canonical id, so the
 	// count + items queries stay consistent.
 	KEVOnly bool
+	// EPSSMin filters to advisories whose EPSS score is at least this
+	// value. Same EXISTS-on-canonical-id pattern as KEV; 0 disables
+	// the filter (and matches "no EPSS row found" via the EXISTS
+	// short-circuit, which is what we want — non-CVE ids stay visible
+	// when no threshold is requested).
+	EPSSMin float64
 	Years   []string
 	RepoID  string
 
@@ -462,12 +468,13 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 		Query                      string
 		FixOnly                    bool
 		KEVOnly                    bool
+		EPSSMin                    float64
 		RepoID                     string
 		RepoSQL, ImageSQL          string
 		RepoArgs, ImageArgs        []any
 	}{
 		p.Limit, p.Offset, p.Severities, p.Sources, p.Years,
-		p.Query, p.FixOnly, p.KEVOnly, p.RepoID, p.RepoSQL, p.ImageSQL,
+		p.Query, p.FixOnly, p.KEVOnly, p.EPSSMin, p.RepoID, p.RepoSQL, p.ImageSQL,
 		p.RepoArgs, p.ImageArgs,
 	})
 	return fmt.Sprintf("%s%x", listCachePrefix, h.Sum64())
@@ -539,6 +546,14 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		// Pushed into the same WHERE the count + ranked CTEs share so
 		// total and items stay in lockstep.
 		where = append(where, "EXISTS (SELECT 1 FROM cisa_kev_entries kev WHERE kev.cve_id = COALESCE(vm.canonical_id, av.vuln_id))")
+	}
+	if p.EPSSMin > 0 {
+		// Same canonical-id EXISTS pattern as KEV. EPSS is CVE-only;
+		// non-CVE ids without an EPSS row drop out, which matches the
+		// intent ("show me likely-to-be-exploited" implies an EPSS row
+		// exists).
+		where = append(where, "EXISTS (SELECT 1 FROM epss_entries epss WHERE epss.cve_id = COALESCE(vm.canonical_id, av.vuln_id) AND epss.score >= ?)")
+		whereArgs = append(whereArgs, p.EPSSMin)
 	}
 	if q := strings.TrimSpace(p.Query); q != "" {
 		needle := "%" + strings.ToLower(q) + "%"

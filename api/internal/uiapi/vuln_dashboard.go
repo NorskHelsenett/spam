@@ -75,7 +75,7 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // and image it appears on.
 //
 // GET /api/vuln/list?limit=&offset=&severity=CRITICAL,HIGH&q=&source=trivy,grype
-//                  &fix=1&kev=1&year=2024,2023&repo_id=
+//                  &fix=1&kev=1&epss_min=0.1&year=2024,2023&repo_id=
 //
 // The response shape is {total, limit, offset, items: VulnGroup[]}.
 // total counts distinct vuln_ids matching the filters so the client can
@@ -95,6 +95,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			Sources:    splitLower(q.Get("source")),
 			FixOnly:    q.Get("fix") == "1" || strings.EqualFold(q.Get("fix"), "true"),
 			KEVOnly:    q.Get("kev") == "1" || strings.EqualFold(q.Get("kev"), "true"),
+			EPSSMin:    parseFloatClamped(q.Get("epss_min"), 0, 1),
 			Years:      splitCSV(q.Get("year")),
 			RepoID:     q.Get("repo_id"),
 		}
@@ -224,6 +225,25 @@ func parseIntDefault(s string, def int) int {
 	v, err := strconv.Atoi(s)
 	if err != nil {
 		return def
+	}
+	return v
+}
+
+// parseFloatClamped parses a float query param, clamps to [lo, hi],
+// and returns 0 on parse failure or empty input.
+func parseFloatClamped(s string, lo, hi float64) float64 {
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
 	}
 	return v
 }

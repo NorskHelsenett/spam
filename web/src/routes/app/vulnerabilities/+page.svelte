@@ -14,6 +14,8 @@
 	import Toggle from '$lib/components/Toggle.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
+	import Select from '$lib/components/Select.svelte';
+	import type { SelectOption } from '$lib/components/Select.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 
 	type TrendPoint = {
@@ -147,6 +149,7 @@
 			vulnSelectedYears,
 			vulnFixAvailable,
 			vulnKEVOnly,
+			vulnEPSSMin,
 			imageSearch,
 			imageSelectedRegistries,
 			imageSelectedSeverities,
@@ -165,6 +168,7 @@
 			vulnSelectedYears?: string[];
 			vulnFixAvailable?: boolean;
 			vulnKEVOnly?: boolean;
+			vulnEPSSMin?: string;
 			imageSearch?: string;
 			imageSelectedRegistries?: string[];
 			imageSelectedSeverities?: string[];
@@ -178,6 +182,7 @@
 			if (value.vulnSelectedYears) vulnSelectedYears = value.vulnSelectedYears;
 			if (value.vulnFixAvailable !== undefined) vulnFixAvailable = value.vulnFixAvailable;
 			if (value.vulnKEVOnly !== undefined) vulnKEVOnly = value.vulnKEVOnly;
+			if (value.vulnEPSSMin !== undefined) vulnEPSSMin = value.vulnEPSSMin;
 			if (value.imageSearch !== undefined) imageSearch = value.imageSearch;
 			if (value.imageSelectedRegistries) imageSelectedRegistries = value.imageSelectedRegistries;
 			if (value.imageSelectedSeverities) imageSelectedSeverities = value.imageSelectedSeverities;
@@ -243,6 +248,18 @@
 	// KEV catalog (i.e., observed in real-world attacks). Backed by the
 	// kev=1 query param on /api/vuln/list.
 	let vulnKEVOnly = false;
+	// EPSS minimum score: empty string = "Any", otherwise the floor
+	// passed to /api/vuln/list as epss_min. EPSS is FIRST.org's daily
+	// 0–1 prediction of exploitation in the next 30 days.
+	let vulnEPSSMin = '';
+
+	const vulnEPSSOptions: SelectOption[] = [
+		{ value: '', label: 'Any' },
+		{ value: '0.01', label: '≥ 1%' },
+		{ value: '0.1', label: '≥ 10%' },
+		{ value: '0.5', label: '≥ 50%' },
+		{ value: '0.9', label: '≥ 90%' },
+	];
 
 	const severityFilterOptions: MultiSelectOption[] = [
 		{ value: 'CRITICAL', label: 'Critical' },
@@ -278,6 +295,7 @@
 		if (vulnSelectedYears.length) params.set('year', vulnSelectedYears.join(','));
 		if (vulnFixAvailable) params.set('fix', '1');
 		if (vulnKEVOnly) params.set('kev', '1');
+		if (vulnEPSSMin) params.set('epss_min', vulnEPSSMin);
 		const q = vulnSearch.trim();
 		if (q) params.set('q', q);
 		try {
@@ -403,7 +421,8 @@
 		vulnSelectedSources.slice().sort(),
 		vulnSelectedYears.slice().sort(),
 		vulnFixAvailable,
-		vulnKEVOnly
+		vulnKEVOnly,
+		vulnEPSSMin
 	]);
 	let prevVulnFiltersKey = '';
 	$: if (activeTab === 'vulnerabilities' && vulnFiltersKey !== prevVulnFiltersKey) {
@@ -514,7 +533,8 @@
 		(vulnSelectedSources.length > 0 ? 1 : 0) +
 		(vulnSelectedYears.length > 0 ? 1 : 0) +
 		(vulnFixAvailable ? 1 : 0) +
-		(vulnKEVOnly ? 1 : 0);
+		(vulnKEVOnly ? 1 : 0) +
+		(vulnEPSSMin ? 1 : 0);
 
 	function clearRepoFilters() {
 		repoSearch = ''; repoSelectedSeverities = []; repoHideClean = false;
@@ -525,6 +545,7 @@
 	function clearVulnFilters() {
 		vulnSearch = ''; vulnSelectedSeverities = []; vulnSelectedSources = [];
 		vulnSelectedYears = []; vulnFixAvailable = false; vulnKEVOnly = false;
+		vulnEPSSMin = '';
 	}
 
 	$: repoVirt = virtSlice(filteredRepos.length, ROW_HEIGHT, repoScrollTop, repoViewH);
@@ -864,7 +885,7 @@
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Search</span>
 							<div class="relative flex items-center">
 								<Search size={13} class="pointer-events-none absolute left-2.5 text-[var(--text-muted)]" />
-								<input type="text" class="host-search-input" placeholder="CVE id, title, package, repo…" bind:value={vulnSearch} />
+								<input type="text" class="host-search-input host-search-input-compact" placeholder="CVE, package, repo…" bind:value={vulnSearch} />
 							</div>
 						</div>
 						<div class="flex flex-col gap-1">
@@ -899,6 +920,12 @@
 							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5" title="Listed in CISA's Known Exploited Vulnerabilities catalog — observed in real-world attacks.">Exploitation</span>
 							<div class="flex items-center h-[28px]">
 								<Toggle bind:checked={vulnKEVOnly} label="Known exploited" />
+							</div>
+						</div>
+						<div class="flex flex-col gap-1">
+							<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5" title="EPSS — FIRST.org's daily-scored probability that a CVE will be exploited in the next 30 days.">EPSS ≥</span>
+							<div class="flex items-center h-[28px]">
+								<Select bind:value={vulnEPSSMin} options={vulnEPSSOptions} size="sm" />
 							</div>
 						</div>
 						{#if vulnActiveFilterCount > 0}
@@ -1302,6 +1329,10 @@
 		outline: none;
 		border-color: var(--accent);
 		box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent);
+	}
+	.host-search-input-compact {
+		min-width: 200px;
+		width: 200px;
 	}
 
 	.host-clear-filters {
