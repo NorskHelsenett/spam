@@ -5,13 +5,13 @@
 		ShieldAlert,
 		AlertTriangle,
 		Eye,
-		Activity,
 		Container,
 		GitBranch,
 		ShieldCheck,
 		Target
 	} from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
+	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -391,9 +391,24 @@
 			</header>
 
 			{#if triage.fix_now.length === 0 && triage.this_week.length === 0 && triage.watch.counts.total === 0}
-				<div class="flex flex-col items-center gap-3 py-16 text-center">
-					<Activity size={32} class="text-[var(--success)]" />
-					<p class="text-sm text-[var(--text-secondary)]">All clear — nothing in your scope needs attention right now.</p>
+				<div class="flex flex-1 items-center justify-center py-16">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<EmptyVulns size={64} class="text-[var(--success)]" />
+						<div class="space-y-1">
+							<h3 class="text-base font-semibold text-[var(--text-bright)]">All clear</h3>
+							<p class="text-sm text-[var(--text-tertiary)]">Nothing in your scope needs attention right now.</p>
+						</div>
+					</div>
+				</div>
+			{:else if activeTabTotal() === 0}
+				<div class="flex flex-1 items-center justify-center py-16">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<EmptyVulns size={64} class="text-[var(--success)]" />
+						<div class="space-y-1">
+							<h3 class="text-base font-semibold text-[var(--text-bright)]">No {activeTabLabel()}s need attention</h3>
+							<p class="text-sm text-[var(--text-tertiary)]">Switch tab or check back after the next scan.</p>
+						</div>
+					</div>
 				</div>
 			{:else}
 				<!-- Fix now -->
