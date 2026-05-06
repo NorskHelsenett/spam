@@ -30,6 +30,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
+	"github.com/NorskHelsenett/spam/internal/signingpolicy"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -85,6 +86,7 @@ func run() error {
 		&imagescan.ImageVulnFinding{},
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
+		&signingpolicy.Policy{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
 		&vulnerabilities.SBOMScanLease{},
@@ -200,6 +202,7 @@ func run() error {
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	routerOpts.SecretsKey = cfg.ProviderSecretsKey
 	// ACL chain: LocalProvider reads acl_grants. Future stages
 	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
 	routerOpts.ACLProvider = &acl.ChainProvider{

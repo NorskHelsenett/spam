@@ -31,6 +31,9 @@ type RouterOptions struct {
 	// provider chain (LocalProvider today, later also OIDC-derived /
 	// GitHub-App / external RBAC) stays out of handler signatures.
 	ACLProvider acl.Provider
+	// SecretsKey is the AES-GCM key used to en/decrypt provider PATs
+	// and the cosign signing policy's optional pinned key material.
+	SecretsKey []byte
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -39,10 +42,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var providerStore *providerconfig.Store
 	var appCache cache.Store
 	var aclProvider acl.Provider
+	var secretsKey []byte
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
+		secretsKey = opts.SecretsKey
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -221,6 +226,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// poll-friendly for the admin UI's progress bar.
 				api.Post("/admin/feeds/{feed}/refresh", uiapi.AdminFeedRefreshHandler(db, authService))
 				api.Get("/admin/feeds/status", uiapi.AdminFeedsStatusHandler(db, authService))
+
+				// Cosign signing policy — admin manages the verifier
+				// identity used by the image scanner. The image-scanner
+				// reads the same row directly via the worker DB, so the
+				// admin endpoint only needs GET (redacted) + PUT.
+				api.Get("/admin/signing/cosign-policy", uiapi.AdminSigningPolicyGetHandler(db, authService, secretsKey))
+				api.Put("/admin/signing/cosign-policy", uiapi.AdminSigningPolicyPutHandler(db, authService, secretsKey))
 
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))

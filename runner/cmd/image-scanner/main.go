@@ -167,14 +167,15 @@ func run() error {
 
 // lease is the subset of the lease response this binary cares about.
 type lease struct {
-	JobID         string            `json:"job_id"`
-	ImageDigestID string            `json:"image_digest_id"`
-	Registry      string            `json:"registry"`
-	Repository    string            `json:"repository"`
-	Digest        string            `json:"digest"`
-	Scanners      map[string]string `json:"scanners,omitempty"`
-	RunToken      string            `json:"run_token"`
-	WorkerURL     string            `json:"worker_url"`
+	JobID         string                  `json:"job_id"`
+	ImageDigestID string                  `json:"image_digest_id"`
+	Registry      string                  `json:"registry"`
+	Repository    string                  `json:"repository"`
+	Digest        string                  `json:"digest"`
+	Scanners      map[string]string       `json:"scanners,omitempty"`
+	SigningPolicy *imagescan.SigningPolicy `json:"signing_policy,omitempty"`
+	RunToken      string                  `json:"run_token"`
+	WorkerURL     string                  `json:"worker_url"`
 }
 
 // fetchPending is a cheap non-claiming probe of the queue. Returns the
@@ -250,6 +251,7 @@ func runOne(ctx context.Context, apiURL string, hmacKey []byte, workBase string,
 		l.Scanners,
 		scanWorkDir,
 		imagescan.StdoutLogger(),
+		l.SigningPolicy,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan pipeline: %w", err)

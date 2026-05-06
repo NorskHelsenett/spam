@@ -53,6 +53,28 @@ type ImageScanPayload struct {
 	Repository    string            `json:"repository"`
 	Digest        string            `json:"digest"`
 	Scanners      map[string]string `json:"scanners,omitempty"`
+
+	// SigningPolicy carries the cosign verification config the runner
+	// should use when running `cosign verify`. nil / empty means "no
+	// verification, just `cosign tree`" — the legacy behaviour. The
+	// worker fills this from signing_policy at job-creation time.
+	SigningPolicy *ImageScanSigningPolicy `json:"signing_policy,omitempty"`
+}
+
+// ImageScanSigningPolicy is the runtime-shaped subset of
+// signingpolicy.ResolvedPolicy that travels through the job payload.
+// Type matches the package's enum strings ("keyless" | "key").
+//
+// The KeyPEM is only populated for type='key' policies and is
+// transmitted in plaintext over the runner-internal connection
+// (already authenticated + scoped per-job by HMAC). Encryption at
+// rest in the DB protects against operator/backup leakage; transport
+// encryption is the cluster's TLS responsibility.
+type ImageScanSigningPolicy struct {
+	Type           string `json:"policy_type"`
+	Issuer         string `json:"issuer,omitempty"`
+	SubjectPattern string `json:"subject_pattern,omitempty"`
+	KeyPEM         string `json:"key_pem,omitempty"`
 }
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.
