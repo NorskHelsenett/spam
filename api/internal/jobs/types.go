@@ -18,6 +18,13 @@ const (
 	// startups can't double-queue.
 	JobTypeFetchKEV  JobType = "FETCH_KEV"
 	JobTypeFetchEPSS JobType = "FETCH_EPSS"
+	// FETCH_DEP_HEALTH refreshes third-party library health metadata
+	// (last activity, archived/deprecated flags, latest version,
+	// stars, issue velocity) from public registries + GitHub/GitLab.
+	// Same self-rescheduling pattern as KEV/EPSS but on a weekly
+	// cadence — packages don't change health that fast and rate-
+	// limited registries thank us for the lower QPS.
+	JobTypeFetchDepHealth JobType = "FETCH_DEP_HEALTH"
 )
 
 // VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
@@ -70,11 +77,21 @@ type ImageScanPayload struct {
 // (already authenticated + scoped per-job by HMAC). Encryption at
 // rest in the DB protects against operator/backup leakage; transport
 // encryption is the cluster's TLS responsibility.
+//
+// The four endpoint URLs let an org point cosign at self-hosted
+// Sigstore (Fulcio/Rekor) or a separate signature registry without
+// patching the runner. Empty values keep cosign on its public-
+// Sigstore defaults.
 type ImageScanSigningPolicy struct {
 	Type           string `json:"policy_type"`
 	Issuer         string `json:"issuer,omitempty"`
 	SubjectPattern string `json:"subject_pattern,omitempty"`
 	KeyPEM         string `json:"key_pem,omitempty"`
+
+	SignatureRepository string `json:"signature_repository,omitempty"`
+	FulcioURL           string `json:"fulcio_url,omitempty"`
+	RekorURL            string `json:"rekor_url,omitempty"`
+	TUFMirrorURL        string `json:"tuf_mirror_url,omitempty"`
 }
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.

@@ -239,9 +239,13 @@ func loadActiveSigningPolicy(ctx context.Context, db *gorm.DB, secretsKey []byte
 		return nil
 	}
 	return &jobs.ImageScanSigningPolicy{
-		Type:           string(resolved.Type),
-		Issuer:         resolved.Issuer,
-		SubjectPattern: resolved.SubjectPattern,
-		KeyPEM:         resolved.KeyPEM,
+		Type:                string(resolved.Type),
+		Issuer:              resolved.Issuer,
+		SubjectPattern:      resolved.SubjectPattern,
+		KeyPEM:              resolved.KeyPEM,
+		SignatureRepository: resolved.SignatureRepository,
+		FulcioURL:           resolved.FulcioURL,
+		RekorURL:            resolved.RekorURL,
+		TUFMirrorURL:        resolved.TUFMirrorURL,
 	}
 }

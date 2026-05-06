@@ -146,6 +146,12 @@
 				return `Unsigned image`;
 			case 'no_sbom':
 				return `No SBOM`;
+			case 'archived_deps':
+				return `${f.count} archived dep${(f.count as number) === 1 ? '' : 's'}`;
+			case 'deprecated_deps':
+				return `${f.count} deprecated dep${(f.count as number) === 1 ? '' : 's'}`;
+			case 'low_dep_health':
+				return `Worst dep health ${Math.round((f.worst_score as number) ?? 0)}/100`;
 			default:
 				return r.id;
 		}
@@ -161,6 +167,9 @@
 			case 'epss_elevated':
 			case 'critical_severity':
 			case 'scan_stale':
+			case 'archived_deps':
+			case 'deprecated_deps':
+			case 'low_dep_health':
 				return 'pill pill-warning';
 			default:
 				return 'pill pill-neutral';

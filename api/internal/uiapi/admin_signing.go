@@ -24,13 +24,33 @@ import (
 // admin can confirm "yes that's the key I uploaded" without the
 // material being readable from a browser cache.
 type adminSigningPolicyResponse struct {
-	Configured     bool                  `json:"configured"`
-	PolicyType     signingpolicy.Type    `json:"policy_type,omitempty"`
-	Enabled        bool                  `json:"enabled"`
-	Issuer         string                `json:"issuer,omitempty"`
-	SubjectPattern string                `json:"subject_pattern,omitempty"`
-	KeyFingerprint string                `json:"key_fingerprint,omitempty"`
-	UpdatedAt      string                `json:"updated_at,omitempty"`
+	Configured          bool               `json:"configured"`
+	PolicyType          signingpolicy.Type `json:"policy_type,omitempty"`
+	Enabled             bool               `json:"enabled"`
+	Issuer              string             `json:"issuer,omitempty"`
+	SubjectPattern      string             `json:"subject_pattern,omitempty"`
+	KeyFingerprint      string             `json:"key_fingerprint,omitempty"`
+	SignatureRepository string             `json:"signature_repository,omitempty"`
+	FulcioURL           string             `json:"fulcio_url,omitempty"`
+	RekorURL            string             `json:"rekor_url,omitempty"`
+	TUFMirrorURL        string             `json:"tuf_mirror_url,omitempty"`
+	UpdatedAt           string             `json:"updated_at,omitempty"`
+}
+
+func policyToResponse(p *signingpolicy.ResolvedPolicy) adminSigningPolicyResponse {
+	return adminSigningPolicyResponse{
+		Configured:          true,
+		PolicyType:          p.Type,
+		Enabled:             p.Enabled,
+		Issuer:              p.Issuer,
+		SubjectPattern:      p.SubjectPattern,
+		KeyFingerprint:      p.KeyFingerprint,
+		SignatureRepository: p.SignatureRepository,
+		FulcioURL:           p.FulcioURL,
+		RekorURL:            p.RekorURL,
+		TUFMirrorURL:        p.TUFMirrorURL,
+		UpdatedAt:           p.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+	}
 }
 
 // AdminSigningPolicyGetHandler returns the active cosign policy
@@ -51,15 +71,7 @@ func AdminSigningPolicyGetHandler(db *gorm.DB, authService *auth.Service, secret
 			http.Error(w, "failed to load signing policy", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, adminSigningPolicyResponse{
-			Configured:     true,
-			PolicyType:     p.Type,
-			Enabled:        p.Enabled,
-			Issuer:         p.Issuer,
-			SubjectPattern: p.SubjectPattern,
-			KeyFingerprint: p.KeyFingerprint,
-			UpdatedAt:      p.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-		})
+		writeJSON(w, http.StatusOK, policyToResponse(p))
 	}
 }
 
@@ -89,15 +101,7 @@ func AdminSigningPolicyPutHandler(db *gorm.DB, authService *auth.Service, secret
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, http.StatusOK, adminSigningPolicyResponse{
-			Configured:     true,
-			PolicyType:     p.Type,
-			Enabled:        p.Enabled,
-			Issuer:         p.Issuer,
-			SubjectPattern: p.SubjectPattern,
-			KeyFingerprint: p.KeyFingerprint,
-			UpdatedAt:      p.UpdatedAt.UTC().Format("2006-01-02T15:04:05Z"),
-		})
+		writeJSON(w, http.StatusOK, policyToResponse(p))
 	}
 }
 

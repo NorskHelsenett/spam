@@ -46,9 +46,19 @@ type Policy struct {
 	SubjectPattern   string    `gorm:"column:subject_pattern"`
 	KeyPEMEncrypted  []byte    `gorm:"column:key_pem_encrypted"`
 	KeyFingerprint   string    `gorm:"column:key_fingerprint"`
-	CreatedAt        time.Time `gorm:"column:created_at"`
-	UpdatedAt        time.Time `gorm:"column:updated_at"`
-	UpdatedBy        string    `gorm:"column:updated_by"`
+
+	// Cosign attestation URL overrides. Empty = use cosign defaults
+	// (public Sigstore at sigstore.dev, signatures alongside the
+	// image). Set when an org runs self-hosted Fulcio/Rekor or
+	// publishes signatures to a separate registry.
+	SignatureRepository string `gorm:"column:signature_repository"`
+	FulcioURL           string `gorm:"column:fulcio_url"`
+	RekorURL            string `gorm:"column:rekor_url"`
+	TUFMirrorURL        string `gorm:"column:tuf_mirror_url"`
+
+	CreatedAt time.Time `gorm:"column:created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at"`
+	UpdatedBy string    `gorm:"column:updated_by"`
 }
 
 func (Policy) TableName() string { return "signing_policy" }
@@ -81,12 +91,16 @@ func (s *Store) Get(ctx context.Context) (*ResolvedPolicy, error) {
 		return nil, err
 	}
 	resolved := &ResolvedPolicy{
-		Type:           row.PolicyType,
-		Enabled:        row.Enabled,
-		Issuer:         row.Issuer,
-		SubjectPattern: row.SubjectPattern,
-		KeyFingerprint: row.KeyFingerprint,
-		UpdatedAt:      row.UpdatedAt,
+		Type:                row.PolicyType,
+		Enabled:             row.Enabled,
+		Issuer:              row.Issuer,
+		SubjectPattern:      row.SubjectPattern,
+		KeyFingerprint:      row.KeyFingerprint,
+		SignatureRepository: row.SignatureRepository,
+		FulcioURL:           row.FulcioURL,
+		RekorURL:            row.RekorURL,
+		TUFMirrorURL:        row.TUFMirrorURL,
+		UpdatedAt:           row.UpdatedAt,
 	}
 	if len(row.KeyPEMEncrypted) > 0 {
 		pem, err := providerconfig.DecryptToken(s.key, row.KeyPEMEncrypted)
@@ -116,13 +130,20 @@ func (s *Store) GetEnabled(ctx context.Context) (*ResolvedPolicy, error) {
 // ResolvedPolicy is the decrypted, runtime-shaped policy. KeyPEM is
 // the plaintext public key when policy_type='key', empty otherwise.
 type ResolvedPolicy struct {
-	Type           Type      `json:"policy_type"`
-	Enabled        bool      `json:"enabled"`
-	Issuer         string    `json:"issuer,omitempty"`
-	SubjectPattern string    `json:"subject_pattern,omitempty"`
-	KeyPEM         string    `json:"key_pem,omitempty"`
-	KeyFingerprint string    `json:"key_fingerprint,omitempty"`
-	UpdatedAt      time.Time `json:"updated_at,omitempty"`
+	Type           Type   `json:"policy_type"`
+	Enabled        bool   `json:"enabled"`
+	Issuer         string `json:"issuer,omitempty"`
+	SubjectPattern string `json:"subject_pattern,omitempty"`
+	KeyPEM         string `json:"key_pem,omitempty"`
+	KeyFingerprint string `json:"key_fingerprint,omitempty"`
+
+	// Cosign endpoint overrides — see Policy fields for semantics.
+	SignatureRepository string `json:"signature_repository,omitempty"`
+	FulcioURL           string `json:"fulcio_url,omitempty"`
+	RekorURL            string `json:"rekor_url,omitempty"`
+	TUFMirrorURL        string `json:"tuf_mirror_url,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 // Upsert validates and writes the policy. The key_pem (if provided)
@@ -138,13 +159,17 @@ func (s *Store) Upsert(ctx context.Context, in UpsertInput, updatedBy string) (*
 	}
 
 	row := Policy{
-		Name:           PolicyName,
-		PolicyType:     in.Type,
-		Enabled:        in.Enabled,
-		Issuer:         strings.TrimSpace(in.Issuer),
-		SubjectPattern: strings.TrimSpace(in.SubjectPattern),
-		UpdatedAt:      time.Now().UTC(),
-		UpdatedBy:      updatedBy,
+		Name:                PolicyName,
+		PolicyType:          in.Type,
+		Enabled:             in.Enabled,
+		Issuer:              strings.TrimSpace(in.Issuer),
+		SubjectPattern:      strings.TrimSpace(in.SubjectPattern),
+		SignatureRepository: strings.TrimSpace(in.SignatureRepository),
+		FulcioURL:           strings.TrimSpace(in.FulcioURL),
+		RekorURL:            strings.TrimSpace(in.RekorURL),
+		TUFMirrorURL:        strings.TrimSpace(in.TUFMirrorURL),
+		UpdatedAt:           time.Now().UTC(),
+		UpdatedBy:           updatedBy,
 	}
 
 	keyPEM := strings.TrimSpace(in.KeyPEM)
@@ -174,6 +199,14 @@ type UpsertInput struct {
 	Issuer         string `json:"issuer,omitempty"`
 	SubjectPattern string `json:"subject_pattern,omitempty"`
 	KeyPEM         string `json:"key_pem,omitempty"`
+
+	// Endpoint overrides for self-hosted Sigstore deployments or
+	// split-registry signature distribution. All optional; empty =
+	// cosign default.
+	SignatureRepository string `json:"signature_repository,omitempty"`
+	FulcioURL           string `json:"fulcio_url,omitempty"`
+	RekorURL            string `json:"rekor_url,omitempty"`
+	TUFMirrorURL        string `json:"tuf_mirror_url,omitempty"`
 }
 
 // Validate rejects payloads that can't be acted on. We don't compile

@@ -86,11 +86,20 @@ type Pipeline struct {
 
 // SigningPolicy is the runtime-shaped subset of the admin-configured
 // cosign verification policy. Type is one of "keyless" or "key".
+//
+// The four endpoint URLs map to cosign flags: SignatureRepository →
+// --signature-repository, FulcioURL → --fulcio-url, RekorURL →
+// --rekor-url, TUFMirrorURL → --tuf-mirror. Empty = cosign default.
 type SigningPolicy struct {
 	Type           string
 	Issuer         string
 	SubjectPattern string
 	KeyPEM         string
+
+	SignatureRepository string
+	FulcioURL           string
+	RekorURL            string
+	TUFMirrorURL        string
 }
 
 // Artifact is the output of one scanner invocation. Field is the multipart
@@ -257,6 +266,29 @@ func (p Pipeline) cosignVerify(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("no signing policy")
 	}
 	args := []string{"verify"}
+
+	// Endpoint overrides come first so they apply to identity flags
+	// resolved later in the same invocation. Empty = let cosign use
+	// its bundled defaults (public Sigstore).
+	if pol.FulcioURL != "" {
+		args = append(args, "--fulcio-url", pol.FulcioURL)
+	}
+	if pol.RekorURL != "" {
+		args = append(args, "--rekor-url", pol.RekorURL)
+	}
+	if pol.TUFMirrorURL != "" {
+		args = append(args, "--tuf-mirror", pol.TUFMirrorURL)
+	}
+	if pol.SignatureRepository != "" {
+		// --signature-repository is a top-level cosign flag; it lives
+		// before the verb on some versions, after on others. Recent
+		// cosign accepts it as a verify subcommand flag, which is the
+		// path we take here. If your fleet pins an older cosign that
+		// requires the env var instead, COSIGN_REPOSITORY=<url> in the
+		// scanner pod's env achieves the same thing.
+		args = append(args, "--signature-repository", pol.SignatureRepository)
+	}
+
 	switch pol.Type {
 	case "keyless":
 		if pol.Issuer == "" || pol.SubjectPattern == "" {

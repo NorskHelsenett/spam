@@ -100,5 +100,30 @@ func Reasons(s Signals) []Reason {
 		})
 	}
 
+	if s.ArchivedDepCount > 0 {
+		out = append(out, Reason{
+			ID: "archived_deps",
+			Fields: map[string]any{
+				"count": s.ArchivedDepCount,
+			},
+		})
+	}
+	if s.DeprecatedDepCount > 0 {
+		out = append(out, Reason{
+			ID: "deprecated_deps",
+			Fields: map[string]any{
+				"count": s.DeprecatedDepCount,
+			},
+		})
+	}
+	if s.WorstDepHealthScore > 0 && s.WorstDepHealthScore < 40 {
+		out = append(out, Reason{
+			ID: "low_dep_health",
+			Fields: map[string]any{
+				"worst_score": s.WorstDepHealthScore,
+			},
+		})
+	}
+
 	return out
 }

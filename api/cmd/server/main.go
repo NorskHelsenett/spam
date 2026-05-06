@@ -16,6 +16,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
@@ -87,6 +88,7 @@ func run() error {
 		&providerconfig.ProviderInstance{},
 		&providerconfig.ProviderSecret{},
 		&signingpolicy.Policy{},
+		&dephealth.Health{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
 		&vulnerabilities.SBOMScanLease{},
@@ -136,6 +138,11 @@ func run() error {
 		"migrations/20260429_create_cisa_kev_and_epss.sql",
 		"migrations/20260429_create_unique_active_kev_epss_jobs.sql",
 		"migrations/20260430_create_materialized_unified_vuln_views.sql",
+		"migrations/20260506_create_asset_risk_view.sql",
+		"migrations/20260507_create_signing_policy.sql",
+		"migrations/20260507a_add_signing_policy_url_overrides.sql",
+		"migrations/20260508_create_dep_health.sql",
+		"migrations/20260508a_unique_active_dep_health_job.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

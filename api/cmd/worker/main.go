@@ -15,6 +15,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/poller"
@@ -185,6 +186,14 @@ func run() error {
 		for _, w := range warnings {
 			log.Printf("WARNING: provider secret key: %s", w)
 		}
+	}
+	// Resolve the GitHub PAT once and hand it to dephealth so the
+	// per-sweep fetcher can use it for higher rate-limit headroom.
+	// Empty when no GitHub provider is configured — falls back to
+	// unauthenticated requests (60/h). Token rotation requires a
+	// worker restart; weekly sweeps make that acceptable.
+	if tok := resolveGitHubProviderToken(ctx, gormDB, cfg.ProviderSecretsKey); tok != "" {
+		dephealth.SetGitHubToken(tok)
 	}
 	commitPoller := poller.New(gormDB, providerStore)
 
@@ -560,4 +569,37 @@ func hostname() string {
 		return "worker"
 	}
 	return name
+}
+
+// resolveGitHubProviderToken returns the most recent decrypted GitHub
+// PAT from provider_secrets, or "" when none is configured / the
+// secret can't be decrypted. Used at boot to seed dephealth's GitHub
+// fetcher; doing the lookup here (rather than in dephealth) keeps
+// that package free of providerconfig + assets imports — the chain
+// would otherwise cycle through jobs.
+func resolveGitHubProviderToken(ctx context.Context, db *gorm.DB, key []byte) string {
+	if len(key) == 0 {
+		return ""
+	}
+	type row struct {
+		TokenEncrypted []byte
+	}
+	var r row
+	err := db.WithContext(ctx).Raw(`
+		SELECT s.token_encrypted
+		FROM provider_secrets s
+		JOIN provider_instances p ON p.id = s.provider_id
+		WHERE p.type = 'github' AND s.revoked_at IS NULL
+		ORDER BY s.created_at DESC
+		LIMIT 1
+	`).Scan(&r).Error
+	if err != nil || len(r.TokenEncrypted) == 0 {
+		return ""
+	}
+	tok, err := providerconfig.DecryptToken(key, r.TokenEncrypted)
+	if err != nil {
+		log.Printf("resolveGitHubProviderToken: decrypt failed: %v", err)
+		return ""
+	}
+	return tok
 }

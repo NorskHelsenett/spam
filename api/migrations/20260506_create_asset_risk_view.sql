@@ -146,7 +146,14 @@ repo_signals AS (
         rv.last_scan_at                                 AS last_scan_at,
         EXISTS (SELECT 1 FROM sbom_bindings sb
                 JOIN repo_commits rc ON rc.id = sb.asset_ref_id
-                WHERE sb.asset_type = 'REPO_COMMIT' AND rc.repo_id = r.id) AS has_sbom
+                WHERE sb.asset_type = 'REPO_COMMIT' AND rc.repo_id = r.id) AS has_sbom,
+        -- Dep-health rollup (Phase 3): worst score across the repo's
+        -- direct deps, plus counts of archived/deprecated direct deps.
+        -- Default 100 when the repo has no manifest_dependencies rows
+        -- (means: nothing measured = no penalty).
+        COALESCE(dh.worst_score, 100)::real             AS worst_dep_health_score,
+        COALESCE(dh.archived_direct, 0)::bigint         AS archived_dep_count,
+        COALESCE(dh.deprecated_direct, 0)::bigint       AS deprecated_dep_count
     FROM repos r
     -- Vulns rolled up per repo, deduped on canonical_id within (repo, severity).
     LEFT JOIN LATERAL (
@@ -190,6 +197,23 @@ repo_signals AS (
         WHERE repo_id = r.id
           AND author_date > NOW() - INTERVAL '90 days'
     ) c ON TRUE
+    -- Dep-health rollup. Joins manifests for the repo → its
+    -- dependencies → dep_health records (ecosystem,name keyed). The
+    -- worst_score is min across direct deps; counts are direct only
+    -- because transitive issues are usually unfixable from the repo
+    -- being scored.
+    LEFT JOIN LATERAL (
+        SELECT
+            MIN(d.health_score)::real                                                    AS worst_score,
+            COUNT(*) FILTER (WHERE d.is_archived AND md.direct)::bigint                  AS archived_direct,
+            COUNT(*) FILTER (WHERE d.is_deprecated AND md.direct)::bigint                AS deprecated_direct
+        FROM manifests m
+        JOIN manifest_dependencies md ON md.manifest_id = m.id
+        JOIN dep_health d
+          ON d.ecosystem = md.ecosystem
+         AND d.package_name = md.name
+        WHERE m.repo_id = r.id
+    ) dh ON TRUE
 ),
 
 -- ---------- image-side aggregation ----------
@@ -216,7 +240,14 @@ image_signals AS (
                                                         AS scan_age_days,
         iv.last_scan_at                                 AS last_scan_at,
         EXISTS (SELECT 1 FROM sbom_bindings sb
-                WHERE sb.asset_type = 'IMAGE_DIGEST' AND sb.asset_ref_id = d.id) AS has_sbom
+                WHERE sb.asset_type = 'IMAGE_DIGEST' AND sb.asset_ref_id = d.id) AS has_sbom,
+        -- Dep-health doesn't apply at the image level — it's
+        -- repo-side (via SBOMs ↔ manifests). Defaults reflect "no
+        -- penalty observed" so image rows aren't downgraded for
+        -- something they shouldn't be measured on.
+        100::real                                       AS worst_dep_health_score,
+        0::bigint                                       AS archived_dep_count,
+        0::bigint                                       AS deprecated_dep_count
     FROM image_digests d
     LEFT JOIN LATERAL (
         SELECT
@@ -259,7 +290,13 @@ cluster_signals AS (
         EXTRACT(DAY FROM NOW() - MAX(per_image.last_scan_at))::int
                                                         AS scan_age_days,
         MAX(per_image.last_scan_at)                     AS last_scan_at,
-        true                                            AS has_sbom
+        true                                            AS has_sbom,
+        -- Cluster rows don't carry dep-health themselves; that
+        -- signal lives on repos. Defaults match image_signals so
+        -- the UNION ALL types align.
+        100::real                                       AS worst_dep_health_score,
+        0::bigint                                       AS archived_dep_count,
+        0::bigint                                       AS deprecated_dep_count
     FROM (SELECT DISTINCT cluster_id FROM cluster_digests) c
     LEFT JOIN cluster_digests cd ON cd.cluster_id = c.cluster_id
     LEFT JOIN image_digests d    ON d.digest = cd.digest

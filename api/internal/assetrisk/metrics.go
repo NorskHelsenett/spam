@@ -301,7 +301,8 @@ func loadAllRows(ctx context.Context, db *gorm.DB, p TriageParams) ([]Signals, *
 			asset_type, asset_id, asset_slug,
 			critical_count, high_count, kev_count, epss_max,
 			has_fix_for_critical, active_secret_count, internet_exposed,
-			signed_commits_pct, image_signed, scan_age_days, last_scan_at, has_sbom
+			signed_commits_pct, image_signed, scan_age_days, last_scan_at, has_sbom,
+			worst_dep_health_score, archived_dep_count, deprecated_dep_count
 		FROM asset_risk
 		WHERE
 		  (asset_type = 'repo'    AND ` + repoSQL + `)

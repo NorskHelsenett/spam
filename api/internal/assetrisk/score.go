@@ -33,6 +33,16 @@ type Signals struct {
 	ScanAgeDays      int        `json:"scan_age_days"      gorm:"column:scan_age_days"`
 	LastScanAt       *time.Time `json:"last_scan_at"       gorm:"column:last_scan_at"`
 	HasSBOM          bool       `json:"has_sbom"           gorm:"column:has_sbom"`
+
+	// Dep-health signals (Phase 3): worst_dep_health_score is the
+	// minimum across the asset's direct deps (0..100, lower=worse;
+	// 100 = "no observed issues" since assets without measured deps
+	// shouldn't be penalised). Counts are direct-only because
+	// transitives are typically unfixable from the asset being
+	// scored.
+	WorstDepHealthScore float32 `json:"worst_dep_health_score" gorm:"column:worst_dep_health_score"`
+	ArchivedDepCount    int64   `json:"archived_dep_count"     gorm:"column:archived_dep_count"`
+	DeprecatedDepCount  int64   `json:"deprecated_dep_count"   gorm:"column:deprecated_dep_count"`
 }
 
 // ThreatScore turns acute-risk signals into a 0..100 number where
@@ -114,6 +124,31 @@ func TrustScore(s Signals) int {
 	// are signed.
 	if s.AssetType == "image" && !s.ImageSigned {
 		score -= 20
+	}
+
+	// Dep-health: penalise assets that depend on archived /
+	// deprecated packages or whose worst direct-dep health score is
+	// low. Capped per signal so a repo with many archived deps gets
+	// flagged but doesn't tank to F instantly.
+	if s.ArchivedDepCount > 0 {
+		penalty := int(s.ArchivedDepCount) * 10
+		if penalty > 30 {
+			penalty = 30
+		}
+		score -= penalty
+	}
+	if s.DeprecatedDepCount > 0 {
+		penalty := int(s.DeprecatedDepCount) * 8
+		if penalty > 25 {
+			penalty = 25
+		}
+		score -= penalty
+	}
+	// Worst-package wins: if any direct dep is below the 40-score
+	// threshold (abandoned, single-maintainer, etc.), apply a
+	// modest fixed penalty regardless of count.
+	if s.WorstDepHealthScore > 0 && s.WorstDepHealthScore < 40 {
+		score -= 15
 	}
 
 	return clamp(score, 0, 100)

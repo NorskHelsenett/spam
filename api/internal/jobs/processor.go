@@ -16,6 +16,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
@@ -73,6 +74,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchKEV(ctx, db)
 	case JobTypeFetchEPSS:
 		return processFetchEPSS(ctx, db, job.ID)
+	case JobTypeFetchDepHealth:
+		return processFetchDepHealth(ctx, db, job.ID)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -284,6 +287,11 @@ func nextFeedRunAt(jobType JobType, from time.Time) time.Time {
 		return next
 	case JobTypeFetchKEV:
 		return from.Add(kevRefreshInterval)
+	case JobTypeFetchDepHealth:
+		// Weekly cadence — package metadata changes slowly and the
+		// upstream registries (npm/PyPI/etc) + GitHub API have rate
+		// limits we don't want to burn on noise.
+		return from.Add(7 * 24 * time.Hour)
 	default:
 		// Unknown feed type — return a safe default; the caller
 		// shouldn't reach here, the switch above is exhaustive over
@@ -333,6 +341,60 @@ func processFetchEPSS(ctx context.Context, db *gorm.DB, jobID string) (interface
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
+// depHealthMaxRowsPerSweep caps how many packages a single sweep
+// processes. Larger initial sweeps risk hitting GitHub rate limits;
+// smaller ones drag out the cold-start backfill. 200 strikes a
+// balance — at one sweep per week the table fills in ~10 weeks for
+// a 2k-package corpus, which is fine for a first deploy.
+const depHealthMaxRowsPerSweep = 200
+
+// processFetchDepHealth walks manifest_dependencies, refreshes
+// per-package health rows that are missing or stale, and reschedules
+// itself for next week. Streams progress (rows-written running
+// total) into Job.Result so the admin UI can render a live counter
+// without polling each package.
+//
+// In Phase 3a the runner has no concrete resolvers wired up yet;
+// the processor short-circuits to a no-op so admins can see the job
+// flow without spurious "no resolver" rows accumulating in
+// dep_health. Phase 3b plugs in npm + GitHub and the same processor
+// starts producing real data.
+func processFetchDepHealth(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	progress := func(written int) {
+		if data, jsonErr := json.Marshal(map[string]any{
+			"status":       "ingesting",
+			"rows_written": written,
+		}); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", data)
+		}
+	}
+
+	resolvers := dephealth.RegisteredResolvers()
+	provider := dephealth.RegisteredProvider(ctx, db)
+
+	if len(resolvers) == 0 {
+		scheduleNextFeedRefresh(ctx, db, JobTypeFetchDepHealth)
+		return map[string]any{
+			"status": "skipped",
+			"reason": "no resolvers registered",
+		}, nil
+	}
+
+	runner := dephealth.NewRunner(db, resolvers, provider)
+	res, err := runner.RunOnce(ctx, depHealthMaxRowsPerSweep, progress)
+	if err != nil {
+		return nil, err
+	}
+	scheduleNextFeedRefresh(ctx, db, JobTypeFetchDepHealth)
+	assetrisk.TriggerRefresh(db) // dep-health feeds Trust signals
+	return map[string]any{
+		"status":    "ingested",
+		"total":     res.Total,
+		"refreshed": res.Refreshed,
+		"failed":    res.Failed,
+	}, nil
+}
+
 // scheduleNextFeedRefresh enqueues a follow-up FETCH_* job at the
 // next slot dictated by nextFeedRunAt for the given feed type.
 // Failures are logged but not fatal — the EnsureFeedRefreshScheduled
@@ -361,7 +423,7 @@ func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) 
 // picks up feeds without waiting for the previous schedule to fire.
 func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
 	now := time.Now()
-	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS} {
+	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS, JobTypeFetchDepHealth} {
 		// If a queued/retry job already exists, the unique index
 		// would reject a fresh insert anyway — but checking first
 		// keeps the log clean.
