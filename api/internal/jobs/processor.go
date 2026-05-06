@@ -14,6 +14,7 @@ import (
 	// schedule pinned to Europe/Oslo.
 	_ "time/tzdata"
 
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
@@ -107,6 +108,7 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 	// run at most one recompute per burst instead of serialising the
 	// job on the expensive summary+repos query.
 	vulnmetrics.TriggerRefresh(db)
+	assetrisk.TriggerRefresh(db)
 	// Any new vuln_ids from this batch need advisory metadata
 	// fetched from OSV/EUVD. Bounded per-call; successive calls
 	// drain the backlog.
@@ -304,6 +306,7 @@ func processFetchKEV(ctx context.Context, db *gorm.DB) (interface{}, error) {
 	// dashboard cache so the next list view picks up the new boost
 	// rather than serving the previous order from cache.
 	vulnmetrics.TriggerRefresh(db)
+	assetrisk.TriggerRefresh(db)
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
@@ -326,6 +329,7 @@ func processFetchEPSS(ctx context.Context, db *gorm.DB, jobID string) (interface
 	}
 	scheduleNextFeedRefresh(ctx, db, JobTypeFetchEPSS)
 	vulnmetrics.TriggerRefresh(db)
+	assetrisk.TriggerRefresh(db)
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
@@ -419,6 +423,10 @@ func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{
 	if err != nil {
 		return result, err
 	}
+	// Probe verdicts flip findings between unknown / valid / invalid;
+	// active_secret_count on asset_risk depends on which hashes are
+	// status='valid', so refresh after each probe pass.
+	assetrisk.TriggerRefresh(db)
 	return result, nil
 }
 

@@ -15,6 +15,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
@@ -161,6 +162,10 @@ func run() error {
 	// Endpoints that read the MVs short-circuit to empty until the first
 	// populate lands (see vulnmetrics.unifiedViewsReady).
 	vulnmetrics.TriggerRefresh(gormDB)
+	// asset_risk MV is similarly created WITH NO DATA — populate
+	// async so /api/triage starts returning real data once the
+	// underlying vuln MVs and cluster_record table are warm.
+	assetrisk.TriggerRefresh(gormDB)
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {

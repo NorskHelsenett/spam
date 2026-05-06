@@ -226,6 +226,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
 
+				// Triage — asset-centric "fix this now" dashboard backing /app.
+				api.Get("/triage", uiapi.TriageHandler(db, authService))
+
 				// Ecosystems endpoint
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService, appCache))
 

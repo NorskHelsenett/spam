@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -86,6 +87,7 @@ func DependencyVEXHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		// the list — warm the dashboard cache in the background so
 		// the next page render reflects the suppression/override.
 		vulnmetrics.TriggerRefresh(db)
+		assetrisk.TriggerRefresh(db)
 
 		w.WriteHeader(http.StatusNoContent)
 	}

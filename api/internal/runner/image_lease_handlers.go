@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
@@ -208,6 +209,7 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 	// background so the next /app/vulnerabilities load sees fresh
 	// aggregates without paying the recompute on the UI thread.
 	vulnmetrics.TriggerRefresh(s.db)
+	assetrisk.TriggerRefresh(s.db)
 	jobs.EnqueueMissingVulnMeta(r.Context(), s.db)
 
 	w.WriteHeader(http.StatusOK)

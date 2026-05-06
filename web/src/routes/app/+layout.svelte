@@ -197,7 +197,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
@@ -213,7 +213,8 @@ let isAdmin = $state(false);
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
 		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound },
-		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon }
+		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon },
+		{ href: '/app/inventory', label: 'Inventory', icon: Boxes }
 	] as const;
 
 	// Admin-only nav — Runs exposes the job queue (CREATE_RUN artifacts
