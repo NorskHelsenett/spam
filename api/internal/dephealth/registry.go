@@ -13,13 +13,19 @@ import (
 // (e.g. disabling a flaky resolver via env var) take effect on the
 // next sweep without a worker restart.
 //
-// Phase 3b ships npm + Go modules. Adding more (PyPI, RubyGems,
-// crates.io, NuGet, Maven) is purely additive — drop a resolver
-// file and append it here.
+// Phase 3.1 ships npm, Go modules, PyPI, RubyGems, cargo (crates.io),
+// and NuGet. Maven is the next addition once we have a defensible
+// approach to the GAV → repo mapping (POM XML parsing). Each new
+// ecosystem is purely additive — drop a resolver file and append
+// it here.
 func RegisteredResolvers() []Resolver {
 	return []Resolver{
 		newNpmResolver(),
 		newGoResolver(),
+		newPypiResolver(),
+		newRubygemsResolver(),
+		newCratesResolver(),
+		newNugetResolver(),
 	}
 }
 

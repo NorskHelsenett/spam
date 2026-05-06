@@ -30,9 +30,18 @@ type Health struct {
 	IsDeprecated     bool      `gorm:"column:is_deprecated"`
 	SingleMaintainer bool      `gorm:"column:single_maintainer"`
 	HealthScore      int16     `gorm:"column:health_score"`
-	FetchedAt        time.Time `gorm:"column:fetched_at"`
-	Etag             string    `gorm:"column:etag"`
-	Error            string    `gorm:"column:error"`
+
+	// Versions-behind deltas vs LatestVersion. Populated when a
+	// manifest_dependencies row exists for this package; zero
+	// otherwise. Only major-behind feeds Trust scoring today —
+	// minor/patch are recorded for the show-your-work expand panel.
+	VersionsBehindMajor int `gorm:"column:versions_behind_major"`
+	VersionsBehindMinor int `gorm:"column:versions_behind_minor"`
+	VersionsBehindPatch int `gorm:"column:versions_behind_patch"`
+
+	FetchedAt time.Time `gorm:"column:fetched_at"`
+	Etag      string    `gorm:"column:etag"`
+	Error     string    `gorm:"column:error"`
 }
 
 func (Health) TableName() string { return "dep_health" }

@@ -43,6 +43,13 @@ type Signals struct {
 	WorstDepHealthScore float32 `json:"worst_dep_health_score" gorm:"column:worst_dep_health_score"`
 	ArchivedDepCount    int64   `json:"archived_dep_count"     gorm:"column:archived_dep_count"`
 	DeprecatedDepCount  int64   `json:"deprecated_dep_count"   gorm:"column:deprecated_dep_count"`
+
+	// Versions-behind: the worst major-version lag across the
+	// asset's direct deps, plus the count of direct deps that are
+	// at least one major behind. Captures "stale upgrade backlog"
+	// as a posture signal even when no individual dep is archived.
+	MaxMajorBehind      int   `json:"max_major_behind"        gorm:"column:max_major_behind"`
+	MajorBehindDepCount int64 `json:"major_behind_dep_count"  gorm:"column:major_behind_dep_count"`
 }
 
 // ThreatScore turns acute-risk signals into a 0..100 number where
@@ -149,6 +156,19 @@ func TrustScore(s Signals) int {
 	// modest fixed penalty regardless of count.
 	if s.WorstDepHealthScore > 0 && s.WorstDepHealthScore < 40 {
 		score -= 15
+	}
+
+	// Major-version upgrade backlog. Each direct dep ≥1 major
+	// version behind is -3, capped at -15 so a project carrying
+	// six stale deps doesn't lose more Trust than one with one.
+	// Patch + minor lag aren't penalised — they're noise across a
+	// real codebase and adding them tanks every long-lived repo.
+	if s.MajorBehindDepCount > 0 {
+		penalty := int(s.MajorBehindDepCount) * 3
+		if penalty > 15 {
+			penalty = 15
+		}
+		score -= penalty
 	}
 
 	return clamp(score, 0, 100)

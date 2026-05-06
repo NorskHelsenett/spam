@@ -211,12 +211,15 @@ repo_signals AS (
                 JOIN repo_commits rc ON rc.id = sb.asset_ref_id
                 WHERE sb.asset_type = 'REPO_COMMIT' AND rc.repo_id = r.id) AS has_sbom,
         -- Dep-health rollup (Phase 3): worst score across the repo's
-        -- direct deps, plus counts of archived/deprecated direct deps.
-        -- Default 100 when the repo has no manifest_dependencies rows
-        -- (means: nothing measured = no penalty).
+        -- direct deps, plus counts of archived/deprecated direct deps,
+        -- plus how many direct deps are at least one major version
+        -- behind. Default values reflect "no penalty observed" so a
+        -- repo with no measured deps isn't downgraded.
         COALESCE(dh.worst_score, 100)::real             AS worst_dep_health_score,
         COALESCE(dh.archived_direct, 0)::bigint         AS archived_dep_count,
-        COALESCE(dh.deprecated_direct, 0)::bigint       AS deprecated_dep_count
+        COALESCE(dh.deprecated_direct, 0)::bigint       AS deprecated_dep_count,
+        COALESCE(dh.max_major_behind, 0)::int           AS max_major_behind,
+        COALESCE(dh.major_behind_direct, 0)::bigint     AS major_behind_dep_count
     FROM repos r
     -- Vulns rolled up per repo, deduped on canonical_id within (repo, severity).
     LEFT JOIN LATERAL (
@@ -269,7 +272,12 @@ repo_signals AS (
         SELECT
             MIN(d.health_score)::real                                                    AS worst_score,
             COUNT(*) FILTER (WHERE d.is_archived AND md.direct)::bigint                  AS archived_direct,
-            COUNT(*) FILTER (WHERE d.is_deprecated AND md.direct)::bigint                AS deprecated_direct
+            COUNT(*) FILTER (WHERE d.is_deprecated AND md.direct)::bigint                AS deprecated_direct,
+            -- Worst major-version lag across direct deps. Zero
+            -- when nothing is behind; major>=1 means at least one
+            -- direct dep is a full major release behind.
+            COALESCE(MAX(d.versions_behind_major) FILTER (WHERE md.direct), 0)::int      AS max_major_behind,
+            COUNT(*) FILTER (WHERE d.versions_behind_major > 0 AND md.direct)::bigint    AS major_behind_direct
         FROM manifests m
         JOIN manifest_dependencies md ON md.manifest_id = m.id
         JOIN dep_health d
@@ -304,13 +312,17 @@ image_signals AS (
         iv.last_scan_at                                 AS last_scan_at,
         EXISTS (SELECT 1 FROM sbom_bindings sb
                 WHERE sb.asset_type = 'IMAGE_DIGEST' AND sb.asset_ref_id = d.id) AS has_sbom,
-        -- Dep-health doesn't apply at the image level — it's
-        -- repo-side (via SBOMs ↔ manifests). Defaults reflect "no
-        -- penalty observed" so image rows aren't downgraded for
-        -- something they shouldn't be measured on.
-        100::real                                       AS worst_dep_health_score,
-        0::bigint                                       AS archived_dep_count,
-        0::bigint                                       AS deprecated_dep_count
+        -- Dep-health rollup at the image level. Images carry their
+        -- own SBOM (sbom_bindings asset_type='IMAGE_DIGEST') with
+        -- manifest_dependencies, so the same chain that scores a
+        -- repo's deps applies here. Useful for images built outside
+        -- the org's repo set (e.g. third-party base images) where
+        -- there's no source-repo to score otherwise.
+        COALESCE(idh.worst_score, 100)::real            AS worst_dep_health_score,
+        COALESCE(idh.archived_direct, 0)::bigint        AS archived_dep_count,
+        COALESCE(idh.deprecated_direct, 0)::bigint      AS deprecated_dep_count,
+        COALESCE(idh.max_major_behind, 0)::int          AS max_major_behind,
+        COALESCE(idh.major_behind_direct, 0)::bigint    AS major_behind_dep_count
     FROM image_digests d
     LEFT JOIN LATERAL (
         SELECT
@@ -327,6 +339,37 @@ image_signals AS (
         FROM image_vuln_canonical
         WHERE image_id = d.id::text
     ) iv ON TRUE
+    -- Image dep-health: image SBOMs land in sbom_component_view
+    -- (PURL-keyed, populated by syft/trivy at scan time) rather
+    -- than manifest_dependencies (repo-side, sourced from manifest
+    -- files). The PURL "kind" maps almost directly to dep_health's
+    -- ecosystem column except for two ecosystems where the
+    -- conventions diverge (golang↔go, gem↔rubygems). The CASE
+    -- normalises that without needing a side-table.
+    --
+    -- All non-root SBOM components are treated as "direct" at the
+    -- image level — operationally they're all baked into the
+    -- image, the manifest_dependencies direct-vs-transitive
+    -- distinction doesn't carry across the build boundary.
+    LEFT JOIN LATERAL (
+        SELECT
+            MIN(dh.health_score)::real                                  AS worst_score,
+            COUNT(*) FILTER (WHERE dh.is_archived)::bigint              AS archived_direct,
+            COUNT(*) FILTER (WHERE dh.is_deprecated)::bigint            AS deprecated_direct,
+            COALESCE(MAX(dh.versions_behind_major), 0)::int             AS max_major_behind,
+            COUNT(*) FILTER (WHERE dh.versions_behind_major > 0)::bigint AS major_behind_direct
+        FROM sbom_component_view sc
+        JOIN dep_health dh
+          ON dh.ecosystem = CASE sc.kind
+                              WHEN 'golang' THEN 'go'
+                              WHEN 'gem'    THEN 'rubygems'
+                              ELSE sc.kind
+                            END
+         AND dh.package_name = sc.package_name
+        WHERE sc.asset_type = 'IMAGE_DIGEST'
+          AND sc.asset_ref_id = d.id
+          AND sc.is_root = false
+    ) idh ON TRUE
 ),
 
 -- ---------- cluster-side aggregation ----------
@@ -380,16 +423,48 @@ cluster_signals AS (
                                                                            AS scan_age_days,
         MAX(cc.last_scan_at)                                               AS last_scan_at,
         true                                                               AS has_sbom,
-        -- Cluster rows don't carry dep-health themselves; that
-        -- signal lives on repos. Defaults match image_signals so
-        -- the UNION ALL types align.
-        100::real                                                          AS worst_dep_health_score,
-        0::bigint                                                          AS archived_dep_count,
-        0::bigint                                                          AS deprecated_dep_count
+        -- Cluster dep-health inherits from the images running
+        -- there. Computed as a single per-cluster aggregate via
+        -- the cluster_dh LATERAL below so it doesn't multiply rows
+        -- against the cluster_canonical join above.
+        COALESCE(cluster_dh.worst_score, 100)::real                        AS worst_dep_health_score,
+        COALESCE(cluster_dh.archived_count, 0)::bigint                     AS archived_dep_count,
+        COALESCE(cluster_dh.deprecated_count, 0)::bigint                   AS deprecated_dep_count,
+        COALESCE(cluster_dh.max_major_behind, 0)::int                      AS max_major_behind,
+        COALESCE(cluster_dh.major_behind_count, 0)::bigint                 AS major_behind_dep_count
     FROM (SELECT DISTINCT cluster_id FROM cluster_digests) c
     LEFT JOIN cluster_canonical cc ON cc.cluster_id = c.cluster_id
     LEFT JOIN epss_entries e       ON e.cve_id     = cc.canonical_id
-    GROUP BY c.cluster_id
+    -- Cluster dep-health: aggregate across every image running in
+    -- the cluster. Walks cluster_digests → image_digests →
+    -- sbom_component_view → dep_health using the same PURL kind ↔
+    -- ecosystem mapping as image_signals.idh. Returns one row per
+    -- cluster_id; nothing to multiply.
+    LEFT JOIN LATERAL (
+        SELECT
+            MIN(dh.health_score)::real                                       AS worst_score,
+            COUNT(*) FILTER (WHERE dh.is_archived)::bigint                   AS archived_count,
+            COUNT(*) FILTER (WHERE dh.is_deprecated)::bigint                 AS deprecated_count,
+            COALESCE(MAX(dh.versions_behind_major), 0)::int                  AS max_major_behind,
+            COUNT(*) FILTER (WHERE dh.versions_behind_major > 0)::bigint     AS major_behind_count
+        FROM cluster_digests cd
+        JOIN image_digests d ON d.digest = cd.digest
+        JOIN sbom_component_view sc
+          ON sc.asset_type   = 'IMAGE_DIGEST'
+         AND sc.asset_ref_id = d.id
+         AND sc.is_root      = false
+        JOIN dep_health dh
+          ON dh.ecosystem = CASE sc.kind
+                              WHEN 'golang' THEN 'go'
+                              WHEN 'gem'    THEN 'rubygems'
+                              ELSE sc.kind
+                            END
+         AND dh.package_name = sc.package_name
+        WHERE cd.cluster_id = c.cluster_id
+    ) cluster_dh ON TRUE
+    GROUP BY c.cluster_id, cluster_dh.worst_score, cluster_dh.archived_count,
+             cluster_dh.deprecated_count, cluster_dh.max_major_behind,
+             cluster_dh.major_behind_count
 )
 
 SELECT * FROM repo_signals

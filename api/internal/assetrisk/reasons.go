@@ -125,5 +125,15 @@ func Reasons(s Signals) []Reason {
 		})
 	}
 
+	if s.MajorBehindDepCount > 0 {
+		out = append(out, Reason{
+			ID: "major_behind",
+			Fields: map[string]any{
+				"count":     s.MajorBehindDepCount,
+				"max_major": s.MaxMajorBehind,
+			},
+		})
+	}
+
 	return out
 }

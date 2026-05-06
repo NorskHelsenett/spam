@@ -215,6 +215,28 @@ func (r *Runner) refreshOne(ctx context.Context, resolver Resolver, ecosystem, n
 		}
 	}
 
+	// Versions-behind: pick the most recent manifest_dependencies
+	// version for this package and compute the delta vs. latest.
+	// Most-recent rather than max-semver because we don't track all
+	// versions across history — manifest_dependencies is bound to
+	// the latest scan per repo.
+	if row.LatestVersion != "" {
+		var installed string
+		_ = r.db.WithContext(ctx).Raw(`
+			SELECT version
+			FROM manifest_dependencies
+			WHERE ecosystem = ? AND name = ? AND COALESCE(version, '') <> ''
+			ORDER BY created_at DESC
+			LIMIT 1
+		`, ecosystem, name).Scan(&installed).Error
+		if installed != "" {
+			major, minor, patch := VersionsBehind(installed, row.LatestVersion)
+			row.VersionsBehindMajor = major
+			row.VersionsBehindMinor = minor
+			row.VersionsBehindPatch = patch
+		}
+	}
+
 	row.HealthScore = int16(Score(row))
 
 	return r.db.WithContext(ctx).

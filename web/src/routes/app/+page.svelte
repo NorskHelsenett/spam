@@ -8,7 +8,8 @@
 		Container,
 		GitBranch,
 		ShieldCheck,
-		Target
+		Target,
+		ChevronDown
 	} from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
@@ -39,6 +40,11 @@
 		scan_age_days: number;
 		last_scan_at: string | null;
 		has_sbom: boolean;
+		worst_dep_health_score: number;
+		archived_dep_count: number;
+		deprecated_dep_count: number;
+		max_major_behind: number;
+		major_behind_dep_count: number;
 		threat_score: number;
 		trust_score: number;
 		trust_grade: string;
@@ -67,7 +73,20 @@
 	let watchSearch = $state('');
 	let watchOffset = $state(0);
 	let activeTab = $state<'all' | 'repo' | 'image' | 'cluster'>('all');
+	// Per-row expansion state for the "show your work" panel. Keyed
+	// by `${asset_type}:${asset_id}` so collapsing one row doesn't
+	// collapse the row-with-the-same-id-in-another-tier (rare, but
+	// happens when the same id is reused across asset types).
+	let expanded = $state(new Set<string>());
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const rowKey = (r: TriageRow) => `${r.asset_type}:${r.asset_id}`;
+	const toggleExpanded = (key: string) => {
+		const next = new Set(expanded);
+		if (next.has(key)) next.delete(key);
+		else next.add(key);
+		expanded = next;
+	};
 
 	const fetchTriage = async (search: string, offset: number) => {
 		const params = new URLSearchParams();
@@ -188,6 +207,42 @@
 		if (grade.startsWith('B')) return 'var(--accent)';
 		if (grade === 'C') return 'var(--warning)';
 		return 'var(--error)';
+	};
+
+	// Threat-side raw inputs for the expansion panel. Returned as
+	// {label, value, dim} so the renderer doesn't need its own
+	// formatting logic and can grey out zero rows.
+	const threatBreakdown = (r: TriageRow) => {
+		const epssPct = r.epss_max > 0 ? `${(r.epss_max * 100).toFixed(1)}%` : '—';
+		return [
+			{ label: 'Critical CVEs', value: r.critical_count, dim: r.critical_count === 0 },
+			{ label: 'High CVEs', value: r.high_count, dim: r.high_count === 0 },
+			{ label: 'KEV CVEs', value: r.kev_count, dim: r.kev_count === 0 },
+			{ label: 'EPSS max', value: epssPct, dim: r.epss_max === 0 },
+			{ label: 'Active secrets', value: r.active_secret_count, dim: r.active_secret_count === 0 },
+			{ label: 'Internet exposed', value: r.internet_exposed ? 'Yes' : 'No', dim: !r.internet_exposed },
+			{ label: 'Critical w/ fix', value: r.has_fix_for_critical ? 'Yes' : 'No', dim: !r.has_fix_for_critical }
+		];
+	};
+
+	const trustBreakdown = (r: TriageRow) => {
+		const scanLabel = r.scan_age_days >= 999 ? 'Never' : `${r.scan_age_days}d ago`;
+		const out: { label: string; value: string | number; dim: boolean }[] = [];
+		if (r.asset_type === 'repo') {
+			out.push({ label: 'Signed commits (90d)', value: `${Math.round(r.signed_commits_pct)}%`, dim: r.signed_commits_pct === 0 });
+		}
+		if (r.asset_type === 'image') {
+			out.push({ label: 'Image signed', value: r.image_signed ? 'Yes' : 'No', dim: !r.image_signed });
+		}
+		out.push(
+			{ label: 'Last scan', value: scanLabel, dim: r.scan_age_days >= 999 },
+			{ label: 'Has SBOM', value: r.has_sbom ? 'Yes' : 'No', dim: !r.has_sbom },
+			{ label: 'Worst dep health', value: Math.round(r.worst_dep_health_score), dim: r.worst_dep_health_score >= 100 },
+			{ label: 'Archived deps', value: r.archived_dep_count, dim: r.archived_dep_count === 0 },
+			{ label: 'Deprecated deps', value: r.deprecated_dep_count, dim: r.deprecated_dep_count === 0 },
+			{ label: 'Major-behind deps', value: r.major_behind_dep_count, dim: r.major_behind_dep_count === 0 }
+		);
+		return out;
 	};
 
 	// Average trust score across all visible tiers — rough proxy for
@@ -410,6 +465,72 @@
 					</div>
 				</div>
 			{:else}
+				{#snippet triageRow(row: TriageRow, threatLevel: 'critical' | 'warning' | 'info', compact: boolean)}
+					{@const Icon = rowIcon(row.asset_type)}
+					{@const key = rowKey(row)}
+					{@const isOpen = expanded.has(key)}
+					<div class="row-wrapper" class:open={isOpen}>
+						<a class="row" class:compact href={rowHref(row)}>
+							<div class="row-asset">
+								<Icon size={compact ? 14 : 16} class="text-[var(--text-muted)]" />
+								<span class="asset-slug">{row.asset_slug}</span>
+								<span class="badge">{row.asset_type}</span>
+							</div>
+							<div class="row-scores">
+								<span class="threat" data-level={threatLevel}>Threat {row.threat_score}</span>
+								<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
+							</div>
+							<div class="row-reasons">
+								{#each row.reasons.slice(0, compact ? 1 : 2) as reason}
+									<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+								{/each}
+							</div>
+						</a>
+						<button
+							type="button"
+							class="row-expand"
+							class:open={isOpen}
+							aria-label={isOpen ? 'Hide signals' : 'Show signals'}
+							aria-expanded={isOpen}
+							onclick={(e) => { e.preventDefault(); e.stopPropagation(); toggleExpanded(key); }}
+						>
+							<ChevronDown size={14} />
+						</button>
+						{#if isOpen}
+							<div class="row-detail">
+								<div class="detail-col">
+									<div class="detail-head">Threat inputs</div>
+									{#each threatBreakdown(row) as kv}
+										<div class="detail-kv" class:dim={kv.dim}>
+											<span class="detail-label">{kv.label}</span>
+											<span class="detail-value">{kv.value}</span>
+										</div>
+									{/each}
+								</div>
+								<div class="detail-col">
+									<div class="detail-head">Trust inputs</div>
+									{#each trustBreakdown(row) as kv}
+										<div class="detail-kv" class:dim={kv.dim}>
+											<span class="detail-label">{kv.label}</span>
+											<span class="detail-value">{kv.value}</span>
+										</div>
+									{/each}
+								</div>
+								{#if row.reasons.length > 0}
+									<div class="detail-col">
+										<div class="detail-head">Why this tier</div>
+										<div class="detail-reasons">
+											{#each row.reasons as reason}
+												<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+											{/each}
+										</div>
+									</div>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				{/snippet}
+
 				<!-- Fix now -->
 				{#if fixNowFiltered().length > 0}
 					<div class="tier" data-tier="fix-now">
@@ -420,23 +541,7 @@
 						</div>
 						<div class="tier-rows">
 							{#each fixNowFiltered() as row}
-								{@const Icon = rowIcon(row.asset_type)}
-								<a class="row" href={rowHref(row)}>
-									<div class="row-asset">
-										<Icon size={16} class="text-[var(--text-muted)]" />
-										<span class="asset-slug">{row.asset_slug}</span>
-										<span class="badge">{row.asset_type}</span>
-									</div>
-									<div class="row-scores">
-										<span class="threat" data-level="critical">Threat {row.threat_score}</span>
-										<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
-									</div>
-									<div class="row-reasons">
-										{#each row.reasons.slice(0, 2) as reason}
-											<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-										{/each}
-									</div>
-								</a>
+								{@render triageRow(row, 'critical', false)}
 							{/each}
 						</div>
 					</div>
@@ -452,23 +557,7 @@
 						</div>
 						<div class="tier-rows">
 							{#each thisWeekFiltered() as row}
-								{@const Icon = rowIcon(row.asset_type)}
-								<a class="row" href={rowHref(row)}>
-									<div class="row-asset">
-										<Icon size={16} class="text-[var(--text-muted)]" />
-										<span class="asset-slug">{row.asset_slug}</span>
-										<span class="badge">{row.asset_type}</span>
-									</div>
-									<div class="row-scores">
-										<span class="threat" data-level="warning">Threat {row.threat_score}</span>
-										<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
-									</div>
-									<div class="row-reasons">
-										{#each row.reasons.slice(0, 2) as reason}
-											<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-										{/each}
-									</div>
-								</a>
+								{@render triageRow(row, 'warning', false)}
 							{/each}
 						</div>
 					</div>
@@ -505,23 +594,7 @@
 					{:else}
 						<div class="tier-rows compact">
 							{#each watchFiltered() as row}
-								{@const Icon = rowIcon(row.asset_type)}
-								<a class="row" href={rowHref(row)}>
-									<div class="row-asset">
-										<Icon size={14} class="text-[var(--text-muted)]" />
-										<span class="asset-slug">{row.asset_slug}</span>
-										<span class="badge">{row.asset_type}</span>
-									</div>
-									<div class="row-scores">
-										<span class="threat" data-level="info">Threat {row.threat_score}</span>
-										<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
-									</div>
-									<div class="row-reasons">
-										{#if row.reasons.length > 0}
-											<span class={reasonPillClass(row.reasons[0].id)}>{renderReason(row.reasons[0])}</span>
-										{/if}
-									</div>
-								</a>
+								{@render triageRow(row, 'info', true)}
 							{/each}
 						</div>
 
@@ -577,32 +650,113 @@
 		flex-direction: column;
 		gap: 0.4rem;
 	}
+
+	/* row-wrapper holds the link, the expand button, and (when open)
+	   the detail panel. The wrapper owns the border + background so
+	   the expand panel renders inside the same card without a seam. */
+	.row-wrapper {
+		display: grid;
+		grid-template-columns: 1fr auto;
+		border: 1px solid var(--border-color);
+		border-radius: 0.75rem;
+		background: var(--card-bg);
+		overflow: hidden;
+		transition: border-color 120ms ease, background 120ms ease;
+	}
+	.row-wrapper:hover {
+		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+		background: var(--hover-bg-subtle);
+	}
+	.row-wrapper.open {
+		border-color: color-mix(in srgb, var(--accent) 35%, var(--border-color));
+	}
+	.tier[data-tier='fix-now'] .row-wrapper {
+		border-color: color-mix(in srgb, var(--error) 35%, var(--border-color));
+	}
+	.tier[data-tier='this-week'] .row-wrapper {
+		border-color: color-mix(in srgb, var(--warning) 28%, var(--border-color));
+	}
+
 	.row {
 		display: grid;
 		grid-template-columns: minmax(220px, 1fr) auto minmax(180px, 1.5fr);
 		align-items: center;
 		gap: 1rem;
 		padding: 0.7rem 1rem;
-		border: 1px solid var(--border-color);
-		border-radius: 0.75rem;
-		background: var(--card-bg);
 		text-decoration: none;
 		color: inherit;
-		transition: border-color 120ms ease, background 120ms ease;
 	}
-	.row:hover {
-		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
-		background: var(--hover-bg-subtle);
-	}
-	.tier-rows.compact .row {
+	.row.compact {
 		padding: 0.4rem 0.85rem;
 		font-size: 0.85rem;
 	}
-	.tier[data-tier='fix-now'] .row {
-		border-color: color-mix(in srgb, var(--error) 35%, var(--border-color));
+
+	/* Expand chevron — small affordance at the right edge of the
+	   row, doesn't navigate when clicked (the link does). Rotates
+	   180° when the panel is open. */
+	.row-expand {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 32px;
+		padding: 0 0.5rem;
+		border: none;
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+		transition: color 120ms ease, transform 120ms ease;
 	}
-	.tier[data-tier='this-week'] .row {
-		border-color: color-mix(in srgb, var(--warning) 28%, var(--border-color));
+	.row-expand:hover {
+		color: var(--text-secondary);
+	}
+	.row-expand.open {
+		color: var(--accent);
+	}
+	.row-expand.open :global(svg) {
+		transform: rotate(180deg);
+	}
+
+	.row-detail {
+		grid-column: 1 / -1;
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+		gap: 0.75rem 1.5rem;
+		padding: 0.7rem 1rem 0.85rem;
+		border-top: 1px dashed color-mix(in srgb, var(--text-muted) 30%, transparent);
+		background: color-mix(in srgb, var(--bg2) 50%, transparent);
+	}
+	.detail-col {
+		min-width: 0;
+	}
+	.detail-head {
+		font-size: 0.65rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		color: var(--text-tertiary);
+		margin-bottom: 0.35rem;
+	}
+	.detail-kv {
+		display: flex;
+		justify-content: space-between;
+		font-size: 0.78rem;
+		padding: 0.15rem 0;
+		color: var(--text-secondary);
+	}
+	.detail-kv.dim {
+		opacity: 0.45;
+	}
+	.detail-label {
+		color: var(--text-muted);
+	}
+	.detail-value {
+		color: var(--text-bright);
+		font-variant-numeric: tabular-nums;
+	}
+	.detail-reasons {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.3rem;
 	}
 
 	.row-asset {
