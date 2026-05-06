@@ -16,6 +16,8 @@
 	import EmptyCommits from '$lib/components/icons/EmptyCommits.svelte';
 	import EmptyContributors from '$lib/components/icons/EmptyContributors.svelte';
 	import EmptyRuns from '$lib/components/icons/EmptyRuns.svelte';
+	import CommitStatusIcons from '$lib/components/CommitStatusIcons.svelte';
+	import CommitDetailDialog from '$lib/components/CommitDetailDialog.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -49,6 +51,12 @@
 		size: number;
 	};
 
+	type CommitImage = {
+		registry: string;
+		repository: string;
+		digest: string;
+	};
+
 	type CommitInfo = {
 		sha: string;
 		message: string;
@@ -58,6 +66,11 @@
 		author_login?: string;
 		author_avatar?: string;
 		commit_url?: string;
+		signed?: string; // git %G?: G/B/U/X/Y/R/E/N (empty for provider-API-sourced)
+		image_count?: number;
+		live_pod_count?: number;
+		live_cluster_count?: number;
+		images?: CommitImage[];
 	};
 
 	type ContributorInfo = {
@@ -143,6 +156,8 @@
 	let readme = $state('');
 	let commits: CommitInfo[] = $state([]);
 	let contributors: ContributorInfo[] = $state([]);
+	let commitDialogOpen = $state(false);
+	let selectedCommit: CommitInfo | null = $state(null);
 	let loading = $state(true);
 	let error = $state('');
 	// Resolved params (may differ from URL when page loads via repo_id only)
@@ -428,9 +443,15 @@
 		return `${(kb / 1024).toFixed(1)} MB`;
 	};
 
+	// Prefer history.back() so the list page's scroll + filter state
+	// restores; fall back to the providers index when the user hit
+	// this detail via a direct link with no prior history.
 	const goBack = () => {
-		if (browser) {
+		if (!browser) return;
+		if (window.history.length > 1) {
 			history.back();
+		} else {
+			goto('/app/providers');
 		}
 	};
 
@@ -540,10 +561,11 @@
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
 
-	// Vulnerabilities dialog
-	type VulnRow = {
-		repo_id: string;
-		repo_slug: string;
+	// Vulnerabilities dialog — /api/vuln/list now returns grouped
+	// results {total, items: VulnGroup[]}. For a repo-scoped request
+	// every group has exactly one asset (this repo), so the dialog
+	// still renders one row per CVE.
+	type VulnGroup = {
 		vuln_id: string;
 		severity: string;
 		pkg_name: string;
@@ -551,11 +573,14 @@
 		fixed_version: string;
 		title: string;
 		description: string;
-		source: string;
+		sources: string[];
+		assets: Array<{ type: 'repo' | 'image'; id: string; slug: string }>;
+		repo_count: number;
+		image_count: number;
 	};
 
 	let vulnDialogOpen = $state(false);
-	let vulnDialogData = $state<VulnRow[]>([]);
+	let vulnDialogData = $state<VulnGroup[]>([]);
 	let vulnDialogLoading = $state(false);
 	let vulnDialogTab = $state('all');
 
@@ -573,11 +598,15 @@
 		if (vulnDialogData.length > 0) return;
 		vulnDialogLoading = true;
 		try {
-			const url = repoDbId
-				? `/api/vuln/list?repo_id=${encodeURIComponent(repoDbId)}`
-				: '/api/vuln/list';
-			const res = await fetch(url, { credentials: 'include' });
-			if (res.ok) vulnDialogData = await res.json();
+			// Cap at 500 (the server maximum) — a single repo rarely
+			// exceeds that, and the dialog shows one row per CVE.
+			const params = new URLSearchParams({ limit: '500' });
+			if (repoDbId) params.set('repo_id', repoDbId);
+			const res = await fetch(`/api/vuln/list?${params}`, { credentials: 'include' });
+			if (res.ok) {
+				const payload = (await res.json()) as { items?: VulnGroup[] };
+				vulnDialogData = payload.items ?? [];
+			}
 		} finally {
 			vulnDialogLoading = false;
 		}
@@ -1126,6 +1155,7 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 						{:else}
 							<div class="space-y-2">
 								{#each commits as commit}
+								{@const subject = commit.message.split('\n', 1)[0]}
 									<div class="flex items-start gap-3 rounded-xl bg-[var(--card-bg)]/40 px-4 py-3">
 										{#if commit.author_avatar}
 											<img src={commit.author_avatar} alt={commit.author_login || commit.author_name} class="h-8 w-8 flex-shrink-0 rounded-full" />
@@ -1135,18 +1165,28 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 											</div>
 										{/if}
 										<div class="min-w-0 flex-1">
-											<div class="flex items-center gap-2">
-												{#if commit.commit_url}
-													<a href={commit.commit_url} target="_blank" rel="noopener noreferrer" class="truncate text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]">
-														{commit.message}
-													</a>
-												{:else}
-													<span class="truncate text-sm font-medium text-[var(--text-bright)]">{commit.message}</span>
-												{/if}
-											</div>
-											<div class="mt-0.5 flex items-center gap-2 text-xs text-[var(--text-muted)]">
+											<button
+												type="button"
+												class="block w-full truncate text-left text-sm font-medium text-[var(--text-bright)] hover:text-[var(--accent)]"
+												title={commit.message}
+												onclick={() => { selectedCommit = commit; commitDialogOpen = true; }}
+											>
+												{subject}
+											</button>
+											<div class="mt-1 flex items-center gap-2 text-xs leading-none text-[var(--text-muted)]">
+												<span class="inline-flex items-center leading-none">
+													<CommitStatusIcons
+														signed={commit.signed}
+														imageCount={commit.image_count}
+														livePodCount={commit.live_pod_count}
+														liveClusterCount={commit.live_cluster_count}
+													/>
+												</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span class="font-mono text-[var(--accent)]">{commit.sha.slice(0, 7)}</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span>{commit.author_login || commit.author_name}</span>
+												<span aria-hidden="true" class="text-[var(--text-muted)]/50">·</span>
 												<span>committed {formatDate(commit.author_date)}</span>
 											</div>
 										</div>
@@ -1206,6 +1246,8 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 </div>
 
 <DependenciesDialog bind:open={dependenciesDialogOpen} loading={dependenciesDialogLoading} data={dependenciesDialogData} />
+
+<CommitDetailDialog bind:open={commitDialogOpen} commit={selectedCommit} />
 
 <!-- Vulnerabilities dialog -->
 {#if vulnDialogOpen}
@@ -1293,9 +1335,9 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 												rel="noopener noreferrer"
 												class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
 											>{v.vuln_id}</a>
-											{#if v.source}
-												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{v.source}</span>
-											{/if}
+											{#each v.sources ?? [] as src}
+												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{src}</span>
+											{/each}
 										</div>
 										{#if v.title}
 											<p class="text-sm text-[var(--text-secondary)]">{v.title}</p>

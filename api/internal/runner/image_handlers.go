@@ -89,6 +89,19 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 	var storedCount int
 
+	// Pre-parse the labels artifact so SBOM bindings can carry the
+	// commit SHA (`org.opencontainers.image.revision`). The artifact
+	// loop below processes `sbom` before `labels` (ordered by scanner
+	// runtime cost, not dependency), so without this pre-read the
+	// binding would be created with commit_sha='' and the repo-page
+	// Commits tab couldn't join commit → image → live workloads.
+	var commitRevision string
+	if labelsFile, _, err := r.FormFile("labels"); err == nil {
+		if raw, err := readAllAndClose(labelsFile); err == nil {
+			commitRevision = extractRevisionLabel(raw)
+		}
+	}
+
 	err = s.db.WithContext(r.Context()).Transaction(func(tx *gorm.DB) error {
 		// Upsert the scan-run row. We do this on first upload rather than at
 		// job creation so the row reflects real execution (the K8s job may
@@ -171,6 +184,7 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 				binding := &artifacts.BindingInput{
 					AssetType:       artifacts.AssetTypeImageDigest,
 					AssetRefID:      imageDigestID,
+					CommitSHA:       commitRevision,
 					Source:          "spam-image-scanner",
 					CreatedByUserID: "system",
 				}
@@ -219,6 +233,18 @@ func readAllAndClose(f multipart.File) ([]byte, error) {
 // `crane config` JSON blob. Returns "" when the label isn't present
 // or the blob doesn't parse.
 func extractSourceLabel(raw []byte) string {
+	return extractOCILabel(raw, "org.opencontainers.image.source")
+}
+
+// extractRevisionLabel reads the OCI `image.revision` label — the git
+// commit SHA the image claims to be built from. Persisted to
+// sbom_bindings.commit_sha so the repo page can join commit → image.
+// Empty when the label is missing or the JSON doesn't parse.
+func extractRevisionLabel(raw []byte) string {
+	return extractOCILabel(raw, "org.opencontainers.image.revision")
+}
+
+func extractOCILabel(raw []byte, key string) string {
 	if len(raw) == 0 {
 		return ""
 	}
@@ -230,7 +256,7 @@ func extractSourceLabel(raw []byte) string {
 	if err := json.Unmarshal(raw, &config); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(config.Config.Labels["org.opencontainers.image.source"])
+	return strings.TrimSpace(config.Config.Labels[key])
 }
 
 // detectSBOMFormat inspects the filename first, then falls back to a cheap

@@ -2,6 +2,7 @@ package providerconfig
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -60,21 +61,22 @@ func (s *Store) VerifyKey(ctx context.Context) []string {
 }
 
 type AdminProvider struct {
-	ID               string     `json:"id"`
-	ProviderURL      string     `json:"provider_url"`
-	BaseURL          string     `json:"base_url"`
-	OwnerPath        string     `json:"owner_path"`
-	Type             string     `json:"type"`
-	DisplayName      string     `json:"display_name"`
-	TokenFingerprint string     `json:"token_fingerprint,omitempty"`
-	Enabled          bool       `json:"enabled"`
-	PollInterval     *int       `json:"poll_interval,omitempty"`
-	HealthStatus     string     `json:"health_status"`
-	HealthMessage    string     `json:"health_message,omitempty"`
-	LastHealthCheck  *time.Time `json:"last_health_check,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	LastRotatedAt    *time.Time `json:"last_rotated_at,omitempty"`
+	ID               string          `json:"id"`
+	ProviderURL      string          `json:"provider_url"`
+	BaseURL          string          `json:"base_url"`
+	OwnerPath        string          `json:"owner_path"`
+	Type             string          `json:"type"`
+	DisplayName      string          `json:"display_name"`
+	TokenFingerprint string          `json:"token_fingerprint,omitempty"`
+	Enabled          bool            `json:"enabled"`
+	PollInterval     *int            `json:"poll_interval,omitempty"`
+	HealthStatus     string          `json:"health_status"`
+	HealthMessage    string          `json:"health_message,omitempty"`
+	LastHealthCheck  *time.Time      `json:"last_health_check,omitempty"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	LastRotatedAt    *time.Time      `json:"last_rotated_at,omitempty"`
+	DefaultGrants    json.RawMessage `json:"default_grants,omitempty"`
 }
 
 type PublicProvider struct {
@@ -84,39 +86,6 @@ type PublicProvider struct {
 	BaseURL   string `json:"base_url"`
 	OwnerPath string `json:"owner_path,omitempty"`
 	IsPublic  bool   `json:"is_public"`
-}
-
-func EnsureDefaults(ctx context.Context, db *gorm.DB) error {
-	var count int64
-	if err := db.WithContext(ctx).Model(&ProviderInstance{}).Count(&count).Error; err != nil {
-		return err
-	}
-	if count > 0 {
-		return nil
-	}
-
-	defaults := []ProviderInstance{
-		{
-			ID:           uuid.NewString(),
-			Type:         ProviderGitHub,
-			BaseURL:      "https://github.com",
-			OwnerPath:    "NorskHelsenett",
-			DisplayName:  "github.com/NorskHelsenett",
-			Enabled:      true,
-			HealthStatus: ProviderHealthUnknown,
-		},
-		{
-			ID:           uuid.NewString(),
-			Type:         ProviderGitLab,
-			BaseURL:      "https://gitlab.com",
-			OwnerPath:    "",
-			DisplayName:  "gitlab.com",
-			Enabled:      true,
-			HealthStatus: ProviderHealthUnknown,
-		},
-	}
-
-	return db.WithContext(ctx).Create(&defaults).Error
 }
 
 func (s *Store) ListAdmin(ctx context.Context) ([]AdminProvider, error) {
@@ -183,6 +152,9 @@ func providerToAdmin(provider ProviderInstance) AdminProvider {
 	}
 	if provider.OwnerPath != "" {
 		admin.ProviderURL = strings.TrimRight(provider.BaseURL, "/") + "/" + provider.OwnerPath
+	}
+	if len(provider.DefaultGrants) > 0 {
+		admin.DefaultGrants = json.RawMessage(provider.DefaultGrants)
 	}
 	return admin
 }
@@ -273,6 +245,28 @@ func (s *Store) Create(ctx context.Context, provider ProviderInstance, pat strin
 	admin.TokenFingerprint = tokenFingerprint
 	admin.LastRotatedAt = tokenCreatedAt
 	return &admin, nil
+}
+
+// SetDefaultGrants replaces the default_grants JSON on a provider.
+// Pass nil to clear it. The JSON shape is
+// [{"subject_type":"group"|"user","subject_id":"..."}, ...];
+// validation happens at ACL application time, not here.
+func (s *Store) SetDefaultGrants(ctx context.Context, providerID string, raw json.RawMessage) (*AdminProvider, error) {
+	// GORM skips .Update() calls where the value is the zero value for
+	// its type, which would silently no-op NULL-ing the column. Use
+	// an Updates(map) so the nil is written through verbatim.
+	var value any
+	if len(raw) == 0 || string(raw) == "null" {
+		value = gorm.Expr("NULL")
+	} else {
+		value = []byte(raw)
+	}
+	if err := s.db.WithContext(ctx).Model(&ProviderInstance{}).
+		Where("id = ?", providerID).
+		Updates(map[string]any{"default_grants": value}).Error; err != nil {
+		return nil, err
+	}
+	return s.getAdminByID(ctx, providerID)
 }
 
 func (s *Store) Update(ctx context.Context, providerID string, displayName *string, enabled *bool, pollInterval ...*int) (*AdminProvider, error) {

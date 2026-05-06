@@ -9,10 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/scam"
+	"github.com/NorskHelsenett/spam/internal/vulnmeta"
 	"gorm.io/gorm"
 )
 
@@ -153,14 +155,36 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		`).
 		Limit(1000).
 		Find(&findings).Error; err == nil {
+		// Load metadata for every distinct vuln_id so we can override
+		// the scanner-reported fix_version per row with the OSV-
+		// derived applicable fix. Cache miss keeps the scanner value.
+		ids := make([]string, 0, len(findings))
+		seen := map[string]struct{}{}
+		for _, f := range findings {
+			if _, ok := seen[f.VulnID]; ok {
+				continue
+			}
+			seen[f.VulnID] = struct{}{}
+			ids = append(ids, f.VulnID)
+		}
+		metas, _ := vulnmeta.MetadataForMany(r.Context(), db, ids)
+
 		response.ImageVulns = make([]ImageVulnListRow, 0, len(findings))
 		for _, f := range findings {
+			fix := f.FixedVersion
+			if m := metas[f.VulnID]; m != nil {
+				if applicable := vulnmeta.ApplicableFix(
+					vulnmeta.ExtractOSVAffected(m), f.PkgName, f.InstalledVersion,
+				); applicable != "" {
+					fix = applicable
+				}
+			}
 			response.ImageVulns = append(response.ImageVulns, ImageVulnListRow{
 				VulnID:           f.VulnID,
 				Severity:         f.Severity,
 				PkgName:          f.PkgName,
 				InstalledVersion: f.InstalledVersion,
-				FixedVersion:     f.FixedVersion,
+				FixedVersion:     fix,
 				Title:            f.Title,
 				Target:           f.Target,
 				Scanner:          f.Scanner,
@@ -394,22 +418,39 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 		}
 
 		var img struct {
-			ID         string
-			Registry   string
-			Repository string
-			Digest     string
-			CreatedAt  time.Time
+			ID             string
+			Registry       string
+			Repository     string
+			Digest         string
+			CreatedAt      time.Time
+			SourceRepoID   string
+			VerifiedSource bool
 		}
 		if err := db.WithContext(r.Context()).
 			Table("image_digests").
-			Select("id, registry, repository, digest, created_at").
+			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
 			Where("id = ?", id).
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				http.Error(w, "image not found", http.StatusNotFound)
+				notFoundOrForbidden(w)
 				return
 			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Image access inheritance is only granted when the source
+		// repo is cryptographically verified. Unsigned images fall
+		// back to admin-only until an explicit image grant path is
+		// wired in Phase 4. 404 hides the existence of images the
+		// caller can't see.
+		if img.VerifiedSource && img.SourceRepoID != "" {
+			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 
@@ -463,32 +504,43 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			}
 		}
 
-		// Severity breakdown for the latest successful scan — drives the
-		// drawer's "critical/high/…" chip row without requiring the
-		// client to hit /api/runs/{id} and parse the full finding list.
-		if resp.LatestScanID != "" {
-			var sev struct {
-				Critical int
-				High     int
-				Medium   int
-				Low      int
-				Unknown  int
-			}
-			_ = db.WithContext(r.Context()).Raw(`
-				SELECT
-				  -- grype stores severities UPPERCASE; trivy lowercases; normalize
-				  -- with UPPER() here so case inconsistencies don't quietly
-				  -- dump everything into the "Unknown" bucket.
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
-				  COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
-				  -- grype emits NEGLIGIBLE for info-grade findings (not a CVSS
-				  -- severity per se) — roll it into Low for the chip row.
-				  COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS low,
-				  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
-				FROM image_vuln_findings
-				WHERE scan_run_id = ?
-			`, resp.LatestScanID).Scan(&sev).Error
+		// Severity breakdown for the latest scan — drives the drawer's
+		// "critical/high/…" chip row without requiring the client to hit
+		// /api/runs/{id} and parse the full finding list. Sourced from
+		// image_scan_runs rather than jobs because the nightly sbom-scanner
+		// revuln creates scan_run rows with uuid.NewString() that are
+		// disjoint from jobs.id — so the findings it stores are invisible
+		// to a jobs-tied query. image_scan_runs is the single source of
+		// truth the findings actually FK against.
+		var sev struct {
+			Critical int
+			High     int
+			Medium   int
+			Low      int
+			Unknown  int
+		}
+		_ = db.WithContext(r.Context()).Raw(`
+			WITH latest_scan AS (
+				SELECT id FROM image_scan_runs
+				WHERE image_digest_id = ? AND finished_at IS NOT NULL
+				ORDER BY finished_at DESC
+				LIMIT 1
+			)
+			SELECT
+			  -- grype stores severities Titlecase; normalize with UPPER()
+			  -- so case inconsistencies don't quietly dump everything
+			  -- into the "Unknown" bucket.
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL') AS critical,
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')     AS high,
+			  COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')   AS medium,
+			  -- grype emits NEGLIGIBLE for info-grade findings (not a CVSS
+			  -- severity per se) — roll it into Low for the chip row.
+			  COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS low,
+			  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
+			FROM image_vuln_findings f
+			JOIN latest_scan ls ON ls.id = f.scan_run_id
+		`, id).Scan(&sev).Error
+		{
 			total := sev.Critical + sev.High + sev.Medium + sev.Low + sev.Unknown
 			if total > 0 {
 				resp.VulnSeverity = &ImageVulnSeverityCount{
@@ -566,6 +618,10 @@ func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		type row struct {
 			ID         string    `json:"id"`
@@ -579,9 +635,8 @@ func RepoImagesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		var rows []row
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
-			       (SELECT MAX(finished_at) FROM jobs j
-			          WHERE j.type = 'IMAGE_SCAN'
-			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       (SELECT MAX(finished_at) FROM image_scan_runs r
+			          WHERE r.image_digest_id = id.id) AS latest_scan_at,
 			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
 			          WHERE f.image_digest_id = id.id), 0) AS vuln_count
 			FROM image_digests id
@@ -620,6 +675,10 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		type imageHeader struct {
 			ID         string     `gorm:"column:id"`
@@ -635,9 +694,8 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		var headers []imageHeader
 		if err := db.WithContext(r.Context()).Raw(`
 			SELECT id.id, id.registry, id.repository, id.digest, id.created_at,
-			       (SELECT MAX(finished_at) FROM jobs j
-			          WHERE j.type = 'IMAGE_SCAN'
-			            AND j.payload->>'image_digest_id' = id.id) AS latest_scan_at,
+			       (SELECT MAX(finished_at) FROM image_scan_runs r
+			          WHERE r.image_digest_id = id.id) AS latest_scan_at,
 			       COALESCE((SELECT COUNT(*) FROM image_vuln_findings f
 			          WHERE f.image_digest_id = id.id), 0) AS vuln_count,
 			       EXISTS (SELECT 1 FROM sbom_bindings b
@@ -807,10 +865,37 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 			Where("id = ? AND scan_run_id = ?", artifactID, jobID).
 			First(&art).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				http.Error(w, "artifact not found", http.StatusNotFound)
+				notFoundOrForbidden(w)
 				return
 			}
 			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
+		// Gate by source-repo ACL with the verified_source rule: an
+		// admin or a reader of the source repo can fetch the artifact
+		// only when the image's claimed repo binding is signed.
+		var img struct {
+			SourceRepoID   string
+			VerifiedSource bool
+		}
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT d.source_repo_id, d.verified_source
+			FROM image_digests d
+			JOIN jobs j ON j.payload->>'image_digest_id' = d.id
+			WHERE j.id = ?
+			LIMIT 1
+		`, jobID).Scan(&img).Error; err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if img.VerifiedSource && img.SourceRepoID != "" {
+			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 

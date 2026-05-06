@@ -1,0 +1,23 @@
+{{- if .Values.pdb.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ default .Release.Name .Values.name }}
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/version: {{ .Chart.AppVersion }}
+    app.kubernetes.io/managed-by: Helm
+spec:
+  # Voluntary disruptions (node drain, cluster autoscaler eviction,
+  # operator `kubectl drain`) must leave at least one api pod serving
+  # so in-flight UI requests don't drop. Rolling deploys are handled
+  # separately by strategy.rollingUpdate.maxUnavailable=0. Involuntary
+  # disruptions (node OS crash) can still take the pod out — that's
+  # inherent to single-replica deployments and the only cure is HA.
+  minAvailable: {{ .Values.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}

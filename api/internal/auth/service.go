@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"path"
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
@@ -61,14 +63,16 @@ type userClaims struct {
 }
 
 type userResponse struct {
-	UserID   string                 `json:"user_id,omitempty"`
-	Subject  string                 `json:"subject"`
-	Email    string                 `json:"email,omitempty"`
-	Name     string                 `json:"name,omitempty"`
-	Claims   map[string]interface{} `json:"claims,omitempty"`
-	Groups   []string               `json:"groups,omitempty"`
-	Role     string                 `json:"role,omitempty"`
-	Approved bool                   `json:"approved"`
+	UserID      string                 `json:"user_id,omitempty"`
+	Subject     string                 `json:"subject"`
+	Email       string                 `json:"email,omitempty"`
+	Name        string                 `json:"name,omitempty"`
+	Picture     string                 `json:"picture,omitempty"`
+	Claims      map[string]interface{} `json:"claims,omitempty"`
+	Groups      []string               `json:"groups,omitempty"`
+	EntraGroups []string               `json:"entra_groups,omitempty"`
+	Role        string                 `json:"role,omitempty"`
+	Approved    bool                   `json:"approved"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -236,6 +240,26 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			}
 		}
 
+		// Best-effort avatar + EntraID groups refresh from Microsoft Graph.
+		// Failures here must not block login — Gravatar covers missing photos
+		// and the groups list silently empties when the token lacks scope.
+		if userResult.user.ID != "" && token.AccessToken != "" {
+			if dataURL, gerr := fetchAzurePhotoDataURL(r.Context(), token.AccessToken); gerr == nil && dataURL != "" && dataURL != userResult.user.Picture {
+				if uerr := s.db.WithContext(r.Context()).Model(&User{}).Where("id = ?", userResult.user.ID).Update("picture", dataURL).Error; uerr != nil {
+					log.Printf("update user picture: %v", uerr)
+				}
+			}
+			if names, gerr := fetchAzureGroupNames(r.Context(), token.AccessToken); gerr == nil && names != nil {
+				if encoded, merr := json.Marshal(names); merr == nil {
+					if uerr := s.db.WithContext(r.Context()).Model(&User{}).Where("id = ?", userResult.user.ID).Update("entra_groups", string(encoded)).Error; uerr != nil {
+						log.Printf("update user entra_groups: %v", uerr)
+					}
+				}
+			} else if gerr != nil {
+				log.Printf("fetch entra groups: %v", gerr)
+			}
+		}
+
 		sessionID, err := randomString(48)
 		if err != nil {
 			http.Error(w, "failed to start session", http.StatusInternalServerError)
@@ -300,6 +324,19 @@ func (s *Service) MeHandler() http.HandlerFunc {
 				response.Groups = groups
 				response.Role = role
 				response.Approved = approved
+			}
+
+			var user User
+			if err := s.db.WithContext(r.Context()).Select("picture", "entra_groups").First(&user, "id = ?", session.UserID).Error; err == nil {
+				response.Picture = pictureOrGravatar(user.Picture, session.Email)
+				if user.EntraGroups != "" {
+					var names []string
+					if jerr := json.Unmarshal([]byte(user.EntraGroups), &names); jerr == nil {
+						response.EntraGroups = names
+					}
+				}
+			} else {
+				response.Picture = pictureOrGravatar("", session.Email)
 			}
 		}
 
@@ -411,7 +448,71 @@ func (s *Service) PendingSessionInfo(r *http.Request) (events.SessionInfo, error
 // ever runs, so a newly-added endpoint cannot accidentally leak data.
 // Per-handler requireAdmin checks still apply on top for write-role
 // granularity.
+//
+// APIGuard also builds an acl.Subject (user id, group slugs, admin
+// flag) and stashes it in the request context so Phase 3 scope
+// helpers can filter data without re-querying the user_groups table
+// per handler.
 func (s *Service) APIGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, err := s.RequireAdminOrGlobalReader(r)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		subj, err := s.buildSubject(r.Context(), user.ID)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		next.ServeHTTP(w, r.WithContext(acl.WithSubject(r.Context(), subj)))
+	})
+}
+
+// buildSubject loads the group slugs for userID and tags the Subject
+// with IsAdmin when the admin slug is present. Returns an error if the
+// lookup fails so APIGuard can fail closed rather than allow access
+// with an empty group list.
+func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject, error) {
+	groups, err := s.userGroupSlugs(ctx, userID)
+	if err != nil {
+		return acl.Subject{}, err
+	}
+	subj := acl.Subject{UserID: userID, GroupSlugs: groups}
+	for _, slug := range groups {
+		switch slug {
+		case GroupAdmin:
+			subj.IsAdmin = true
+		case GroupGlobalReader:
+			subj.IsGlobalReader = true
+		}
+	}
+	return subj, nil
+}
+
+// AdminGuard restricts a subrouter to admin sessions only. Use this to
+// wrap groups of endpoints whose data would leak credentials or secret
+// values to global_reader (e.g. /api/secrets/*, raw run-secret bodies).
+// Pairs with APIGuard — APIGuard runs first at the enclosing group and
+// AdminGuard tightens the requirement to admin on the inner route.
+func (s *Service) AdminGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, err := s.RequireAdmin(r); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// AdminOrGlobalReaderGuard allows admins and global_readers through,
+// and blocks everyone else. For endpoints whose payloads are aggregate
+// / metadata only (counts, trends, per-asset tallies) — safe for a
+// cross-tenant read role but not safe for random users. Endpoints that
+// surface raw credential text must still use AdminGuard.
+func (s *Service) AdminOrGlobalReaderGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, err := s.RequireAdminOrGlobalReader(r); err != nil {
 			http.Error(w, "forbidden", http.StatusForbidden)

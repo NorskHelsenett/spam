@@ -19,9 +19,10 @@ type createProviderRequest struct {
 }
 
 type updateProviderRequest struct {
-	DisplayName  *string `json:"display_name,omitempty"`
-	Enabled      *bool   `json:"enabled,omitempty"`
-	PollInterval *int    `json:"poll_interval,omitempty"`
+	DisplayName   *string          `json:"display_name,omitempty"`
+	Enabled       *bool            `json:"enabled,omitempty"`
+	PollInterval  *int             `json:"poll_interval,omitempty"`
+	DefaultGrants *json.RawMessage `json:"default_grants,omitempty"`
 }
 
 type rotateProviderRequest struct {
@@ -190,12 +191,32 @@ func AdminProvidersUpdateHandler(authService *auth.Service, store *providerconfi
 			return
 		}
 
-		updated, err := store.Update(r.Context(), providerID, req.DisplayName, req.Enabled, req.PollInterval)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
+		// Update regular fields first when any are set; SetDefaultGrants
+		// is a separate call because it rejects a zero-update payload,
+		// and an admin can legitimately patch only default_grants.
+		var updated *providerconfig.AdminProvider
+		if req.DisplayName != nil || req.Enabled != nil || req.PollInterval != nil {
+			u, err := store.Update(r.Context(), providerID, req.DisplayName, req.Enabled, req.PollInterval)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			updated = u
 		}
 
+		if req.DefaultGrants != nil {
+			u, err := store.SetDefaultGrants(r.Context(), providerID, *req.DefaultGrants)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			updated = u
+		}
+
+		if updated == nil {
+			http.Error(w, "no updates provided", http.StatusBadRequest)
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	}
 }

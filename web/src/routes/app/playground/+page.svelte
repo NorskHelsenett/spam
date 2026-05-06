@@ -15,6 +15,7 @@
 	import Radio from '$lib/components/Radio.svelte';
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
 	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
+	import UserHoverCard from '$lib/components/UserHoverCard.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -538,6 +539,44 @@
 					<div>
 						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">No avatar (fallback initials)</p>
 						<ContributorAvatars contributors={[mockContributors[2], mockContributors[3]]} />
+					</div>
+				</div>
+			</div>
+
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">User Hover Card</p>
+				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Wrap any trigger (avatar, username, link) to reveal a user tip-card. Click the card to copy email.</p>
+				<div class="space-y-4 text-sm text-[var(--text-secondary)]">
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Inline username</p>
+						<p>
+							Committed by
+							<UserHoverCard user={mockContributors[0]}>
+								<span class="font-medium text-[var(--accent)] hover:underline">@{mockContributors[0].login}</span>
+							</UserHoverCard>
+							2 days ago.
+						</p>
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Avatar trigger</p>
+						<UserHoverCard user={mockContributors[1]}>
+							<img
+								src={mockContributors[1].avatar_url}
+								alt={mockContributors[1].login}
+								class="h-8 w-8 rounded-full ring-1 ring-[var(--border-color)]"
+							/>
+						</UserHoverCard>
+					</div>
+					<div>
+						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Fallback initial (no avatar, no email)</p>
+						<UserHoverCard user={mockContributors[3]}>
+							<span class="inline-flex items-center gap-1.5">
+								<span class="flex h-6 w-6 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[10px] font-semibold text-[var(--text-secondary)]">
+									{mockContributors[3].name?.[0]}
+								</span>
+								<span class="text-xs">{mockContributors[3].name}</span>
+							</span>
+						</UserHoverCard>
 					</div>
 				</div>
 			</div>

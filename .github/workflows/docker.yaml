@@ -107,10 +107,10 @@ jobs:
           build-args: |
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
 
-  build-runner:
+  build-repo-runner:
     runs-on: ubuntu-latest
     outputs:
-      digest: ${{ steps.build-runner-image.outputs.digest }}
+      digest: ${{ steps.build-repo-runner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
@@ -133,11 +133,11 @@ jobs:
           repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
           echo "REPOSITORY_LOWER=$repo_lower" >> "$GITHUB_ENV"
 
-      - name: Docker Metadata action for runner
+      - name: Docker Metadata action for repo-runner
         uses: docker/metadata-action@v4.3.0
         id: runner-meta
         with:
-          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner
+          images: ${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/repo-runner
           tags: |
               type=ref,event=branch
               type=raw,value={{date 'YYYY.MM.DD.HHmm' tz='UTC'}}
@@ -171,7 +171,7 @@ jobs:
       - name: Export repository info for outputs
         id: export-vars
         run: |
-          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner" >> $GITHUB_OUTPUT
+          echo "repository=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/repo-runner" >> $GITHUB_OUTPUT
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -180,17 +180,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ env.REGISTRY_ACCESS_TOKEN }}
 
-      - name: Build and push runner image
+      - name: Build and push repo-runner image
         uses: docker/build-push-action@v6
-        id: build-runner-image
+        id: build-repo-runner-image
         with:
           context: ./runner
+          file: ./runner/Dockerfile.repo-runner
           platforms: linux/amd64 #,linux/arm64
           push: true
           tags: ${{ steps.runner-meta.outputs.tags }}
           labels: ${{ steps.runner-meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/runner:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/repo-runner:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY_HOST }}/${{ env.REPOSITORY_LOWER }}/repo-runner:buildcache,mode=max
           provenance: false
           sbom: false
           build-args: |
@@ -378,7 +379,7 @@ jobs:
 
   deploy-helm:
     runs-on: ubuntu-latest
-    needs: [build-app, build-runner, build-sbom-scanner, build-image-scanner]
+    needs: [build-app, build-repo-runner, build-sbom-scanner, build-image-scanner]
     env:
       REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
@@ -469,9 +470,9 @@ jobs:
           APP_DIGEST=${{ needs.build-app.outputs.digest }}
           APP_TAG="${IMAGE_TAG}@${APP_DIGEST}"
           APP_REPO="${{ needs.build-app.outputs.repository }}"
-          RUNNER_DIGEST=${{ needs.build-runner.outputs.digest }}
+          RUNNER_DIGEST=${{ needs.build-repo-runner.outputs.digest }}
           RUNNER_TAG="${IMAGE_TAG}@${RUNNER_DIGEST}"
-          RUNNER_REPO="${{ needs.build-runner.outputs.repository }}"
+          RUNNER_REPO="${{ needs.build-repo-runner.outputs.repository }}"
           SBOM_SCANNER_DIGEST=${{ needs.build-sbom-scanner.outputs.digest }}
           SBOM_SCANNER_TAG="${IMAGE_TAG}@${SBOM_SCANNER_DIGEST}"
           SBOM_SCANNER_REPO="${{ needs.build-sbom-scanner.outputs.repository }}"

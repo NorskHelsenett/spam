@@ -197,23 +197,32 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
 let accountDialogOpen = $state(false);
 let isAdmin = $state(false);
 
+	// Primary nav — inventory + security overviews. Visible to all
+	// authenticated users. Admin-only actions (Runs, Settings) render
+	// in a separate block below with an isAdmin gate.
 	const navLinks = [
 		{ href: '/app', label: 'Dashboard', icon: ChartPie },
 		{ href: '/app/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
 		{ href: '/app/components', label: 'Dependencies', icon: Package },
 		{ href: '/app/providers', label: 'Providers', icon: GitBranch },
-		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon },
-		// Visual group break — everything above is inventory/assets,
-		// everything below is operational/security actions.
-		{ href: '/app/runs', label: 'Runs', icon: Play, groupBreak: true },
-		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound }
+		{ href: '/app/secrets', label: 'Secrets', icon: KeyRound },
+		{ href: '/app/clusters', label: 'Clusters', icon: KubernetesIcon }
+	] as const;
+
+	// Admin-only nav — Runs exposes the job queue (CREATE_RUN artifacts
+	// can contain credentials surfaced in scan history), Jobs is the
+	// live queue view across all worker pools, Settings covers provider
+	// config + user management.
+	const adminNavLinks = [
+		{ href: '/app/runs', label: 'Runs', icon: Play },
+		{ href: '/app/admin/jobs', label: 'Jobs', icon: Layers }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
@@ -346,6 +355,25 @@ let isAdmin = $state(false);
 				</button>
 			{/each}
 			{#if isAdmin}
+				<div class="h-6" aria-hidden="true"></div>
+				{#each adminNavLinks as link}
+					<button
+						type="button"
+						class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
+							isActive(link.href)
+								? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
+								: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
+						}`}
+						onclick={() => goto(link.href)}
+						aria-current={isActive(link.href) ? 'page' : undefined}
+						aria-label={link.label}
+					>
+						<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
+							<link.icon size={18} stroke-width={1.7} />
+						</span>
+						<span class="font-medium">{link.label}</span>
+					</button>
+				{/each}
 				<button
 					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${

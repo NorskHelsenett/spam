@@ -30,6 +30,23 @@ func RepoSecurityCountsHandler(db *gorm.DB, authService *auth.Service) http.Hand
 			http.Error(w, "repo_id required", http.StatusBadRequest)
 			return
 		}
+		// repo_id is either a repos.id UUID or a provider:org:slug path.
+		// Resolve to a UUID so the ACL gate is uniform.
+		resolvedID := repoID
+		if parts := strings.SplitN(repoID, ":", 3); len(parts) == 3 {
+			var row struct{ ID string }
+			_ = db.WithContext(r.Context()).Table("repos").
+				Select("id").
+				Where("provider = ? AND org = ? AND slug = ?", parts[0], parts[1], parts[2]).
+				Scan(&row).Error
+			if row.ID != "" {
+				resolvedID = row.ID
+			}
+		}
+		if ok, err := canReadRepoByID(r, db, resolvedID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
 
 		var sbomID string
 		if err := db.WithContext(r.Context()).Table("sbom_bindings").
@@ -128,6 +145,9 @@ type SecretFinding struct {
 
 // RepoSecretsListHandler returns individual secret findings for a repo's latest scan.
 // GET /api/repos/secrets/list?repo_id=<uuid>
+//
+// Access: only callers whose ACL grants cover the repo see its findings.
+// 404/403 are normalized to avoid leaking the existence of private repos.
 func RepoSecretsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
@@ -137,6 +157,10 @@ func RepoSecretsListHandler(db *gorm.DB, authService *auth.Service) http.Handler
 		repoID := r.URL.Query().Get("repo_id")
 		if repoID == "" {
 			http.Error(w, "repo_id required", http.StatusBadRequest)
+			return
+		}
+		if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+			notFoundOrForbidden(w)
 			return
 		}
 

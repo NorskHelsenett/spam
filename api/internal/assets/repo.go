@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/dbutil"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
@@ -28,9 +29,14 @@ type RepoInput struct {
 }
 
 type RepoCommitInput struct {
-	RepoID    string
-	CommitSHA string
-	Ref       string
+	RepoID      string
+	CommitSHA   string
+	Ref         string
+	AuthorName  string
+	AuthorEmail string
+	AuthorDate  *time.Time
+	Signed      string
+	Message     string
 }
 
 func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error) {
@@ -133,6 +139,16 @@ func UpsertRepo(ctx context.Context, db *gorm.DB, input RepoInput) (*Repo, error
 			// upload) will still converge.
 			_ = err
 		}
+		// Apply provider default_grants so newly-discovered repos
+		// don't become invisible to every non-admin. The helper is
+		// best-effort: grant insertion failures are logged, not
+		// propagated.
+		acl.ApplyIngestDefaults(ctx, db, providerInstanceID, acl.RepoIdentity{
+			Provider:           provider,
+			ProviderInstanceID: providerInstanceID,
+			Owner:              org,
+			Slug:               slug,
+		})
 	}
 
 	return &repo, nil
@@ -143,14 +159,23 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 		return nil, errors.New("repo id and commit sha required")
 	}
 
+	authorName := sanitizeForDB(input.AuthorName)
+	authorEmail := sanitizeForDB(strings.ToLower(strings.TrimSpace(input.AuthorEmail)))
+	message := sanitizeForDB(input.Message)
+
 	var commit RepoCommit
 	where := RepoCommit{
 		RepoID:    input.RepoID,
 		CommitSHA: input.CommitSHA,
 	}
 	result := db.WithContext(ctx).Where(where).Attrs(RepoCommit{
-		ID:  uuid.NewString(),
-		Ref: input.Ref,
+		ID:          uuid.NewString(),
+		Ref:         input.Ref,
+		AuthorName:  authorName,
+		AuthorEmail: authorEmail,
+		AuthorDate:  input.AuthorDate,
+		Signed:      input.Signed,
+		Message:     message,
 	}).FirstOrCreate(&commit)
 
 	if result.Error != nil {
@@ -158,9 +183,29 @@ func UpsertRepoCommit(ctx context.Context, db *gorm.DB, input RepoCommitInput) (
 			if err := db.WithContext(ctx).Where(where).First(&commit).Error; err != nil {
 				return nil, err
 			}
-			return &commit, nil
+		} else {
+			return nil, result.Error
 		}
-		return nil, result.Error
+	}
+
+	// Backfill metadata on the existing row when the caller supplied it —
+	// older runners left these NULL and a rescan is how the data lands.
+	if input.AuthorDate != nil && commit.AuthorDate == nil {
+		updates := map[string]any{
+			"author_name":  authorName,
+			"author_email": authorEmail,
+			"author_date":  input.AuthorDate,
+			"signed":       input.Signed,
+			"message":      message,
+		}
+		if err := db.WithContext(ctx).Model(&RepoCommit{}).Where("id = ?", commit.ID).Updates(updates).Error; err != nil {
+			return nil, err
+		}
+		commit.AuthorName = authorName
+		commit.AuthorEmail = authorEmail
+		commit.AuthorDate = input.AuthorDate
+		commit.Signed = input.Signed
+		commit.Message = message
 	}
 	return &commit, nil
 }

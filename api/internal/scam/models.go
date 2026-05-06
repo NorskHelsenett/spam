@@ -17,6 +17,22 @@ type Record struct {
 
 func (Record) TableName() string { return "cluster_record" }
 
+// Cluster is a first-class cluster entity promoted from the
+// `cluster_id` string that SCAM agents send in every Record. It exists
+// so ACL grants can reference clusters directly and so admins can
+// attach a friendly display name to an otherwise opaque id. Rows are
+// created on first-heartbeat by the SCAM handler; no grants are seeded
+// by default (clusters are deny-by-default).
+type Cluster struct {
+	ID          string    `gorm:"primaryKey;size:36" json:"id"`
+	ClusterID   string    `gorm:"size:255;uniqueIndex;not null" json:"cluster_id"`
+	DisplayName string    `gorm:"size:255" json:"display_name,omitempty"`
+	FirstSeenAt time.Time `json:"first_seen_at"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (Cluster) TableName() string { return "clusters" }
+
 // Incoming is the expected shape of each record POSTed by a SCAM agent.
 // Fields are validated on ingest; the full object is stored as JSONB in Data.
 // Agents are anonymous (no registration or shared secret), so data integrity

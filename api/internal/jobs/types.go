@@ -10,7 +10,23 @@ const (
 	JobTypeSBOMAdhocScan    JobType = "SBOM_ADHOC_SCAN"
 	JobTypeProbeSecrets     JobType = "PROBE_SECRETS"
 	JobTypeImageScan        JobType = "IMAGE_SCAN"
+	JobTypeVulnMetaFetch    JobType = "VULN_META_FETCH"
+	// FETCH_KEV / FETCH_EPSS pull bulk feeds (CISA KEV, FIRST.org
+	// EPSS) into their own tables. Self-rescheduling: each handler
+	// enqueues the next run +24 h after success, gated by the
+	// ux_jobs_fetch_*_active partial unique index so multi-replica
+	// startups can't double-queue.
+	JobTypeFetchKEV  JobType = "FETCH_KEV"
+	JobTypeFetchEPSS JobType = "FETCH_EPSS"
 )
+
+// VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
+// one vuln_id per job. Kept single-id so a flaky external fetch
+// only retries one ID at a time and the worker can parallelize
+// across IDs by claiming multiple jobs.
+type VulnMetaFetchPayload struct {
+	VulnID string `json:"vuln_id"`
+}
 
 // SBOMAdhocPayload is the payload for SBOM_ADHOC_SCAN jobs. The ad-hoc
 // run clones the SBOM scanner CronJob's pod template to force a scan

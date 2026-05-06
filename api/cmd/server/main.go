@@ -12,8 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
+	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/config"
@@ -29,6 +31,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/server"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 )
 
 func main() {
@@ -83,19 +86,18 @@ func run() error {
 		&providerconfig.ProviderSecret{},
 		&vulnerabilities.ComponentVulnerability{},
 		&vulnerabilities.ComponentVEX{},
-		&vulnerabilities.TrivyScanLease{},
-		&vulnerabilities.TrivyScanResult{},
+		&vulnerabilities.SBOMScanLease{},
+		&vulnerabilities.SBOMScanResult{},
 		&secretprobe.SecretProbe{},
 		&secretprobe.ProbeAuditLog{},
 		&secretprobe.SecretDismissal{},
 		&scam.Record{},
 		&scam.ClusterSession{},
+		&scam.Cluster{},
+		&audit.Log{},
+		&acl.Grant{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
-	}
-
-	if err := providerconfig.EnsureDefaults(ctx, gormDB); err != nil {
-		return fmt.Errorf("seed provider defaults: %w", err)
 	}
 
 	if err := db.EnsureViews(ctx, gormDB,
@@ -122,6 +124,15 @@ func run() error {
 		"migrations/20260416_create_scam_indexes.sql",
 		"migrations/20260420_dedupe_cluster_record_msg.sql",
 		"migrations/20260421_rename_trivy_adhoc_job_type.sql",
+		"migrations/20260422_create_acl_constraints.sql",
+		"migrations/20260422_seed_acl_migration.sql",
+		"migrations/20260422_rename_trivy_scan_to_sbom_scan.sql",
+		"migrations/20260423_create_view_unified_image_vulnerabilities.sql",
+		"migrations/20260423_create_vuln_metadata.sql",
+		"migrations/20260423_add_vuln_metadata_canonical_id.sql",
+		"migrations/20260429_create_cisa_kev_and_epss.sql",
+		"migrations/20260429_create_unique_active_kev_epss_jobs.sql",
+		"migrations/20260430_create_materialized_unified_vuln_views.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -141,6 +152,15 @@ func run() error {
 	}); err != nil {
 		log.Printf("startup view refresh job (may already be queued): %v", err)
 	}
+
+	// Populate the unified-vuln materialized views asynchronously. The
+	// migration creates them WITH NO DATA so init is instant; this kicks
+	// off the first build in the background so HTTP serving starts now
+	// rather than after a multi-minute populate. TriggerRefresh debounces
+	// so this coalesces with any concurrent scan-completion triggers.
+	// Endpoints that read the MVs short-circuit to empty until the first
+	// populate lands (see vulnmetrics.unifiedViewsReady).
+	vulnmetrics.TriggerRefresh(gormDB)
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
@@ -175,6 +195,11 @@ func run() error {
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	// ACL chain: LocalProvider reads acl_grants. Future stages
+	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
+	routerOpts.ACLProvider = &acl.ChainProvider{
+		Providers: []acl.Provider{acl.NewLocalProvider(gormDB)},
+	}
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
 			log.Printf("WARNING: provider secret key: %s", w)

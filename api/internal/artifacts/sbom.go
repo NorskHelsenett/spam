@@ -11,8 +11,6 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-var ErrBindingExists = errors.New("sbom binding already exists for this asset")
-
 type SBOMInput struct {
 	Format           string
 	ContentHash      []byte
@@ -75,12 +73,19 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 		CreatedByUserID: input.CreatedByUserID,
 	}
 
-	// Use ON CONFLICT to handle race conditions atomically.
-	// The unique constraint on (asset_type, asset_ref_id) ensures only one binding per asset.
+	// One binding per (asset_type, asset_ref_id) — unique index enforces.
+	// On conflict rotate to the newest SBOM: a rescan of the same image
+	// produces new findings keyed off the new sbom_id, so we want the
+	// binding to point at the latest one (old sbom rows stay referenced
+	// by any historical lookups that pinned by id). Keep the original
+	// binding id + created_at so FK references from anything that
+	// pinned by binding id don't dangle.
 	result := db.WithContext(ctx).
 		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "asset_type"}, {Name: "asset_ref_id"}},
-			DoNothing: true,
+			Columns: []clause.Column{{Name: "asset_type"}, {Name: "asset_ref_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"sbom_id", "source", "commit_sha", "created_by_user_id",
+			}),
 		}).
 		Create(&binding)
 
@@ -88,12 +93,15 @@ func UpsertBinding(ctx context.Context, db *gorm.DB, input BindingInput) (*SBOMB
 		return nil, result.Error
 	}
 
-	// If no rows were affected, binding already exists
-	if result.RowsAffected == 0 {
-		return nil, ErrBindingExists
+	// binding.ID is the NEW uuid when we inserted, but stale when we
+	// updated — fetch the canonical row so the caller sees the real id.
+	var stored SBOMBinding
+	if err := db.WithContext(ctx).
+		Where("asset_type = ? AND asset_ref_id = ?", input.AssetType, input.AssetRefID).
+		First(&stored).Error; err != nil {
+		return nil, err
 	}
-
-	return &binding, nil
+	return &stored, nil
 }
 
 // StoreSBOM stores an SBOM and optionally creates a binding in a single transaction.

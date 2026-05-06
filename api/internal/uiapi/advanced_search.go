@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -357,39 +358,8 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 	case "vulnerability":
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT * FROM (
-				-- Trivy results (format='trivy' or pre-format-column rows)
-				SELECT
-					'vulnerability' AS type,
-					'trivy/' || tsr.id || '/' || (vuln->>'VulnerabilityID') AS source_ref,
-					r.id AS repo_id,
-					r.provider,
-					COALESCE(pi.id, '') AS provider_id,
-					COALESCE(pi.base_url, '') AS base_url,
-					COALESCE(pi.owner_path, '') AS owner_path,
-					r.org,
-					r.slug,
-					vuln->>'VulnerabilityID' AS title,
-					COALESCE(vuln->>'Severity', 'UNKNOWN') AS value,
-					(COALESCE(vuln->>'PkgName', '') || ' ' || COALESCE(vuln->>'InstalledVersion', '') || ' - ' || COALESCE(vuln->>'Title', '') || ' ' || COALESCE(vuln->>'Description', '')) AS source_text,
-					tsr.scanned_at AS created_at
-				FROM trivy_scan_results tsr
-				JOIN repos r ON r.id = tsr.repo_id
-				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
-				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
-				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
-				WHERE
-					COALESCE(tsr.format, 'trivy') = 'trivy'
-					AND (
-					  vuln->>'VulnerabilityID' ILIKE ?
-					  OR vuln->>'PkgName' ILIKE ?
-					  OR vuln->>'Title' ILIKE ?
-					  OR vuln->>'Description' ILIKE ?
-					)
-
-				UNION ALL
-
-				-- Grype results (format='grype') — sbom-scanner emits this
-				-- shape; fields are lowercased and sit under matches[].
+				-- Grype results — sbom-scanner emits this shape;
+				-- fields are lowercased and sit under matches[].
 				SELECT
 					'vulnerability' AS type,
 					'grype/' || tsr.id || '/' || (m->'vulnerability'->>'id') AS source_ref,
@@ -404,17 +374,14 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					COALESCE(UPPER(m->'vulnerability'->>'severity'), 'UNKNOWN') AS value,
 					(COALESCE(m->'artifact'->>'name', '') || ' ' || COALESCE(m->'artifact'->>'version', '') || ' - ' || COALESCE(m->'vulnerability'->>'description', '')) AS source_text,
 					tsr.scanned_at AS created_at
-				FROM trivy_scan_results tsr
+				FROM sbom_scan_results tsr
 				JOIN repos r ON r.id = tsr.repo_id
 				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'matches', '[]'::jsonb)) AS m(m)
 				WHERE
-					tsr.format = 'grype'
-					AND (
-					  m->'vulnerability'->>'id' ILIKE ?
-					  OR m->'artifact'->>'name' ILIKE ?
-					  OR m->'vulnerability'->>'description' ILIKE ?
-					)
+					m->'vulnerability'->>'id' ILIKE ?
+					OR m->'artifact'->>'name' ILIKE ?
+					OR m->'vulnerability'->>'description' ILIKE ?
 
 				UNION ALL
 
@@ -449,8 +416,6 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 			ORDER BY created_at DESC
 			LIMIT ?
 		`,
-			// trivy branch (4 placeholders)
-			like, like, like, like,
 			// grype branch (3 placeholders)
 			like, like, like,
 			// OSV branch (4 placeholders)
@@ -529,9 +494,15 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 
 // AdvancedSearchHandler runs cross-domain searches over repo metadata and artifacts.
 // GET /api/search/advanced?q=<query>&target=<all|repo|commit|language|contributor|readme|manifest|sbom|secret>
+//
+// Phase 3 gate: admin or wildcard-grant callers only. Scoped search
+// across repo / cluster / image / secret targets is a follow-up.
 func AdvancedSearchHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {
+			return
+		}
+		if !requireUnrestrictedRepos(w, r) {
 			return
 		}
 
@@ -640,6 +611,17 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 		}
 		if _, ok := advancedSearchTargets[targetType]; !ok {
 			http.Error(w, "unsupported type", http.StatusBadRequest)
+			return
+		}
+		// Gate by repo ACL when the preview is about a repo-bound
+		// artifact. No repo_id present → admin-only.
+		if repoID != "" {
+			if ok, err := canReadRepoByID(r, db, repoID); err != nil || !ok {
+				notFoundOrForbidden(w)
+				return
+			}
+		} else if !acl.SubjectFromRequest(r).IsAdmin {
+			notFoundOrForbidden(w)
 			return
 		}
 
@@ -873,8 +855,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Metadata["provider"] = row.Provider
 		case "vulnerability":
 		// source_ref is one of:
-		//   trivy/{tsr_id}/{vuln_id}   — trivy_scan_results row (trivy format)
-		//   grype/{tsr_id}/{vuln_id}   — trivy_scan_results row (grype format)
+		//   grype/{tsr_id}/{vuln_id}   — sbom_scan_results row
 		//   osv/{vuln_id}/{repo_id}    — component_vulnerabilities (OSV lookup)
 		parts := strings.SplitN(sourceRef, "/", 3)
 		if len(parts) != 3 {
@@ -887,10 +868,10 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 		case "grype":
 			tsrID, vulnID := id1, id2
 			var vulnRow struct {
-				RepoID   string
-				Provider string
-				Org      string
-				Slug     string
+				RepoID    string
+				Provider  string
+				Org       string
+				Slug      string
 				MatchJSON string `gorm:"column:match_json"`
 				Target    string
 			}
@@ -902,7 +883,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 					r.slug,
 					m::text AS match_json,
 					COALESCE(tsr.raw_json->'source'->'target'->>'userInput', '') AS target
-				FROM trivy_scan_results tsr
+				FROM sbom_scan_results tsr
 				JOIN repos r ON r.id = tsr.repo_id
 				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'matches', '[]'::jsonb)) AS m(m)
 				WHERE tsr.id = ? AND m->'vulnerability'->>'id' = ?
@@ -917,43 +898,6 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Metadata["vuln_id"] = vulnID
 			resp.Metadata["scan_id"] = tsrID
 			resp.Metadata["source"] = "grype"
-			if vulnRow.Target != "" {
-				resp.Metadata["target"] = vulnRow.Target
-			}
-		case "trivy":
-			tsrID, vulnID := id1, id2
-			var vulnRow struct {
-				RepoID   string
-				Provider string
-				Org      string
-				Slug     string
-				VulnJSON string
-				Target   string
-			}
-			err := db.WithContext(r.Context()).Raw(`
-				SELECT
-					r.id AS repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					vuln::text AS vuln_json,
-					COALESCE(result.result->>'Target', '') AS target
-				FROM trivy_scan_results tsr
-				JOIN repos r ON r.id = tsr.repo_id
-				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'Results', '[]'::jsonb)) AS result(result)
-				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(result.result->'Vulnerabilities', '[]'::jsonb)) AS vuln(vuln)
-				WHERE tsr.id = ? AND vuln->>'VulnerabilityID' = ?
-				LIMIT 1
-			`, tsrID, vulnID).Scan(&vulnRow).Error
-			if err != nil || vulnRow.RepoID == "" {
-				http.Error(w, "preview not found", http.StatusNotFound)
-				return
-			}
-			resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
-			resp.Raw = vulnRow.VulnJSON
-			resp.Metadata["vuln_id"] = vulnID
-			resp.Metadata["scan_id"] = tsrID
-			resp.Metadata["source"] = "trivy"
 			if vulnRow.Target != "" {
 				resp.Metadata["target"] = vulnRow.Target
 			}

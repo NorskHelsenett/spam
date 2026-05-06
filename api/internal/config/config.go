@@ -83,11 +83,17 @@ func Load() (Config, error) {
 
 // WorkerConfig captures configuration for the background worker.
 type WorkerConfig struct {
-	DatabaseURL        string
-	Concurrency        int           // Number of concurrent job processors
-	StaleTimeout       time.Duration // Duration after which RUNNING jobs are considered stale
-	ProviderSecretsKey []byte        // Key for decrypting provider secrets (for poller)
-	Runner             RunnerConfig
+	DatabaseURL string
+	Concurrency int // Number of concurrent job processors in the main pool
+	// VulnMetaConcurrency sizes a dedicated goroutine pool that exclusively
+	// claims VULN_META_FETCH jobs. Isolating these from the main pool
+	// prevents a large vuln-meta backfill (often tens of thousands of jobs
+	// after an OSV scan) from FIFO-starving CREATE_RUN dispatches and other
+	// user-facing job types.
+	VulnMetaConcurrency int
+	StaleTimeout        time.Duration // Duration after which RUNNING jobs are considered stale
+	ProviderSecretsKey  []byte        // Key for decrypting provider secrets (for poller)
+	Runner              RunnerConfig
 }
 
 // RunnerConfig captures configuration for the Kubernetes runner system.
@@ -132,8 +138,9 @@ type RunnerEgressSelfTestConfig struct {
 // Only requires database connection - no OIDC or HTTP config needed.
 func LoadWorker() (WorkerConfig, error) {
 	cfg := WorkerConfig{
-		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
-		Concurrency: parseIntEnv("WORKER_CONCURRENCY", 4),
+		DatabaseURL:         strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		Concurrency:         parseIntEnv("WORKER_CONCURRENCY", 4),
+		VulnMetaConcurrency: parseIntEnv("WORKER_VULN_META_CONCURRENCY", 8),
 	}
 
 	if cfg.DatabaseURL == "" {
@@ -147,6 +154,9 @@ func LoadWorker() (WorkerConfig, error) {
 	// Ensure concurrency is at least 1
 	if cfg.Concurrency < 1 {
 		cfg.Concurrency = 1
+	}
+	if cfg.VulnMetaConcurrency < 1 {
+		cfg.VulnMetaConcurrency = 1
 	}
 
 	// Load provider secrets key (needed for poller regardless of runner)
@@ -181,7 +191,7 @@ func loadRunnerConfig() (RunnerConfig, error) {
 
 	cfg := RunnerConfig{
 		Enabled:        true,
-		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Image:          getEnv("RUNNER_IMAGE", "spam-repo-runner:latest"),
 		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
 		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
 		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),
@@ -235,7 +245,7 @@ func LoadRunnerConfigOptional() (RunnerConfig, error) {
 
 	cfg := RunnerConfig{
 		Enabled:        true,
-		Image:          getEnv("RUNNER_IMAGE", "spam-runner:latest"),
+		Image:          getEnv("RUNNER_IMAGE", "spam-repo-runner:latest"),
 		Namespace:      getEnv("RUNNER_NAMESPACE", "default"),
 		ServiceAccount: getEnv("RUNNER_SERVICE_ACCOUNT", "spam-runner"),
 		WorkerURL:      getEnv("RUNNER_WORKER_URL", "http://localhost:8081"),

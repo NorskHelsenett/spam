@@ -2,18 +2,18 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ .Release.Name }}-runner
+  name: {{ .Release.Name }}-repo-runner
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}-runner
+    app.kubernetes.io/name: {{ .Chart.Name }}-repo-runner
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/version: {{ .Chart.AppVersion }}
-    app.kubernetes.io/component: runner
+    app.kubernetes.io/component: repo-runner
     app.kubernetes.io/managed-by: Helm
 spec:
-  # Matches dynamically-created runner Job pods (labels set in Go code)
+  # Matches dynamically-created repo-runner Job pods (labels set in Go code)
   podSelector:
     matchLabels:
-      app.kubernetes.io/component: runner
+      app.kubernetes.io/component: repo-runner
   policyTypes:
     - Ingress
     - Egress

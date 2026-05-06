@@ -96,6 +96,12 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 		if requireAuth(w, r, authService) == nil {
 			return
 		}
+		// Cross-repo aggregate — admin or wildcard grant only in
+		// Phase 3. Narrow grants fall through to 404 until a
+		// per-subject scoped recomputation lands.
+		if !requireUnrestrictedRepos(w, r) {
+			return
+		}
 
 		watermark := appSummaryWatermark(r.Context(), db)
 
@@ -257,11 +263,11 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			ORDER BY s.created_at DESC
 			LIMIT 8
 		),
-		trivy_latest AS (
+		scan_latest AS (
 			SELECT DISTINCT ON (repo_id)
 				repo_id,
 				critical_count + high_count + medium_count + low_count + unknown_count AS total
-			FROM trivy_scan_results
+			FROM sbom_scan_results
 			ORDER BY repo_id, scanned_at DESC
 		),
 		image_vulns AS (
@@ -315,7 +321,7 @@ func computeAppSummary(ctx context.Context, db *gorm.DB) (AppSummaryResponse, er
 			WHERE is_root = false
 			GROUP BY sbom_id
 		) lib ON lib.sbom_id = r.sbom_id
-		LEFT JOIN trivy_latest tv ON tv.repo_id::text = rc.repo_id::text
+		LEFT JOIN scan_latest tv ON tv.repo_id::text = rc.repo_id::text
 		LEFT JOIN image_vulns iv ON iv.image_id::text = imd.id::text
 		LEFT JOIN repo_secret_latest rs ON rs.repo_id::text = rc.repo_id::text
 		ORDER BY r.created_at DESC

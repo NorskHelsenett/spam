@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -201,6 +202,13 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 	).Error; err != nil {
 		log.Printf("image-scans/complete: mark finished %s: %v", jobID, err)
 	}
+
+	// image_scan_runs.finished_at is one of the four watermarks the
+	// vulnmetrics cache is versioned against. Warm the cache in the
+	// background so the next /app/vulnerabilities load sees fresh
+	// aggregates without paying the recompute on the UI thread.
+	vulnmetrics.TriggerRefresh(s.db)
+	jobs.EnqueueMissingVulnMeta(r.Context(), s.db)
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))

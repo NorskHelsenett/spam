@@ -6,13 +6,27 @@
 # For production with load balancing, increase to 2+ for high availability
 replicaCount: 1
 
-# Deployment strategy
-# RollingUpdate ensures zero-downtime deployments
+# Deployment strategy — zero-downtime rollouts.
+# maxUnavailable: 0 means we never drop below replicaCount during an
+# upgrade. maxSurge: 1 lets one extra pod come up and pass readiness
+# before the old pod is drained, so at least one replica is always
+# serving traffic across a restart. Pair with pdb below to get the
+# same guarantee for voluntary disruptions (node drains, evictions).
 strategy:
   type: RollingUpdate
   rollingUpdate:
-    maxSurge: 1        # Maximum number of pods that can be created above desired count
-    maxUnavailable: 0  # Maximum number of pods that can be unavailable during update
+    maxSurge: 1
+    maxUnavailable: 0
+
+# PodDisruptionBudget — keep at least one api pod serving during
+# voluntary disruptions (node drain, autoscaler eviction). The Deployment
+# strategy above handles rollouts; this handles everything else. With
+# replicaCount: 1 and minAvailable: 1 a drain will BLOCK until you first
+# bump replicas or delete the PDB — that's the point, it prevents
+# accidental takedowns of a single-replica deployment.
+pdb:
+  enabled: true
+  minAvailable: 1
 
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
@@ -148,6 +162,31 @@ ingress:
       paths:
         - path: /
           pathType: ImplementationSpecific
+
+# Arbitrary extra manifests rendered alongside the chart. Useful for
+# Gateway API resources (HTTPRoute, ReferenceGrant), NetworkPolicies,
+# CRs from other operators, etc., so an ArgoCD app that points at this
+# chart can ship them as a single unit. Each entry is rendered as-is
+# through `tpl`, so Go template expressions referencing chart values
+# (e.g. `{{ .Release.Namespace }}`) are supported.
+extraResources: []
+  # - apiVersion: gateway.networking.k8s.io/v1
+  #   kind: HTTPRoute
+  #   metadata:
+  #     name: spam
+  #     namespace: {{ .Release.Namespace }}
+  #   spec:
+  #     parentRefs:
+  #       - name: spam-gateway
+  #         namespace: gateways
+  #         sectionName: spam.sikkerhet.nhn.no
+  #     hostnames:
+  #       - spam.sikkerhet.nhn.no
+  #     rules:
+  #       - backendRefs:
+  #           - kind: Service
+  #             name: spam
+  #             port: 8080
 
 resources: {}
   # We usually recommend not to specify default resources and to leave this as a conscious
@@ -335,22 +374,31 @@ worker:
     timeoutSeconds: 5
     failureThreshold: 3
 
-  resources: {}
-    # limits:
-    #   cpu: 200m
-    #   memory: 256Mi
-    # requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+  # Sized to move the pod out of BestEffort (on cpu, memory, and
+  # especially ephemeral-storage). Without an ephemeral-storage request
+  # the worker was first in the eviction queue when any neighbour filled
+  # the node. The worker itself uses little disk — mostly the writable
+  # rootfs + stdout logs — but 0 request meant 0 guarantee.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+      ephemeral-storage: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+      ephemeral-storage: 2Gi
 
 # Runner configuration
-# The runner executes scans (SBOM generation, secret scanning) in Kubernetes jobs
+# repo-runner: clones a repo in a K8s Job and produces artifacts —
+# syft-generated SBOM, betterleaks secret scan, dependency manifests.
+# (sbom-scanner / image-scanner handle the vuln side; see their blocks.)
 runner:
   enabled: false
 
-  # Runner container image
+  # repo-runner container image
   image:
-    repository: spam-runner
+    repository: spam-repo-runner
     tag: latest
     pullPolicy: IfNotPresent
 
@@ -405,9 +453,9 @@ runner:
 # SBOM scanner CronJob configuration
 # Runs nightly and scans all SBOMs in the database for vulnerabilities.
 # Uses a dedicated image (separate from the runner) with minimal attack surface.
-# Named "sbom-scanner" because the tool inside is interchangeable (trivy today;
-# grype once the backend grype-result ingest lands) — the input is always an
-# SBOM, so the scanner's identity is the input shape, not the binary.
+# Named "sbom-scanner" because the tool inside is interchangeable — the input
+# is always an SBOM, so the scanner's identity is the input shape, not the
+# binary. Grype is the current producer.
 sbomScanner:
   enabled: false
   schedule: "0 6 * * *"        # 6am nightly
@@ -415,7 +463,7 @@ sbomScanner:
   activeDeadlineSeconds: 14400  # 4h max runtime
 
   # Dedicated sbom-scanner image (built from runner/Dockerfile.sbom-scanner).
-  # Contains ONLY trivy + the scanner binary — no git, syft, or betterleaks.
+  # Contains ONLY grype + the scanner binary — no git, syft, or betterleaks.
   image:
     repository: spam-sbom-scanner
     tag: ""
@@ -468,6 +516,28 @@ imageScanner:
   # against a single pathological image hanging the whole tick).
   scanDeadlineSeconds: 900
 
+  # /tmp scratch volume for crane/syft/grype. Was 512Mi tmpfs (RAM-backed)
+  # which ran out on any image >300MB because image extraction can briefly
+  # duplicate layers on disk. Now a disk-backed emptyDir pulling from node
+  # ephemeral storage — doesn't count against pod memory. Bump if a fat
+  # image still fills it (runtime: `kubectl -n spam exec <pod> -- df /tmp`).
+  tmpSizeLimit: 8Gi
+
+  # Per-volume caps on the other disk-backed emptyDirs. Each is counted
+  # against node ephemeral storage, so bounding them (rather than leaving
+  # {} = unbounded) is what stops a single scanner from filling the node
+  # and triggering DiskPressure eviction of neighbouring pods.
+  #
+  #  work           — extracted image rootfs; scales with largest layer
+  #  grypeCache     — grype vulnerability DB (~1 GiB uncompressed)
+  #  trivyCache     — trivy vulnerability DB (similar size)
+  #
+  # Sum of tmp + work + grype + trivy should fit inside the container's
+  # ephemeral-storage limit below (see resources.limits.ephemeral-storage).
+  workSizeLimit: 8Gi
+  grypeCacheSizeLimit: 2Gi
+  trivyCacheSizeLimit: 2Gi
+
   # Extra env forwarded to each scan subprocess. Typical keys:
   #   GRYPE_DB_UPDATE_URL, GRYPE_DB_AUTO_UPDATE, GRYPE_DB_VALIDATE_AGE
   #   TRIVY_DB_REPOSITORY, TRIVY_JAVA_DB_REPOSITORY
@@ -478,9 +548,19 @@ imageScanner:
     requests:
       cpu: 200m
       memory: 512Mi
+      # ephemeral-storage request is required to move the pod out of the
+      # BestEffort eviction class for disk. Without it the scanner is
+      # first in line when any neighbour fills the node. Size to cover
+      # expected simultaneous use of the emptyDirs above.
+      ephemeral-storage: 8Gi
     limits:
       cpu: "2"
       memory: 4Gi
+      # Hard ceiling — if the pod exceeds this (sum of emptyDirs +
+      # writable layer + logs) the kubelet evicts the pod rather than the
+      # node. Matches the sum of tmp + work + grype + trivy caps above,
+      # with a small buffer for logs and the writable layer.
+      ephemeral-storage: 22Gi
 
 # Connection configuration for the application
 # When postgresql.enabled=true, these are auto-configured

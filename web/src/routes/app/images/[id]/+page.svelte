@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import {
 		ArrowLeft,
@@ -149,6 +150,19 @@
 		if (browser) loadImage();
 	});
 
+	// Prefer history.back() so the referring page's scroll + state
+	// restores; fall back to /app when this page was loaded directly
+	// (image-detail routes are reached from several places — search,
+	// secrets, providers/repo — so there's no single canonical parent).
+	const goBack = () => {
+		if (!browser) return;
+		if (window.history.length > 1) {
+			history.back();
+		} else {
+			goto('/app');
+		}
+	};
+
 	const formatDate = (iso: string) => {
 		if (!iso) return '—';
 		return new Date(iso).toLocaleString();
@@ -190,7 +204,7 @@
 		<button
 			type="button"
 			class="inline-flex items-center gap-2 text-sm text-[var(--text-secondary)] transition hover:text-[var(--accent)]"
-			onclick={() => history.back()}
+			onclick={goBack}
 		>
 			<ArrowLeft class="h-4 w-4" />
 			Back

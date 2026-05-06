@@ -42,6 +42,45 @@
 	let detailOpen = $state(false);
 	let selectedDependency: UnifiedDependency | null = $state(null);
 
+	// SvelteKit snapshot: preserves search + filter + pagination +
+	// sort state when navigating away and back via history.back().
+	// The list renders in the page's normal flow (no inner scroll
+	// container), so SvelteKit's default scroll restoration handles
+	// window scroll on its own — we only need the filter/page state
+	// the re-mounted component can't re-derive.
+	//
+	// dependencies + ecosystems are intentionally not captured: they
+	// re-fetch on mount via the existing load* functions, which
+	// apply the restored filters to hit the right page.
+	export const snapshot = {
+		capture: () => ({
+			searchQuery,
+			selectedEcosystem,
+			selectedSource,
+			page,
+			pageSize,
+			sortColumn,
+			sortDirection,
+		}),
+		restore: (v: {
+			searchQuery?: string;
+			selectedEcosystem?: string;
+			selectedSource?: string;
+			page?: number;
+			pageSize?: number;
+			sortColumn?: string;
+			sortDirection?: 'asc' | 'desc';
+		}) => {
+			if (v.searchQuery !== undefined) searchQuery = v.searchQuery;
+			if (v.selectedEcosystem !== undefined) selectedEcosystem = v.selectedEcosystem;
+			if (v.selectedSource !== undefined) selectedSource = v.selectedSource;
+			if (v.page !== undefined) page = v.page;
+			if (v.pageSize !== undefined) pageSize = v.pageSize;
+			if (v.sortColumn !== undefined) sortColumn = v.sortColumn;
+			if (v.sortDirection !== undefined) sortDirection = v.sortDirection;
+		},
+	};
+
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 	const sourceOptions = [
 		{ value: '', label: 'All sources' },
@@ -310,7 +349,20 @@
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{error}</div>
 		{/if}
 
-		{#if dependencies.length === 0 && !loading}
+		{#if loading && dependencies.length === 0}
+			<div class="flex flex-1 items-center justify-center">
+				<div class="flex flex-col items-center gap-4 text-center">
+					<Package class="h-10 w-10 text-[var(--accent)]" aria-hidden="true" />
+					<div>
+						<p class="text-sm font-semibold text-[var(--text-bright)]">Loading dependencies</p>
+						<p class="mt-1 text-xs text-[var(--text-muted)]">Fetching packages from SBOMs and manifests</p>
+					</div>
+					<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
+						<div class="deps-loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
+					</div>
+				</div>
+			</div>
+		{:else if dependencies.length === 0 && !loading}
 			<div class="flex flex-1 items-center justify-center">
 				<div class="flex flex-col items-center gap-3 text-center">
 					{#if hasActiveSearch}
@@ -527,3 +579,23 @@
 		{/if}
 	</section>
 </div>
+
+<style>
+	.deps-loading-bar {
+		position: relative;
+		width: 35%;
+		left: 0%;
+		animation: deps-loading-slide 2s linear infinite alternate;
+	}
+
+	@keyframes deps-loading-slide {
+		0% {
+			left: 0%;
+			transform: translateX(-95%);
+		}
+		100% {
+			left: 100%;
+			transform: translateX(-5%);
+		}
+	}
+</style>

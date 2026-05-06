@@ -25,6 +25,19 @@ type ViewSchemaVersion struct {
 // replica refreshes the SBOM materialized views at a time.
 const sbomViewRefreshLockID = 8_742_635_912
 
+// vulnUnifiedViewRefreshLockID guards refreshes of the unified vuln MVs
+// (view_unified_repositories_vulnerabilities + view_unified_image_vulnerabilities).
+// Distinct from the SBOM lock so a slow SBOM refresh does not block a
+// vuln refresh and vice versa — the two view families are independent.
+const vulnUnifiedViewRefreshLockID = 8_742_635_913
+
+// vulnUnifiedViewNames are the materialized views that hold the unified
+// per-asset vulnerability rows the API filters and groups against.
+var vulnUnifiedViewNames = []string{
+	"view_unified_repositories_vulnerabilities",
+	"view_unified_image_vulnerabilities",
+}
+
 // EnsureViews applies SQL view definitions from the provided file paths.
 // Each file is hashed; the view is only dropped and recreated when the hash
 // differs from what is stored in view_schema_versions. A PostgreSQL advisory
@@ -164,6 +177,54 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // process holds the advisory lock. Callers should treat this as a transient
 // condition and retry rather than silently succeeding.
 var ErrRefreshLockHeld = errors.New("materialized view refresh lock held by another process")
+
+// VulnUnifiedViewsPopulated reports whether all unified vuln MVs are
+// populated. Used as a gate on read endpoints so the brief startup window
+// after a fresh deploy (MVs created WITH NO DATA, first refresh in
+// flight) returns empty results instead of a SQLSTATE 55000 error.
+func VulnUnifiedViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
+	var populated bool
+	err := db.WithContext(ctx).Raw(
+		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN (?, ?)",
+		vulnUnifiedViewNames[0], vulnUnifiedViewNames[1],
+	).Scan(&populated).Error
+	return populated, err
+}
+
+// RefreshVulnUnifiedViews refreshes the unified vuln MVs under a
+// dedicated advisory lock so concurrent triggers across replicas
+// serialize. Reuses refreshView for the CONCURRENTLY+fallback logic
+// that handles "view not yet populated" (first refresh after WITH NO
+// DATA must be plain) gracefully. Returns ErrRefreshLockHeld when
+// another process holds the lock so the caller can decide whether to
+// retry or treat the in-flight refresh as good enough.
+func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
+	sqlDB, err := db.WithContext(ctx).DB()
+	if err != nil {
+		return fmt.Errorf("get raw db: %w", err)
+	}
+	conn, err := sqlDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire db connection: %w", err)
+	}
+	defer conn.Close()
+
+	var acquired bool
+	if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", vulnUnifiedViewRefreshLockID).Scan(&acquired); err != nil {
+		return fmt.Errorf("acquire vuln refresh lock: %w", err)
+	}
+	if !acquired {
+		return ErrRefreshLockHeld
+	}
+	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", vulnUnifiedViewRefreshLockID) //nolint:errcheck
+
+	for _, view := range vulnUnifiedViewNames {
+		if err := refreshView(ctx, db, view); err != nil {
+			return fmt.Errorf("refresh %s: %w", view, err)
+		}
+	}
+	return nil
+}
 
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
 // It uses a PostgreSQL advisory lock so that in a multi-replica deployment only one

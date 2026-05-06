@@ -2,6 +2,8 @@ package scam
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -163,7 +165,7 @@ func HostMetaHandler(cs cache.Store) http.HandlerFunc {
 
 		_ = cache.SetJSON(ctx, cs, cacheKey, meta, metaTTL)
 		if meta.HasFavicon && meta.faviconBytes != nil {
-			_ = cs.Set(ctx, faviconCachePrefix+host, meta.faviconBytes, metaTTL)
+			_ = cache.SetBytes(ctx, cs, faviconCachePrefix+host, meta.faviconBytes, metaTTL)
 		}
 
 		writeJSON(w, http.StatusOK, meta)
@@ -181,12 +183,12 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 
 		ctx := r.Context()
 
-		data, ok, _ := cs.Get(ctx, faviconCachePrefix+host)
+		data, ok, _ := cache.GetBytes(ctx, cs, faviconCachePrefix+host)
 		if !ok || len(data) == 0 {
 			meta := fetchHostMeta(ctx, host)
 			_ = cache.SetJSON(ctx, cs, metaCachePrefix+host, meta, metaTTL)
 			if meta.HasFavicon && meta.faviconBytes != nil {
-				_ = cs.Set(ctx, faviconCachePrefix+host, meta.faviconBytes, metaTTL)
+				_ = cache.SetBytes(ctx, cs, faviconCachePrefix+host, meta.faviconBytes, metaTTL)
 				data = meta.faviconBytes
 			}
 			if len(data) == 0 {
@@ -204,10 +206,25 @@ func HostFaviconHandler(cs cache.Store) http.HandlerFunc {
 			http.NotFound(w, r)
 			return
 		}
+
+		// Content-addressed ETag lets browsers revalidate cheaply after
+		// the max-age window. max-age=7d drives down re-requests to
+		// single-digit per host per week; 304-on-match avoids reshipping
+		// the bytes even when the browser does come back.
+		sum := sha256.Sum256(data)
+		etag := `"` + hex.EncodeToString(sum[:16]) + `"`
+		if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+			w.Header().Set("ETag", etag)
+			w.Header().Set("Cache-Control", "public, max-age=604800")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+
 		w.Header().Set("Content-Type", contentType)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=604800")
 		_, _ = w.Write(data)
 	}
 }

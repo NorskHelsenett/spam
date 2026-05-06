@@ -1,12 +1,13 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browser } from '$app/environment';
-	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search } from 'lucide-svelte';
+	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search, Bot } from 'lucide-svelte';
 	import { slide, fly } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import HostChainDrawer from '$lib/components/HostChainDrawer.svelte';
 	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
 	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
+	import DeployScamDialog from '$lib/components/DeployScamDialog.svelte';
 
 	// --- Virtual scroll helpers for tables ---
 	const ROW_HEIGHT = 48;
@@ -107,6 +108,21 @@
 		return `${dy}.${mo}.${yr} ${hr}:${mi}:${sc}`;
 	};
 
+	type HostResolve = {
+		ips: string[];
+		is_local: boolean;
+		error?: string;
+	};
+
+	type HostMeta = {
+		title: string;
+		has_favicon: boolean;
+	};
+
+	// `resolved` / `meta` are inlined by the API from its per-host cache
+	// when available (present on every row after the cache warms). When
+	// absent, the per-row $effect falls back to /resolve + /meta, which
+	// in turn populates the cache for the next list response.
 	type HostRow = {
 		host: string;
 		kind: string;
@@ -121,17 +137,8 @@
 		backends: string;
 		workload_count: number;
 		last_seen: string;
-	};
-
-	type HostResolve = {
-		ips: string[];
-		is_local: boolean;
-		error?: string;
-	};
-
-	type HostMeta = {
-		title: string;
-		has_favicon: boolean;
+		resolved?: HostResolve;
+		meta?: HostMeta;
 	};
 
 	let clusters: ClusterRow[] = $state([]);
@@ -142,6 +149,7 @@
 	let hostMetas = $state<Record<string, HostMeta>>({});
 	let loading = $state(true);
 	let error = $state('');
+	let deployDialogOpen = $state(false);
 	let activeTab = $state('clusters');
 	let imagesFetched = $state(false);
 	let hostsFetched = $state(false);
@@ -163,6 +171,68 @@
 	let clusterDrawerRow: ClusterRow | null = $state(null);
 	let imageDrawerOpen = $state(false);
 	let imageDrawerId: string | null = $state(null);
+
+	// Pending scroll restores — set by snapshot.restore, applied by
+	// the $effect below once the corresponding tab's scroll element
+	// has bound AND its data has landed (setting scrollTop on an
+	// empty container won't stick). Cleared on application.
+	let restoreClusterScroll = $state<number | null>(null);
+	let restoreImageScroll = $state<number | null>(null);
+	let restoreHostScroll = $state<number | null>(null);
+
+	// SvelteKit snapshot: preserves tab + filter + scroll state when
+	// navigating to a detail route (image, host chain, cluster chain)
+	// and back via history.back(). The three inner-div scrolls aren't
+	// covered by SvelteKit's window-level scroll restoration, so we
+	// capture them explicitly.
+	export const snapshot = {
+		capture: () => ({
+			activeTab,
+			includeInactive,
+			clusterSearch,
+			imageSearch,
+			imageSelectedRegistries,
+			hostSearch,
+			hostSelectedClusters,
+			hostSelectedNamespaces,
+			hostSelectedKinds,
+			hostActiveWorkloadsOnly,
+			scroll: {
+				cluster: clusterScrollTop,
+				image: imageScrollTop,
+				host: hostScrollTop,
+			},
+		}),
+		restore: (v: {
+			activeTab?: string;
+			includeInactive?: boolean;
+			clusterSearch?: string;
+			imageSearch?: string;
+			imageSelectedRegistries?: string[];
+			hostSearch?: string;
+			hostSelectedClusters?: string[];
+			hostSelectedNamespaces?: string[];
+			hostSelectedKinds?: string[];
+			hostActiveWorkloadsOnly?: boolean;
+			scroll?: { cluster?: number; image?: number; host?: number };
+		}) => {
+			if (v.activeTab !== undefined) activeTab = v.activeTab;
+			if (v.includeInactive !== undefined) includeInactive = v.includeInactive;
+			if (v.clusterSearch !== undefined) clusterSearch = v.clusterSearch;
+			if (v.imageSearch !== undefined) imageSearch = v.imageSearch;
+			if (v.imageSelectedRegistries) imageSelectedRegistries = v.imageSelectedRegistries;
+			if (v.hostSearch !== undefined) hostSearch = v.hostSearch;
+			if (v.hostSelectedClusters) hostSelectedClusters = v.hostSelectedClusters;
+			if (v.hostSelectedNamespaces) hostSelectedNamespaces = v.hostSelectedNamespaces;
+			if (v.hostSelectedKinds) hostSelectedKinds = v.hostSelectedKinds;
+			if (v.hostActiveWorkloadsOnly !== undefined) hostActiveWorkloadsOnly = v.hostActiveWorkloadsOnly;
+			if (v.scroll) {
+				if (v.scroll.cluster) restoreClusterScroll = v.scroll.cluster;
+				if (v.scroll.image) restoreImageScroll = v.scroll.image;
+				if (v.scroll.host) restoreHostScroll = v.scroll.host;
+			}
+		},
+	};
 
 	function openImageDrawer(digestId: string) {
 		if (imageDrawerOpen && imageDrawerId === digestId) {
@@ -248,6 +318,18 @@
 			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) {
 				hosts = (await res.json()) ?? [];
+				// Seed the per-host maps from inline fields so the
+				// virtual-scroll $effect sees a cache hit and skips
+				// the fallback /resolve + /meta round-trip for every
+				// row the backend already knows about.
+				const seedRes: Record<string, HostResolve> = {};
+				const seedMeta: Record<string, HostMeta> = {};
+				for (const h of hosts) {
+					if (h.resolved) seedRes[h.host] = h.resolved;
+					if (h.meta) seedMeta[h.host] = h.meta;
+				}
+				if (Object.keys(seedRes).length) hostResolutions = { ...hostResolutions, ...seedRes };
+				if (Object.keys(seedMeta).length) hostMetas = { ...hostMetas, ...seedMeta };
 			}
 			hostsFetched = true;
 		} catch { /* silent */ }
@@ -601,6 +683,33 @@
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
 	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH));
 	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH));
+
+	// Apply pending scroll restores once the target tab's DOM has
+	// mounted (scrollEl bound) and its data has landed (rows > 0).
+	// Each $effect fires exactly once per snapshot restore: the self-
+	// clearing null assignment flips the guard so the effect doesn't
+	// re-run on subsequent data changes.
+	$effect(() => {
+		if (restoreClusterScroll !== null && clusterScrollEl && sortedClusters.length > 0) {
+			clusterScrollEl.scrollTop = restoreClusterScroll;
+			clusterScrollTop = restoreClusterScroll;
+			restoreClusterScroll = null;
+		}
+	});
+	$effect(() => {
+		if (restoreImageScroll !== null && imageScrollEl && sortedImages.length > 0) {
+			imageScrollEl.scrollTop = restoreImageScroll;
+			imageScrollTop = restoreImageScroll;
+			restoreImageScroll = null;
+		}
+	});
+	$effect(() => {
+		if (restoreHostScroll !== null && hostScrollEl && sortedHosts.length > 0) {
+			hostScrollEl.scrollTop = restoreHostScroll;
+			hostScrollTop = restoreHostScroll;
+			restoreHostScroll = null;
+		}
+	});
 </script>
 
 <svelte:head>
@@ -630,12 +739,19 @@
 			</div>
 		{:else if clusters.length === 0}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
-				<Server class="h-12 w-12 text-[var(--yellow)]" />
+				<Bot class="h-12 w-12 text-[var(--yellow)]" />
 				<p class="text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
 				<p class="text-sm text-[var(--text-muted)]">Deploy a SCAM agent to start collecting container inventory.</p>
 				<div class="w-48 overflow-hidden rounded-full bg-[var(--bg2)]/30">
 					<div class="loading-bar h-1 rounded-full bg-[var(--yellow)]"></div>
 				</div>
+				<button
+					type="button"
+					class="mt-2 inline-flex items-center gap-2 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+					onclick={() => (deployDialogOpen = true)}
+				>
+					Show install instructions
+				</button>
 			</div>
 		{:else}
 			<!-- Metric cards -->
@@ -1169,6 +1285,8 @@
 	{/if}
 
 </div>
+
+<DeployScamDialog bind:open={deployDialogOpen} />
 
 <!-- Date tooltip for "Deployed at" cells. Top-level so it escapes
      the images table's scroll overflow. -->

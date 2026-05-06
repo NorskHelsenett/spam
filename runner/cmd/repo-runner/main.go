@@ -55,9 +55,16 @@ type Runner struct {
 	cancel        context.CancelFunc
 	wsConn        *websocket.Conn
 	logChan       chan string
-	sbomScanner   string // "trivy" or "syft"
 	commitHash    string
-	runnerMode    string // "clone" or "scan"
+	// Captured from `git log -1` on the pinned commit. Shipped to the
+	// API on SBOM upload so repo_commits carries authoritative metadata
+	// rather than a provider-API sample.
+	commitAuthorName  string
+	commitAuthorEmail string
+	commitAuthorDate  string // RFC3339 (%aI)
+	commitSigned      string // git %G? — one of G/B/U/X/Y/R/E/N
+	commitMessage     string // full message (%B), unbounded
+	runnerMode        string // "clone" or "scan"
 }
 
 func main() {
@@ -67,7 +74,6 @@ func main() {
 	repoCloneURL := os.Getenv("REPO_CLONE_URL")
 	repoRef := os.Getenv("REPO_REF")
 	repoCommitSHA := os.Getenv("REPO_COMMIT_SHA")
-	sbomScanner := os.Getenv("SBOM_SCANNER")
 
 	runnerMode := os.Getenv("RUNNER_MODE")
 
@@ -80,11 +86,6 @@ func main() {
 	// Clone mode: init container that clones the repo and exits
 	if runnerMode == "clone" {
 		os.Exit(runCloneMode(workerURL, runID, runToken, repoCloneURL, repoRef, repoCommitSHA))
-	}
-
-	// Default to syft if not specified
-	if sbomScanner == "" {
-		sbomScanner = "syft"
 	}
 
 	// Extract repo name from clone URL
@@ -107,7 +108,6 @@ func main() {
 		ctx:           ctx,
 		cancel:        cancel,
 		logChan:       make(chan string, 100),
-		sbomScanner:   sbomScanner,
 		runnerMode:    runnerMode,
 	}
 
@@ -258,21 +258,37 @@ func (r *Runner) runPipeline() int {
 		}
 	}
 
+	// Capture authoritative commit metadata straight from git. %x1f (ASCII
+	// unit separator) delimits fields so the message body — which may
+	// contain arbitrary newlines — stays intact as the final field.
+	if r.commitHash != "" {
+		const sep = "\x1f"
+		format := "%an" + sep + "%ae" + sep + "%aI" + sep + "%G?" + sep + "%B"
+		metaCmd := exec.CommandContext(r.ctx, "git", "-C", r.workDir, "log", "-1", "--format="+format, r.commitHash)
+		if metaOut, err := metaCmd.Output(); err == nil {
+			parts := strings.SplitN(string(metaOut), sep, 5)
+			if len(parts) == 5 {
+				r.commitAuthorName = strings.TrimSpace(parts[0])
+				r.commitAuthorEmail = strings.TrimSpace(parts[1])
+				r.commitAuthorDate = strings.TrimSpace(parts[2])
+				r.commitSigned = strings.TrimSpace(parts[3])
+				// %B trails with a newline git appends; keep the body
+				// itself verbatim but strip that single training char.
+				r.commitMessage = strings.TrimRight(parts[4], "\n")
+			}
+		} else {
+			r.log(fmt.Sprintf("git log metadata capture failed: %v", err))
+		}
+	}
+
 	// Run SBOM generation
-	r.log(fmt.Sprintf("Running %s for SBOM generation...", r.sbomScanner))
+	r.log("Running syft for SBOM generation...")
 	sbomPath := filepath.Join(r.artifactDir, "sbom.json")
 	betterleaksPath := filepath.Join(r.artifactDir, "betterleaks.json")
 	manifestsPath := filepath.Join(r.artifactDir, "manifests.json")
 
-	var sbomErr error
-	if r.sbomScanner == "trivy" {
-		sbomErr = r.runCommand("trivy", "fs", "--quiet", "--format", "cyclonedx", "--output", sbomPath, r.workDir)
-	} else {
-		sbomErr = r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir)
-	}
-
-	if sbomErr != nil {
-		r.log(fmt.Sprintf("SBOM generation failed: %v", sbomErr))
+	if err := r.runCommand("syft", "scan", "-q", "-o", "cyclonedx-json="+sbomPath, r.workDir); err != nil {
+		r.log(fmt.Sprintf("SBOM generation failed: %v", err))
 		return 1
 	}
 
@@ -356,7 +372,6 @@ func (r *Runner) logToolVersions() {
 		versionArgs []string
 	}{
 		{"syft", "/usr/local/bin/syft", []string{"--version"}},
-		{"trivy", "/usr/local/bin/trivy", []string{"--version"}},
 		{"betterleaks", "/usr/local/bin/betterleaks", []string{"version"}},
 		{"git", "/usr/bin/git", []string{"--version"}},
 	}
@@ -387,16 +402,13 @@ func (r *Runner) logToolVersions() {
 
 // cleanEnv returns a minimal environment for running external tools.
 // This prevents sensitive variables (tokens, secrets) from leaking to
-// third-party analyzers like syft, trivy, or betterleaks.
+// third-party analyzers like syft or betterleaks.
 func cleanEnv() []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
 		"GIT_TERMINAL_PROMPT=0",
 		"SYFT_CHECK_FOR_APP_UPDATE=false",
-		"TRIVY_SKIP_DB_UPDATE=true",
-		"TRIVY_SKIP_JAVA_DB_UPDATE=true",
-		"TRIVY_OFFLINE_SCAN=true",
 	}
 }
 
@@ -450,6 +462,24 @@ func (r *Runner) uploadFile(filePath, fileType string) error {
 	// Add commit_hash field if available
 	if r.commitHash != "" {
 		if err := writer.WriteField("commit_hash", r.commitHash); err != nil {
+			return err
+		}
+	}
+
+	// Attach commit metadata on the SBOM upload so the API can enrich
+	// repo_commits in the same transaction. Empty fields are skipped so
+	// an older API receiver ignores them gracefully.
+	for field, value := range map[string]string{
+		"commit_author_name":  r.commitAuthorName,
+		"commit_author_email": r.commitAuthorEmail,
+		"commit_author_date":  r.commitAuthorDate,
+		"commit_signed":       r.commitSigned,
+		"commit_message":      r.commitMessage,
+	} {
+		if value == "" {
+			continue
+		}
+		if err := writer.WriteField(field, value); err != nil {
 			return err
 		}
 	}

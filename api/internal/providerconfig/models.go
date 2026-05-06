@@ -1,6 +1,10 @@
 package providerconfig
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/datatypes"
+)
 
 const (
 	ProviderHealthUnknown  = "UNKNOWN"
@@ -25,6 +29,13 @@ type ProviderInstance struct {
 	CreatedByUserID string     `gorm:"size:36" json:"created_by"`
 	CreatedAt       time.Time  `json:"created_at"`
 	UpdatedAt       time.Time  `json:"updated_at"`
+
+	// DefaultGrants holds subject pairs that receive an ingest_default
+	// acl_grant for every newly discovered repo under this provider.
+	// Shape: [{"subject_type":"group"|"user","subject_id":"..."}, ...].
+	// Empty/null means "no automatic grants" — admins claim each repo
+	// manually via /api/admin/acl/grants.
+	DefaultGrants datatypes.JSON `gorm:"type:jsonb" json:"default_grants,omitempty"`
 }
 
 // ProviderSecret stores encrypted PATs for provider instances.
