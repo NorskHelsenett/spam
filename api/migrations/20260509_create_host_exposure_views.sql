@@ -28,8 +28,14 @@
 -- instead of just contributing zero rows. Guarding by jsonb_typeof
 -- isolates bad records.
 
-DROP MATERIALIZED VIEW IF EXISTS exposed_digests;
-DROP MATERIALIZED VIEW IF EXISTS host_exposure;
+-- CASCADE because asset_risk (created by 20260509a) holds a dependency
+-- on exposed_digests via its `exposed_clusters` CTE. Without CASCADE,
+-- DROP errors with SQLSTATE 2BP01 the moment anyone bumps this
+-- migration's hash. asset_risk gets recreated by 20260509a in the same
+-- EnsureViews pass — its hash is bumped alongside this change so the
+-- recreate is guaranteed.
+DROP MATERIALIZED VIEW IF EXISTS exposed_digests CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS host_exposure CASCADE;
 
 CREATE MATERIALIZED VIEW host_exposure AS
 WITH per_rule_backend AS (

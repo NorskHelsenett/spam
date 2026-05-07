@@ -10,6 +10,13 @@
 --
 -- The rest of the asset_risk body is unchanged from
 -- 20260506_create_asset_risk_view.sql.
+--
+-- Hash-bump note: 20260509_create_host_exposure_views.sql now uses
+-- DROP MATERIALIZED VIEW ... CASCADE because asset_risk depends on
+-- exposed_digests. The CASCADE drops asset_risk too — this migration
+-- must re-run in the same EnsureViews pass to recreate it. The
+-- comment edit here exists solely to bump this file's sha256 so the
+-- hash check picks it up; the SQL body below is unchanged.
 
 DROP MATERIALIZED VIEW IF EXISTS asset_risk;
 
