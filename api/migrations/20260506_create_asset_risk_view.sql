@@ -65,6 +65,7 @@ exposed_digests AS (
       ON svc.data->>'kind'       = 'Service'
      AND svc.data->>'cluster_id' = ing.data->>'cluster_id'
      AND svc.data->>'namespace'  = ing.data->>'namespace'
+     AND COALESCE(svc.data->>'msg', '') <> 'DELETE'
      AND jsonb_typeof(ing.data->'rules') = 'array'
      AND EXISTS (
          SELECT 1
@@ -78,7 +79,9 @@ exposed_digests AS (
      AND cont.data->>'namespace'  = svc.data->>'namespace'
      AND (cont.data->'pod_labels') @> (svc.data->'selector')
      AND COALESCE(cont.data->>'digest', '') <> ''
+     AND COALESCE(cont.data->>'msg', '')    <> 'DELETE'
     WHERE ing.data->>'kind' = 'Ingress'
+      AND COALESCE(ing.data->>'msg', '') <> 'DELETE'
 
     UNION
 
@@ -93,6 +96,7 @@ exposed_digests AS (
       ON svc.data->>'kind'       = 'Service'
      AND svc.data->>'cluster_id' = ing.data->>'cluster_id'
      AND svc.data->>'namespace'  = ing.data->>'namespace'
+     AND COALESCE(svc.data->>'msg', '') <> 'DELETE'
      AND jsonb_typeof(ing.data->'backends') = 'array'
      AND EXISTS (
          SELECT 1
@@ -105,11 +109,24 @@ exposed_digests AS (
      AND cont.data->>'namespace'  = svc.data->>'namespace'
      AND (cont.data->'pod_labels') @> (svc.data->'selector')
      AND COALESCE(cont.data->>'digest', '') <> ''
+     AND COALESCE(cont.data->>'msg', '')    <> 'DELETE'
     WHERE ing.data->>'kind' IN
-        ('IngressRoute','IngressRouteTCP','HTTPRoute','GRPCRoute','TLSRoute')
+            ('IngressRoute','IngressRouteTCP','HTTPRoute','GRPCRoute','TLSRoute')
+      AND COALESCE(ing.data->>'msg', '') <> 'DELETE'
 ),
 
--- ---------- chain: cluster → digests running ----------
+-- ---------- chain: cluster → digests currently running ----------
+-- "Currently running" rather than "ever observed":
+--   * msg <> 'DELETE'  drops tombstoned pods
+--
+-- We deliberately do NOT gate on received_at: the scam ingest
+-- pipeline emits Container records on observed create/delete events,
+-- not as a periodic heartbeat, so a stable pod that has been running
+-- unchanged for weeks carries a stale received_at while still being
+-- alive. Trusting msg<>'DELETE' means we may slightly over-count if a
+-- delete event is missed (controller restart, dropped watch); that's
+-- an acceptable trade vs. dramatically under-counting long-running
+-- workloads.
 cluster_digests AS (
     SELECT DISTINCT
         cr.data->>'cluster_id' AS cluster_id,
@@ -117,6 +134,7 @@ cluster_digests AS (
     FROM cluster_record cr
     WHERE cr.data->>'kind' = 'Container'
       AND COALESCE(cr.data->>'digest', '') <> ''
+      AND COALESCE(cr.data->>'msg', '')   <> 'DELETE'
 ),
 
 -- ---------- per-vuln, KEV / EPSS bulk lookups ----------
@@ -404,6 +422,12 @@ image_signals AS (
           AND sc.asset_ref_id = d.id
           AND sc.is_root = false
     ) idh ON TRUE
+    -- Restrict triage's image universe to digests currently observed
+    -- running in some cluster (cluster_digests is the 24h+msg<>DELETE
+    -- "live" set above). Pre-deployment / retired images stay visible
+    -- on /app/images for audit, but they don't bloat the triage queue
+    -- or pay the per-row LATERAL cost.
+    WHERE EXISTS (SELECT 1 FROM cluster_digests cd WHERE cd.digest = d.digest)
 ),
 
 -- ---------- cluster-side aggregation ----------
