@@ -367,7 +367,12 @@ image_signals AS (
         COALESCE(idh.deprecated_direct, 0)::bigint      AS deprecated_dep_count,
         COALESCE(idh.max_major_behind, 0)::int          AS max_major_behind,
         COALESCE(idh.major_behind_direct, 0)::bigint    AS major_behind_dep_count
+    -- INNER JOIN to the in-cluster digest set up front (rather than
+    -- a trailing WHERE EXISTS) so the LATERALs below only fire for
+    -- images we actually surface — vs. running them across every
+    -- digest the system has ever seen and filtering at the end.
     FROM image_digests d
+    JOIN (SELECT DISTINCT digest FROM cluster_digests) cd ON cd.digest = d.digest
     LEFT JOIN LATERAL (
         SELECT
             COUNT(DISTINCT canonical_id) FILTER (WHERE severity = 'CRITICAL')::bigint AS critical_count,
@@ -422,12 +427,10 @@ image_signals AS (
           AND sc.asset_ref_id = d.id
           AND sc.is_root = false
     ) idh ON TRUE
-    -- Restrict triage's image universe to digests currently observed
-    -- running in some cluster (cluster_digests is the 24h+msg<>DELETE
-    -- "live" set above). Pre-deployment / retired images stay visible
-    -- on /app/images for audit, but they don't bloat the triage queue
-    -- or pay the per-row LATERAL cost.
-    WHERE EXISTS (SELECT 1 FROM cluster_digests cd WHERE cd.digest = d.digest)
+    -- (The cluster-presence gate is now the INNER JOIN to
+    -- cluster_digests above; pre-deployment / retired images stay
+    -- visible on /app/images for audit but skip the triage LATERALs
+    -- entirely.)
 ),
 
 -- ---------- cluster-side aggregation ----------
