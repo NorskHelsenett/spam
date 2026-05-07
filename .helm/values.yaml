@@ -362,6 +362,17 @@ worker:
   enabled: true
   replicaCount: 2
 
+  # Worker job-pool concurrency. Two independent goroutine pools run in
+  # the same process: the main pool handles CREATE_RUN dispatch, feed
+  # refreshes, sync jobs, etc.; the vuln-meta pool exclusively claims
+  # VULN_META_FETCH so a large backfill (tens of thousands of jobs after
+  # a fresh OSV scan) cannot FIFO-starve user-facing dispatches.
+  # IMAGE_SCAN jobs are NOT served by either pool — they go to dedicated
+  # scanner pods sized via imageScanner.operator.maxParallelism below.
+  concurrency:
+    main: 4
+    vulnMeta: 8
+
   # Rolling strategy: keep serving throughout an upgrade.
   # maxUnavailable: 0 means we never go below the configured replica
   # count. maxSurge: 1 lets one extra pod come up before an old one
