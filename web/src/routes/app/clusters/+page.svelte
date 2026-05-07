@@ -393,23 +393,19 @@
 		if (!browser) return;
 		loadMain();
 
+		// Relative-time ticker only — purely a display refresh, no
+		// network calls.
 		const interval = setInterval(() => tick++, 60_000);
 
-		const es = new EventSource('/api/app/stream');
-		es.addEventListener('scam_ingest', () => {
-			// loadMain triggers loadHosts internally; reset the cache
-			// flags first so the refresh actually fetches. The inFlight
-			// guards inside loadHosts / loadImages prevent duplicate
-			// requests even if this handler fires rapidly.
-			hostsFetched = false;
-			if (imagesFetched) imagesFetched = false;
-			loadMain();
-			if (activeTab === 'images') loadImages();
-		});
-
+		// We deliberately do NOT subscribe to /api/app/stream here. With
+		// hundreds of clusters and thousands of images the per-page
+		// fan-out (summary + registry-distribution + hosts + image
+		// detail) is expensive enough that re-firing it on every
+		// scam_ingest event practically DDoS'd the API. The page now
+		// loads once on open; the user can flip the inactive toggle or
+		// reload to refresh.
 		return () => {
 			clearInterval(interval);
-			es.close();
 		};
 	});
 
