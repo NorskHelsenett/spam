@@ -407,12 +407,6 @@
 		}
 	};
 
-	// When the vulns tab is opened, kick off the first fetch. Filter
-	// changes (including the debounced search) bump vulnFilterVersion
-	// and clear caches via the filtersKey watcher below.
-	$: if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0) && !vulnError) {
-		void fetchVulnPage(0);
-	}
 	$: if (activeTab === 'images') loadImages();
 
 	$: vulnFiltersKey = JSON.stringify([
@@ -424,10 +418,24 @@
 		vulnKEVOnly,
 		vulnEPSSMin
 	]);
+	// Combined initial-fetch + filter-change watcher. Splitting these into
+	// two reactive blocks caused a double request on mount: the first
+	// would mark page 0 in-flight, then the filter-key watcher would see
+	// vulnFiltersKey transition from its '' seed to the computed JSON,
+	// observe the in-flight flag, and call resetVulnPages — which clears
+	// the in-flight set and refetches.
 	let prevVulnFiltersKey = '';
-	$: if (activeTab === 'vulnerabilities' && vulnFiltersKey !== prevVulnFiltersKey) {
-		prevVulnFiltersKey = vulnFiltersKey;
-		if (vulnLoaded || vulnInflight.has(0)) resetVulnPages();
+	$: if (activeTab === 'vulnerabilities') {
+		if (vulnFiltersKey !== prevVulnFiltersKey) {
+			prevVulnFiltersKey = vulnFiltersKey;
+			if (vulnLoaded || vulnInflight.has(0)) {
+				resetVulnPages();
+			} else if (!vulnError) {
+				void fetchVulnPage(0);
+			}
+		} else if (!vulnLoaded && !vulnInflight.has(0) && !vulnError) {
+			void fetchVulnPage(0);
+		}
 	}
 
 	// Images filtered + sorted by severity weight (critical > high > medium > low).
