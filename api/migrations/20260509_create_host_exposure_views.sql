@@ -18,6 +18,15 @@
 -- internal/db/host_exposure_view.go). Refresh ordering matters:
 -- exposed_digests reads from host_exposure, so host_exposure must
 -- refresh first.
+--
+-- Every jsonb_array_elements* call below uses
+--     CASE jsonb_typeof(...) WHEN 'array' THEN ... ELSE '[]'::jsonb END
+-- instead of plain COALESCE. COALESCE only handles SQL NULL, not jsonb
+-- scalars — so a malformed cluster_record row with e.g. rules=null (the
+-- JSON literal, not SQL NULL) or rules="" would crash the entire
+-- REFRESH with SQLSTATE 22023 ("cannot extract elements from a scalar")
+-- instead of just contributing zero rows. Guarding by jsonb_typeof
+-- isolates bad records.
 
 DROP MATERIALIZED VIEW IF EXISTS exposed_digests;
 DROP MATERIALIZED VIEW IF EXISTS host_exposure;
@@ -47,8 +56,8 @@ WITH per_rule_backend AS (
         COALESCE(cr.data->>'ingress_class','') AS ingress_class,
         cr.received_at                        AS last_seen
     FROM cluster_record cr
-    CROSS JOIN LATERAL jsonb_array_elements(COALESCE(cr.data->'rules','[]'::jsonb)) AS r
-    LEFT  JOIN LATERAL jsonb_array_elements(COALESCE(r->'paths','[]'::jsonb))      AS p ON TRUE
+    CROSS JOIN LATERAL jsonb_array_elements(CASE jsonb_typeof(cr.data->'rules') WHEN 'array' THEN cr.data->'rules' ELSE '[]'::jsonb END) AS r
+    LEFT  JOIN LATERAL jsonb_array_elements(CASE jsonb_typeof(r->'paths') WHEN 'array' THEN r->'paths' ELSE '[]'::jsonb END)      AS p ON TRUE
     WHERE cr.data->>'kind' = 'Ingress'
       AND COALESCE(cr.data->>'msg','') <> 'DELETE'
       AND NULLIF(r->>'host','') IS NOT NULL
@@ -71,8 +80,8 @@ WITH per_rule_backend AS (
         '',
         cr.received_at
     FROM cluster_record cr
-    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(cr.data->'hostnames','[]'::jsonb)) AS h
-    LEFT  JOIN LATERAL jsonb_array_elements(COALESCE(cr.data->'backends','[]'::jsonb))       AS b ON TRUE
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE jsonb_typeof(cr.data->'hostnames') WHEN 'array' THEN cr.data->'hostnames' ELSE '[]'::jsonb END) AS h
+    LEFT  JOIN LATERAL jsonb_array_elements(CASE jsonb_typeof(cr.data->'backends') WHEN 'array' THEN cr.data->'backends' ELSE '[]'::jsonb END)       AS b ON TRUE
     WHERE cr.data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
       AND COALESCE(cr.data->>'msg','') <> 'DELETE'
       AND NULLIF(h,'') IS NOT NULL
@@ -95,8 +104,8 @@ WITH per_rule_backend AS (
         '',
         cr.received_at
     FROM cluster_record cr
-    CROSS JOIN LATERAL jsonb_array_elements_text(COALESCE(cr.data->'hosts','[]'::jsonb))    AS h
-    LEFT  JOIN LATERAL jsonb_array_elements(COALESCE(cr.data->'backends','[]'::jsonb))      AS b ON TRUE
+    CROSS JOIN LATERAL jsonb_array_elements_text(CASE jsonb_typeof(cr.data->'hosts') WHEN 'array' THEN cr.data->'hosts' ELSE '[]'::jsonb END)    AS h
+    LEFT  JOIN LATERAL jsonb_array_elements(CASE jsonb_typeof(cr.data->'backends') WHEN 'array' THEN cr.data->'backends' ELSE '[]'::jsonb END)      AS b ON TRUE
     WHERE cr.data->>'kind' IN ('IngressRoute','IngressRouteTCP')
       AND COALESCE(cr.data->>'msg','') <> 'DELETE'
       AND NULLIF(h,'') IS NOT NULL
