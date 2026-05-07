@@ -307,11 +307,11 @@
 			if (d.id) params.set('repo_id', d.id);
 			if (d.provider_id) params.set('provider_id', d.provider_id);
 			else if (d.base_url) params.set('base_url', d.base_url);
-			goto(`/app/providers/repo?${params}`);
+			goto(`/providers/repo?${params}`);
 		} else if (item.kind === 'image') {
-			goto(`/app/images/${item.data.image_id}`);
+			goto(`/images/${item.data.image_id}`);
 		} else {
-			goto(`/app/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
+			goto(`/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
 		close();
 	};

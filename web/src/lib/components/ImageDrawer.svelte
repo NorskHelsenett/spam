@@ -103,7 +103,7 @@
 		});
 		if (lr.base_url) params.set('base_url', lr.base_url);
 		if (lr.provider_id) params.set('provider_id', lr.provider_id);
-		return `/app/providers/repo?${params.toString()}`;
+		return `/providers/repo?${params.toString()}`;
 	};
 </script>
 
@@ -122,7 +122,7 @@
 			</div>
 			<a
 				class="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 px-2.5 text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
-				href={`/app/images/${imageId}`}
+				href={`/images/${imageId}`}
 				title="Open full image page"
 			>
 				Full page
@@ -260,7 +260,7 @@
 					<ul class="space-y-1.5">
 						{#each detail.scan_history.slice(0, 5) as h}
 							<li class="flex items-center justify-between gap-2 text-xs">
-								<a href={`/app/runs/${h.job_id}`} class="flex min-w-0 items-center gap-2 truncate text-[var(--text-secondary)] hover:text-[var(--accent)]">
+								<a href={`/runs/${h.job_id}`} class="flex min-w-0 items-center gap-2 truncate text-[var(--text-secondary)] hover:text-[var(--accent)]">
 									<span
 										class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase"
 										style="color: {h.status === 'SUCCEEDED' ? 'var(--success)' : h.status === 'FAILED' ? 'var(--error)' : 'var(--warning)'}; background: color-mix(in srgb, {h.status === 'SUCCEEDED' ? 'var(--success)' : h.status === 'FAILED' ? 'var(--error)' : 'var(--warning)'} 15%, transparent);"

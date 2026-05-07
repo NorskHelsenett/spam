@@ -121,7 +121,7 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 				merged.component_purl,
 				merged.component_name,
 				merged.ecosystem,
-				('/app/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
+				('/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
 					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
 				) AS spam_url
 			FROM merged
@@ -640,7 +640,7 @@ func buildSpamRepoURL(baseURL, providerType, org, slug, providerBaseURL string) 
 	if providerType == "" || path == "" {
 		return ""
 	}
-	u := "/app/providers/repo?provider=" + providerType + "&path=" + path
+	u := "/providers/repo?provider=" + providerType + "&path=" + path
 	if strings.TrimSpace(providerBaseURL) != "" {
 		u += "&base_url=" + strings.TrimSpace(providerBaseURL)
 	}

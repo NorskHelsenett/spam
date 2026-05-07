@@ -473,7 +473,7 @@
 			<div class="min-w-0 flex-1">
 				<div class="flex items-center gap-2">
 					<a
-						href="/app/providers/repo/{repoId}"
+						href="/providers/repo/{repoId}"
 						class="truncate text-base font-semibold text-[var(--text-bright)] hover:text-[var(--accent)] hover:underline"
 					>
 						{repoName}
