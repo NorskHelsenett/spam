@@ -28,7 +28,7 @@
 	let selectedEcosystem = $state('');
 	let selectedSource = $state(''); // 'sbom', 'manifest', or ''
 	let page = $state(1);
-	let totalCount = $state(0);
+	let hasMore = $state(false);
 	let pageSize = $state(50);
 	let exporting = $state(false);
 	let exportDropdownOpen = $state(false);
@@ -128,7 +128,7 @@
 			}
 			const data = await response.json();
 			dependencies = data.dependencies || [];
-			totalCount = data.total || 0;
+			hasMore = Boolean(data.has_more);
 		} catch {
 			error = 'Failed to load dependencies.';
 		} finally {
@@ -251,7 +251,6 @@
 		}
 	};
 
-	const totalPages = $derived(Math.ceil(totalCount / pageSize));
 	const hasActiveSearch = $derived(Boolean(searchQuery.trim() || selectedEcosystem || selectedSource));
 
 	onMount(() => {
@@ -551,10 +550,10 @@
 			</div>
 
 			<!-- Pagination -->
-			{#if totalPages > 1}
+			{#if page > 1 || hasMore}
 				<div class="flex items-center justify-between pt-4">
 					<p class="text-xs text-[var(--text-muted)]">
-						Showing {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, totalCount)} of {totalCount}
+						Page {page} · showing {(page - 1) * pageSize + 1}–{(page - 1) * pageSize + dependencies.length}
 					</p>
 					<div class="flex gap-2">
 						<button
@@ -568,7 +567,7 @@
 						<button
 							type="button"
 							class="rounded-full border border-[var(--border-color)] px-3 py-1 text-xs text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] disabled:opacity-50"
-							disabled={page >= totalPages}
+							disabled={!hasMore}
 							onclick={() => { page++; loadComponents(); }}
 						>
 							Next

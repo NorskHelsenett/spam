@@ -850,13 +850,17 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 	return assets, nil
 }
 
-// UnifiedDependenciesResponse is the API response
+// UnifiedDependenciesResponse is the API response. HasMore is the
+// limit+1 trick: the handler asks the DB for one row past the page,
+// drops it before serialising, and reports HasMore=true. Replaces the
+// old COUNT(*) OVER () total — at scale, computing the total dominated
+// the query (full GROUP BY across both sbom_component_view and
+// manifest_dependencies) and made `?q=spa` searches unusable.
 type UnifiedDependenciesResponse struct {
 	Dependencies []UnifiedDependency `json:"dependencies"`
-	Total        int64               `json:"total"`
 	Page         int                 `json:"page"`
 	PerPage      int                 `json:"per_page"`
-	TotalPages   int                 `json:"total_pages"`
+	HasMore      bool                `json:"has_more"`
 }
 
 // UnifiedDependenciesHandler merges SBOM components and manifest dependencies
@@ -982,7 +986,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					GROUP BY scv.name, scv.ecosystem
 				)
 				SELECT name, ecosystem, purl, 'sbom' AS sources, version_count, sbom_count, repo_count, image_count,
-				       false AS has_direct, NULL::text[] AS scopes, COUNT(*) OVER () AS total_count
+				       false AS has_direct, NULL::text[] AS scopes
 				FROM sbom_deps
 			`
 
@@ -1024,7 +1028,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					GROUP BY md.name, md.ecosystem
 				)
 				SELECT name, ecosystem, NULL AS purl, 'manifest' AS sources, version_count, 0 AS sbom_count, repo_count, 0 AS image_count,
-				       has_direct, scopes, COUNT(*) OVER () AS total_count
+				       has_direct, scopes
 				FROM manifest_deps
 			`
 
@@ -1138,7 +1142,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						ON s.name = m.name
 						AND s.ecosystem = m.ecosystem
 				)
-				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, image_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
+				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, image_count, has_direct, scopes FROM merged
 			`
 			if source == "both" {
 				query += ` WHERE sources = 'both'`
@@ -1154,12 +1158,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		// Secondary sort by name for consistency
 		query += `, name ASC`
 
-		// Apply pagination
+		// Pagination: ask for one row past the page so we can report
+		// has_more without a second COUNT query. The extra row is
+		// dropped before serialising.
 		offset := (page - 1) * perPage
 		query += ` LIMIT ? OFFSET ?`
-		args = append(args, interface{}(perPage), interface{}(offset))
+		args = append(args, interface{}(perPage+1), interface{}(offset))
 
-		// Execute query — total count comes back as a window function column
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("unified deps query error: %v", err)
@@ -1168,8 +1173,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		}
 		defer rows.Close()
 
-		var total int64
-		deps := make([]UnifiedDependency, 0)
+		deps := make([]UnifiedDependency, 0, perPage)
 		for rows.Next() {
 			var dep UnifiedDependency
 			var sources string
@@ -1180,7 +1184,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				&dep.Name, &dep.Ecosystem, &purl,
 				&sources, &dep.VersionCount,
 				&dep.SBOMCount, &dep.RepoCount, &dep.ImageCount,
-				&dep.HasDirect, &scopes, &total,
+				&dep.HasDirect, &scopes,
 			); err != nil {
 				log.Printf("scan error: %v", err)
 				continue
@@ -1209,18 +1213,17 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			deps = append(deps, dep)
 		}
 
-		totalPages := int(total) / perPage
-		if int(total)%perPage > 0 {
-			totalPages++
+		hasMore := len(deps) > perPage
+		if hasMore {
+			deps = deps[:perPage]
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(UnifiedDependenciesResponse{
 			Dependencies: deps,
-			Total:        total,
 			Page:         page,
 			PerPage:      perPage,
-			TotalPages:   totalPages,
+			HasMore:      hasMore,
 		})
 	}
 }
