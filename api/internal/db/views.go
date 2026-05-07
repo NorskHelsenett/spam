@@ -42,6 +42,14 @@ var vulnUnifiedViewNames = []string{
 // Each file is hashed; the view is only dropped and recreated when the hash
 // differs from what is stored in view_schema_versions. A PostgreSQL advisory
 // lock serialises concurrent replicas so only one does the work.
+//
+// The hash is checked once *outside* the advisory lock so the common
+// "nothing changed" case (every boot after the first deploy of a given
+// migration) doesn't compete for the lock at all. This matters because
+// the lock is held for the whole DDL transaction — a stuck rolling
+// deploy or a leftover idle-in-transaction backend can otherwise block
+// new replicas indefinitely. With the fast-path skip, only replicas
+// that actually need to do work serialise on the lock.
 func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 	for _, path := range paths {
 		payload, err := os.ReadFile(path)
@@ -52,6 +60,15 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 			continue
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(payload))
+
+		// Fast path: if the stored hash already matches, no work is
+		// needed, so we don't enter the transaction at all and never
+		// touch the advisory lock. The recheck inside the lock below
+		// still runs for races (two replicas both decide to do work).
+		var stored ViewSchemaVersion
+		if err := db.WithContext(ctx).First(&stored, "name = ?", path).Error; err == nil && stored.Hash == hash {
+			continue
+		}
 
 		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			sum := sha256.Sum256([]byte(path))
@@ -216,7 +233,14 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 	if !acquired {
 		return ErrRefreshLockHeld
 	}
-	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", vulnUnifiedViewRefreshLockID) //nolint:errcheck
+	// See note on RefreshAssetRiskView — release must survive a
+	// caller ctx cancellation or the session-level advisory lock
+	// leaks back into the pool.
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", vulnUnifiedViewRefreshLockID)
+	}()
 
 	for _, view := range vulnUnifiedViewNames {
 		if err := refreshView(ctx, db, view); err != nil {
@@ -252,7 +276,14 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 		log.Printf("refresh lock held by another process, will retry")
 		return ErrRefreshLockHeld
 	}
-	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID) //nolint:errcheck
+	// See note on RefreshAssetRiskView — release must survive a
+	// caller ctx cancellation or the session-level advisory lock
+	// leaks back into the pool.
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID)
+	}()
 
 	// Refresh metadata first so that any SBOM visible in sbom_metadata_view is
 	// guaranteed to already have its components in sbom_component_view (which

@@ -55,7 +55,17 @@ func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
 	if !acquired {
 		return ErrRefreshLockHeld
 	}
-	defer conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", assetRiskViewRefreshLockID) //nolint:errcheck
+	// Release on a fresh ctx so a SIGTERM-triggered cancellation of
+	// the parent ctx (mid-refresh) does not skip the unlock. Without
+	// this, the PG backend retains the session-level advisory lock
+	// when the conn is returned to the pool — every subsequent refresh
+	// silently no-ops via ErrRefreshLockHeld. 5s budget is plenty for
+	// a single one-row exec.
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", assetRiskViewRefreshLockID)
+	}()
 
 	if err := refreshView(ctx, db, assetRiskViewName); err != nil {
 		return err
