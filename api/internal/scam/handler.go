@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"gorm.io/datatypes"
@@ -20,6 +21,13 @@ import (
 )
 
 const maxBodySize = 10 << 20 // 10 MiB
+
+// upsertItem is one observation in a callcenter batch — the JSONB
+// payload that lands in cluster_record. Defined at package scope so
+// helpers like ensureRecentScansForBatch can take a typed slice.
+type upsertItem struct {
+	data datatypes.JSON
+}
 
 // resourceKeyExpr is the PostgreSQL expression that computes the unique
 // resource identity from the JSONB data column. Matches ux_cluster_record_resource.
@@ -155,9 +163,6 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
-		type upsertItem struct {
-			data datatypes.JSON
-		}
 		var rejected int
 
 		// Dedupe by upsert key WITHIN the batch. Postgres disallows a
@@ -253,6 +258,19 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			})
 			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
 
+			// Deploy-time scan trigger: for each unique image digest in
+			// this batch's Container records, ensure an image_digest row
+			// exists and a recent IMAGE_SCAN is queued. UpsertImageDigest
+			// no longer eagerly enqueues scans for non-cluster-resident
+			// images (e.g. SBOM uploads from CI), so the scan actually
+			// triggers here — exactly when an image hits a cluster.
+			//
+			// Runs asynchronously with a 30s budget so a slow scan-
+			// enqueue path doesn't extend the ingest latency the agent
+			// sees. Idempotent via the ux_jobs_image_scan_active partial
+			// unique index.
+			go ensureRecentScansForBatch(db, items)
+
 			// Fresh ingest may change which hosts/backends exist and
 			// which Services have ready endpoints behind them. Only
 			// invalidate the hosts list cache when the batch actually
@@ -276,6 +294,53 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			Accepted: len(items),
 			Rejected: rejected,
 		})
+	}
+}
+
+// ensureRecentScansForBatch is the scam ingest's deploy-time scan
+// trigger. For each unique (registry, repository, digest) tuple in the
+// batch's Container records, it ensures an image_digests row exists
+// and a recent IMAGE_SCAN job is queued (see assets.EnsureImageScanRecent
+// for freshness semantics). Skips DELETE / non-Container / digest-less
+// records.
+func ensureRecentScansForBatch(db *gorm.DB, items []upsertItem) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Dedupe by digest within the batch — multiple pods of the same
+	// image collapse to a single scan-enqueue attempt.
+	unique := make(map[string]assets.ImageDigestInput, len(items))
+	for _, item := range items {
+		var inc Incoming
+		if err := json.Unmarshal(item.data, &inc); err != nil {
+			continue
+		}
+		if inc.Kind != "Container" || inc.Msg == "DELETE" {
+			continue
+		}
+		if inc.Digest == "" || inc.Registry == "" || inc.Image == "" {
+			continue
+		}
+		unique[inc.Digest] = assets.ImageDigestInput{
+			Registry:   inc.Registry,
+			Repository: inc.Image,
+			Digest:     inc.Digest,
+		}
+	}
+
+	for _, in := range unique {
+		image, err := assets.UpsertImageDigest(ctx, db, in)
+		if err != nil {
+			log.Printf("scam: ensure image_digest %s/%s@%s: %v",
+				in.Registry, in.Repository, in.Digest, err)
+			continue
+		}
+		// UpsertImageDigest only auto-enqueues for *new* rows; for
+		// digests we've seen before we still need to ensure scan
+		// freshness in case the previous run is now stale.
+		if err := assets.EnsureImageScanRecent(ctx, db, image.ID); err != nil {
+			log.Printf("scam: ensure scan for %s: %v", image.ID, err)
+		}
 	}
 }
 

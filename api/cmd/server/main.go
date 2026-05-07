@@ -141,6 +141,7 @@ func run() error {
 		"migrations/20260506_create_asset_risk_view.sql",
 		"migrations/20260507_create_signing_policy.sql",
 		"migrations/20260507a_add_signing_policy_url_overrides.sql",
+		"migrations/20260507c_unique_active_image_scan_job.sql",
 		"migrations/20260508_create_dep_health.sql",
 		"migrations/20260508a_unique_active_dep_health_job.sql",
 		"migrations/20260508b_add_dep_health_versions_behind.sql",
