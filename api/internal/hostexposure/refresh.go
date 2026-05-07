@@ -33,6 +33,35 @@ var refreshGate struct {
 	pending  bool
 }
 
+// EnsureFirstPopulate blocks until host_exposure and exposed_digests
+// are populated. Spawn from a startup goroutine so HTTP serving isn't
+// gated on it. Multi-replica safe via the advisory lock inside
+// RefreshHostExposureViews — only one replica actually does the work;
+// others observe ErrRefreshLockHeld and poll. Returns on ctx cancel.
+func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
+	backoff := 2 * time.Second
+	for {
+		populated, err := spamdb.HostExposureViewsPopulated(ctx, db)
+		if err != nil {
+			log.Printf("hostexposure: check populated: %v", err)
+		}
+		if populated {
+			return nil
+		}
+		if err := spamdb.RefreshHostExposureViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			log.Printf("hostexposure: first populate refresh: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // TriggerRefresh proactively rebuilds host_exposure and exposed_digests
 // in the background. Call from any signal-source change hook (see
 // CallcenterHandler — Ingress / HTTPRoute / IngressRoute / Service /

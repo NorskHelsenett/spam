@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import { Layers, RefreshCw, Cpu, Database, Container, AlertCircle, Rss } from 'lucide-svelte';
+	import { Layers, RefreshCw, Cpu, Database, Container, AlertCircle, Rss, BookOpen } from 'lucide-svelte';
 
 	type JobCount = {
 		type: string;
@@ -59,8 +59,18 @@
 		feeds: FeedStatus[];
 	};
 
+	type MatViewStatus = {
+		name: string;
+		populated: boolean;
+		refreshed_at: string | null;
+	};
+	type MatViewsResponse = {
+		views: MatViewStatus[];
+	};
+
 	let data = $state<Response | null>(null);
 	let feeds = $state<FeedStatus[]>([]);
+	let matviews = $state<MatViewStatus[]>([]);
 	let loading = $state(true);
 	let error = $state('');
 	// Loading flag for poll cycles other than the first; lets the UI
@@ -82,9 +92,10 @@
 		if (initial) loading = true;
 		else refreshing = true;
 		try {
-			const [jobsRes, feedsRes] = await Promise.all([
+			const [jobsRes, feedsRes, viewsRes] = await Promise.all([
 				fetch('/api/admin/jobs', { credentials: 'include' }),
-				fetch('/api/admin/feeds/status', { credentials: 'include' })
+				fetch('/api/admin/feeds/status', { credentials: 'include' }),
+				fetch('/api/admin/views/status', { credentials: 'include' })
 			]);
 			if (!jobsRes.ok) {
 				if (jobsRes.status === 403) error = 'Admin access required.';
@@ -95,6 +106,10 @@
 			if (feedsRes.ok) {
 				const fr = (await feedsRes.json()) as FeedsResponse;
 				feeds = fr.feeds ?? [];
+			}
+			if (viewsRes.ok) {
+				const vr = (await viewsRes.json()) as MatViewsResponse;
+				matviews = vr.views ?? [];
 			}
 			lastUpdated = new Date();
 			error = '';
@@ -410,5 +425,62 @@
 				</section>
 			{/each}
 		</div>
+
+		<!-- Materialised views: state + last refresh. These are NOT
+		     queue-backed jobs — they run as in-process goroutines under
+		     advisory locks (one replica wins, others observe lock-held
+		     and exit). Surfaced here so operators can answer "is the
+		     view warm?" without a psql session. -->
+		<section class="panel-surface space-y-4 px-6 py-6">
+			<header class="space-y-1">
+				<div class="flex items-center gap-2">
+					<BookOpen class="h-5 w-5 flex-shrink-0 text-[var(--accent)]" />
+					<h2 class="text-base font-semibold text-[var(--text-bright)]">Materialised views</h2>
+				</div>
+				<p class="text-xs leading-snug text-[var(--text-tertiary)]">
+					In-process refresh under per-MV advisory lock. <code class="font-mono text-[10px]">populated=false</code> means the first-populate goroutine is still running (or has failed) — readers short-circuit to empty until it finishes.
+				</p>
+			</header>
+
+			<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+				<table class="min-w-full text-xs">
+					<thead class="text-[0.6rem] uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+						<tr>
+							<th class="px-3 py-2 text-left">Name</th>
+							<th class="px-2 py-2 text-left">State</th>
+							<th class="px-2 py-2 text-right">Last refresh</th>
+						</tr>
+					</thead>
+					<tbody class="divide-y divide-[var(--border-color)]/40">
+						{#each matviews as mv (mv.name)}
+							<tr class="text-[var(--text-secondary)]">
+								<td class="px-3 py-1.5 font-mono text-[10px] text-[var(--text-bright)]">{mv.name}</td>
+								<td class="px-2 py-1.5">
+									{#if mv.populated}
+										<span class="inline-flex items-center gap-1 text-[var(--green)]">
+											<span class="h-1.5 w-1.5 rounded-full bg-[var(--green)]"></span>
+											populated
+										</span>
+									{:else}
+										<span class="inline-flex items-center gap-1 text-yellow-400">
+											<span class="h-1.5 w-1.5 rounded-full bg-yellow-400"></span>
+											populating
+										</span>
+									{/if}
+								</td>
+								<td class="px-2 py-1.5 text-right tabular-nums text-[var(--text-tertiary)]">
+									{fmtRelativeISO(mv.refreshed_at)}
+								</td>
+							</tr>
+						{/each}
+						{#if matviews.length === 0}
+							<tr>
+								<td colspan="3" class="px-3 py-3 text-center text-[var(--text-muted)]">No materialised views.</td>
+							</tr>
+						{/if}
+					</tbody>
+				</table>
+			</div>
+		</section>
 	{/if}
 </div>

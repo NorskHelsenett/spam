@@ -37,7 +37,7 @@ var jobPoolDefs = []adminPoolDef{
 	{
 		Name:        "main",
 		Label:       "Main worker pool",
-		Description: "In-process worker for CREATE_RUN dispatches plus the light scheduled job types (KEV/EPSS feeds, OSV scans, secret probes, view refreshes).",
+		Description: "In-process worker for CREATE_RUN dispatches plus the light scheduled job types (KEV/EPSS feeds, OSV scans, secret probes). REFRESH_SBOM_VIEWS is drain-only — new SBOM-view refreshes run as in-process goroutines now (see Materialised views panel).",
 		Types: []string{
 			jobs.JobTypeCreateRun,
 			jobs.JobTypeRefreshSBOMViews,

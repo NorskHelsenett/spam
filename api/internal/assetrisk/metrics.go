@@ -119,6 +119,35 @@ func assetRiskReady(ctx context.Context, db *gorm.DB) bool {
 	return true
 }
 
+// EnsureFirstPopulate blocks until the asset_risk MV is populated. Call
+// after vulnmetrics + hostexposure first-populates have completed —
+// asset_risk's body joins view_unified_*_vulnerabilities and
+// exposed_digests, so a refresh issued before those are populated
+// raises SQLSTATE 55000 ("materialized view has not been populated")
+// and the gate's pending bit is local-only, so nothing retries it.
+//
+// Multi-replica safe via RefreshAssetRiskView's advisory lock. Returns
+// on ctx cancel.
+func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
+	backoff := 2 * time.Second
+	for {
+		if assetRiskReady(ctx, db) {
+			return nil
+		}
+		if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			log.Printf("assetrisk: first populate refresh: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // TriggerRefresh proactively rebuilds the asset_risk MV in the
 // background. Call from any signal-source change hook (scan
 // completion, secret-probe verdict, cluster-record write) so the next

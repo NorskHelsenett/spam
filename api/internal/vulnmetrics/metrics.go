@@ -224,6 +224,36 @@ func unifiedViewsReady(ctx context.Context, db *gorm.DB) bool {
 	return true
 }
 
+// EnsureFirstPopulate blocks until both unified vuln MVs are populated.
+// Spawn from a startup goroutine so HTTP serving isn't gated on it.
+//
+// Multi-replica safe: RefreshVulnUnifiedViews holds an advisory lock so
+// only one replica actually performs the REFRESH; others observe
+// ErrRefreshLockHeld and poll. We back off between iterations so a
+// transient failure (e.g. underlying scan tables still seeding) gets
+// retried instead of leaving the views unpopulated forever.
+//
+// Returns when ctx is cancelled or the views are populated.
+func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
+	backoff := 2 * time.Second
+	for {
+		if unifiedViewsReady(ctx, db) {
+			return nil
+		}
+		if err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			log.Printf("vulnmetrics: first populate refresh: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // TriggerRefresh proactively warms the summary / repos caches in the
 // background. Call from any scan-completion hook (SBOM, OSV batch,
 // image scan finish, VEX edit) so the next user hits a warm cache

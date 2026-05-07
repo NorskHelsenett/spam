@@ -14,6 +14,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/clustersummary"
 	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/hostexposure"
@@ -290,6 +291,17 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 					break
 				}
 			}
+
+			// cluster_summary aggregates Container/Ingress/HTTPRoute
+			// counts per cluster. The same kind set that moves
+			// host_exposure also moves the summary, so reuse the
+			// detection above. Refresh is debounced via its own gate.
+			for kind := range batchKinds {
+				if clusterSummaryRelevantKinds[kind] {
+					clustersummary.TriggerRefresh(db)
+					break
+				}
+			}
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{
@@ -492,7 +504,14 @@ func validate(r Incoming) error {
 
 // --- Query handlers (authenticated) ---
 
-// ClusterSummaryHandler returns a high-level overview per cluster.
+// ClusterSummaryHandler returns a high-level overview per cluster. Reads
+// from the cluster_summary materialised view (see
+// 20260510a_create_cluster_summary_view.sql); freshness is ingest-driven
+// via clustersummary.TriggerRefresh from the CallcenterHandler hook.
+//
+// The MV does not embed the cluster_sessions liveness filter — that
+// depends on NOW() and is per-request — so the handler joins
+// cluster_sessions here when ?include_inactive isn't truthy.
 func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -506,33 +525,48 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cs.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`
+
+		// Cold-start: the MV is created WITH NO DATA. Refreshes run
+		// asynchronously at boot and on every relevant ingest. If we
+		// catch it before the first populate, return an empty list and
+		// kick a refresh so the next request lands warm — avoids the
+		// SQLSTATE 55000 a bare SELECT would raise.
+		if ready, err := spamdb.ClusterSummaryViewPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := "JOIN cluster_sessions sess ON sess.cluster_id = cs.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		if includeInactive {
+			livenessJoin = ""
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		query := `
 			SELECT
-				data->>'cluster'     AS cluster,
-				data->>'cluster_id'  AS cluster_id,
-				data->>'environment' AS environment,
-				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'pod_phase' = 'Running') AS containers,
-				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
-					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'pod_phase' = 'Running'
-						AND COALESCE(data->>'digest','') != '') AS images,
-				COUNT(DISTINCT data->>'namespace')
-					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'pod_phase' = 'Running') AS namespaces,
-				COUNT(DISTINCT data->>'uid')
-					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')) AS ingress_count,
-				MAX(received_at) AS last_seen
-			FROM live
-			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
-			ORDER BY last_seen DESC
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+			    cs.cluster, cs.cluster_id, cs.environment,
+			    cs.containers, cs.images, cs.namespaces, cs.ingress_count,
+			    cs.last_seen
+			FROM cluster_summary cs
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + `
+			ORDER BY cs.last_seen DESC
+		`
+		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+			log.Printf("ClusterSummaryHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
@@ -717,6 +751,24 @@ var hostExposureRelevantKinds = map[string]bool{
 	"IngressRouteTCP": true,
 	"Service":         true,
 	"Container":       true,
+}
+
+// clusterSummaryRelevantKinds is the set of SCAM record kinds whose
+// ingest changes one of the columns cluster_summary aggregates:
+// container counts (Container), distinct image counts (Container with
+// digest), namespace counts (Container.namespace), and ingress_count
+// (Ingress / Gateway / Traefik routes). last_seen also moves on any of
+// these. Service and TLSRoute don't directly contribute to a column
+// but are kept aligned with hostExposureRelevantKinds so the same
+// detection covers both.
+var clusterSummaryRelevantKinds = map[string]bool{
+	"Container":       true,
+	"Ingress":         true,
+	"HTTPRoute":       true,
+	"GRPCRoute":       true,
+	"TLSRoute":        true,
+	"IngressRoute":    true,
+	"IngressRouteTCP": true,
 }
 
 // HostRow is the shape returned by HostsHandler. Resolved/Meta are

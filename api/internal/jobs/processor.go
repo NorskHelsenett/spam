@@ -15,8 +15,8 @@ import (
 	_ "time/tzdata"
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
-	dbviews "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
+	"github.com/NorskHelsenett/spam/internal/sbomviews"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
@@ -85,16 +85,20 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 	}
 }
 
+// processRefreshSBOMViews drains the deprecated REFRESH_SBOM_VIEWS job
+// queue. New refreshes run via sbomviews.TriggerRefresh — the in-process
+// gate coalesces concurrent triggers and the advisory lock serialises
+// across replicas. We keep the handler so any backlog drains cleanly,
+// but no new jobs of this type are created (see runner/handlers.go and
+// cmd/server/main.go callers, both migrated).
+//
+// We deliberately don't run the REFRESH inline here: that's exactly the
+// path that produced the lock-wait failures (failed=24 with 3 replicas
+// all leasing the same job). Firing TriggerRefresh and returning
+// success drains the backlog without queue contention.
 func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, error) {
-	if err := dbviews.RefreshMaterializedViews(ctx, db); err != nil {
-		if errors.Is(err, dbviews.ErrRefreshLockHeld) {
-			// Another process holds the refresh lock. Retry without counting
-			// the attempt so this job runs again once the lock is released.
-			return nil, retryableError{err}
-		}
-		return nil, err
-	}
-	return map[string]string{"status": "refreshed"}, nil
+	sbomviews.TriggerRefresh(db)
+	return map[string]string{"status": "scheduled"}, nil
 }
 
 func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {

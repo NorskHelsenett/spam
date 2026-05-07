@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/clustersummary"
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
@@ -27,6 +29,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/sbomviews"
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
@@ -149,6 +152,8 @@ func run() error {
 		"migrations/20260508b_add_dep_health_versions_behind.sql",
 		"migrations/20260509_create_host_exposure_views.sql",
 		"migrations/20260509a_use_host_exposure_in_asset_risk.sql",
+		"migrations/20260510_dependency_search_indexes.sql",
+		"migrations/20260510a_create_cluster_summary_view.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -159,34 +164,57 @@ func run() error {
 		return fmt.Errorf("populate views: %w", err)
 	}
 
-	// Enqueue a refresh so the worker picks up any data accumulated since
-	// the last refresh (e.g. across a server restart). The unique index on
-	// active REFRESH_SBOM_VIEWS jobs means this is a no-op if one is already
-	// queued; the error is intentionally ignored.
-	if _, err := jobs.CreateJob(ctx, gormDB, jobs.CreateJobInput{
-		Type: jobs.JobTypeRefreshSBOMViews,
-	}); err != nil {
-		log.Printf("startup view refresh job (may already be queued): %v", err)
-	}
+	// Kick a coalesced refresh so we pick up any data accumulated since
+	// the last refresh (e.g. across a server restart). The advisory lock
+	// inside RefreshMaterializedViews makes this multi-replica safe —
+	// only one replica does the work; others observe ErrRefreshLockHeld
+	// and exit. Replaces the old REFRESH_SBOM_VIEWS job-queue path which
+	// burned worker slots on the lock contention.
+	sbomviews.TriggerRefresh(gormDB)
 
-	// Populate the unified-vuln materialized views asynchronously. The
-	// migration creates them WITH NO DATA so init is instant; this kicks
-	// off the first build in the background so HTTP serving starts now
-	// rather than after a multi-minute populate. TriggerRefresh debounces
-	// so this coalesces with any concurrent scan-completion triggers.
-	// Endpoints that read the MVs short-circuit to empty until the first
-	// populate lands (see vulnmetrics.unifiedViewsReady).
-	vulnmetrics.TriggerRefresh(gormDB)
-	// asset_risk MV is similarly created WITH NO DATA — populate
-	// async so /api/triage starts returning real data once the
-	// underlying vuln MVs and cluster_record table are warm.
-	assetrisk.TriggerRefresh(gormDB)
-	// host_exposure / exposed_digests are also WITH NO DATA — kick the
-	// first refresh in the background so /api/clusters/hosts starts
-	// returning real data once the chain projection lands. The trigger
-	// cascades into assetrisk after it completes; the gates coalesce so
-	// the explicit assetrisk call above isn't double work.
-	hostexposure.TriggerRefresh(gormDB)
+	// First-populate the cascade of MVs in dependency order. They were
+	// created WITH NO DATA so HTTP serving starts immediately; this
+	// goroutine fills them in the background. Each step's advisory lock
+	// makes this safe across replicas — exactly one replica does the
+	// REFRESH work per family; the others observe ErrRefreshLockHeld and
+	// poll until the winning replica finishes.
+	//
+	// Order matters: asset_risk's body joins view_unified_*_vulnerabilities
+	// and exposed_digests. Refreshing it before those populate raises
+	// SQLSTATE 55000 and leaves asset_risk empty until the next
+	// scan-completion trigger fires — on a fresh deploy with no scans
+	// yet, /api/triage stays empty indefinitely. Sequencing here avoids
+	// the race; ongoing refreshes use the existing TriggerRefresh gates.
+	go func() {
+		ctx := context.Background()
+		var wg sync.WaitGroup
+		wg.Add(3)
+		go func() {
+			defer wg.Done()
+			if err := vulnmetrics.EnsureFirstPopulate(ctx, gormDB); err != nil {
+				log.Printf("vulnmetrics first populate: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := hostexposure.EnsureFirstPopulate(ctx, gormDB); err != nil {
+				log.Printf("hostexposure first populate: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			// cluster_summary is independent of vuln + host_exposure, so
+			// it runs in parallel. asset_risk is the only one that needs
+			// to wait — it joins both vuln MVs and exposed_digests.
+			if err := clustersummary.EnsureFirstPopulate(ctx, gormDB); err != nil {
+				log.Printf("clustersummary first populate: %v", err)
+			}
+		}()
+		wg.Wait()
+		if err := assetrisk.EnsureFirstPopulate(ctx, gormDB); err != nil {
+			log.Printf("assetrisk first populate: %v", err)
+		}
+	}()
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
