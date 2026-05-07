@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -15,7 +14,9 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/hostexposure"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -141,9 +142,11 @@ func isTruthy(v string) bool {
 // and upserts live-state rows. DELETE events are stored (not physically removed)
 // so the history is preserved. No authentication required.
 //
-// The cache Store is used only to invalidate derived caches (hosts:list:*)
-// after a successful batch — the ingest path itself doesn't read from it.
-func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
+// The cache Store parameter is retained for future per-resource cache work; the
+// hosts list now invalidates via the host_exposure MV refresh hook
+// (hostexposure.TriggerRefresh) rather than a derived-cache prefix delete, so
+// cs itself is currently unused on this path.
+func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -271,21 +274,20 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			// unique index.
 			go ensureRecentScansForBatch(db, items)
 
-			// Fresh ingest may change which hosts/backends exist and
-			// which Services have ready endpoints behind them. Only
-			// invalidate the hosts list cache when the batch actually
-			// touched a kind that feeds the projection (see
-			// hostRelevantKinds). Container pushes — the bulk of ingest
-			// volume — no longer feed liveness, so they don't blow the
-			// cache away on every pod restart. resolve: / hostmeta: /
-			// hostfav: are intentionally not touched (they track
-			// host-external state).
-			if cs != nil {
-				for kind := range batchKinds {
-					if hostRelevantKinds[kind] {
-						_ = cache.DeleteByPrefix(r.Context(), cs, hostsListCachePrefix)
-						break
-					}
+			// Fresh ingest may change which URLs exist and which images
+			// sit on a publicly-served path. Trigger a host_exposure +
+			// exposed_digests refresh so the next /api/clusters/hosts
+			// (and triage's internet_exposed signal) lands on warm
+			// projections. The trigger is debounced — high-volume
+			// Container ingest coalesces into one inflight + one
+			// pending refresh rather than re-running the chain on
+			// every batch. resolve: / hostmeta: / hostfav: caches are
+			// intentionally not touched (they track host-external
+			// state).
+			for kind := range batchKinds {
+				if hostExposureRelevantKinds[kind] {
+					hostexposure.TriggerRefresh(db)
+					break
 				}
 			}
 		}
@@ -699,24 +701,14 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// hostsListCachePrefix keys the cached result of HostsHandler's DB query.
-// CallcenterHandler invalidates the whole prefix on ingest so a new push
-// always shows up on the next page render; resolve:/hostmeta:/hostfav:
-// entries are left alone (they track host-external state).
-const hostsListCachePrefix = "hosts:list:"
-
-// hostsListCacheTTL is a safety-net TTL. The real freshness signal is
-// ingest-driven invalidation in CallcenterHandler; this keeps the cache
-// from growing unbounded if a tenant goes silent.
-const hostsListCacheTTL = 24 * time.Hour
-
-// hostRelevantKinds is the set of SCAM record kinds whose ingest can
-// change the output of HostsHandler. CallcenterHandler invalidates the
-// hosts list cache only when a batch contains one of these — Container
-// pushes (the bulk of ingest volume) no longer feed the projection
-// since liveness moved from pod-label match to EndpointSlice ready
-// counts, so skipping them keeps the cache warm in busy fleets.
-var hostRelevantKinds = map[string]bool{
+// hostExposureRelevantKinds is the set of SCAM record kinds whose
+// ingest can change either the host_exposure projection (URL-level
+// metadata) or the exposed_digests projection (which images sit on a
+// publicly-served path). CallcenterHandler triggers a debounced refresh
+// when a batch touches one of these — high-volume Container ingest
+// coalesces into one inflight + one pending refresh rather than
+// recomputing the chain on every batch.
+var hostExposureRelevantKinds = map[string]bool{
 	"Ingress":         true,
 	"HTTPRoute":       true,
 	"GRPCRoute":       true,
@@ -724,7 +716,7 @@ var hostRelevantKinds = map[string]bool{
 	"IngressRoute":    true,
 	"IngressRouteTCP": true,
 	"Service":         true,
-	"EndpointSlice":   true,
+	"Container":       true,
 }
 
 // HostRow is the shape returned by HostsHandler. Resolved/Meta are
@@ -757,205 +749,80 @@ type hostMetaLite struct {
 	HasFavicon bool   `json:"has_favicon"`
 }
 
-// HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and IngressRoute.
+// HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and
+// IngressRoute. Reads from the host_exposure / exposed_digests
+// materialised views (see 20260509_create_host_exposure_views.sql);
+// freshness is ingest-driven via hostexposure.TriggerRefresh from the
+// CallcenterHandler hook.
 func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeOnly := r.URL.Query().Get("active_only") == "true"
 		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
 
 		rows := []HostRow{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "he.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
-		// Scope-hashed cache key: two users with the same ACL scope +
-		// include_inactive flag share a cache entry; changes to either
-		// produce a different key. Collision on an 8-byte fnv-64a is
-		// irrelevant here — worst case a user sees another scope's
-		// (different) result for up to hostsListCacheTTL, which the
-		// ingest invalidation clears anyway.
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(aclFrag))
-		for _, a := range aclArgs {
-			fmt.Fprintf(h, "|%v", a)
-		}
-		if includeInactive {
-			_, _ = h.Write([]byte("|inactive"))
-		}
-		cacheKey := fmt.Sprintf("%s%x", hostsListCachePrefix, h.Sum64())
-
-		ctx := r.Context()
-		if cached, ok, _ := cache.GetJSON[[]HostRow](ctx, cs, cacheKey); ok {
-			writeAndFilterHosts(w, cached, cs, ctx, activeOnly)
+		// Cold-start: the MVs are created WITH NO DATA. Refreshes run
+		// asynchronously at boot (see main.go) and on every relevant
+		// ingest. Until the first one lands, return an empty list
+		// rather than a SQLSTATE 55000 — same pattern as triage.
+		if ready, err := spamdb.HostExposureViewsPopulated(ctx, db); err != nil || !ready {
+			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
-		// Query structure:
-		//   hosts_raw          — flattened hostnames from Ingress /
-		//                        HTTPRoute / IngressRoute variants
-		//   service_liveness   — per-Service ready-endpoint count derived
-		//                        from EndpointSlice (the same signal
-		//                        kube-proxy uses to route traffic), with
-		//                        an ExternalName fallback for services
-		//                        that CNAME to external DNS and never
-		//                        get an EndpointSlice
-		//
-		// EndpointSlice is the authoritative "is this URL live?" signal:
-		// non-empty ready addresses ⇔ kube-proxy will send traffic. It's
-		// also far cheaper than the previous label-match approach
-		// (pod_labels @> selector across every Container row) and
-		// changes only on readiness transitions, not pod restarts —
-		// which lets CallcenterHandler skip cache invalidation on the
-		// noisy Container ingest path.
-		err := db.Raw(cteForWithACL(r, aclFrag)+`,
-			ingress_hosts AS (
-				SELECT
-					r->>'host' AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					jsonb_typeof(data->'tls') = 'array' AND jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
-					CASE WHEN jsonb_typeof(data->'lb_ips') = 'array'
-						THEN COALESCE((SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip), '')
-						ELSE '' END AS lb_ips,
-					COALESCE(data->>'ingress_class', '') AS ingress_class,
-					CASE WHEN jsonb_typeof(r->'paths') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
-							 FROM jsonb_array_elements(r->'paths') AS p
-							 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
-							'')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
-				WHERE data->>'kind' = 'Ingress'
-				  AND jsonb_typeof(data->'rules') = 'array'
-				  AND jsonb_array_length(data->'rules') > 0
-			),
-			route_hosts AS (
-				SELECT
-					jsonb_array_elements_text(data->'hostnames') AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					FALSE AS tls,
-					'' AS lb_ips,
-					'' AS ingress_class,
-					CASE WHEN jsonb_typeof(data->'backends') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT b->>'name', ', ')
-							 FROM jsonb_array_elements(data->'backends') AS b), '')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND jsonb_typeof(data->'hostnames') = 'array'
-				  AND jsonb_array_length(data->'hostnames') > 0
-			),
-			traefik_hosts AS (
-				SELECT
-					jsonb_array_elements_text(data->'hosts') AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					COALESCE(data->>'tls_secret', '') != '' AS tls,
-					'' AS lb_ips,
-					'' AS ingress_class,
-					CASE WHEN jsonb_typeof(data->'backends') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT b->>'name', ', ')
-							 FROM jsonb_array_elements(data->'backends') AS b
-							 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
-							'')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND jsonb_typeof(data->'hosts') = 'array'
-				  AND jsonb_array_length(data->'hosts') > 0
-			),
-			hosts_raw AS (
-				SELECT * FROM ingress_hosts
-				UNION ALL
-				SELECT * FROM route_hosts
-				UNION ALL
-				SELECT * FROM traefik_hosts
-			),
-			service_liveness AS (
-				-- Standard selector-backed Services: count distinct ready
-				-- endpoint addresses from their EndpointSlices. Endpoints
-				-- without a conditions.ready flag are treated as ready
-				-- (older kube-proxy / controllers do not always populate
-				-- it; absence is "no opinion" rather than "not ready").
-				SELECT
-					es.data->>'cluster_id'   AS cluster_id,
-					es.data->>'namespace'    AS namespace,
-					es.data->>'service_name' AS name,
-					COUNT(DISTINCT addr)::bigint AS cnt
-				FROM live es
-				CROSS JOIN LATERAL jsonb_array_elements(
-					COALESCE(es.data->'endpoints', '[]'::jsonb)
-				) AS ep
-				CROSS JOIN LATERAL jsonb_array_elements_text(
-					COALESCE(ep->'addresses', '[]'::jsonb)
-				) AS addr
-				WHERE es.data->>'kind' = 'EndpointSlice'
-				  AND es.data->>'service_name' IS NOT NULL
-				  AND es.data->>'service_name' <> ''
-				  AND COALESCE(ep->'conditions'->>'ready', 'true') = 'true'
-				GROUP BY es.data->>'cluster_id', es.data->>'namespace', es.data->>'service_name'
+		// Liveness gate. Live mode joins cluster_sessions and filters
+		// out clusters whose agent has been silent past sessionLiveWindow.
+		// include_inactive=true skips the join entirely and surfaces
+		// every URL we've ever observed.
+		livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+		if includeInactive {
+			livenessJoin = ""
+		}
 
-				UNION ALL
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
 
-				-- ExternalName Services CNAME to external DNS — they have
-				-- no Selector and never get a controller-managed
-				-- EndpointSlice, but they always route somewhere. Treat
-				-- as live by definition so the URL doesn't disappear from
-				-- active_only views just because the target is off-cluster.
-				SELECT
-					s.data->>'cluster_id',
-					s.data->>'namespace',
-					s.data->>'name',
-					1::bigint
-				FROM live s
-				WHERE s.data->>'kind' = 'Service'
-				  AND s.data->>'service_type' = 'ExternalName'
-			)
-			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
-			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
-			       COALESCE(w.total, 0) AS workload_count, h.last_seen
-			FROM hosts_raw h
+		// workload_count is the count of distinct image digests that
+		// sit on this URL's backend chain (see exposed_digests MV).
+		// Better signal than the old EndpointSlice ready-address count
+		// for triage UX: "how many running images are reachable here"
+		// rather than "how many TCP endpoints reply" — and it lines up
+		// directly with asset_risk's internet_exposed flag.
+		query := `
+			SELECT
+			    he.host, he.kind, he.name, he.namespace, he.cluster, he.cluster_id,
+			    he.environment, he.tls, he.lb_ips, he.ingress_class, he.backends,
+			    COALESCE(w.cnt, 0) AS workload_count, he.last_seen
+			FROM host_exposure he
+			` + livenessJoin + `
 			LEFT JOIN LATERAL (
-				SELECT SUM(sw.cnt)::bigint AS total
-				FROM unnest(string_to_array(h.backends, ', ')) AS be(name)
-				JOIN service_liveness sw
-				  ON sw.cluster_id = h.cluster_id
-				 AND sw.namespace  = h.namespace
-				 AND sw.name       = be.name
-				WHERE be.name <> ''
+			    SELECT COUNT(DISTINCT ed.digest)::bigint AS cnt
+			    FROM exposed_digests ed
+			    WHERE ed.cluster_id    = he.cluster_id
+			      AND ed.namespace     = he.namespace
+			      AND ed.host          = he.host
+			      AND ed.exposure_kind = he.kind
+			      AND ed.exposure_name = he.name
 			) w ON TRUE
-			WHERE h.host IS NOT NULL AND h.host <> ''
-			ORDER BY h.host, h.cluster
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+			WHERE TRUE ` + aclWhere + `
+			ORDER BY he.host, he.cluster
+		`
+
+		if err := db.Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
 			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
 
-		_ = cache.SetJSON(ctx, cs, cacheKey, rows, hostsListCacheTTL)
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
 }

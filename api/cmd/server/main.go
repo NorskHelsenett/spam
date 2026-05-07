@@ -23,6 +23,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/hostexposure"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
@@ -146,6 +147,8 @@ func run() error {
 		"migrations/20260508_create_dep_health.sql",
 		"migrations/20260508a_unique_active_dep_health_job.sql",
 		"migrations/20260508b_add_dep_health_versions_behind.sql",
+		"migrations/20260509_create_host_exposure_views.sql",
+		"migrations/20260509a_use_host_exposure_in_asset_risk.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -178,6 +181,12 @@ func run() error {
 	// async so /api/triage starts returning real data once the
 	// underlying vuln MVs and cluster_record table are warm.
 	assetrisk.TriggerRefresh(gormDB)
+	// host_exposure / exposed_digests are also WITH NO DATA — kick the
+	// first refresh in the background so /api/clusters/hosts starts
+	// returning real data once the chain projection lands. The trigger
+	// cascades into assetrisk after it completes; the gates coalesce so
+	// the explicit assetrisk call above isn't double work.
+	hostexposure.TriggerRefresh(gormDB)
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
 	if seedSQLPath != "" {
