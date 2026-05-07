@@ -1,12 +1,15 @@
 # SPAM — Software Package Asset Management
 
-SPAM is a dashboard for managing third-party software components across an
-organization. It unifies three independent sources of dependency truth —
-uploaded or generated SBOMs, dependency manifests parsed straight out of
-source trees, and live workload data ingested from connected Kubernetes
-clusters via SCAM — then enriches the merged graph with vulnerability data
-(NVD, OSV, KEV, EPSS, ENISA EUVD) and surfaces prioritized risk to the
-people who can act on it.
+SPAM is a dashboard for managing third-party software components in any
+development or DevSecOps environment — from a single team's repo to a
+fleet of clusters across an organization. It aggregates SBOMs and
+dependency data from several
+in-cluster sources — SBOM generation against cloned source trees and
+container image digests, dependency manifests parsed straight out of
+source repositories, and live workload data ingested from connected
+Kubernetes clusters via SCAM — then enriches the merged graph with
+vulnerability data (NVD, OSV, KEV, EPSS, ENISA EUVD) and surfaces
+prioritized risk to the people who can act on it.
 
 The project is open-source software developed by Norsk helsenett SF and
 distributed under the MIT license.
@@ -37,11 +40,11 @@ flowchart LR
     FEEDS -- pulls --> WORKER
 
     subgraph SANDBOX[Sandboxed Jobs &mdash; no egress]
-        RR[repo-runner<br/>git clone · syft<br/>manifest extract · betterleaks]:::job
+        RR[repo-runner<br/>git clone · SBOM generation<br/>manifest extract · secret scan]:::job
     end
 
     subgraph SCANNERS[Scanner pods]
-        IS[image-scanner<br/>grype · trivy · cosign]:::job
+        IS[image-scanner<br/>vulnerability scan<br/>signature verification]:::job
         SB[sbom-scanner<br/>re-scan stored SBOMs]:::job
     end
 
@@ -77,11 +80,11 @@ short-lived Kubernetes Job that the worker spawns on demand.
   Kubernetes Jobs with NetworkPolicies that deny all egress except the
   worker callback. Cloned source code never reaches the public internet
   from inside the scanner pod, and a built-in egress self-test verifies
-  the policy at pod startup. The pods produce SBOMs (syft), parsed
-  dependency manifests, and secret-scan findings (betterleaks).
-- **Image vulnerability scanning** — long-lived scanner pods run grype and
-  trivy against image digests with a warm vulnerability database, sized by
-  a queue-depth-aware operator.
+  the policy at pod startup. The pods produce SBOMs, parsed dependency
+  manifests, and secret-scan findings.
+- **Image vulnerability scanning** — long-lived scanner pods run
+  vulnerability scans against image digests with a warm vulnerability
+  database, sized by a queue-depth-aware operator.
 - **Live cluster awareness via SCAM** — connected clusters stream live
   workload state into SPAM, giving the triage dashboard a real-time view
   of which findings affect actually-running workloads versus dormant code.
