@@ -134,7 +134,7 @@
 				</div>
 			{/if}
 		</div>
-		<div class="flex-1 space-y-0.5">
+		<div class="flex-1 max-h-[20em] space-y-0.5 overflow-y-auto pr-1">
 			{#each segmentData as seg (seg.index)}
 				<button
 					type="button"
