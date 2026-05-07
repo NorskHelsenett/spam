@@ -80,13 +80,28 @@ func DispatchStreamEvent(event string, payload json.RawMessage) {
 	dispatch(StreamEvent{Event: event, Payload: payload})
 }
 
+// adminOnlyEvents is the set of SSE events that are only meaningful
+// to admin users — non-admin clients can't trigger or act on them, so
+// we skip the fan-out to keep their channel buffers (cap 8) free for
+// events they actually care about. Driven by StartSync from the admin
+// providers page; non-admins literally have no UI surface for these.
+var adminOnlyEvents = map[string]struct{}{
+	StreamEventNewUser:               {},
+	StreamEventProviderSyncStarted:   {},
+	StreamEventProviderSyncProgress:  {},
+	StreamEventProviderSyncCompleted: {},
+	StreamEventProviderSyncFailed:    {},
+}
+
 func dispatch(evt StreamEvent) {
 	streamMu.RLock()
 	defer streamMu.RUnlock()
 
+	_, adminOnly := adminOnlyEvents[evt.Event]
+
 	for _, clients := range streams {
 		for _, client := range clients {
-			if evt.Event == StreamEventNewUser && !client.isAdmin {
+			if adminOnly && !client.isAdmin {
 				continue
 			}
 			select {

@@ -9,7 +9,7 @@
 	import { onMount } from 'svelte';
 	import AccountDialog from '$lib/components/AccountDialog.svelte';
 	import SearchPalette from '$lib/components/SearchPalette.svelte';
-	import { updateSyncState, initSyncStates } from '$lib/stores/providerSync';
+	import { updateSyncState } from '$lib/stores/providerSync';
 	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
 	let appEventSource: EventSource | null = null;
@@ -105,11 +105,13 @@
 
 		appEventSource.addEventListener('ready', (event) => {
 			console.info('sse ready', parsePayload(event));
-			// Restore any in-progress or recent sync states after reconnect/navigation.
-			fetch('/api/admin/providers/sync/status', { credentials: 'include' })
-				.then((r) => (r.ok ? r.json() : null))
-				.then((data) => { if (data) initSyncStates(data); })
-				.catch(() => {});
+			// We deliberately don't pull /api/admin/providers/sync/status
+			// here. The endpoint reads SyncManager's in-memory map, which
+			// is only populated by manual admin "Sync now" clicks since the
+			// process started — `{}` in normal operation. The admin
+			// providers page does its own fetch on mount when it actually
+			// matters; everywhere else we rely on the live
+			// provider_sync_* SSE events (admin-only, see events/stream.go).
 		});
 
 		appEventSource.addEventListener('heartbeat', (event) => {
