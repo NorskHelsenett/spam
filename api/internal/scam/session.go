@@ -72,8 +72,17 @@ func resolveLiveWindow() time.Duration {
 // No grants are seeded — clusters are deny-by-default; an admin has
 // to claim the cluster before non-admins can see it. Registration is
 // idempotent via ON CONFLICT (cluster_id) DO NOTHING.
+//
+// Detaches from the caller's cancellation: agents close the connection
+// the moment the ingest body has flushed, which raced the registration
+// INSERT and produced "scam: register cluster <id>: context canceled"
+// — leaving brand-new clusters absent from the `clusters` table and
+// therefore unclaimable. Registration must outlive the request, so we
+// run both writes against a detached context with a hard deadline.
 func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now time.Time) error {
-	if err := db.WithContext(ctx).Exec(`
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if err := db.WithContext(bg).Exec(`
 		INSERT INTO clusters (id, cluster_id, display_name, first_seen_at, created_at)
 		VALUES (gen_random_uuid()::text, ?, ?, ?, ?)
 		ON CONFLICT (cluster_id) DO NOTHING
@@ -82,7 +91,7 @@ func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now
 		// the row will be auto-registered on the next heartbeat.
 		log.Printf("scam: register cluster %s: %v", clusterID, err)
 	}
-	return db.WithContext(ctx).Exec(`
+	return db.WithContext(bg).Exec(`
 		INSERT INTO cluster_sessions (cluster_id, session_started_at, last_push_at)
 		VALUES (?, ?, ?)
 		ON CONFLICT (cluster_id) DO UPDATE SET
