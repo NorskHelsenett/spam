@@ -109,15 +109,6 @@ exposed_digests AS (
         ('IngressRoute','IngressRouteTCP','HTTPRoute','GRPCRoute','TLSRoute')
 ),
 
--- ---------- chain: cluster has any internet exposure at all ----------
--- For cluster rows: "does this cluster expose anything?" (cheap, no
--- per-digest correlation needed).
-exposed_clusters AS (
-    SELECT DISTINCT cr.data->>'cluster_id' AS cluster_id
-    FROM cluster_record cr
-    WHERE cr.data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')
-),
-
 -- ---------- chain: cluster → digests running ----------
 cluster_digests AS (
     SELECT DISTINCT
@@ -182,6 +173,26 @@ image_vuln_canonical AS (
     )
 ),
 
+-- ---------- chain: cluster has internet-exposed *vulnerable* workload ----------
+-- A cluster is "internet exposed" only when it has at least one digest
+-- that is both internet-reachable (per exposed_digests) and carries an
+-- actionable vulnerability finding. This makes the +30 KEV-and-exposed
+-- tier bonus mean "exploitable AND reachable" instead of the looser
+-- "exploitable AND there's an Ingress somewhere in the cluster" — clean
+-- exposed workloads correctly stop flipping the cluster row to red.
+-- Defined after image_vuln_canonical because the predicate joins
+-- through it.
+exposed_clusters AS (
+    SELECT DISTINCT ed.cluster_id
+    FROM exposed_digests ed
+    JOIN image_digests id ON id.digest = ed.digest
+    WHERE EXISTS (
+        SELECT 1 FROM image_vuln_canonical ivc
+        WHERE ivc.image_id = id.id::text
+          AND ivc.severity IN ('CRITICAL', 'HIGH', 'MEDIUM')
+    )
+),
+
 -- ---------- repo-side aggregation ----------
 -- One row per repo with all its threat + trust signals collapsed.
 -- Counts are over distinct canonical_id within (repo, severity) to
@@ -204,9 +215,9 @@ repo_signals AS (
         -- Trust
         COALESCE(c.signed_pct, 0)::real                 AS signed_commits_pct,
         false                                           AS image_signed,
-        EXTRACT(DAY FROM NOW() - COALESCE(rv.last_scan_at, NOW() - INTERVAL '999 days'))::int
+        EXTRACT(DAY FROM NOW() - COALESCE(sa.last_scan_at, NOW() - INTERVAL '999 days'))::int
                                                         AS scan_age_days,
-        rv.last_scan_at                                 AS last_scan_at,
+        sa.last_scan_at                                 AS last_scan_at,
         EXISTS (SELECT 1 FROM sbom_bindings sb
                 JOIN repo_commits rc ON rc.id = sb.asset_ref_id
                 WHERE sb.asset_type = 'REPO_COMMIT' AND rc.repo_id = r.id) AS has_sbom,
@@ -237,6 +248,21 @@ repo_signals AS (
         FROM repo_vuln_canonical
         WHERE repo_id = r.id::text
     ) rv ON TRUE
+    -- Last scan time, derived from the actual scan-record tables so
+    -- a clean repo (zero vuln rows) doesn't look stale. SBOM scans
+    -- and gitleaks runs both tell us "the asset was looked at on
+    -- this date"; we take the most recent of the two so the freshness
+    -- threshold reflects whichever ran last.
+    LEFT JOIN LATERAL (
+        SELECT GREATEST(
+            (SELECT MAX(sr.scanned_at)
+               FROM sbom_scan_results sr
+               JOIN sbom_bindings sb  ON sb.sbom_id = sr.sbom_id AND sb.asset_type = 'REPO_COMMIT'
+               JOIN repo_commits rc   ON rc.id = sb.asset_ref_id
+              WHERE rc.repo_id = r.id),
+            (SELECT MAX(rs2.created_at) FROM run_secrets rs2 WHERE rs2.repo_id = r.id)
+        ) AS last_scan_at
+    ) sa ON TRUE
     -- Active validated secrets in latest run_secrets for this repo.
     LEFT JOIN LATERAL (
         SELECT COUNT(*)::bigint AS active_secret_count
@@ -307,9 +333,9 @@ image_signals AS (
         -- Trust
         0::real                                         AS signed_commits_pct,
         d.verified_source                               AS image_signed,
-        EXTRACT(DAY FROM NOW() - COALESCE(iv.last_scan_at, NOW() - INTERVAL '999 days'))::int
+        EXTRACT(DAY FROM NOW() - COALESCE(isa.last_scan_at, NOW() - INTERVAL '999 days'))::int
                                                         AS scan_age_days,
-        iv.last_scan_at                                 AS last_scan_at,
+        isa.last_scan_at                                AS last_scan_at,
         EXISTS (SELECT 1 FROM sbom_bindings sb
                 WHERE sb.asset_type = 'IMAGE_DIGEST' AND sb.asset_ref_id = d.id) AS has_sbom,
         -- Dep-health rollup at the image level. Images carry their
@@ -339,6 +365,14 @@ image_signals AS (
         FROM image_vuln_canonical
         WHERE image_id = d.id::text
     ) iv ON TRUE
+    -- Last scan time straight from image_scan_runs so a clean image
+    -- (zero findings) doesn't look stale.
+    LEFT JOIN LATERAL (
+        SELECT MAX(isr.finished_at) AS last_scan_at
+        FROM image_scan_runs isr
+        WHERE isr.image_digest_id = d.id
+          AND isr.finished_at IS NOT NULL
+    ) isa ON TRUE
     -- Image dep-health: image SBOMs land in sbom_component_view
     -- (PURL-keyed, populated by syft/trivy at scan time) rather
     -- than manifest_dependencies (repo-side, sourced from manifest
