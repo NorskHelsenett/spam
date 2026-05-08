@@ -14,7 +14,15 @@ import (
 )
 
 const (
-	refreshMaxRuntime = 2 * time.Minute
+	// refreshMaxRuntime caps a single REFRESH attempt. The MV body
+	// pulls in every repo, image, and cluster with their full risk
+	// signals (vuln counts, secret counts, dep-health, exposure) in
+	// one CTE — at fleet scale this can run 5-15 minutes. The previous
+	// 2-minute cap was tighter than the actual query, so the goroutine
+	// loop logged "context deadline exceeded" forever and the MV
+	// stayed unpopulated. 30 minutes leaves headroom for further
+	// growth before we need to slice the body up.
+	refreshMaxRuntime = 30 * time.Minute
 
 	// Default page size for the watch tier. The fix_now / this_week
 	// tiers are returned in full (they're operator-actionable, sized
