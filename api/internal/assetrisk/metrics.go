@@ -39,11 +39,23 @@ const (
 
 // Scope is the header strip on /app — operator's inventory + count of
 // items needing attention, post-ACL.
+//
+// FixNowTotal / ThisWeekTotal report the *true* tier population before
+// the response-side caps (fixNowCap / thisWeekCap) trim the row arrays.
+// The dashboard renders these so an operator with 850 fix_now items
+// doesn't see a misleading "100" that's actually the cap.
+//
+// AvgTrust is computed server-side over every actionable row
+// (fix_now + this_week + watch, pre-cap) so it doesn't drift as the
+// operator paginates through watch on the client.
 type Scope struct {
 	Clusters        int        `json:"clusters"`
 	Repos           int        `json:"repos"`
 	Images          int        `json:"images"`
 	NeedsAttention  int        `json:"needs_attention"`
+	FixNowTotal     int        `json:"fix_now_total"`
+	ThisWeekTotal   int        `json:"this_week_total"`
+	AvgTrust        int        `json:"avg_trust"`
 	ViewRefreshedAt *time.Time `json:"view_refreshed_at,omitempty"`
 }
 
@@ -252,6 +264,32 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 	rankTriage(resp.ThisWeek)
 	rankTriage(watchAll)
 
+	// Capture true tier totals BEFORE the response-side caps trim the
+	// row arrays. The dashboard reads these so the header strip shows
+	// the real population — the row arrays are still capped to keep
+	// the response payload bounded.
+	resp.Scope.FixNowTotal = len(resp.FixNow)
+	resp.Scope.ThisWeekTotal = len(resp.ThisWeek)
+
+	// AvgTrust over every actionable row (fix_now + this_week + watch
+	// pre-pagination). Computed here so it stays stable as the operator
+	// pages through the watch tier on the client — the previous
+	// client-side average drifted because it summed only the current
+	// watch page (default 50 of N).
+	if total := resp.Scope.FixNowTotal + resp.Scope.ThisWeekTotal + len(watchAll); total > 0 {
+		var sum int
+		for _, r := range resp.FixNow {
+			sum += r.TrustScore
+		}
+		for _, r := range resp.ThisWeek {
+			sum += r.TrustScore
+		}
+		for _, r := range watchAll {
+			sum += r.TrustScore
+		}
+		resp.Scope.AvgTrust = sum / total
+	}
+
 	if len(resp.FixNow) > fixNowCap {
 		resp.FixNow = resp.FixNow[:fixNowCap]
 	}
@@ -289,7 +327,10 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 	end := clamp(off+resp.Watch.Limit, 0, len(watchAll))
 	resp.Watch.Rows = watchAll[off:end]
 
-	resp.Scope.NeedsAttention = len(resp.FixNow) + len(resp.ThisWeek)
+	// NeedsAttention reports the un-capped sum so "300 across 6754" is
+	// honest — the previous len(FixNow)+len(ThisWeek) was post-cap and
+	// silently flat-lined at 300 once both tiers hit their caps.
+	resp.Scope.NeedsAttention = resp.Scope.FixNowTotal + resp.Scope.ThisWeekTotal
 	resp.Scope.ViewRefreshedAt = refreshedAt
 
 	return resp, nil

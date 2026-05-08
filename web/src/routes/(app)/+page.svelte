@@ -57,6 +57,9 @@
 		repos: number;
 		images: number;
 		needs_attention: number;
+		fix_now_total: number;
+		this_week_total: number;
+		avg_trust: number;
 		view_refreshed_at: string | null;
 	};
 	type WatchCounts = { total: number; repo: number; image: number; cluster: number };
@@ -350,15 +353,16 @@
 		return out;
 	};
 
-	// Average trust score across all visible tiers — rough proxy for
-	// the operator's overall posture. Excludes assets that fall below
-	// the actionable threshold (the API drops those server-side).
+	// Server-computed average trust across every actionable asset
+	// (fix_now + this_week + entire watch tier, pre-cap). The previous
+	// client-side average mixed capped tiers with only the current
+	// watch page, so it drifted as the operator paginated.
 	const avgTrust = $derived(() => {
 		if (!triage) return null;
-		const all = [...triage.fix_now, ...triage.this_week, ...triage.watch.rows];
-		if (all.length === 0) return null;
-		const sum = all.reduce((acc, r) => acc + r.trust_score, 0);
-		return Math.round(sum / all.length);
+		// 0 is a valid value (everything failing). Show null only when
+		// there are genuinely no actionable rows to average over.
+		if (triage.scope.needs_attention === 0 && triage.watch.counts.total === 0) return null;
+		return triage.scope.avg_trust;
 	});
 
 	// Asset-type distribution donut: how does the "needs attention"
@@ -389,15 +393,19 @@
 	const tierSegments = $derived((): DonutSegment[] => {
 		if (!triage) return [];
 		const segs: DonutSegment[] = [];
-		if (triage.fix_now.length > 0) segs.push({ label: 'Fix now', value: triage.fix_now.length, color: 'var(--error)' });
-		if (triage.this_week.length > 0) segs.push({ label: 'This week', value: triage.this_week.length, color: 'var(--warning)' });
+		// Use the un-capped totals so the donut reflects the real tier
+		// population (fix_now / this_week arrays on the response are
+		// trimmed to fixNowCap / thisWeekCap; using their .length here
+		// would understate the picture).
+		if (triage.scope.fix_now_total > 0) segs.push({ label: 'Fix now', value: triage.scope.fix_now_total, color: 'var(--error)' });
+		if (triage.scope.this_week_total > 0) segs.push({ label: 'This week', value: triage.scope.this_week_total, color: 'var(--warning)' });
 		if (triage.watch.counts.total > 0) segs.push({ label: 'Watch', value: triage.watch.counts.total, color: 'var(--text-muted)' });
 		return segs;
 	});
 
 	const tierTotal = $derived(() => {
 		if (!triage) return 0;
-		return triage.fix_now.length + triage.this_week.length + triage.watch.counts.total;
+		return triage.scope.fix_now_total + triage.scope.this_week_total + triage.watch.counts.total;
 	});
 
 	// Tab filter applied client-side over already-fetched lists.
@@ -414,14 +422,15 @@
 	const watchFiltered = $derived(() => triage ? filterByTab(triage.watch.rows) : []);
 
 	// Total count for the active tab — shown under the Findings header.
-	// Includes server-side watch counts (which are pre-filtered by tab
-	// using the .counts.{repo,image,cluster} buckets the API returns)
-	// so the number is accurate even when the watch page on screen is
-	// just a slice of the full set.
+	// 'all' uses the un-capped scope totals so it reflects the real
+	// population across tiers. Per-type tabs use the capped arrays for
+	// fix_now / this_week (the response only carries the top-N slice
+	// when totals exceed the cap) plus the pre-aggregated watch
+	// .counts.{repo,image,cluster} buckets the API returns.
 	const activeTabTotal = $derived(() => {
 		if (!triage) return 0;
 		if (activeTab === 'all') {
-			return triage.fix_now.length + triage.this_week.length + triage.watch.counts.total;
+			return triage.scope.fix_now_total + triage.scope.this_week_total + triage.watch.counts.total;
 		}
 		const fix = triage.fix_now.filter((r) => r.asset_type === activeTab).length;
 		const week = triage.this_week.filter((r) => r.asset_type === activeTab).length;
@@ -472,12 +481,12 @@
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Fix now</h3>
-					<p class="text-3xl font-bold text-[var(--error)]">{fmt(triage.fix_now.length)}</p>
+					<p class="text-3xl font-bold text-[var(--error)]">{fmt(triage.scope.fix_now_total)}</p>
 					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-[var(--error)]" /> Acute, exposed, or leaking</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">This week</h3>
-					<p class="text-3xl font-bold text-[var(--warning)]">{fmt(triage.this_week.length)}</p>
+					<p class="text-3xl font-bold text-[var(--warning)]">{fmt(triage.scope.this_week_total)}</p>
 					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><AlertTriangle class="h-3 w-3 text-[var(--warning)]" /> High-risk or stale</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
