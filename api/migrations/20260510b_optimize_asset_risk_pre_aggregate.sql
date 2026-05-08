@@ -58,6 +58,37 @@
 -- NOT EXISTS inside repo_vuln_canonical / image_vuln_canonical (the
 -- canonical CTEs are GROUP BY-driven, not per-row).
 
+-- Bootstrap deadlock avoidance.
+--
+-- When this migration ships, every replica pod's bootstrap tries to
+-- DROP asset_risk and recreate it. If another replica (or the same
+-- replica's pre-restart in-process gate) is mid-REFRESH on asset_risk,
+-- it holds an AccessExclusiveLock on the MV — the DROP blocks
+-- indefinitely waiting for it.
+--
+-- The bootstrap ctx is signal-bound (SIGTERM/SIGINT). K8s eventually
+-- restarts the pod for taking too long, the new pod hits the same
+-- block, and the cluster loops with "context canceled" forever.
+--
+-- Cancel any active asset_risk REFRESH so DROP can take the lock
+-- immediately. The cancelled refresh's work is discarded by the DROP
+-- anyway, so cancelling costs nothing. pg_cancel_backend works across
+-- backends owned by the same DB role.
+--
+-- Then bound the wait with a lock_timeout so even if the cancel signal
+-- doesn't propagate fast enough, bootstrap fails after 60s instead of
+-- looping. Failed bootstrap → pod restarts → next pod picks up after
+-- the previous holder has finished.
+DO $$
+BEGIN
+    PERFORM pg_cancel_backend(pid)
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+      AND query ILIKE '%REFRESH MATERIALIZED VIEW%asset_risk%';
+END $$;
+
+SET LOCAL lock_timeout = '60s';
+
 DROP MATERIALIZED VIEW IF EXISTS asset_risk;
 
 CREATE MATERIALIZED VIEW asset_risk AS
