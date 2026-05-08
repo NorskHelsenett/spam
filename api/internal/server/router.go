@@ -11,6 +11,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/ror"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
@@ -34,6 +35,10 @@ type RouterOptions struct {
 	// SecretsKey is the AES-GCM key used to en/decrypt provider PATs
 	// and the cosign signing policy's optional pinned key material.
 	SecretsKey []byte
+	// RORClient is the optional NHN ROR API client. When nil, the
+	// admin /ror/probe endpoint returns 503; when set, it powers the
+	// admin probe and (later) the RORProvider in the ACL chain.
+	RORClient *ror.Client
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -43,11 +48,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var appCache cache.Store
 	var aclProvider acl.Provider
 	var secretsKey []byte
+	var rorClient *ror.Client
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
 		secretsKey = opts.SecretsKey
+		rorClient = opts.RORClient
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -117,6 +124,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			pub.Get("/api/auth/callback", authService.CallbackHandler())
 			pub.Get("/api/auth/me", authService.MeHandler())
 			pub.Post("/api/auth/logout", authService.LogoutHandler())
+
+			// Per-user ROR cluster access — gated by an approved
+			// session only (handler self-checks via LoadSession), not
+			// APIGuard. Returns the clusters the caller can see in ROR
+			// based on their EntraID identity + the service ApiKey.
+			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(authService, rorClient))
 		})
 
 		// Pending-approval SSE accepts a pending session (pre-approval),
@@ -193,6 +206,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.With(providerAudit).Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
+
+				// ROR API probe — admin-only diagnostic that hits the
+				// candidate ROR endpoints with the caller's session
+				// access token + service ApiKey and echoes back the raw
+				// upstream response. Used to confirm endpoint shape and
+				// auth before wiring RORProvider into the ACL chain.
+				api.Get("/admin/ror/probe", uiapi.AdminRORProbeHandler(authService, rorClient))
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
 				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))

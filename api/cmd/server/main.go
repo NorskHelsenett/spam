@@ -33,6 +33,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/ror"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 	"github.com/NorskHelsenett/spam/internal/signingpolicy"
@@ -251,6 +252,14 @@ func run() error {
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	routerOpts.SecretsKey = cfg.ProviderSecretsKey
+
+	// ROR API client — only built when ROR_BASE_URL is set so dev
+	// envs without ROR access don't accidentally hit production.
+	if cfg.ROR.BaseURL != "" {
+		routerOpts.RORClient = ror.New(cfg.ROR.BaseURL, cfg.ROR.APIKey)
+		log.Printf("ROR client configured: base_url=%s api_key_set=%t", cfg.ROR.BaseURL, cfg.ROR.APIKey != "")
+	}
+
 	// ACL chain: LocalProvider reads acl_grants. Future stages
 	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
 	routerOpts.ACLProvider = &acl.ChainProvider{
@@ -276,6 +285,7 @@ func run() error {
 		CookieHashKey:     cfg.OIDC.CookieHashKey,
 		CookieBlockKey:    cfg.OIDC.CookieBlockKey,
 		CookieSecure:      cfg.OIDC.CookieSecure,
+		SecretsKey:        cfg.ProviderSecretsKey,
 	}, gormDB)
 	if err != nil {
 		return fmt.Errorf("init oidc auth: %w", err)

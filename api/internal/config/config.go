@@ -26,6 +26,15 @@ type Config struct {
 	DatabaseURL        string
 	OIDC               OIDCConfig
 	ProviderSecretsKey []byte
+	ROR                RORConfig
+}
+
+// RORConfig configures the optional integration with the NHN ROR API.
+// When BaseURL is empty the integration is disabled — the admin probe
+// endpoint returns 503 and no RORProvider is appended to the ACL chain.
+type RORConfig struct {
+	BaseURL string
+	APIKey  string
 }
 
 // OIDCConfig captures configuration for the OIDC login flow and session cookies.
@@ -77,6 +86,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.ProviderSecretsKey = secretKey
+
+	cfg.ROR = RORConfig{
+		BaseURL: strings.TrimSpace(os.Getenv("ROR_BASE_URL")),
+		APIKey:  strings.TrimSpace(os.Getenv("ROR_API_KEY")),
+	}
 
 	return cfg, nil
 }

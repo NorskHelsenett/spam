@@ -16,6 +16,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
 	"golang.org/x/oauth2"
@@ -32,6 +33,11 @@ type Service struct {
 	authCookieName    string
 	sessionTTL        time.Duration
 	cookieSecure      bool
+	// secretsKey is the AES-GCM key used to en/decrypt EntraID access
+	// tokens persisted on the session row. nil disables persistence —
+	// downstream-API integrations that need the user's bearer token
+	// will get an empty string back from AccessTokenForRequest.
+	secretsKey []byte
 }
 
 type Config struct {
@@ -46,6 +52,10 @@ type Config struct {
 	CookieHashKey     []byte
 	CookieBlockKey    []byte
 	CookieSecure      bool
+	// SecretsKey en/decrypts the per-session EntraID access token.
+	// Optional; without it, the access token is dropped at callback
+	// time and AccessTokenForRequest returns "".
+	SecretsKey []byte
 }
 
 type authRequest struct {
@@ -108,6 +118,7 @@ func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) 
 		authCookieName:    cfg.AuthCookieName,
 		sessionTTL:        cfg.SessionTTL,
 		cookieSecure:      cfg.CookieSecure,
+		secretsKey:        cfg.SecretsKey,
 	}, nil
 }
 
@@ -276,6 +287,15 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			ExpiresAt: time.Now().Add(s.sessionTTL),
 		}
 
+		if s.secretsKey != nil && token.AccessToken != "" {
+			if blob, err := providerconfig.EncryptToken(s.secretsKey, token.AccessToken); err == nil {
+				session.AccessTokenEnc = blob
+				session.AccessTokenExp = token.Expiry
+			} else {
+				log.Printf("encrypt session access token: %v", err)
+			}
+		}
+
 		if err := s.db.Create(&session).Error; err != nil {
 			http.Error(w, "failed to persist session", http.StatusInternalServerError)
 			return
@@ -404,6 +424,36 @@ func (s *Service) loadSessionAllowPending(r *http.Request) (*Session, error) {
 // LoadSession exposes session lookup for other modules.
 func (s *Service) LoadSession(r *http.Request) (*Session, error) {
 	return s.loadSession(r)
+}
+
+// AccessTokenForRequest decrypts the EntraID access token persisted on
+// the caller's session and returns it for use against downstream APIs
+// (e.g. ROR). Returns ("", nil) when no token is stored — callers must
+// be prepared for that case (no secrets key configured at boot, or
+// session predates this feature).
+//
+// Errors are reserved for "session present but token decode failed",
+// which a caller may want to surface to the user as "please re-login".
+// An expired token is returned anyway; the caller decides whether to
+// use it as-is, refresh it, or reject. Right now we have no refresh
+// flow, so the access token is good for at most the OIDC token
+// lifetime (typically 60–90 min for Entra).
+func (s *Service) AccessTokenForRequest(r *http.Request) (string, error) {
+	if s.secretsKey == nil {
+		return "", nil
+	}
+	session, err := s.loadSession(r)
+	if err != nil {
+		return "", err
+	}
+	if len(session.AccessTokenEnc) == 0 {
+		return "", nil
+	}
+	tok, err := providerconfig.DecryptToken(s.secretsKey, session.AccessTokenEnc)
+	if err != nil {
+		return "", fmt.Errorf("decrypt access token: %w", err)
+	}
+	return tok, nil
 }
 
 // SessionInfo returns the minimal session snapshot for SSE/auth flows.
