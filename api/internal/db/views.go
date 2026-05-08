@@ -50,6 +50,17 @@ var vulnUnifiedViewNames = []string{
 // deploy or a leftover idle-in-transaction backend can otherwise block
 // new replicas indefinitely. With the fast-path skip, only replicas
 // that actually need to do work serialise on the lock.
+// viewLockRetryDelay paces the busy-wait between advisory-lock attempts.
+// Short enough to feel responsive, long enough that polling doesn't pile
+// up against the DB while another replica is mid-migration.
+const viewLockRetryDelay = 2 * time.Second
+
+// viewLockMaxWaitTime caps how long a replica polls for a single
+// migration's advisory lock before bailing. Used as a guardrail —
+// migrations should run in seconds; if one is genuinely held for >5min
+// something is stuck and the next bootstrap attempt is the right move.
+const viewLockMaxWaitTime = 5 * time.Minute
+
 func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 	for _, path := range paths {
 		payload, err := os.ReadFile(path)
@@ -70,29 +81,96 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 			continue
 		}
 
-		if err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			sum := sha256.Sum256([]byte(path))
-			lockKey := int64(binary.BigEndian.Uint64(sum[:8]))
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", lockKey).Error; err != nil {
-				return fmt.Errorf("acquire advisory lock: %w", err)
-			}
-
-			var stored ViewSchemaVersion
-			result := tx.First(&stored, "name = ?", path)
-			if result.Error == nil && stored.Hash == hash {
-				return nil // view definition unchanged, skip
-			}
-
-			if err := tx.Exec(string(payload)).Error; err != nil {
-				return fmt.Errorf("exec view sql %s: %w", path, err)
-			}
-
-			return tx.Save(&ViewSchemaVersion{Name: path, Hash: hash}).Error
-		}); err != nil {
+		if err := applyViewWithRetry(ctx, db, path, payload, hash); err != nil {
 			return fmt.Errorf("ensure view %s: %w", path, err)
 		}
 	}
 	return nil
+}
+
+// applyViewWithRetry runs a single migration under a try-then-poll
+// pattern on its advisory lock. The previous implementation used the
+// blocking pg_advisory_xact_lock, which deadlocked multi-replica
+// rollouts: replica A holds the migration lock while its DROP waits on
+// an in-flight REFRESH's AccessExclusiveLock; replica B's bootstrap
+// blocks on the advisory lock waiting for A; K8s eventually kills B
+// before A finishes and the cluster loops with "context canceled".
+//
+// The fix is to never block the connection — try the lock, give up
+// immediately if held, sleep and retry. On every iteration we re-check
+// the stored hash so as soon as A commits, B exits cleanly with a
+// match. The 5-minute wall-clock cap stops a runaway migration from
+// holding bootstrap forever; on timeout the bootstrap fails fast and
+// the next pod restart picks up cleanly.
+func applyViewWithRetry(ctx context.Context, db *gorm.DB, path string, payload []byte, hash string) error {
+	sum := sha256.Sum256([]byte(path))
+	lockKey := int64(binary.BigEndian.Uint64(sum[:8]))
+	deadline := time.Now().Add(viewLockMaxWaitTime)
+
+	for {
+		// Re-check stored hash before every attempt. If another
+		// replica just finished applying, we're done — no need to
+		// even try the lock.
+		var stored ViewSchemaVersion
+		if err := db.WithContext(ctx).First(&stored, "name = ?", path).Error; err == nil && stored.Hash == hash {
+			return nil
+		}
+
+		applied, err := tryApplyView(ctx, db, lockKey, path, payload, hash)
+		if err != nil {
+			return err
+		}
+		if applied {
+			return nil
+		}
+
+		// Lock held by another replica. Sleep and retry, respecting
+		// ctx cancellation and the wall-clock cap.
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out after %s waiting for migration lock on %s", viewLockMaxWaitTime, path)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(viewLockRetryDelay):
+		}
+	}
+}
+
+// tryApplyView is the single-attempt body. Returns (true, nil) on
+// successful apply OR same-hash skip; (false, nil) if the lock was
+// held by another replica; (false, err) on any execution failure.
+func tryApplyView(ctx context.Context, db *gorm.DB, lockKey int64, path string, payload []byte, hash string) (bool, error) {
+	applied := false
+	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var acquired bool
+		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", lockKey).Scan(&acquired).Error; err != nil {
+			return fmt.Errorf("try advisory lock: %w", err)
+		}
+		if !acquired {
+			return nil // another replica holds the lock; outer loop retries
+		}
+
+		// Re-check inside the lock — another replica might have
+		// committed a matching hash between our outer check and here.
+		var stored ViewSchemaVersion
+		result := tx.First(&stored, "name = ?", path)
+		if result.Error == nil && stored.Hash == hash {
+			applied = true
+			return nil
+		}
+
+		if err := tx.Exec(string(payload)).Error; err != nil {
+			return fmt.Errorf("exec view sql %s: %w", path, err)
+		}
+
+		if err := tx.Save(&ViewSchemaVersion{Name: path, Hash: hash}).Error; err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
 }
 
 // EnsureViewsPopulated blocks until all SBOM materialized views are populated.
