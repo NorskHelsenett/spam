@@ -424,10 +424,12 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 		).Scan(&rows).Error
 		return rows, err
 	case "cluster":
-		// Cluster inventory search. One row per distinct cluster_id
-		// observed in cluster_record; matches are on cluster name,
-		// cluster_id, or environment. Empty repo_* fields — clusters
-		// are not repo-scoped.
+		// Cluster inventory search. Reads from cluster_summary instead
+		// of full-scanning cluster_record — the MV already has one row
+		// per cluster_id with denormalized name/environment/last_seen,
+		// so the search becomes an index-friendly N-cluster scan instead
+		// of an O(events) JSONB extraction over the operational store.
+		// Empty repo_* fields — clusters are not repo-scoped.
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT
 				'cluster' AS type,
@@ -439,18 +441,17 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				'' AS owner_path,
 				'' AS org,
 				'' AS slug,
-				COALESCE(NULLIF(data->>'cluster', ''), data->>'cluster_id') AS title,
-				COALESCE(data->>'environment', '') AS value,
+				COALESCE(NULLIF(cluster, ''), cluster_id) AS title,
+				COALESCE(environment, '') AS value,
 				'' AS source_text,
-				MAX(received_at) AS created_at,
-				data->>'cluster_id' AS cluster_id,
+				last_seen AS created_at,
+				cluster_id AS cluster_id,
 				'' AS image_id
-			FROM cluster_record
-			WHERE data->>'cluster'     ILIKE ?
-			   OR data->>'cluster_id'  ILIKE ?
-			   OR data->>'environment' ILIKE ?
-			GROUP BY data->>'cluster_id', data->>'cluster', data->>'environment'
-			ORDER BY MAX(received_at) DESC
+			FROM cluster_summary
+			WHERE cluster     ILIKE ?
+			   OR cluster_id  ILIKE ?
+			   OR environment ILIKE ?
+			ORDER BY last_seen DESC
 			LIMIT ?
 		`, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err

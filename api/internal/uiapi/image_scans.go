@@ -106,89 +106,101 @@ func writeImageScanRunResponse(w http.ResponseWriter, r *http.Request, db *gorm.
 		}
 	}
 
-	// Severity summary from the grype parser output.
-	var severityRows []struct {
-		Severity string
-		Count    int
-	}
-	if err := db.WithContext(r.Context()).
-		Table("image_vuln_findings").
-		Select("severity, COUNT(*) AS count").
-		Where("scan_run_id = ?", runID).
-		Group("severity").
-		Find(&severityRows).Error; err == nil && len(severityRows) > 0 {
-		counts := &ImageVulnSeverityCount{}
-		for _, row := range severityRows {
-			counts.Total += row.Count
-			// Normalize — grype uppercases, trivy lowercases, NEGLIGIBLE
-			// is grype's info tier and rolls into Low.
-			switch strings.ToUpper(row.Severity) {
-			case "CRITICAL":
-				counts.Critical += row.Count
-			case "HIGH":
-				counts.High += row.Count
-			case "MEDIUM":
-				counts.Medium += row.Count
-			case "LOW", "NEGLIGIBLE":
-				counts.Low += row.Count
-			default:
-				counts.Unknown += row.Count
-			}
+	// Severity summary from the grype parser output. Keyed by
+	// image_digest_id rather than scan_run_id: the nightly sbom-scanner
+	// revuln deletes prior grype findings and re-inserts under a fresh
+	// scan_run_id (uuid.NewString() disjoint from the original job.id —
+	// see runner/sbom_scan_handlers.grypeImageResultHandler). A query
+	// scoped to scan_run_id=job.id silently misses every revunned row,
+	// surfacing as "No vulnerabilities found." even on actively scanned
+	// images. The parser deletes per (image_digest_id, scanner), so the
+	// table only ever holds the latest findings for the image — exactly
+	// what this view should display.
+	if payload.ImageDigestID != "" {
+		var severityRows []struct {
+			Severity string
+			Count    int
 		}
-		response.ImageVulnCounts = counts
-	}
-
-	// Full vuln list (capped at 1000 rows, severity-sorted). For larger
-	// findings the UI offers the raw artifact download.
-	var findings []imagescan.ImageVulnFinding
-	if err := db.WithContext(r.Context()).
-		Where("scan_run_id = ?", runID).
-		Order(`
-			CASE UPPER(severity)
-				WHEN 'CRITICAL' THEN 0
-				WHEN 'HIGH'     THEN 1
-				WHEN 'MEDIUM'   THEN 2
-				WHEN 'LOW'      THEN 3
-				ELSE 4
-			END,
-			vuln_id ASC
-		`).
-		Limit(1000).
-		Find(&findings).Error; err == nil {
-		// Load metadata for every distinct vuln_id so we can override
-		// the scanner-reported fix_version per row with the OSV-
-		// derived applicable fix. Cache miss keeps the scanner value.
-		ids := make([]string, 0, len(findings))
-		seen := map[string]struct{}{}
-		for _, f := range findings {
-			if _, ok := seen[f.VulnID]; ok {
-				continue
-			}
-			seen[f.VulnID] = struct{}{}
-			ids = append(ids, f.VulnID)
-		}
-		metas, _ := vulnmeta.MetadataForMany(r.Context(), db, ids)
-
-		response.ImageVulns = make([]ImageVulnListRow, 0, len(findings))
-		for _, f := range findings {
-			fix := f.FixedVersion
-			if m := metas[f.VulnID]; m != nil {
-				if applicable := vulnmeta.ApplicableFix(
-					vulnmeta.ExtractOSVAffected(m), f.PkgName, f.InstalledVersion,
-				); applicable != "" {
-					fix = applicable
+		if err := db.WithContext(r.Context()).
+			Table("image_vuln_findings").
+			Select("severity, COUNT(*) AS count").
+			Where("image_digest_id = ?", payload.ImageDigestID).
+			Group("severity").
+			Find(&severityRows).Error; err == nil && len(severityRows) > 0 {
+			counts := &ImageVulnSeverityCount{}
+			for _, row := range severityRows {
+				counts.Total += row.Count
+				// Normalize — grype uppercases, trivy lowercases, NEGLIGIBLE
+				// is grype's info tier and rolls into Low.
+				switch strings.ToUpper(row.Severity) {
+				case "CRITICAL":
+					counts.Critical += row.Count
+				case "HIGH":
+					counts.High += row.Count
+				case "MEDIUM":
+					counts.Medium += row.Count
+				case "LOW", "NEGLIGIBLE":
+					counts.Low += row.Count
+				default:
+					counts.Unknown += row.Count
 				}
 			}
-			response.ImageVulns = append(response.ImageVulns, ImageVulnListRow{
-				VulnID:           f.VulnID,
-				Severity:         f.Severity,
-				PkgName:          f.PkgName,
-				InstalledVersion: f.InstalledVersion,
-				FixedVersion:     fix,
-				Title:            f.Title,
-				Target:           f.Target,
-				Scanner:          f.Scanner,
-			})
+			response.ImageVulnCounts = counts
+		}
+
+		// Full vuln list (capped at 1000 rows, severity-sorted). For larger
+		// findings the UI offers the raw artifact download. Same
+		// image_digest_id keying as the severity summary above.
+		var findings []imagescan.ImageVulnFinding
+		if err := db.WithContext(r.Context()).
+			Where("image_digest_id = ?", payload.ImageDigestID).
+			Order(`
+				CASE UPPER(severity)
+					WHEN 'CRITICAL' THEN 0
+					WHEN 'HIGH'     THEN 1
+					WHEN 'MEDIUM'   THEN 2
+					WHEN 'LOW'      THEN 3
+					ELSE 4
+				END,
+				vuln_id ASC
+			`).
+			Limit(1000).
+			Find(&findings).Error; err == nil {
+			// Load metadata for every distinct vuln_id so we can override
+			// the scanner-reported fix_version per row with the OSV-
+			// derived applicable fix. Cache miss keeps the scanner value.
+			ids := make([]string, 0, len(findings))
+			seen := map[string]struct{}{}
+			for _, f := range findings {
+				if _, ok := seen[f.VulnID]; ok {
+					continue
+				}
+				seen[f.VulnID] = struct{}{}
+				ids = append(ids, f.VulnID)
+			}
+			metas, _ := vulnmeta.MetadataForMany(r.Context(), db, ids)
+
+			response.ImageVulns = make([]ImageVulnListRow, 0, len(findings))
+			for _, f := range findings {
+				fix := f.FixedVersion
+				if m := metas[f.VulnID]; m != nil {
+					if applicable := vulnmeta.ApplicableFix(
+						vulnmeta.ExtractOSVAffected(m), f.PkgName, f.InstalledVersion,
+					); applicable != "" {
+						fix = applicable
+					}
+				}
+				response.ImageVulns = append(response.ImageVulns, ImageVulnListRow{
+					VulnID:           f.VulnID,
+					Severity:         f.Severity,
+					PkgName:          f.PkgName,
+					InstalledVersion: f.InstalledVersion,
+					FixedVersion:     fix,
+					Title:            f.Title,
+					Target:           f.Target,
+					Scanner:          f.Scanner,
+				})
+			}
 		}
 	}
 

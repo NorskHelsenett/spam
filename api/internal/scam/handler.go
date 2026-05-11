@@ -125,6 +125,37 @@ func cteFor(r *http.Request) string {
 	return liveCTE
 }
 
+// liveCTEForCluster is liveCTE with a per-cluster filter baked into
+// the inner WHERE. Cluster_id is bound via a `?` placeholder — callers
+// pass it as the FIRST arg to db.Raw, ahead of any other placeholders
+// the trailing SELECT introduces.
+//
+// Use this in detail handlers (chain, host chain, drilldown) where the
+// request targets one cluster. The DISTINCT ON dedup then runs over a
+// few thousand rows instead of the full multi-cluster table, which is
+// the difference between sub-second and upstream-timeout at fleet
+// scale. Same liveness + DELETE guards as buildLiveCTE.
+var liveCTEForCluster = `WITH live AS (
+	SELECT DISTINCT ON (
+		cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END
+	) cr.*
+	FROM cluster_record cr
+	JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
+	WHERE cr.data->>'cluster_id' = ?
+	  AND cr.data->>'msg' != 'DELETE'
+	  AND cs.last_push_at >= NOW() - ` + liveWindowInterval() + `
+	ORDER BY cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END,
+		cr.received_at DESC
+) `
+
 // cteForWithACL is cteFor plus an injected ACL filter on the CTE's
 // cluster_id selection. The returned SQL has one `?` placeholder per
 // entry in the ACL filter's args slice (handled by the caller).
@@ -1073,9 +1104,11 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			LabelsJSON     string `gorm:"column:labels_json"`
 		}
 
-		// Step 1: All ingresses/routes in this cluster
+		// Step 1: All ingresses/routes in this cluster. liveCTEForCluster
+		// pre-filters by cluster_id so the per-branch cluster_id checks
+		// become no-ops we drop.
 		var ingresses []nsIngress
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT * FROM (
 				SELECT
 					data->>'namespace' AS namespace,
@@ -1092,7 +1125,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				UNION ALL
 				SELECT
@@ -1110,7 +1142,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live,
 				     jsonb_array_elements_text(data->'hosts') AS h
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				UNION ALL
 				SELECT
@@ -1128,15 +1159,14 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 			) sub WHERE host IS NOT NULL AND host != ''
 			ORDER BY namespace, host
-		`, clusterID, clusterID, clusterID).Scan(&ingresses)
+		`, clusterID).Scan(&ingresses)
 
 		// Step 2: All services in this cluster
 		var services []nsSvc
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'name' AS name,
@@ -1145,13 +1175,12 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				COALESCE(data->'selector'::text, '{}') AS selector_json
 			FROM live
 			WHERE data->>'kind' = 'Service'
-			  AND data->>'cluster_id' = ?
 			ORDER BY data->>'namespace', data->>'name'
 		`, clusterID).Scan(&services)
 
 		// Step 3: All running pod groups in this cluster
 		var pods []nsPod
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'owner' AS owner,
@@ -1169,7 +1198,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			FROM live
 			WHERE data->>'kind' = 'Container'
 			  AND data->>'pod_phase' = 'Running'
-			  AND data->>'cluster_id' = ?
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
 			ORDER BY data->>'namespace', data->>'owner'
 		`, clusterID).Scan(&pods)
@@ -1339,7 +1367,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Address     string `gorm:"column:address"`
 		}
 		var epIPs []epIPRow
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
@@ -1348,7 +1376,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				) AS address
 			FROM live
 			WHERE data->>'kind' = 'EndpointSlice'
-			  AND data->>'cluster_id' = ?
 		`, clusterID).Scan(&epIPs)
 
 		// Endpoint ports per service
@@ -1358,14 +1385,13 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Port        int    `gorm:"column:port"`
 		}
 		var epPortRows []epPortRow
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT DISTINCT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
 				(p->>'port')::int AS port
 			FROM live, jsonb_array_elements(data->'ports') AS p
 			WHERE data->>'kind' = 'EndpointSlice'
-			  AND data->>'cluster_id' = ?
 			  AND p->>'port' IS NOT NULL
 		`, clusterID).Scan(&epPortRows)
 
@@ -1406,7 +1432,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Look up cluster name
 		var clusterName string
-		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTEForCluster+`SELECT data->>'cluster' FROM live WHERE data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		// Sort namespaces and build result
 		type result struct {
