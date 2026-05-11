@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -30,6 +31,14 @@ const sbomViewRefreshLockID = 8_742_635_912
 // Distinct from the SBOM lock so a slow SBOM refresh does not block a
 // vuln refresh and vice versa — the two view families are independent.
 const vulnUnifiedViewRefreshLockID = 8_742_635_913
+
+// minMaterializedViewRefreshInterval is a cross-replica debounce for
+// background MV refresh triggers. The in-process gates coalesce bursts
+// inside one pod, but daytime ingest can hit API + worker replicas at
+// the same time. The materialized_view_refreshes table gives all
+// replicas a shared "fresh enough" signal so they do not rebuild the
+// same expensive MV family multiple times per short burst.
+const minMaterializedViewRefreshInterval = 30 * time.Second
 
 // vulnUnifiedViewNames are the materialized views that hold the unified
 // per-asset vulnerability rows the API filters and groups against.
@@ -275,6 +284,30 @@ func refreshView(ctx context.Context, db *gorm.DB, view string) error {
 	return err
 }
 
+func materializedViewsRecentlyRefreshed(ctx context.Context, db *gorm.DB, names []string, maxAge time.Duration) bool {
+	if maxAge <= 0 || len(names) == 0 {
+		return false
+	}
+
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(names)), ",")
+	args := make([]any, 0, len(names)+1)
+	for _, name := range names {
+		args = append(args, name)
+	}
+	args = append(args, time.Now().UTC().Add(-maxAge))
+
+	var freshCount int64
+	err := db.WithContext(ctx).Raw(`
+		SELECT COUNT(*)
+		FROM materialized_view_refreshes r
+		JOIN pg_matviews m ON m.matviewname = r.name
+		WHERE r.name IN (`+placeholders+`)
+		  AND r.refreshed_at >= ?
+		  AND m.ispopulated
+	`, args...).Scan(&freshCount).Error
+	return err == nil && freshCount == int64(len(names))
+}
+
 // isSQLState reports whether err contains a PostgreSQL error with the given
 // five-character SQLSTATE code.
 func isSQLState(err error, code string) bool {
@@ -316,6 +349,10 @@ func VulnUnifiedViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // another process holds the lock so the caller can decide whether to
 // retry or treat the in-flight refresh as good enough.
 func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
+	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -342,12 +379,23 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", vulnUnifiedViewRefreshLockID)
 	}()
 
+	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	for _, view := range vulnUnifiedViewNames {
 		if err := refreshView(ctx, db, view); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)
 		}
 	}
-	return nil
+
+	refreshedAt := time.Now().UTC()
+	return db.WithContext(ctx).Exec(`
+		INSERT INTO materialized_view_refreshes (name, refreshed_at)
+		VALUES (?, ?), (?, ?)
+		ON CONFLICT (name)
+		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+	`, vulnUnifiedViewNames[0], refreshedAt, vulnUnifiedViewNames[1], refreshedAt).Error
 }
 
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
@@ -357,6 +405,11 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 // CONCURRENTLY is used so reads are not blocked during the refresh, but it must run
 // outside a transaction block, so a session-level advisory lock is used instead.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
+	sbomViewNames := []string{"sbom_metadata_view", "sbom_component_view"}
+	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	// Session-level advisory lock: must acquire and release on the same connection.
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
@@ -385,11 +438,15 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID)
 	}()
 
+	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	// Refresh metadata first so that any SBOM visible in sbom_metadata_view is
 	// guaranteed to already have its components in sbom_component_view (which
 	// takes a later snapshot). Reversing this order would cause recent SBOMs
 	// committed between the two snapshot times to show component_count = 0.
-	for _, view := range []string{"sbom_metadata_view", "sbom_component_view"} {
+	for _, view := range sbomViewNames {
 		if err := refreshView(ctx, db, view); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)
 		}

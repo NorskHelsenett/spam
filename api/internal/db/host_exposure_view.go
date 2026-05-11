@@ -44,6 +44,11 @@ func HostExposureViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) 
 // gracefully. Returns ErrRefreshLockHeld when another process holds the
 // lock.
 func RefreshHostExposureViews(ctx context.Context, db *gorm.DB) error {
+	names := []string{hostExposureViewName, exposedDigestsViewName}
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -70,7 +75,11 @@ func RefreshHostExposureViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", hostExposureViewRefreshLockID)
 	}()
 
-	for _, view := range []string{hostExposureViewName, exposedDigestsViewName} {
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
+	for _, view := range names {
 		if err := refreshView(ctx, db, view); err != nil {
 			return fmt.Errorf("refresh %s: %w", view, err)
 		}

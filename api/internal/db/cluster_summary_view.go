@@ -15,8 +15,8 @@ import (
 const clusterSummaryViewRefreshLockID = 8_742_635_916
 
 const (
-	clusterSummaryViewName  = "cluster_summary"
-	clusterImageViewName    = "cluster_image_inventory"
+	clusterSummaryViewName = "cluster_summary"
+	clusterImageViewName   = "cluster_image_inventory"
 )
 
 // clusterMVNames are the MVs refreshed together by
@@ -61,6 +61,10 @@ func ClusterImageInventoryPopulated(ctx context.Context, db *gorm.DB) (bool, err
 // that handles "view not yet populated" gracefully. Returns
 // ErrRefreshLockHeld when another process holds the lock.
 func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
+	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -85,6 +89,10 @@ func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
 		defer cancel()
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", clusterSummaryViewRefreshLockID)
 	}()
+
+	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, minMaterializedViewRefreshInterval) {
+		return nil
+	}
 
 	for _, view := range clusterMVNames {
 		if err := refreshView(ctx, db, view); err != nil {

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -44,9 +43,9 @@ func DependencyVulnerabilitiesHandler(db *gorm.DB, authService *auth.Service) ht
 type VEXSetRequest struct {
 	PURL          string `json:"purl"`
 	VulnID        string `json:"vuln_id"`
-	Status        string `json:"status"`         // affected | not_affected | fixed | under_investigation
-	Justification string `json:"justification"`  // optional
-	Detail        string `json:"detail"`         // optional
+	Status        string `json:"status"`        // affected | not_affected | fixed | under_investigation
+	Justification string `json:"justification"` // optional
+	Detail        string `json:"detail"`        // optional
 }
 
 // DependencyVEXHandler upserts a VEX override for a PURL+vuln pair.
@@ -87,7 +86,6 @@ func DependencyVEXHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 		// the list — warm the dashboard cache in the background so
 		// the next page render reflects the suppression/override.
 		vulnmetrics.TriggerRefresh(db)
-		assetrisk.TriggerRefresh(db)
 
 		w.WriteHeader(http.StatusNoContent)
 	}

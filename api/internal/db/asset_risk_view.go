@@ -38,6 +38,11 @@ func AssetRiskViewPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // holds the lock so the caller can decide whether to retry or treat
 // the in-flight refresh as good enough.
 func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
+	names := []string{assetRiskViewName}
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -66,6 +71,10 @@ func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
 		defer cancel()
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", assetRiskViewRefreshLockID)
 	}()
+
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
 
 	if err := refreshView(ctx, db, assetRiskViewName); err != nil {
 		return err
