@@ -1457,7 +1457,7 @@
 						<p class="text-sm text-[var(--text-muted)]">No exposed FQDNs found from Ingress or route resources.</p>
 					</div>
 				{:else}
-					<div class="overflow-auto" style="max-height: 70vh;" bind:this={hostScrollEl} onscroll={() => { hostScrollTop = hostScrollEl?.scrollTop ?? 0; hostViewH = hostScrollEl?.clientHeight ?? 600; }}>
+					<div class="overflow-auto [overflow-anchor:none]" style="max-height: 70vh;" bind:this={hostScrollEl} onscroll={() => { hostScrollTop = hostScrollEl?.scrollTop ?? 0; hostViewH = hostScrollEl?.clientHeight ?? 600; }}>
 						<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
