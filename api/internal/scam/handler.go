@@ -1017,6 +1017,7 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
 		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
 		activeWorkloadsOnly := isTruthy(r.URL.Query().Get("active_workloads_only"))
+		sortColumn, sortDirection := parseHostSortParams(r.URL.Query().Get("sort"), r.URL.Query().Get("order"))
 
 		rows := []HostRow{}
 		ctx := r.Context()
@@ -1075,7 +1076,7 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			      AND ed.exposure_name = he.name
 			) w ON TRUE
 			WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
-			ORDER BY he.host, he.cluster
+			ORDER BY ` + sortColumn + ` ` + sortDirection + `, he.host ` + sortDirection + `, he.cluster ` + sortDirection + `
 			LIMIT ? OFFSET ?
 		`
 		queryArgs := append([]any{}, aclArgs...)
@@ -1103,6 +1104,39 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// hostSortColumnSQL maps the frontend's HostRow field names to SQL
+// expressions over the host_exposure MV plus the LATERAL workload
+// count. Anything not in this map falls back to (host, cluster) —
+// the original ORDER BY before sort was added.
+var hostSortColumnSQL = map[string]string{
+	"host":           "he.host",
+	"cluster":        "he.cluster",
+	"cluster_id":     "he.cluster_id",
+	"namespace":      "he.namespace",
+	"name":           "he.name",
+	"kind":           "he.kind",
+	"environment":    "he.environment",
+	"ingress_class":  "he.ingress_class",
+	"workload_count": "COALESCE(w.cnt, 0)",
+	"last_seen":      "he.last_seen",
+}
+
+// parseHostSortParams returns the SQL ORDER BY column expression and
+// direction for the host list, validating both against allowlists so
+// the user-supplied params never reach the SQL string directly. The
+// fallback (host, asc) matches the pre-sort behaviour.
+func parseHostSortParams(rawSort, rawOrder string) (string, string) {
+	column, ok := hostSortColumnSQL[strings.TrimSpace(strings.ToLower(rawSort))]
+	if !ok {
+		column = "he.host"
+	}
+	direction := "ASC"
+	if strings.EqualFold(strings.TrimSpace(rawOrder), "desc") {
+		direction = "DESC"
+	}
+	return column, direction
 }
 
 // parseHostFilterCSV splits a comma-separated query-string value into

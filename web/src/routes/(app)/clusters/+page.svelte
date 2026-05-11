@@ -414,7 +414,12 @@
 		if (initial) hostsInFlight = true; else hostsLoadingMore = true;
 		try {
 			const offset = initial ? 0 : hostsOffset;
-			const qs = buildHostQueryString({ offset: String(offset), limit: String(hostsPageSize) });
+			const qs = buildHostQueryString({
+				offset: String(offset),
+				limit: String(hostsPageSize),
+				sort: String(hostSortKey),
+				order: hostSortDir
+			});
 			const url = `/api/clusters/hosts${qs}`;
 			const res = await fetch(url, { credentials: 'include' });
 			if (res.ok) {
@@ -570,7 +575,9 @@
 			hostSelectedClusters.join(' '),
 			hostSelectedNamespaces.join(' '),
 			hostSelectedKinds.join(' '),
-			hostActiveWorkloadsOnly
+			hostActiveWorkloadsOnly,
+			hostSortKey,
+			hostSortDir
 		];
 		if (!browser) return;
 		if (activeTab !== 'hosts' && !hostsFetched) return;
@@ -656,6 +663,10 @@
 		if (hostSelectedNamespaces.length > 0) params.set('namespaces', hostSelectedNamespaces.join(','));
 		if (hostSelectedKinds.length > 0) params.set('kinds', hostSelectedKinds.join(','));
 		if (hostActiveWorkloadsOnly) params.set('active_workloads_only', 'true');
+		// Sort applies only to the paginated list endpoint, not the
+		// summary — summary aggregates over the whole set regardless.
+		// Callers that don't want sort pass extra without it; the
+		// summary call deliberately omits these params.
 		if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
 		const s = params.toString();
 		return s ? `?${s}` : '';
@@ -843,15 +854,10 @@
 		})
 	);
 
-	const sortedHosts = $derived(
-		[...filteredHosts].sort((a, b) => {
-			const primary = cmp(a[hostSortKey], b[hostSortKey], hostSortDir);
-			if (primary !== 0) return primary;
-			return hostSortKey === 'cluster'
-				? (a.host ?? '').localeCompare(b.host ?? '')
-				: (a.cluster ?? '').localeCompare(b.cluster ?? '');
-		})
-	);
+	// Host sort is applied server-side via the sort+order query params;
+	// rendering the loaded page in array order keeps client and server
+	// in agreement.
+	const sortedHosts = $derived(filteredHosts);
 
 	// Virtual scroll ranges (must be after sorted* declarations)
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
