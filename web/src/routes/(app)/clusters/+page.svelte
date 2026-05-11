@@ -1193,10 +1193,8 @@
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Images</h2>
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Container images across all clusters.
-								{#if imageTotal > 0}
-									<span class="text-[var(--text-muted)]">
-										&middot; {imageTotal} {imageActiveFilterCount > 0 ? 'matching' : 'images'}
-									</span>
+								{#if imageActiveFilterCount > 0}
+									<span class="text-[var(--text-muted)]">&middot; {imageTotal} matching</span>
 								{/if}
 							</p>
 						</div>
@@ -1371,10 +1369,8 @@
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Hosts</h2>
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Hostnames exposed via Ingress and route resources.
-								{#if hostSummary.total > 0}
-									<span class="text-[var(--text-muted)]">
-										&middot; {hostSummary.total} {hostActiveFilterCount > 0 ? 'matching' : 'hosts'}
-									</span>
+								{#if hostActiveFilterCount > 0}
+									<span class="text-[var(--text-muted)]">&middot; {hostSummary.total} matching</span>
 								{/if}
 							</p>
 						</div>
