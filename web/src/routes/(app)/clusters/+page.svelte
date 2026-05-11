@@ -581,6 +581,15 @@
 			imageHasMore = false;
 			imageDetails = [];
 			imageTotal = 0;
+			// Reset scroll to the top of the (about-to-be-empty) list so
+			// when the new page lands the user sees the first matching
+			// rows. Without this, a stale hostScrollTop / imageScrollTop
+			// from the previous (larger) dataset can park the virtual
+			// scroll's start index past the new dataset length — the
+			// row slice returns empty and the table looks broken until
+			// the user manually scrolls back up.
+			imageScrollTop = 0;
+			if (imageScrollEl) imageScrollEl.scrollTop = 0;
 			untrack(() => loadImages());
 		}, 200);
 		void _;
@@ -646,6 +655,13 @@
 			hostsOffset = 0;
 			hostsHasMore = true;
 			hosts = [];
+			// Reset scroll so the new (potentially smaller) result set
+			// renders from the top. Without this, the stale hostScrollTop
+			// can land the virtual-scroll start index past the new
+			// hosts.length — slice returns empty and the table looks
+			// broken until the user manually scrolls back up.
+			hostScrollTop = 0;
+			if (hostScrollEl) hostScrollEl.scrollTop = 0;
 			loadHosts();
 			loadHostSummary();
 		}, 200);
