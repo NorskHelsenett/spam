@@ -16,7 +16,17 @@ import (
 // appSummaryCacheTTL is long because the cache is version-gated by the
 // materialized view refresh timestamp — not by wall-clock expiry.
 const appSummaryCacheTTL = 24 * time.Hour
-const appSummaryCacheKey = "app:summary:v2"
+const appSummaryCacheKey = "app:summary:v3"
+
+// appSummaryMinRefreshGap caps how often the expensive aggregate is
+// recomputed in the background. Without it, the watermark-driven stale
+// check fires a recompute on every materialized-view refresh — and
+// with the cross-replica coalescing those happen every ~30s under
+// activity. The aggregate takes ~10s, so unbounded watermark-driven
+// recomputes burn a sizable fraction of one core continuously even
+// though users only ever see cached data. A 2-minute floor brings
+// the duty cycle down without making dashboard counts visibly stale.
+const appSummaryMinRefreshGap = 2 * time.Minute
 
 type AppSummaryCounts struct {
 	SBOMCount             int64 `json:"sbom_count"`
@@ -79,8 +89,12 @@ type AppSummaryResponse struct {
 
 // appSummaryCacheEntry wraps the response with the materialized view version
 // so we can detect when the view has been refreshed and the cache is stale.
+// ComputedAt is the wall-clock time the response was generated and is used to
+// rate-limit the background refresh; ViewRefreshedAt is the MV watermark at
+// compute time and is used to detect cache staleness.
 type appSummaryCacheEntry struct {
 	ViewRefreshedAt time.Time          `json:"view_refreshed_at"`
+	ComputedAt      time.Time          `json:"computed_at"`
 	Response        AppSummaryResponse `json:"response"`
 }
 
@@ -111,8 +125,14 @@ func AppSummaryHandler(db *gorm.DB, authService *auth.Service, c cache.Store) ht
 				writeJSON(w, http.StatusOK, entry.Response)
 				return
 			}
-			// Stale: serve immediately, refresh in background.
+			// Stale: serve immediately. Background refresh is rate-limited
+			// to appSummaryMinRefreshGap so a chatty watermark (coalesced
+			// MV refreshes every ~30s under activity) does not pin the
+			// expensive aggregate to a recompute-per-watermark-tick cadence.
 			writeJSON(w, http.StatusOK, entry.Response)
+			if !entry.ComputedAt.IsZero() && time.Since(entry.ComputedAt) < appSummaryMinRefreshGap {
+				return
+			}
 			go func() {
 				if !appSummaryRefreshing.CompareAndSwap(false, true) {
 					return
@@ -146,6 +166,7 @@ func maybeStoreAppSummary(ctx context.Context, c cache.Store, watermark time.Tim
 	}
 	return cache.SetJSON(ctx, c, appSummaryCacheKey, appSummaryCacheEntry{
 		ViewRefreshedAt: watermark,
+		ComputedAt:      time.Now().UTC(),
 		Response:        resp,
 	}, appSummaryCacheTTL)
 }

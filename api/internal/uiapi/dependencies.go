@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"gorm.io/gorm"
 )
 
@@ -863,6 +866,59 @@ type UnifiedDependenciesResponse struct {
 	HasMore      bool                `json:"has_more"`
 }
 
+const unifiedDepsCacheKeyPrefix = "deps:unified:v1:"
+
+// unifiedDepsCacheTTL is intentionally long because invalidation is
+// driven by the watermark (sbom_component_view refresh + latest
+// manifest_dependencies row) — TTL only catches orphan keys whose
+// watermark moved past them.
+const unifiedDepsCacheTTL = 30 * time.Minute
+
+// unifiedDepsCacheEntry is the cached response plus the watermark at
+// compute time. ACL-scoped requests skip the cache entirely; cross-
+// repo aggregates are admin-only in Phase 3 so all callers see the
+// same data and key collisions are not a privacy issue.
+type unifiedDepsCacheEntry struct {
+	Watermark time.Time                    `json:"watermark"`
+	Response  UnifiedDependenciesResponse  `json:"response"`
+}
+
+// unifiedDepsCacheKey hashes every input that affects the response.
+// 8-byte fnv-64a collisions are harmless: the watermark check inside
+// the entry would still gate freshness, and the alternative response
+// would have been computed against identical filters anyway.
+func unifiedDepsCacheKey(page, perPage int, search, ecosystem, source, sortColumn, sortOrder string) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(struct {
+		Page, PerPage                                      int
+		Search, Ecosystem, Source, SortColumn, SortOrder   string
+	}{page, perPage, search, ecosystem, source, sortColumn, sortOrder})
+	return fmt.Sprintf("%s%x", unifiedDepsCacheKeyPrefix, h.Sum64())
+}
+
+// unifiedDepsWatermark returns the latest moment at which the
+// underlying data could have changed: the SBOM materialized view
+// refresh or the most recent manifest_dependency insert. Mirrors the
+// app_summary pattern so cache invalidation is driven by data
+// freshness, not wall-clock TTL.
+func unifiedDepsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var sbomRefreshedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'sbom_component_view' LIMIT 1",
+	).Scan(&sbomRefreshedAt)
+
+	var latestManifestCreatedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(created_at), TIMESTAMPTZ 'epoch') FROM manifest_dependencies",
+	).Scan(&latestManifestCreatedAt)
+
+	if latestManifestCreatedAt.After(sbomRefreshedAt) {
+		return latestManifestCreatedAt
+	}
+	return sbomRefreshedAt
+}
+
 // UnifiedDependenciesHandler merges SBOM components and manifest dependencies
 func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -924,6 +980,28 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		if !ok {
 			sqlSortColumn = "repo_count"
 			sortOrder = "desc"
+		}
+
+		// Cache lookup for the cross-repo aggregate. We skip the cache when
+		// repo_id is set because that path is already cheap (filters down
+		// to one repo's rows) and avoids worrying about per-user
+		// invalidation. The cross-repo aggregate path is admin-only in
+		// Phase 3 so all callers share the same response shape — safe to
+		// share a cache key.
+		var cacheStore cache.Store
+		var cacheKey string
+		var watermark time.Time
+		if repoID == "" {
+			cacheStore = cache.NewPostgresStore(db)
+			watermark = unifiedDepsWatermark(r.Context(), db)
+			cacheKey = unifiedDepsCacheKey(page, perPage, search, ecosystem, source, sortColumn, sortOrder)
+			if entry, ok, _ := cache.GetJSON[unifiedDepsCacheEntry](r.Context(), cacheStore, cacheKey); ok {
+				if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(entry.Response)
+					return
+				}
+			}
 		}
 
 		// Build the query. When a source filter is specified, short-circuit to avoid
@@ -1218,13 +1296,22 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			deps = deps[:perPage]
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(UnifiedDependenciesResponse{
+		resp := UnifiedDependenciesResponse{
 			Dependencies: deps,
 			Page:         page,
 			PerPage:      perPage,
 			HasMore:      hasMore,
-		})
+		}
+
+		if cacheStore != nil && cache.ShouldStore(r.Context()) {
+			_ = cache.SetJSON(r.Context(), cacheStore, cacheKey, unifiedDepsCacheEntry{
+				Watermark: watermark,
+				Response:  resp,
+			}, unifiedDepsCacheTTL)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 
