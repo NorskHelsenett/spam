@@ -29,6 +29,7 @@
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import type { MultiSelectOption } from '$lib/components/MultiSelect.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
+	import Loading from '$lib/components/Loading.svelte';
 
 	type ClusterRow = {
 		cluster: string;
@@ -307,9 +308,10 @@
 	// two rapid calls (e.g. loadMain's internal call + an explicit call
 	// from the same event handler) both pass the guard and fire parallel
 	// requests. These flags block re-entry while a fetch is already in
-	// flight.
-	let imagesInFlight = false;
-	let hostsInFlight = false;
+	// flight. Reactive ($state) so the UI can show a spinner while a
+	// fetch is in progress.
+	let imagesInFlight = $state(false);
+	let hostsInFlight = $state(false);
 
 	// imagesPath builds the paginated URL with the include_inactive
 	// toggle and the limit/offset cursor. Kept as a helper so loadImages
@@ -987,7 +989,9 @@
 			</section>
 		{:else if activeTab === 'images'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
-				{#if imageDetails.length === 0}
+				{#if imageDetails.length === 0 && (imagesInFlight || !imagesFetched)}
+					<Loading message="Loading images" variant="spinner" size="md" />
+				{:else if imageDetails.length === 0}
 					<div class="flex flex-col items-center justify-center gap-3 py-16">
 						<Container class="h-10 w-10 text-[var(--yellow)]" />
 						<p class="text-base font-medium text-[var(--text-secondary)]">No images</p>
@@ -1245,7 +1249,9 @@
 					{/if}
 				{/if}
 
-				{#if hosts.length === 0}
+				{#if hosts.length === 0 && (hostsInFlight || !hostsFetched)}
+					<Loading message="Loading hosts" variant="spinner" size="md" />
+				{:else if hosts.length === 0}
 					<div class="flex flex-col items-center justify-center gap-3 py-16">
 						<Globe class="h-10 w-10 text-[var(--yellow)]" />
 						<p class="text-base font-medium text-[var(--text-secondary)]">No hosts</p>

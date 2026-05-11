@@ -170,6 +170,15 @@ type cachedRepos struct {
 	Rows    []RepoRow      `json:"rows"`
 }
 
+// LoadSummary returns the cached summary if its version matches, the
+// stale cached entry if it doesn't (kicking a background refresh), or
+// computes synchronously if there's nothing cached at all.
+//
+// Stale-while-revalidate: the old version ran Refresh() inline whenever
+// the version drifted, which is the path that timed out /api/vuln/summary
+// — Refresh re-runs the unified-vuln MV refresh + computeSummary +
+// computeRepos serialised inside the request. Mirrors the pattern in
+// secrets_dashboard.go (table/trend/stats).
 func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	store := cache.NewPostgresStore(db)
 
@@ -182,8 +191,17 @@ func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 		if sameVersion(entry.Version, version) {
 			return entry.Summary, nil
 		}
+		// Stale: serve immediately, refresh in the background. The
+		// existing refreshGate inside TriggerRefresh coalesces this
+		// with any concurrent scan-completion triggers, so spammed
+		// reads don't pile up redundant refreshes.
+		TriggerRefresh(db)
+		return entry.Summary, nil
 	}
 
+	// Cache miss (first request after deploy, or cache evicted) —
+	// compute inline. After this returns, subsequent requests within
+	// the same version see a cache hit.
 	return Refresh(ctx, db, time.Now().UTC())
 }
 
@@ -517,11 +535,16 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 // changes the version hash, so stale keys are orphaned and expire
 // via TTL. Fresh after every scan without a manual bust.
 func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
+	// 50 is the default; 100 caps the page so a single request can't
+	// pull the whole table. Old code defaulted to 100 and capped at
+	// 500 — at scale that's a ~10x payload + planner cost for marginal
+	// scrolling benefit. The list page virtualises so smaller pages
+	// don't affect UX.
 	if p.Limit <= 0 {
-		p.Limit = 100
+		p.Limit = 50
 	}
-	if p.Limit > 500 {
-		p.Limit = 500
+	if p.Limit > 100 {
+		p.Limit = 100
 	}
 	if p.Offset < 0 {
 		p.Offset = 0
