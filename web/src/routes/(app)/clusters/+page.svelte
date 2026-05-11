@@ -1195,7 +1195,7 @@
 								Container images across all clusters.
 								{#if imageTotal > 0}
 									<span class="text-[var(--text-muted)]">
-										&middot; showing {imageDetails.length} of {imageTotal}{imageActiveFilterCount > 0 ? ' matching' : ''}
+										&middot; {imageTotal} {imageActiveFilterCount > 0 ? 'matching' : 'images'}
 									</span>
 								{/if}
 							</p>
@@ -1373,7 +1373,7 @@
 								Hostnames exposed via Ingress and route resources.
 								{#if hostSummary.total > 0}
 									<span class="text-[var(--text-muted)]">
-										&middot; showing {hosts.length} of {hostSummary.total}{hostActiveFilterCount > 0 ? ' matching' : ''}
+										&middot; {hostSummary.total} {hostActiveFilterCount > 0 ? 'matching' : 'hosts'}
 									</span>
 								{/if}
 							</p>
