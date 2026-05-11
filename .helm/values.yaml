@@ -285,6 +285,23 @@ postgresql:
 
   # Primary instance configuration
   primary:
+    # Extra postgres command-line args. Used to enable
+    # pg_stat_statements (powers the /admin/database slow-queries
+    # view). Changing this list requires a postgres restart because
+    # shared_preload_libraries is a postmaster-level setting.
+    #
+    # After the StatefulSet rolls with this enabled, an operator must
+    # run once (as superuser) in the spam DB:
+    #   CREATE EXTENSION pg_stat_statements;
+    # The SPAM app user is not a superuser and cannot do this itself.
+    extraArgs:
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "pg_stat_statements.track=top"
+
     # Persistent volume configuration
     persistence:
       enabled: true
