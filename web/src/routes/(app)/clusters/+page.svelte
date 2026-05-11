@@ -14,14 +14,20 @@
 	const HOST_ROW_HEIGHT = 72;
 	const OVERSCAN = 10;
 
-	function useVirtualScroll(totalCount: number, rowHeight: number, scrollTop: number, viewportHeight: number) {
+	function useVirtualScroll(totalCount: number, rowHeight: number, scrollTop: number, viewportHeight: number, estimatedTotalCount?: number) {
 		const start = Math.max(0, Math.floor(scrollTop / rowHeight) - OVERSCAN);
 		const end = Math.min(totalCount, Math.ceil((scrollTop + viewportHeight) / rowHeight) + OVERSCAN);
+		// estimatedTotalCount lets a server-paginated list show a true
+		// scrollbar length even before all pages are loaded. The bottom
+		// padding represents loaded-but-unrendered rows AND unloaded
+		// rows below them. Defaults to totalCount when no estimate is
+		// known (fully client-side pagination).
+		const estimated = Math.max(totalCount, estimatedTotalCount ?? totalCount);
 		return {
 			start,
 			end,
 			topPad: start * rowHeight,
-			bottomPad: Math.max(0, (totalCount - end) * rowHeight),
+			bottomPad: Math.max(0, (estimated - end) * rowHeight),
 		};
 	}
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -286,11 +292,19 @@
 	// images/hosts come through. Default is live-only.
 	const inactiveQS = () => (includeInactive ? '?include_inactive=true' : '');
 
+	const buildClusterURL = () => {
+		const params = new URLSearchParams();
+		if (includeInactive) params.set('include_inactive', 'true');
+		const q = clusterSearch.trim();
+		if (q) params.set('q', q);
+		return `/api/clusters/summary?${params}`;
+	};
+
 	const loadMain = async () => {
 		try {
 			const qs = inactiveQS();
 			const [clusterRes, regRes] = await Promise.all([
-				fetch(`/api/clusters/summary${qs}`, { credentials: 'include' }),
+				fetch(buildClusterURL(), { credentials: 'include' }),
 				fetch(`/api/clusters/registry-distribution${qs}`, { credentials: 'include' })
 			]);
 			// Defensive parse: 504s / proxy error pages return non-JSON
@@ -333,6 +347,9 @@
 		if (includeInactive) params.set('include_inactive', 'true');
 		params.set('limit', String(IMAGE_PAGE_SIZE));
 		params.set('offset', String(offset));
+		const q = imageSearch.trim();
+		if (q) params.set('q', q);
+		if (imageSelectedRegistries.length > 0) params.set('registries', imageSelectedRegistries.join(','));
 		return `/api/clusters/images/detail?${params}`;
 	};
 
@@ -397,11 +414,8 @@
 		if (initial) hostsInFlight = true; else hostsLoadingMore = true;
 		try {
 			const offset = initial ? 0 : hostsOffset;
-			const params = new URLSearchParams({ offset: String(offset), limit: String(hostsPageSize) });
-			const q = hostSearch.trim();
-			if (q) params.set('q', q);
-			const inactive = inactiveQS();
-			const url = `/api/clusters/hosts?${params}${inactive ? '&' + inactive.slice(1) : ''}`;
+			const qs = buildHostQueryString({ offset: String(offset), limit: String(hostsPageSize) });
+			const url = `/api/clusters/hosts${qs}`;
 			const res = await fetch(url, { credentials: 'include' });
 			if (res.ok) {
 				const body = await res.json().catch(() => null);
@@ -439,13 +453,19 @@
 		}
 	});
 
-	// Infinite scroll: when the virtualised viewport reaches the last
-	// 25% of the currently loaded rows, fetch the next page. Server-side
-	// pagination (offset / limit) keeps each request bounded.
+	// Infinite scroll: trigger only when the viewport is within the
+	// last 20 rows of the currently loaded set. Originally a 75%
+	// threshold, which during fast scrolling fired again immediately
+	// after each load completed (the new end was past 75% of the new
+	// length too) and spammed the endpoint with offset=200, offset=400,
+	// offset=600 in rapid succession. The "last 20 rows" trigger is
+	// edge-driven instead of ratio-driven, so a single load is enough
+	// to push the user back out of the trigger window until they
+	// actually scroll further.
 	$effect(() => {
 		if (!hostsHasMore || hostsLoadingMore || hostsInFlight) return;
 		if (sortedHosts.length === 0) return;
-		const trigger = Math.max(0, Math.floor(sortedHosts.length * 0.75));
+		const trigger = Math.max(0, sortedHosts.length - 20);
 		if (hostVirt.end >= trigger) loadMoreHosts();
 	});
 
@@ -525,25 +545,45 @@
 		if (activeTab === 'hosts') loadHosts();
 	});
 
-	// Debounced search: when the user types in the host search box,
-	// reset pagination and reload page 1 against the server. 200ms is
-	// snappy without firing on every keystroke.
-	let hostSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	// Debounced cluster search → reload /clusters/summary with q=.
+	let clusterSearchTimer: ReturnType<typeof setTimeout> | null = null;
 	$effect(() => {
-		const q = hostSearch; // track
+		const q = clusterSearch; // track
+		if (!browser) return;
+		if (clusterSearchTimer) clearTimeout(clusterSearchTimer);
+		clusterSearchTimer = setTimeout(() => {
+			loadMain();
+		}, 200);
+		void q;
+	});
+
+	// Debounced reload whenever any host filter changes (search or any
+	// of the categorical multiselects or the active-workloads toggle).
+	// 200ms is snappy enough without firing on every keystroke or click.
+	// Also refreshes the summary so the chip / "showing N of M" /
+	// dropdown options re-aggregate against the new filter scope.
+	let hostFiltersTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		// Track every filter input so this effect re-runs on change.
+		const _ = [
+			hostSearch,
+			hostSelectedClusters.join(' '),
+			hostSelectedNamespaces.join(' '),
+			hostSelectedKinds.join(' '),
+			hostActiveWorkloadsOnly
+		];
 		if (!browser) return;
 		if (activeTab !== 'hosts' && !hostsFetched) return;
-		if (hostSearchTimer) clearTimeout(hostSearchTimer);
-		hostSearchTimer = setTimeout(() => {
+		if (hostFiltersTimer) clearTimeout(hostFiltersTimer);
+		hostFiltersTimer = setTimeout(() => {
 			hostsFetched = false;
 			hostsOffset = 0;
 			hostsHasMore = true;
 			hosts = [];
 			loadHosts();
+			loadHostSummary();
 		}, 200);
-		// Suppress linter / svelte-check warning when q is technically
-		// unused — its only purpose is to register reactivity.
-		void q;
+		void _;
 	});
 
 	// When the "Show inactive" toggle flips, invalidate the lazy-load
@@ -592,17 +632,38 @@
 	// 1MB hosts list (which the Hosts tab still loads lazily). The
 	// classification (LB IP first, then cached DNS) lives server-side
 	// so "pending" reflects genuinely unknown hosts rather than
-	// "haven't scrolled there yet" — see HostSummaryHandler.
-	let hostSummary = $state<{ external: number; internal: number; pending: number; total: number }>({
-		external: 0,
-		internal: 0,
-		pending: 0,
-		total: 0
-	});
+	// "haven't scrolled there yet" — see HostSummaryHandler. The same
+	// response also carries the distinct values for the filter
+	// dropdowns, since with server-side pagination the loaded rows
+	// don't represent the full set of clusters/namespaces/kinds.
+	type HostFacetOption = { id: string; label: string };
+	let hostSummary = $state<{
+		external: number;
+		internal: number;
+		pending: number;
+		total: number;
+		clusters: HostFacetOption[];
+		namespaces: string[];
+		kinds: string[];
+	}>({ external: 0, internal: 0, pending: 0, total: 0, clusters: [], namespaces: [], kinds: [] });
+
+	const buildHostQueryString = (extra?: Record<string, string>): string => {
+		const params = new URLSearchParams();
+		if (includeInactive) params.set('include_inactive', 'true');
+		const q = hostSearch.trim();
+		if (q) params.set('q', q);
+		if (hostSelectedClusters.length > 0) params.set('cluster_ids', hostSelectedClusters.join(','));
+		if (hostSelectedNamespaces.length > 0) params.set('namespaces', hostSelectedNamespaces.join(','));
+		if (hostSelectedKinds.length > 0) params.set('kinds', hostSelectedKinds.join(','));
+		if (hostActiveWorkloadsOnly) params.set('active_workloads_only', 'true');
+		if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
+		const s = params.toString();
+		return s ? `?${s}` : '';
+	};
 
 	const loadHostSummary = async () => {
 		try {
-			const res = await fetch(`/api/clusters/hosts/summary${inactiveQS()}`, { credentials: 'include' });
+			const res = await fetch(`/api/clusters/hosts/summary${buildHostQueryString()}`, { credentials: 'include' });
 			if (res.ok) {
 				const body = await res.json().catch(() => null);
 				if (body && typeof body === 'object') {
@@ -610,7 +671,10 @@
 						external: body.external ?? 0,
 						internal: body.internal ?? 0,
 						pending: body.pending ?? 0,
-						total: body.total ?? 0
+						total: body.total ?? 0,
+						clusters: Array.isArray(body.clusters) ? body.clusters : [],
+						namespaces: Array.isArray(body.namespaces) ? body.namespaces : [],
+						kinds: Array.isArray(body.kinds) ? body.kinds : []
 					};
 				}
 			}
@@ -655,19 +719,10 @@
 		(clusterSearch.trim() ? 1 : 0) + (includeInactive ? 1 : 0)
 	);
 
-	const filteredClusters = $derived(
-		clusters.filter((c) => {
-			if (clusterSearch.trim()) {
-				const q = clusterSearch.trim().toLowerCase();
-				if (
-					!(c.cluster || '').toLowerCase().includes(q) &&
-					!(c.cluster_id || '').toLowerCase().includes(q) &&
-					!(c.environment || '').toLowerCase().includes(q)
-				) return false;
-			}
-			return true;
-		})
-	);
+	// Cluster search is server-side via buildClusterURL — the filter
+	// below stays as a passthrough so the existing render path (which
+	// reads filteredClusters) keeps working without further changes.
+	const filteredClusters = $derived(clusters);
 
 	const clearClusterFilters = () => {
 		clusterSearch = '';
@@ -687,21 +742,9 @@
 		(imageSearch.trim() ? 1 : 0) + (imageSelectedRegistries.length > 0 ? 1 : 0)
 	);
 
-	const filteredImages = $derived(
-		imageDetails.filter((img) => {
-			if (imageSelectedRegistries.length > 0 && !imageSelectedRegistries.includes(img.registry)) return false;
-			if (imageSearch.trim()) {
-				const q = imageSearch.trim().toLowerCase();
-				if (
-					!img.image.toLowerCase().includes(q) &&
-					!img.registry.toLowerCase().includes(q) &&
-					!(img.tags || '').toLowerCase().includes(q) &&
-					!(img.digest || '').toLowerCase().includes(q)
-				) return false;
-			}
-			return true;
-		})
-	);
+	// Image search + registry filter are server-side via imagesPath().
+	// Keep filteredImages as a passthrough so render code unchanged.
+	const filteredImages = $derived(imageDetails);
 
 	const clearImageFilters = () => {
 		imageSearch = '';
@@ -716,14 +759,18 @@
 	let hostSelectedKinds: string[] = $state([]);
 	let hostActiveWorkloadsOnly = $state(false);
 
+	// Filter dropdown options come from the host summary endpoint —
+	// it scans every host the caller can see, regardless of pagination.
+	// Loaded-rows-based options would miss values from unloaded pages
+	// and silently exclude valid filter targets.
 	const hostClusterOptions: MultiSelectOption[] = $derived(
-		[...new Set(hosts.map((h) => h.cluster || h.cluster_id))].sort().map((c) => ({ value: c, label: c }))
+		hostSummary.clusters.map((c) => ({ value: c.id, label: c.label }))
 	);
 	const hostNamespaceOptions: MultiSelectOption[] = $derived(
-		[...new Set(hosts.map((h) => h.namespace))].sort().map((n) => ({ value: n, label: n }))
+		hostSummary.namespaces.map((n) => ({ value: n, label: n }))
 	);
 	const hostKindOptions: MultiSelectOption[] = $derived(
-		[...new Set(hosts.map((h) => h.kind))].sort().map((k) => ({ value: k, label: k }))
+		hostSummary.kinds.map((k) => ({ value: k, label: k }))
 	);
 
 	const hostActiveFilterCount = $derived(
@@ -734,20 +781,11 @@
 		(hostActiveWorkloadsOnly ? 1 : 0)
 	);
 
-	// Search is server-side (hostSearch drives the q= param via the
-	// debounce effect below). Categorical filters (clusters / namespaces
-	// / kinds / active-workloads-only) remain client-side for now and
-	// only operate on the rows already loaded — a known limitation that
-	// will follow once those move server-side too.
-	const filteredHosts = $derived(
-		hosts.filter((h) => {
-			if (hostActiveWorkloadsOnly && h.workload_count === 0) return false;
-			if (hostSelectedClusters.length > 0 && !hostSelectedClusters.includes(h.cluster || h.cluster_id)) return false;
-			if (hostSelectedNamespaces.length > 0 && !hostSelectedNamespaces.includes(h.namespace)) return false;
-			if (hostSelectedKinds.length > 0 && !hostSelectedKinds.includes(h.kind)) return false;
-			return true;
-		})
-	);
+	// All host filters (search + clusters + namespaces + kinds +
+	// active-workloads-only) are applied server-side via the
+	// buildHostQueryString helper. filteredHosts is now a passthrough
+	// so the existing render path keeps working without changes.
+	const filteredHosts = $derived(hosts);
 
 	const clearHostFilters = () => {
 		hostSearch = '';
@@ -818,7 +856,7 @@
 	// Virtual scroll ranges (must be after sorted* declarations)
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
 	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH));
-	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH));
+	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH, hostSummary.total));
 
 	// Apply pending scroll restores once the target tab's DOM has
 	// mounted (scrollEl bound) and its data has landed (rows > 0).
@@ -1251,9 +1289,9 @@
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Hosts</h2>
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Hostnames exposed via Ingress and route resources.
-								{#if hostActiveFilterCount > 0 || hostsHasMore}
+								{#if hostSummary.total > 0}
 									<span class="text-[var(--text-muted)]">
-										&middot; showing {filteredHosts.length} of {hostSummary.total || hosts.length}{hostSearch.trim() ? ' matching' : ''}
+										&middot; showing {hosts.length} of {hostSummary.total}{hostActiveFilterCount > 0 ? ' matching' : ''}
 									</span>
 								{/if}
 							</p>

@@ -588,6 +588,18 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
+		// Free-text search across the fields the frontend table search
+		// covered client-side. Cluster list is small (handful to a few
+		// dozen rows) so this stays as a single query without pagination.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		searchWhere := ""
+		var searchArgs []any
+		if searchQuery != "" {
+			pattern := "%" + searchQuery + "%"
+			searchWhere = `AND (cs.cluster ILIKE ? OR cs.cluster_id ILIKE ? OR cs.environment ILIKE ?)`
+			searchArgs = []any{pattern, pattern, pattern}
+		}
+
 		query := `
 			SELECT
 			    cs.cluster, cs.cluster_id, cs.environment,
@@ -595,10 +607,12 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			    cs.last_seen
 			FROM cluster_summary cs
 			` + livenessJoin + `
-			WHERE TRUE ` + aclWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + searchWhere + `
 			ORDER BY cs.last_seen DESC
 		`
-		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+		queryArgs := append([]any{}, aclArgs...)
+		queryArgs = append(queryArgs, searchArgs...)
+		if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
 			log.Printf("ClusterSummaryHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -775,6 +789,35 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
+		// Free-text search across the row-level fields the frontend
+		// table used to filter client-side. Pre-aggregate filter so the
+		// GROUP BY counts (cluster_count, container_count, etc.) reflect
+		// only the matched rows.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		var preGroupWhere string
+		var preGroupArgs []any
+		if searchQuery != "" {
+			pattern := "%" + searchQuery + "%"
+			preGroupWhere += `AND (cii.registry ILIKE ? OR cii.image ILIKE ? OR cii.digest ILIKE ? OR cii.tag ILIKE ?) `
+			preGroupArgs = append(preGroupArgs, pattern, pattern, pattern, pattern)
+		}
+		// Registry multi-select. Comma-separated raw_registry values
+		// match the cii.raw_registry column (not the display registry
+		// which the frontend uses, since the inventory rows store raw).
+		if rawReg := r.URL.Query().Get("registries"); rawReg != "" {
+			values := []any{}
+			for _, v := range strings.Split(rawReg, ",") {
+				if v = strings.TrimSpace(v); v != "" {
+					values = append(values, v)
+				}
+			}
+			if len(values) > 0 {
+				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
+				preGroupWhere += `AND cii.raw_registry IN (` + placeholders + `) `
+				preGroupArgs = append(preGroupArgs, values...)
+			}
+		}
+
 		// limit+1 gives us has_more without a second COUNT query.
 		// Stable ORDER BY (container_count DESC, image, digest) ensures
 		// consistent paging when nothing changes between requests.
@@ -789,7 +832,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				    MAX(cii.last_seen)                     AS last_seen
 				FROM cluster_image_inventory cii
 				` + livenessJoin + `
-				WHERE TRUE ` + aclWhere + `
+				WHERE TRUE ` + aclWhere + ` ` + preGroupWhere + `
 				GROUP BY cii.raw_registry, cii.registry, cii.image, cii.digest
 				ORDER BY container_count DESC, cii.image ASC, cii.digest ASC
 				LIMIT ? OFFSET ?
@@ -845,6 +888,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 		`
 
 		args := append([]any{}, aclArgs...)
+		args = append(args, preGroupArgs...)
 		args = append(args, limit+1, offset)
 
 		if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
@@ -964,13 +1008,15 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		if limit > hostsMaxLimit {
 			limit = hostsMaxLimit
 		}
-		// Free-text search. ILIKE across the fields the old client-side
-		// search covered (host, cluster, namespace, name, environment,
-		// kind, ingress_class, backends, lb_ips). The frontend table
-		// search input drives this — categorical filters (cluster /
-		// namespace / kind multiselect, active-only) are still applied
-		// client-side on loaded rows and will follow in a separate pass.
+		// Free-text search and categorical filters all applied server-
+		// side so pagination works correctly: the old client-side filters
+		// only operated on rows already loaded, which gave wrong totals
+		// and missed unloaded matches.
 		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		filterClusters := parseHostFilterCSV(r.URL.Query().Get("cluster_ids"))
+		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
+		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
+		activeWorkloadsOnly := isTruthy(r.URL.Query().Get("active_workloads_only"))
 
 		rows := []HostRow{}
 		ctx := r.Context()
@@ -1004,23 +1050,7 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
-		searchWhere := ""
-		var searchArgs []any
-		if searchQuery != "" {
-			pattern := "%" + searchQuery + "%"
-			searchWhere = `AND (
-				he.host ILIKE ?
-				OR he.cluster ILIKE ?
-				OR he.namespace ILIKE ?
-				OR he.name ILIKE ?
-				OR he.environment ILIKE ?
-				OR he.kind ILIKE ?
-				OR he.ingress_class ILIKE ?
-				OR he.backends ILIKE ?
-				OR he.lb_ips ILIKE ?
-			)`
-			searchArgs = []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
-		}
+		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
 
 		// workload_count is the count of distinct image digests that
 		// sit on this URL's backend chain (see exposed_digests MV).
@@ -1044,12 +1074,12 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			      AND ed.exposure_kind = he.kind
 			      AND ed.exposure_name = he.name
 			) w ON TRUE
-			WHERE TRUE ` + aclWhere + ` ` + searchWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
 			ORDER BY he.host, he.cluster
 			LIMIT ? OFFSET ?
 		`
 		queryArgs := append([]any{}, aclArgs...)
-		queryArgs = append(queryArgs, searchArgs...)
+		queryArgs = append(queryArgs, filterArgs...)
 		queryArgs = append(queryArgs, limit, offset)
 
 		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
@@ -1058,8 +1088,94 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			return
 		}
 
+		// activeOnly (workload_count > 0) is post-paginate by design:
+		// the workload_count is a per-row scalar, and the SQL only sees
+		// it via the LATERAL subquery. Pushing it into the WHERE would
+		// require materialising the count twice. Apply in Go on the
+		// already-bounded page — cheap, and the page already paid for
+		// the rows. activeWorkloadsOnly is a sibling for the host-tab
+		// filter that hides cluster-side endpoints without running
+		// containers; activeOnly is the older URL flag for the same
+		// semantics, kept for backward compatibility.
+		if activeWorkloadsOnly {
+			activeOnly = true
+		}
+
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// parseHostFilterCSV splits a comma-separated query-string value into
+// trimmed non-empty tokens. nil result means "no filter applied".
+func parseHostFilterCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// buildHostFilterClauses produces the WHERE fragment + args for the
+// host_exposure search box and the cluster / namespace / kind
+// multiselects. Shared between HostsHandler and HostSummaryHandler so
+// the chip counts always reflect the same row set as the table.
+func buildHostFilterClauses(searchQuery string, clusterIDs, namespaces, kinds []string) (string, []any) {
+	var parts []string
+	var args []any
+	if searchQuery != "" {
+		pattern := "%" + searchQuery + "%"
+		parts = append(parts, `(
+			he.host ILIKE ?
+			OR he.cluster ILIKE ?
+			OR he.namespace ILIKE ?
+			OR he.name ILIKE ?
+			OR he.environment ILIKE ?
+			OR he.kind ILIKE ?
+			OR he.ingress_class ILIKE ?
+			OR he.backends ILIKE ?
+			OR he.lb_ips ILIKE ?
+		)`)
+		for i := 0; i < 9; i++ {
+			args = append(args, pattern)
+		}
+	}
+	if len(clusterIDs) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(clusterIDs)), ",")
+		parts = append(parts, `(he.cluster_id IN (`+placeholders+`) OR he.cluster IN (`+placeholders+`))`)
+		for _, v := range clusterIDs {
+			args = append(args, v)
+		}
+		for _, v := range clusterIDs {
+			args = append(args, v)
+		}
+	}
+	if len(namespaces) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(namespaces)), ",")
+		parts = append(parts, `he.namespace IN (`+placeholders+`)`)
+		for _, v := range namespaces {
+			args = append(args, v)
+		}
+	}
+	if len(kinds) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+		parts = append(parts, `he.kind IN (`+placeholders+`)`)
+		for _, v := range kinds {
+			args = append(args, v)
+		}
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "AND " + strings.Join(parts, " AND "), args
 }
 
 // HostSummary is the small response shape backing the cluster page's
@@ -1077,6 +1193,21 @@ type HostSummary struct {
 	Internal int `json:"internal"`
 	Pending  int `json:"pending"`
 	Total    int `json:"total"`
+	// Distinct values for the filter dropdowns. Computed in the same
+	// query as the categorisation so the frontend doesn't have to do a
+	// separate facets round-trip. Returned for the entire ACL-scoped
+	// dataset, not the paginated table page — that's the whole point.
+	Clusters   []HostFacetOption `json:"clusters"`
+	Namespaces []string          `json:"namespaces"`
+	Kinds      []string          `json:"kinds"`
+}
+
+// HostFacetOption pairs a cluster id with its display name so the
+// multiselect can show "prod-eu-1" while the URL param carries the
+// stable id.
+type HostFacetOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 const hostSummaryCacheKeyPrefix = "hosts:summary:v1:"
@@ -1124,23 +1255,37 @@ func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			return
 		}
 
-		watermark := hostExposureWatermark(ctx, db)
-		cacheKey := buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive)
+		// Same filters as HostsHandler so the chip totals correspond
+		// 1:1 with what the table is currently showing. Skips the
+		// summary cache when filters are applied (each unique filter
+		// combination would otherwise spawn its own cache entry and
+		// the kv_store would balloon for marginal benefit).
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		filterClusters := parseHostFilterCSV(r.URL.Query().Get("cluster_ids"))
+		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
+		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
+		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
+		filtersApplied := filterWhere != ""
 
-		if entry, ok, _ := cache.GetJSON[hostSummaryCacheEntry](ctx, cs, cacheKey); ok {
-			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
-				writeJSON(w, http.StatusOK, entry.Summary)
-				return
+		watermark := hostExposureWatermark(ctx, db)
+		var cacheKey string
+		if !filtersApplied {
+			cacheKey = buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive)
+			if entry, ok, _ := cache.GetJSON[hostSummaryCacheEntry](ctx, cs, cacheKey); ok {
+				if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+					writeJSON(w, http.StatusOK, entry.Summary)
+					return
+				}
 			}
 		}
 
-		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive)
+		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive, filterWhere, filterArgs)
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
 
-		if cache.ShouldStore(ctx) {
+		if !filtersApplied && cache.ShouldStore(ctx) {
 			_ = cache.SetJSON(ctx, cs, cacheKey, hostSummaryCacheEntry{
 				Watermark: watermark,
 				Summary:   summary,
@@ -1173,7 +1318,7 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 // computeHostSummary reads the deduped host set the caller can see and
 // classifies each one. Dedup is by hostname (the same FQDN can appear
 // once per cluster/namespace via a shared *.apps wildcard).
-func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool) (HostSummary, error) {
+func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
 		livenessJoin = ""
@@ -1184,27 +1329,74 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 	}
 
 	type row struct {
-		Host  string `gorm:"column:host"`
-		LBIPs string `gorm:"column:lb_ips"`
+		Host      string `gorm:"column:host"`
+		LBIPs     string `gorm:"column:lb_ips"`
+		Cluster   string `gorm:"column:cluster"`
+		ClusterID string `gorm:"column:cluster_id"`
+		Namespace string `gorm:"column:namespace"`
+		Kind      string `gorm:"column:kind"`
 	}
 	var rows []row
+	// Project all columns the categorisation + facets need on the
+	// same scan. DISTINCT ON (host) dedups for the categorisation; the
+	// facet aggregation runs over the same row set, which is correct
+	// for filter dropdowns (we want each option to appear once even
+	// if many host rows share that cluster/namespace/kind).
 	query := `
-		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
+		SELECT DISTINCT ON (he.host)
+		    he.host, he.lb_ips, he.cluster, he.cluster_id, he.namespace, he.kind
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + `
+		WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
 		ORDER BY he.host
 	`
-	if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+	queryArgs := append([]any{}, aclArgs...)
+	queryArgs = append(queryArgs, filterArgs...)
+	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
 		return HostSummary{}, err
 	}
+
+	clusterByID := make(map[string]string, 8)
+	namespaceSet := make(map[string]struct{}, 16)
+	kindSet := make(map[string]struct{}, 4)
 
 	var summary HostSummary
 	summary.Total = len(rows)
 	for _, r := range rows {
 		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
+		if r.ClusterID != "" {
+			// Prefer the display name when present; fall back to id.
+			label := r.Cluster
+			if label == "" {
+				label = r.ClusterID
+			}
+			clusterByID[r.ClusterID] = label
+		}
+		if r.Namespace != "" {
+			namespaceSet[r.Namespace] = struct{}{}
+		}
+		if r.Kind != "" {
+			kindSet[r.Kind] = struct{}{}
+		}
 	}
+
+	summary.Clusters = make([]HostFacetOption, 0, len(clusterByID))
+	for id, label := range clusterByID {
+		summary.Clusters = append(summary.Clusters, HostFacetOption{ID: id, Label: label})
+	}
+	sort.Slice(summary.Clusters, func(i, j int) bool { return summary.Clusters[i].Label < summary.Clusters[j].Label })
+	summary.Namespaces = sortedKeys(namespaceSet)
+	summary.Kinds = sortedKeys(kindSet)
 	return summary, nil
+}
+
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
