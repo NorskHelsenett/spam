@@ -100,11 +100,5 @@ func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 
-	refreshedAt := time.Now().UTC()
-	return db.WithContext(ctx).Exec(`
-		INSERT INTO materialized_view_refreshes (name, refreshed_at)
-		VALUES (?, ?), (?, ?)
-		ON CONFLICT (name)
-		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-	`, clusterSummaryViewName, refreshedAt, clusterImageViewName, refreshedAt).Error
+	return recordMaterializedViewRefresh(ctx, db, clusterMVNames, time.Now().UTC())
 }

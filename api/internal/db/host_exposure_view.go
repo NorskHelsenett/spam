@@ -85,11 +85,5 @@ func RefreshHostExposureViews(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 
-	refreshedAt := time.Now().UTC()
-	return db.WithContext(ctx).Exec(`
-		INSERT INTO materialized_view_refreshes (name, refreshed_at)
-		VALUES (?, ?), (?, ?)
-		ON CONFLICT (name)
-		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-	`, hostExposureViewName, refreshedAt, exposedDigestsViewName, refreshedAt).Error
+	return recordMaterializedViewRefresh(ctx, db, names, time.Now().UTC())
 }

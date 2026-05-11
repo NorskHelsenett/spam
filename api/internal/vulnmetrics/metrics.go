@@ -296,6 +296,12 @@ func TriggerRefresh(db *gorm.DB) {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
 			if _, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
 				log.Printf("vulnmetrics: background refresh: %v", err)
+				// Skipping the assetrisk cascade is deliberate — asset_risk
+				// reads from the vuln_unified MVs, so refreshing it against
+				// data we just failed to recompute would record a stale
+				// snapshot. The log line makes the staleness visible to ops
+				// instead of silently letting asset_risk drift.
+				log.Printf("vulnmetrics: skipping assetrisk cascade (vulnmetrics refresh failed)")
 			} else {
 				// asset_risk reads the unified vulnerability MVs. Cascade
 				// after the vuln refresh has had a chance to land instead

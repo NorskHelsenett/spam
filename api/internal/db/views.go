@@ -284,6 +284,30 @@ func refreshView(ctx context.Context, db *gorm.DB, view string) error {
 	return err
 }
 
+// recordMaterializedViewRefresh upserts a refreshed_at row in
+// materialized_view_refreshes for each name in the slice. Single
+// source of truth so a future view added to any of the multi-MV
+// refresher lists (cluster_summary, host_exposure, vuln_unified)
+// can't silently miss its timestamp record — the previous pattern
+// hardcoded VALUES (?, ?), (?, ?) tuples positional to a slice and
+// would only catch the bug at runtime via a stuck debounce window.
+func recordMaterializedViewRefresh(ctx context.Context, db *gorm.DB, names []string, at time.Time) error {
+	if len(names) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("(?,?),", len(names)), ",")
+	args := make([]any, 0, len(names)*2)
+	for _, n := range names {
+		args = append(args, n, at)
+	}
+	return db.WithContext(ctx).Exec(`
+		INSERT INTO materialized_view_refreshes (name, refreshed_at)
+		VALUES `+placeholders+`
+		ON CONFLICT (name)
+		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
+	`, args...).Error
+}
+
 func materializedViewsRecentlyRefreshed(ctx context.Context, db *gorm.DB, names []string, maxAge time.Duration) bool {
 	if maxAge <= 0 || len(names) == 0 {
 		return false
@@ -389,13 +413,7 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 
-	refreshedAt := time.Now().UTC()
-	return db.WithContext(ctx).Exec(`
-		INSERT INTO materialized_view_refreshes (name, refreshed_at)
-		VALUES (?, ?), (?, ?)
-		ON CONFLICT (name)
-		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-	`, vulnUnifiedViewNames[0], refreshedAt, vulnUnifiedViewNames[1], refreshedAt).Error
+	return recordMaterializedViewRefresh(ctx, db, vulnUnifiedViewNames, time.Now().UTC())
 }
 
 // RefreshMaterializedViews refreshes SBOM materialized views and records refresh time.
@@ -452,15 +470,7 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 
-	refreshedAt := time.Now().UTC()
-	if err := db.WithContext(ctx).Exec(`
-		INSERT INTO materialized_view_refreshes (name, refreshed_at)
-		VALUES
-			('sbom_component_view', ?),
-			('sbom_metadata_view', ?)
-		ON CONFLICT (name)
-		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-	`, refreshedAt, refreshedAt).Error; err != nil {
+	if err := recordMaterializedViewRefresh(ctx, db, sbomViewNames, time.Now().UTC()); err != nil {
 		return fmt.Errorf("record refresh: %w", err)
 	}
 
