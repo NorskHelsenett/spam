@@ -67,19 +67,24 @@ func TriggerRefresh(db *gorm.DB) {
 	}()
 }
 
-// EnsureFirstPopulate blocks until cluster_summary is populated. Spawn
-// from a startup goroutine so HTTP serving isn't gated on it.
-// Multi-replica safe via the advisory lock inside RefreshClusterSummaryView
-// — only one replica actually does the REFRESH; others observe
-// ErrRefreshLockHeld and poll. Returns on ctx cancel.
+// EnsureFirstPopulate blocks until both cluster_summary and
+// cluster_image_inventory are populated. Spawn from a startup
+// goroutine so HTTP serving isn't gated on it. Multi-replica safe via
+// the advisory lock inside RefreshClusterSummaryView — only one replica
+// actually does the REFRESH; others observe ErrRefreshLockHeld and
+// poll. Returns on ctx cancel.
 func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
 	backoff := 2 * time.Second
 	for {
-		populated, err := spamdb.ClusterSummaryViewPopulated(ctx, db)
+		summaryReady, err := spamdb.ClusterSummaryViewPopulated(ctx, db)
 		if err != nil {
 			log.Printf("clustersummary: check populated: %v", err)
 		}
-		if populated {
+		imageReady, err := spamdb.ClusterImageInventoryPopulated(ctx, db)
+		if err != nil {
+			log.Printf("clustersummary: check image inventory populated: %v", err)
+		}
+		if summaryReady && imageReady {
 			return nil
 		}
 		if err := spamdb.RefreshClusterSummaryView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {

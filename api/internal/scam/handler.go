@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -575,6 +576,12 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 }
 
 // RegistryDistributionHandler returns unique image counts by registry.
+// Reads from cluster_image_inventory (see
+// 20260511_create_cluster_image_inventory_view.sql); freshness is
+// ingest-driven via clustersummary.TriggerRefresh from CallcenterHandler.
+//
+// Output cardinality is bounded by the number of registries in the
+// fleet (typically tens), so this endpoint isn't paginated.
 func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -582,23 +589,47 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`
+
+		// Cold-start gate: MV created WITH NO DATA. Kick a refresh
+		// and return empty so the first request after fresh deploy
+		// doesn't raise SQLSTATE 55000.
+		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := ""
+		if !includeInactive {
+			livenessJoin = "JOIN cluster_sessions sess ON sess.cluster_id = cii.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		query := `
 			SELECT
-				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
-			FROM live
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'pod_phase' = 'Running'
-			  AND COALESCE(data->>'digest', '') != ''
-			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
+			    cii.registry,
+			    COUNT(DISTINCT (cii.raw_registry || '/' || cii.image || '@' || cii.digest))::bigint AS image_count
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + `
+			GROUP BY cii.registry
 			ORDER BY image_count DESC
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+		`
+
+		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+			log.Printf("RegistryDistributionHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
@@ -641,6 +672,12 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 // tags, plus a digest_id (from image_digests) for drawer deep-linking
 // and severity counts from the latest SUCCEEDED IMAGE_SCAN for that
 // digest.
+//
+// Reads from cluster_image_inventory (per running container) and
+// aggregates at request time so ACL on cluster_id can apply before the
+// GROUP BY. Paginated via ?limit/?offset with a has_more flag — the
+// dependencies endpoint pattern, mirrored here so the frontend can
+// infinite-scroll without loading 10k+ rows up front.
 func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -659,45 +696,93 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			VulnLow        int       `json:"vuln_low"`
 			VulnUnknown    int       `json:"vuln_unknown"`
 		}
+		type response struct {
+			Items   []row `json:"items"`
+			Limit   int   `json:"limit"`
+			Offset  int   `json:"offset"`
+			HasMore bool  `json:"has_more"`
+		}
+
+		ctx := r.Context()
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
 		if deny {
-			writeJSON(w, http.StatusOK, rows)
+			writeJSON(w, http.StatusOK, response{Items: rows})
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`,
-			agg AS (
+
+		// Cold-start gate.
+		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, response{Items: rows})
+			return
+		}
+
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		offset := 0
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := ""
+		if !includeInactive {
+			livenessJoin = "JOIN cluster_sessions sess ON sess.cluster_id = cii.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		// limit+1 gives us has_more without a second COUNT query.
+		// Stable ORDER BY (container_count DESC, image, digest) ensures
+		// consistent paging when nothing changes between requests.
+		query := `
+			WITH page AS (
 				SELECT
-					data->>'registry' AS raw_registry,
-					COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-					data->>'image' AS image,
-					COALESCE(data->>'digest', '') AS digest,
-					STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
-					COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
-					COUNT(DISTINCT data->>'namespace') AS namespace_count,
-					COUNT(*) AS container_count,
-					MAX(received_at) AS last_seen
-				FROM live
-				WHERE data->>'kind' = 'Container'
-				  AND data->>'pod_phase' = 'Running'
-				GROUP BY data->>'registry', data->>'image', data->>'digest'
+				    cii.raw_registry, cii.registry, cii.image, cii.digest,
+				    STRING_AGG(DISTINCT cii.tag, ',' ORDER BY cii.tag) FILTER (WHERE cii.tag IS NOT NULL AND cii.tag <> '') AS tags,
+				    COUNT(DISTINCT cii.cluster_id)::bigint AS cluster_count,
+				    COUNT(DISTINCT cii.namespace)::bigint  AS namespace_count,
+				    COUNT(*)::bigint                       AS container_count,
+				    MAX(cii.last_seen)                     AS last_seen
+				FROM cluster_image_inventory cii
+				` + livenessJoin + `
+				WHERE TRUE ` + aclWhere + `
+				GROUP BY cii.raw_registry, cii.registry, cii.image, cii.digest
+				ORDER BY container_count DESC, cii.image ASC, cii.digest ASC
+				LIMIT ? OFFSET ?
 			),
 			latest_scan AS (
-				-- Source of truth for findings is image_scan_runs, not jobs:
-				-- the nightly sbom-scanner revuln flow creates scan_run rows
-				-- with uuid.NewString() that don't correspond to any jobs.id,
-				-- so joining via jobs drops any image that's been re-scanned
-				-- against a newer grype DB since its last IMAGE_SCAN.
+				-- Latest finished scan per image_digest_id. Restricted to
+				-- digests in the page by EXISTS so we don't sort all
+				-- image_scan_runs when we only need 50 rows of vuln counts.
 				SELECT DISTINCT ON (image_digest_id)
 				       image_digest_id,
 				       id AS scan_run_id
-				FROM image_scan_runs
+				FROM image_scan_runs isr
 				WHERE finished_at IS NOT NULL
+				  AND EXISTS (
+				      SELECT 1
+				      FROM image_digests id
+				      JOIN page p
+				        ON p.raw_registry = id.registry
+				       AND p.image        = id.repository
+				       AND p.digest       = id.digest
+				      WHERE id.id = isr.image_digest_id
+				  )
 				ORDER BY image_digest_id, finished_at DESC
 			),
 			vuln_counts AS (
-				-- Qualify image_digest_id with f. — both tables expose it
-				-- after the JOIN; unqualified references are ambiguous.
 				SELECT f.image_digest_id,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
@@ -709,29 +794,44 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				GROUP BY f.image_digest_id
 			)
 			SELECT
-				agg.registry, agg.image, agg.digest,
-				COALESCE(id.id, '') AS digest_id,
-				agg.tags, agg.cluster_count, agg.namespace_count,
-				agg.container_count, agg.last_seen,
-				COALESCE(vc.vuln_critical, 0) AS vuln_critical,
-				COALESCE(vc.vuln_high, 0)     AS vuln_high,
-				COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
-				COALESCE(vc.vuln_low, 0)      AS vuln_low,
-				COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
-			FROM agg
+			    page.registry, page.image, page.digest,
+			    COALESCE(id.id::text, '') AS digest_id,
+			    COALESCE(page.tags, '')   AS tags,
+			    page.cluster_count, page.namespace_count, page.container_count, page.last_seen,
+			    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
+			    COALESCE(vc.vuln_high, 0)     AS vuln_high,
+			    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
+			    COALESCE(vc.vuln_low, 0)      AS vuln_low,
+			    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
+			FROM page
 			LEFT JOIN image_digests id
-			  ON id.registry   = agg.raw_registry
-			 AND id.repository = agg.image
-			 AND id.digest     = agg.digest
+			  ON id.registry   = page.raw_registry
+			 AND id.repository = page.image
+			 AND id.digest     = page.digest
 			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
-			ORDER BY agg.container_count DESC, agg.image
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
-			log.Printf("clusters/images/detail: %v", err)
+			ORDER BY page.container_count DESC, page.image ASC, page.digest ASC
+		`
+
+		args := append([]any{}, aclArgs...)
+		args = append(args, limit+1, offset)
+
+		if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+			log.Printf("ImageDetailHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, rows)
+
+		hasMore := len(rows) > limit
+		if hasMore {
+			rows = rows[:limit]
+		}
+
+		writeJSON(w, http.StatusOK, response{
+			Items:   rows,
+			Limit:   limit,
+			Offset:  offset,
+			HasMore: hasMore,
+		})
 	}
 }
 

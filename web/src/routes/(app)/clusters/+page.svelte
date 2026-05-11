@@ -153,6 +153,17 @@
 	let activeTab = $state('clusters');
 	let imagesFetched = $state(false);
 	let hostsFetched = $state(false);
+
+	// Infinite-scroll state for /api/clusters/images/detail. The endpoint
+	// now paginates with ?limit/?offset and returns has_more; we keep
+	// loading pages as the user scrolls until the server reports no more.
+	// Existing client-side search/registry filters still operate over the
+	// accumulated array, so the more the user scrolls the wider their
+	// filter set becomes.
+	const IMAGE_PAGE_SIZE = 50;
+	let imageOffset = $state(0);
+	let imageHasMore = $state(false);
+	let imageLoadingMore = $state(false);
 	let tick = $state(0);
 	let chainDrawerOpen = $state(false);
 	let chainDrawerRow: HostRow | null = $state(null);
@@ -300,15 +311,60 @@
 	let imagesInFlight = false;
 	let hostsInFlight = false;
 
+	// imagesPath builds the paginated URL with the include_inactive
+	// toggle and the limit/offset cursor. Kept as a helper so loadImages
+	// and loadMoreImages share the param construction.
+	const imagesPath = (offset: number) => {
+		const params = new URLSearchParams();
+		if (includeInactive) params.set('include_inactive', 'true');
+		params.set('limit', String(IMAGE_PAGE_SIZE));
+		params.set('offset', String(offset));
+		return `/api/clusters/images/detail?${params}`;
+	};
+
+	type ImageDetailPage = {
+		items: ImageDetail[];
+		limit: number;
+		offset: number;
+		has_more: boolean;
+	};
+
 	const loadImages = async () => {
 		if (imagesFetched || imagesInFlight) return;
 		imagesInFlight = true;
 		try {
-			const res = await fetch(`/api/clusters/images/detail${inactiveQS()}`, { credentials: 'include' });
-			if (res.ok) imageDetails = (await res.json()) ?? [];
+			const res = await fetch(imagesPath(0), { credentials: 'include' });
+			if (res.ok) {
+				const page = (await res.json()) as ImageDetailPage;
+				imageDetails = page.items ?? [];
+				imageOffset = imageDetails.length;
+				imageHasMore = Boolean(page.has_more);
+			}
 			imagesFetched = true;
 		} catch { /* silent */ }
 		finally { imagesInFlight = false; }
+	};
+
+	// Pulls the next page and appends to the array. Triggered by the
+	// scroll handler when the viewport approaches the end of the
+	// rendered virtual list. Guarded against re-entry by
+	// imageLoadingMore so rapid scroll events don't fan out duplicate
+	// fetches.
+	const loadMoreImages = async () => {
+		if (!imageHasMore || imageLoadingMore) return;
+		imageLoadingMore = true;
+		try {
+			const res = await fetch(imagesPath(imageOffset), { credentials: 'include' });
+			if (res.ok) {
+				const page = (await res.json()) as ImageDetailPage;
+				if (page.items?.length) {
+					imageDetails = [...imageDetails, ...page.items];
+					imageOffset = imageDetails.length;
+				}
+				imageHasMore = Boolean(page.has_more);
+			}
+		} catch { /* silent */ }
+		finally { imageLoadingMore = false; }
 	};
 
 	const loadHosts = async () => {
@@ -422,6 +478,11 @@
 		if (initialInactive) { initialInactive = false; return; }
 		imagesFetched = false;
 		hostsFetched = false;
+		// Reset infinite-scroll cursor; the toggle changes the underlying
+		// row set, so accumulated pages are no longer valid.
+		imageDetails = [];
+		imageOffset = 0;
+		imageHasMore = false;
 		loadMain();
 		if (activeTab === 'images') loadImages();
 	});
@@ -989,7 +1050,19 @@
 						</div>
 					{/if}
 
-					<div class="overflow-auto [overflow-anchor:none]" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => { imageScrollTop = imageScrollEl?.scrollTop ?? 0; imageViewH = imageScrollEl?.clientHeight ?? 600; }}>
+					<div class="overflow-auto [overflow-anchor:none]" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => {
+						imageScrollTop = imageScrollEl?.scrollTop ?? 0;
+						imageViewH = imageScrollEl?.clientHeight ?? 600;
+						// Infinite scroll: when the viewport is within ~10
+						// rows of the bottom of the rendered list, fetch
+						// the next page. The guard inside loadMoreImages
+						// keeps rapid scroll from fanning out fetches.
+						if (imageHasMore && !imageLoadingMore) {
+							const contentH = sortedImages.length * ROW_HEIGHT;
+							const distanceToBottom = contentH - imageScrollTop - imageViewH;
+							if (distanceToBottom < ROW_HEIGHT * 10) loadMoreImages();
+						}
+					}}>
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 							<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
@@ -1066,6 +1139,14 @@
 								{#if imageVirt.bottomPad > 0}<tr style="height:{imageVirt.bottomPad}px"><td colspan="8"></td></tr>{/if}
 							</tbody>
 						</table>
+						{#if imageLoadingMore}
+							<div class="flex items-center justify-center gap-2 py-3 text-xs text-[var(--text-muted)]">
+								<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+								<span>Loading more images…</span>
+							</div>
+						{:else if !imageHasMore && imageDetails.length >= IMAGE_PAGE_SIZE}
+							<div class="py-3 text-center text-xs text-[var(--text-muted)]">All {imageDetails.length} images loaded.</div>
+						{/if}
 					</div>
 				{/if}
 
