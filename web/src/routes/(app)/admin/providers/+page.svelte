@@ -6,7 +6,6 @@
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning, PlugZap } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
-	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
 	import X from 'lucide-svelte/icons/x';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -18,7 +17,6 @@
 	import SecretInspectDrawer from '$lib/components/SecretInspectDrawer.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
-	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -1188,109 +1186,34 @@
 		}
 	};
 
-	// ── Users ──────────────────────────────────────────────────────────────
-	type UserSummary = {
-		id: string;
-		subject: string;
-		email?: string;
-		name?: string;
-		approved: boolean;
-		hidden: boolean;
-		role: string;
-		groups: string[];
-		last_login_at?: string;
-		created_at: string;
-	};
-
-	const roleOptions = [
-		{ value: 'pending', label: 'Pending' },
-		{ value: 'default', label: 'Default' },
-		{ value: 'global_reader', label: 'Global reader' },
-		{ value: 'admin', label: 'Admin' }
-	];
-
-	let users: UserSummary[] = $state([]);
-	const approvedUsers = $derived(users.filter(u => u.approved && !u.hidden));
-	const adminCount = $derived(approvedUsers.filter(u => u.role === 'admin').length);
-	const readerCount = $derived(approvedUsers.filter(u => u.role === 'global_reader').length);
-	const defaultCount = $derived(approvedUsers.filter(u => u.role === 'default').length);
-	const pendingUsers = $derived(users.filter(u => !u.approved && !u.hidden));
+	// Summary counts only — the full users management UI lives at
+	// /admin/users. This page just renders the headline cards.
+	type UserCountRow = { approved: boolean; hidden: boolean; role: string };
+	let users: UserCountRow[] = $state([]);
 	let usersLoading = $state(true);
-	let usersError = $state('');
-	let savingUser = $state<string | null>(null);
-	let usersRefreshing = $state(false);
-	let showHidden = $state(false);
+	const approvedUsers = $derived(users.filter((u) => u.approved && !u.hidden));
+	const adminCount = $derived(approvedUsers.filter((u) => u.role === 'admin').length);
+	const readerCount = $derived(approvedUsers.filter((u) => u.role === 'global_reader').length);
+	const defaultCount = $derived(approvedUsers.filter((u) => u.role === 'default').length);
+	const pendingUsers = $derived(users.filter((u) => !u.approved && !u.hidden));
 
-	const visibleUsers = $derived(showHidden ? users : users.filter((u) => !u.hidden));
-
-	const loadUsers = async () => {
+	const loadUserCounts = async () => {
 		usersLoading = true;
-		usersRefreshing = true;
-		usersError = '';
 		try {
 			const response = await fetch('/api/admin/users', { credentials: 'include' });
-			if (!response.ok) {
-				usersError = response.status === 403 ? 'Admin access required.' : 'Failed to load users.';
-				users = [];
-				return;
-			}
+			if (!response.ok) { users = []; return; }
 			users = await response.json();
 		} catch {
-			usersError = 'Failed to load users.';
+			users = [];
 		} finally {
 			usersLoading = false;
-			setTimeout(() => { usersRefreshing = false; }, 1000);
 		}
 	};
-
-	const setHidden = async (user: UserSummary, hidden: boolean) => {
-		try {
-			const response = await fetch(`/api/admin/users/${user.id}/hidden`, {
-				method: 'PATCH',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ hidden })
-			});
-			if (!response.ok) return;
-			const updated = await response.json();
-			users = users.map((u) => (u.id === updated.id ? updated : u));
-		} catch { /* ignore */ }
-	};
-
-	const updateRole = async (user: UserSummary, role: string) => {
-		savingUser = user.id;
-		try {
-			const response = await fetch(`/api/admin/users/${user.id}`, {
-				method: 'PATCH',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ role })
-			});
-			if (!response.ok) { usersError = 'Failed to update role.'; return; }
-			const updated = await response.json();
-			users = users.map((entry) => (entry.id === updated.id ? updated : entry));
-		} catch {
-			usersError = 'Failed to update role.';
-		} finally {
-			savingUser = null;
-		}
-	};
-
-	$effect(() => {
-		const incoming = $newUserEvent;
-		if (!incoming) return;
-		newUserEvent.set(null);
-		newUserCount.update((n) => Math.max(0, n - 1));
-		if (!users.some((u) => u.id === incoming.id)) {
-			users = [...users, incoming];
-		}
-	});
 
 	onMount(() => {
 		if (browser) {
 			loadProviders();
-			loadUsers();
-			newUserCount.set(0);
+			loadUserCounts();
 			loadOSVStatus().then(() => {
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
@@ -1344,19 +1267,25 @@
 
 		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
 			<!-- Users with access + role breakdown as subtitles -->
-			<div class="metric-card space-y-1 rounded-2xl p-4">
+			<a
+				href="/admin/users"
+				class="metric-card space-y-1 rounded-2xl p-4 transition hover:bg-[var(--hover-bg-subtle)]"
+			>
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Users</h3>
 				<p class="text-3xl font-bold text-[var(--text-bright)]">{usersLoading ? '—' : approvedUsers.length}</p>
 				<p class="text-xs text-[var(--text-muted)]">
 					{usersLoading ? '' : `${adminCount} admin · ${readerCount} reader · ${defaultCount} default`}
 				</p>
-			</div>
+			</a>
 			<!-- Pending users -->
-			<div class="metric-card space-y-1 rounded-2xl p-4">
+			<a
+				href="/admin/users"
+				class="metric-card space-y-1 rounded-2xl p-4 transition hover:bg-[var(--hover-bg-subtle)]"
+			>
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Pending</h3>
 				<p class="text-3xl font-bold {!usersLoading && pendingUsers.length > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">{usersLoading ? '—' : pendingUsers.length}</p>
 				<p class="text-xs text-[var(--text-muted)]">awaiting approval</p>
-			</div>
+			</a>
 			<!-- Providers -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Providers</h3>
@@ -1378,96 +1307,6 @@
 		</div>
 	</section>
 
-	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-			<div>
-				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Users</h2>
-				<p class="text-sm text-[var(--text-tertiary)]">Approve new access requests and adjust roles.</p>
-			</div>
-			<div class="flex items-center gap-4">
-				<Toggle bind:checked={showHidden} label="Show hidden" />
-				<button type="button" class="btn btn-ghost" onclick={loadUsers} disabled={usersRefreshing}>
-					<span class="inline-flex h-[14px] w-[14px] items-center justify-center {usersRefreshing ? 'animate-spin' : ''}">
-						<RotateCw size={14} />
-					</span>
-					Refresh
-				</button>
-			</div>
-		</header>
-
-		{#if usersError}
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{usersError}</div>
-		{/if}
-
-		{#if usersLoading}
-			<p class="text-sm text-[var(--text-secondary)]">Loading users…</p>
-		{:else if visibleUsers.length === 0}
-			<p class="text-sm text-[var(--text-secondary)]">No users found.</p>
-		{:else}
-			<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
-					<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
-						<tr>
-							<th class="px-5 py-3 text-left">Name</th>
-							<th class="px-5 py-3 text-left">Email</th>
-							<th class="px-5 py-3 text-left">Subject</th>
-							<th class="px-5 py-3 text-left">Status</th>
-							<th class="px-5 py-3 text-left">Role</th>
-							<th class="px-5 py-3 text-left">Created</th>
-							<th class="px-5 py-3"></th>
-						</tr>
-					</thead>
-					<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-						{#each visibleUsers as user (user.id)}
-							<tr transition:slide={{ duration: 200 }} class="transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]">
-								<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{user.name ?? '—'}</td>
-								<td class="px-5 py-3">{user.email ?? '—'}</td>
-								<td class="px-5 py-3 text-xs">{user.subject}</td>
-								<td class="px-5 py-3">
-									<span class="badge">{user.approved ? 'Approved' : 'Pending'}</span>
-								</td>
-								<td class="px-5 py-3">
-									<Select
-										value={user.role}
-										options={roleOptions}
-										disabled={savingUser === user.id}
-										size="sm"
-										onchange={(value) => updateRole(user, value)}
-									/>
-								</td>
-								<td class="px-5 py-3 text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
-									{user.created_at}
-								</td>
-								<td class="px-5 py-3">
-									{#if user.hidden}
-										<button
-											type="button"
-											class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
-											onclick={() => setHidden(user, false)}
-											aria-label="Restore user"
-											title="Restore"
-										>
-											<RotateCcw size={14} />
-										</button>
-									{:else}
-										<button
-											type="button"
-											class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
-											onclick={() => setHidden(user, true)}
-											aria-label="Hide user"
-											title="Hide"
-										>
-											<X size={14} />
-										</button>
-									{/if}
-								</td>
-							</tr>
-						{/each}
-					</tbody>
-				</table>
-			</div>
-		{/if}
-	</section>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
