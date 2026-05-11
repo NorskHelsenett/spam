@@ -226,6 +226,116 @@ func AdminDBMaintenanceHandler(db *gorm.DB, authService *auth.Service) http.Hand
 	}
 }
 
+// AdminDBMaintenanceAllHandler — POST /api/admin/db/maintenance/all
+//
+// Fans out one DB_MAINTENANCE job per user table. Skips tables with
+// zero live tuples (ANALYZE on an empty table is wasted queue work).
+// Honours the existing per-table dedupe inside CreateJob's payload
+// match? No — CreateJob doesn't dedupe; the per-table block in
+// AdminDBMaintenanceHandler does. We replicate that block here so a
+// table already mid-maintenance doesn't double-queue.
+func AdminDBMaintenanceAllHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	type request struct {
+		Operation string `json:"operation"`
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if requireAdmin(w, r, authService) == nil {
+			return
+		}
+
+		var body request
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		body.Operation = strings.TrimSpace(body.Operation)
+		var op jobs.DBMaintenanceOp
+		switch jobs.DBMaintenanceOp(body.Operation) {
+		case jobs.DBMaintenanceOpAnalyze, jobs.DBMaintenanceOpVacuumAnalyze:
+			op = jobs.DBMaintenanceOp(body.Operation)
+		default:
+			http.Error(w, "operation must be 'analyze' or 'vacuum_analyze'", http.StatusBadRequest)
+			return
+		}
+
+		// Enumerate user tables with at least one live row, skipping
+		// system schemas. n_live_tup comes from pg_stat_user_tables;
+		// freshly-created tables that have never been analyzed report
+		// 0, so we OR in a fallback on pg_class.reltuples (planner's
+		// estimate) to avoid silently skipping new tables.
+		type tableRef struct {
+			Schema string `gorm:"column:schema"`
+			Name   string `gorm:"column:name"`
+		}
+		var tables []tableRef
+		if err := db.WithContext(r.Context()).Raw(`
+			SELECT n.nspname AS schema, c.relname AS name
+			FROM pg_class c
+			JOIN pg_namespace n ON n.oid = c.relnamespace
+			LEFT JOIN pg_stat_user_tables s
+			    ON s.schemaname = n.nspname AND s.relname = c.relname
+			WHERE c.relkind IN ('r', 'p')
+			  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+			  AND n.nspname NOT LIKE 'pg_toast%'
+			  AND (COALESCE(s.n_live_tup, 0) > 0 OR c.reltuples > 0)
+			ORDER BY n.nspname, c.relname
+		`).Scan(&tables).Error; err != nil {
+			http.Error(w, "failed to enumerate tables", http.StatusInternalServerError)
+			return
+		}
+
+		// Pre-load the in-flight set so we skip tables already running
+		// or queued without N round-trips to CreateJob.
+		type inflightRow struct {
+			Schema string `gorm:"column:schema"`
+			Name   string `gorm:"column:name"`
+		}
+		var inflight []inflightRow
+		db.WithContext(r.Context()).Raw(`
+			SELECT payload->>'schema' AS schema, payload->>'table' AS name
+			FROM jobs
+			WHERE type = ?
+			  AND status IN (?, ?, ?)
+		`, jobs.JobTypeDBMaintenance,
+			jobs.JobStatusQueued, jobs.JobStatusRunning, jobs.JobStatusRetry,
+		).Scan(&inflight)
+		inflightSet := make(map[string]struct{}, len(inflight))
+		for _, row := range inflight {
+			inflightSet[row.Schema+"."+row.Name] = struct{}{}
+		}
+
+		enqueued := 0
+		skipped := 0
+		for _, t := range tables {
+			if _, busy := inflightSet[t.Schema+"."+t.Name]; busy {
+				skipped++
+				continue
+			}
+			_, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
+				Type: jobs.JobTypeDBMaintenance,
+				Payload: jobs.DBMaintenancePayload{
+					Schema:    t.Schema,
+					Table:     t.Name,
+					Operation: op,
+				},
+				MaxAttempts: 1,
+			})
+			if err != nil {
+				skipped++
+				continue
+			}
+			enqueued++
+		}
+
+		writeJSON(w, http.StatusAccepted, map[string]interface{}{
+			"operation":     body.Operation,
+			"enqueued":      enqueued,
+			"skipped":       skipped,
+			"total_tables":  len(tables),
+		})
+	}
+}
+
 type adminDBMaintenanceJob struct {
 	JobID      string      `json:"job_id"`
 	Status     string      `json:"status"`

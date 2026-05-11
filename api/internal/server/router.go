@@ -233,7 +233,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// /recent returns the last 50 maintenance jobs so the UI
 				// can show per-row state.
 				api.Post("/admin/db/maintenance", uiapi.AdminDBMaintenanceHandler(db, authService))
+				api.Post("/admin/db/maintenance/all", uiapi.AdminDBMaintenanceAllHandler(db, authService))
 				api.Get("/admin/db/maintenance/recent", uiapi.AdminDBMaintenanceRecentHandler(db, authService))
+
+				// DB activity / diagnostics — pg_stat_database aggregates,
+				// pg_stat_activity live queries, pg_stat_statements top-N
+				// (degrades cleanly if the extension isn't installed).
+				api.Get("/admin/db/activity", uiapi.AdminDBActivityHandler(db, authService))
+				api.Get("/admin/db/live-queries", uiapi.AdminDBLiveQueriesHandler(db, authService))
+				api.Get("/admin/db/slow-queries", uiapi.AdminDBSlowQueriesHandler(db, authService))
 
 				// Bulk vuln-feed refresh (CISA KEV, FIRST.org EPSS).
 				// Manual trigger jumps the auto-schedule queue; status is
