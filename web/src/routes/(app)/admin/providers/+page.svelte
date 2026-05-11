@@ -6,7 +6,6 @@
 	import { browser } from '$app/environment';
 	import { ShieldCheck, KeyRound, Eye, EyeOff, ChevronDown, ShieldAlert, Play, Clock, Trash2, Copy, Download, FileWarning, PlugZap } from 'lucide-svelte';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
-	import RotateCcw from 'lucide-svelte/icons/rotate-ccw';
 	import X from 'lucide-svelte/icons/x';
 	import Dialog from '$lib/components/Dialog.svelte';
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
@@ -18,7 +17,6 @@
 	import SecretInspectDrawer from '$lib/components/SecretInspectDrawer.svelte';
 	import MultiSelect from '$lib/components/MultiSelect.svelte';
 	import { providerSyncStates, initSyncStates, updateSyncState } from '$lib/stores/providerSync';
-	import { newUserCount, newUserEvent } from '$lib/stores/newUserCount';
 
 	type ProviderType = 'github' | 'gitlab' | 'gitea' | 'forgejo';
 	type ProviderTypeMode = ProviderType | 'auto';
@@ -1188,141 +1186,9 @@
 		}
 	};
 
-	// ── Users ──────────────────────────────────────────────────────────────
-	type UserSummary = {
-		id: string;
-		subject: string;
-		email?: string;
-		name?: string;
-		picture?: string;
-		approved: boolean;
-		hidden: boolean;
-		role: string;
-		groups: string[];
-		last_login_at?: string;
-		created_at: string;
-	};
-
-	const VISIBLE_GROUPS = 6;
-
-	const userInitials = (user: UserSummary) => {
-		const source = user.name || user.email || user.subject || '?';
-		const parts = source.trim().split(/[\s@._-]+/).filter(Boolean);
-		if (parts.length === 0) return '?';
-		if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-		return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-	};
-
-	const userDateFmt = new Intl.DateTimeFormat(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-	const formatUserDate = (iso?: string) => {
-		if (!iso) return '—';
-		const d = new Date(iso);
-		return Number.isNaN(d.getTime()) ? '—' : userDateFmt.format(d);
-	};
-	const formatUserRelative = (iso?: string) => {
-		if (!iso) return 'never';
-		const d = new Date(iso);
-		if (Number.isNaN(d.getTime())) return '—';
-		const diff = Date.now() - d.getTime();
-		const min = Math.round(diff / 60_000);
-		if (min < 1) return 'just now';
-		if (min < 60) return `${min}m ago`;
-		const hr = Math.round(min / 60);
-		if (hr < 24) return `${hr}h ago`;
-		const day = Math.round(hr / 24);
-		if (day < 30) return `${day}d ago`;
-		return userDateFmt.format(d);
-	};
-
-	const roleOptions = [
-		{ value: 'pending', label: 'Pending' },
-		{ value: 'default', label: 'Default' },
-		{ value: 'global_reader', label: 'Global reader' },
-		{ value: 'admin', label: 'Admin' }
-	];
-
-	let users: UserSummary[] = $state([]);
-	const approvedUsers = $derived(users.filter(u => u.approved && !u.hidden));
-	const adminCount = $derived(approvedUsers.filter(u => u.role === 'admin').length);
-	const readerCount = $derived(approvedUsers.filter(u => u.role === 'global_reader').length);
-	const defaultCount = $derived(approvedUsers.filter(u => u.role === 'default').length);
-	const pendingUsers = $derived(users.filter(u => !u.approved && !u.hidden));
-	let usersLoading = $state(true);
-	let usersError = $state('');
-	let savingUser = $state<string | null>(null);
-	let usersRefreshing = $state(false);
-	let showHidden = $state(false);
-
-	const visibleUsers = $derived(showHidden ? users : users.filter((u) => !u.hidden));
-
-	const loadUsers = async () => {
-		usersLoading = true;
-		usersRefreshing = true;
-		usersError = '';
-		try {
-			const response = await fetch('/api/admin/users', { credentials: 'include' });
-			if (!response.ok) {
-				usersError = response.status === 403 ? 'Admin access required.' : 'Failed to load users.';
-				users = [];
-				return;
-			}
-			users = await response.json();
-		} catch {
-			usersError = 'Failed to load users.';
-		} finally {
-			usersLoading = false;
-			setTimeout(() => { usersRefreshing = false; }, 1000);
-		}
-	};
-
-	const setHidden = async (user: UserSummary, hidden: boolean) => {
-		try {
-			const response = await fetch(`/api/admin/users/${user.id}/hidden`, {
-				method: 'PATCH',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ hidden })
-			});
-			if (!response.ok) return;
-			const updated = await response.json();
-			users = users.map((u) => (u.id === updated.id ? updated : u));
-		} catch { /* ignore */ }
-	};
-
-	const updateRole = async (user: UserSummary, role: string) => {
-		savingUser = user.id;
-		try {
-			const response = await fetch(`/api/admin/users/${user.id}`, {
-				method: 'PATCH',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ role })
-			});
-			if (!response.ok) { usersError = 'Failed to update role.'; return; }
-			const updated = await response.json();
-			users = users.map((entry) => (entry.id === updated.id ? updated : entry));
-		} catch {
-			usersError = 'Failed to update role.';
-		} finally {
-			savingUser = null;
-		}
-	};
-
-	$effect(() => {
-		const incoming = $newUserEvent;
-		if (!incoming) return;
-		newUserEvent.set(null);
-		newUserCount.update((n) => Math.max(0, n - 1));
-		if (!users.some((u) => u.id === incoming.id)) {
-			users = [...users, incoming];
-		}
-	});
-
 	onMount(() => {
 		if (browser) {
 			loadProviders();
-			loadUsers();
-			newUserCount.set(0);
 			loadOSVStatus().then(() => {
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
@@ -1374,21 +1240,7 @@
 			</div>
 		</header>
 
-		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
-			<!-- Users with access + role breakdown as subtitles -->
-			<div class="metric-card space-y-1 rounded-2xl p-4">
-				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Users</h3>
-				<p class="text-3xl font-bold text-[var(--text-bright)]">{usersLoading ? '—' : approvedUsers.length}</p>
-				<p class="text-xs text-[var(--text-muted)]">
-					{usersLoading ? '' : `${adminCount} admin · ${readerCount} reader · ${defaultCount} default`}
-				</p>
-			</div>
-			<!-- Pending users -->
-			<div class="metric-card space-y-1 rounded-2xl p-4">
-				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Pending</h3>
-				<p class="text-3xl font-bold {!usersLoading && pendingUsers.length > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">{usersLoading ? '—' : pendingUsers.length}</p>
-				<p class="text-xs text-[var(--text-muted)]">awaiting approval</p>
-			</div>
+		<div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
 			<!-- Providers -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Providers</h3>
@@ -1410,121 +1262,6 @@
 		</div>
 	</section>
 
-	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
-		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-			<div>
-				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Users</h2>
-				<p class="text-sm text-[var(--text-tertiary)]">Approve new access requests and adjust roles.</p>
-			</div>
-			<div class="flex items-center gap-4">
-				<Toggle bind:checked={showHidden} label="Show hidden" />
-				<button type="button" class="btn btn-ghost" onclick={loadUsers} disabled={usersRefreshing}>
-					<span class="inline-flex h-[14px] w-[14px] items-center justify-center {usersRefreshing ? 'animate-spin' : ''}">
-						<RotateCw size={14} />
-					</span>
-					Refresh
-				</button>
-			</div>
-		</header>
-
-		{#if usersError}
-			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">{usersError}</div>
-		{/if}
-
-		{#if usersLoading}
-			<p class="text-sm text-[var(--text-secondary)]">Loading users…</p>
-		{:else if visibleUsers.length === 0}
-			<p class="text-sm text-[var(--text-secondary)]">No users found.</p>
-		{:else}
-			<ul class="divide-y divide-[var(--border-color)]/40 overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-				{#each visibleUsers as user (user.id)}
-					<li
-						transition:slide={{ duration: 200 }}
-						class="flex items-start gap-4 px-5 py-4 text-sm transition hover:bg-[var(--hover-bg-subtle)]"
-						class:opacity-60={user.hidden}
-					>
-						<div class="shrink-0 pt-0.5">
-							{#if user.picture}
-								<img
-									src={user.picture}
-									alt=""
-									class="h-10 w-10 rounded-full object-cover ring-1 ring-[var(--border-color)]/60"
-									referrerpolicy="no-referrer"
-								/>
-							{:else}
-								<div class="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--hover-bg)] text-[11px] font-semibold uppercase text-[var(--text-secondary)] ring-1 ring-[var(--border-color)]/60">
-									{userInitials(user)}
-								</div>
-							{/if}
-						</div>
-
-						<div class="min-w-0 flex-1 space-y-1.5">
-							<div class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
-								<span class="truncate font-semibold text-[var(--text-bright)]">{user.name ?? '—'}</span>
-								<span class="truncate text-xs text-[var(--text-secondary)]">{user.email ?? '—'}</span>
-							</div>
-
-							<div class="flex flex-wrap items-center gap-1.5">
-								{#each user.groups.slice(0, VISIBLE_GROUPS) as group}
-									<span class="rounded-full border border-[var(--border-color)]/60 bg-[var(--hover-bg)]/30 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-secondary)]">
-										{group}
-									</span>
-								{/each}
-								{#if user.groups.length > VISIBLE_GROUPS}
-									<span
-										class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[10px] uppercase tracking-[0.08em] text-[var(--text-tertiary)]"
-										title={user.groups.slice(VISIBLE_GROUPS).join(', ')}
-									>
-										+{user.groups.length - VISIBLE_GROUPS} more
-									</span>
-								{:else if user.groups.length === 0}
-									<span class="text-[10px] uppercase tracking-[0.08em] text-[var(--text-tertiary)]">No groups</span>
-								{/if}
-							</div>
-
-							<div class="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
-								<span>Created {formatUserDate(user.created_at)}</span>
-								<span aria-hidden="true">·</span>
-								<span>Last seen {formatUserRelative(user.last_login_at)}</span>
-							</div>
-						</div>
-
-						<div class="flex shrink-0 items-center gap-3 pt-0.5">
-							<span class="badge">{user.approved ? 'Approved' : 'Pending'}</span>
-							<Select
-								value={user.role}
-								options={roleOptions}
-								disabled={savingUser === user.id}
-								size="sm"
-								onchange={(value) => updateRole(user, value)}
-							/>
-							{#if user.hidden}
-								<button
-									type="button"
-									class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
-									onclick={() => setHidden(user, false)}
-									aria-label="Restore user"
-									title="Restore"
-								>
-									<RotateCcw size={14} />
-								</button>
-							{:else}
-								<button
-									type="button"
-									class="rounded-full p-1 text-[var(--text-tertiary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-secondary)]"
-									onclick={() => setHidden(user, true)}
-									aria-label="Hide user"
-									title="Hide"
-								>
-									<X size={14} />
-								</button>
-							{/if}
-						</div>
-					</li>
-				{/each}
-			</ul>
-		{/if}
-	</section>
 
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
