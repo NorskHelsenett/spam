@@ -580,9 +580,16 @@
 			hostSortDir
 		];
 		if (!browser) return;
-		if (activeTab !== 'hosts' && !hostsFetched) return;
+		// Tab + fetched checks run inside the setTimeout (not at effect
+		// definition time) so they don't get registered as reactive
+		// deps. Reading hostsFetched up here would mean the effect
+		// re-runs after every successful load (loadHosts flips
+		// hostsFetched back to true), re-arming the setTimeout and
+		// firing another offset=0 reload — that was the scroll-time
+		// "spamming offset=0&limit=200" loop.
 		if (hostFiltersTimer) clearTimeout(hostFiltersTimer);
 		hostFiltersTimer = setTimeout(() => {
+			if (activeTab !== 'hosts' && !hostsFetched) return;
 			hostsFetched = false;
 			hostsOffset = 0;
 			hostsHasMore = true;
@@ -613,7 +620,6 @@
 
 	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
 	const totalContainers = $derived(clusters.reduce((s, c) => s + c.containers, 0));
-	const uniqueHosts = $derived(new Set(hosts.map((h) => h.host)).size);
 
 	const registrySegments = $derived(
 		registryDist.map((r, i) => ({
@@ -693,6 +699,12 @@
 	};
 
 	const exposureCounts = $derived(hostSummary);
+	// Host count card uses the summary total, not the loaded-rows length:
+	// with server-side pagination the loaded set is just the current
+	// page, so the old derived would show e.g. "200 Unique hostnames"
+	// regardless of fleet size. Declared after hostSummary so TS sees
+	// the binding in source order.
+	const uniqueHosts = $derived(hostSummary.total);
 	const exposureSegments = $derived([
 		{ label: 'External', value: exposureCounts.external, color: 'var(--red)' },
 		{ label: 'Internal', value: exposureCounts.internal, color: 'var(--green)' }
@@ -745,8 +757,14 @@
 	let imageSearch = $state('');
 	let imageSelectedRegistries: string[] = $state([]);
 
+	// Registry options come from /api/clusters/registry-distribution
+	// (registryDist), which already aggregates every registry across
+	// the fleet — not from the loaded image page, which would miss
+	// registries on unloaded pages. Sorted by name so the dropdown
+	// order is stable; the registry-distribution endpoint sorts by
+	// count for the donut chart.
 	const imageRegistryOptions: MultiSelectOption[] = $derived(
-		[...new Set(imageDetails.map((i) => i.registry))].sort().map((r) => ({ value: r, label: r }))
+		[...registryDist].sort((a, b) => a.registry.localeCompare(b.registry)).map((r) => ({ value: r.registry, label: r.registry }))
 	);
 
 	const imageActiveFilterCount = $derived(

@@ -801,9 +801,13 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			preGroupWhere += `AND (cii.registry ILIKE ? OR cii.image ILIKE ? OR cii.digest ILIKE ? OR cii.tag ILIKE ?) `
 			preGroupArgs = append(preGroupArgs, pattern, pattern, pattern, pattern)
 		}
-		// Registry multi-select. Comma-separated raw_registry values
-		// match the cii.raw_registry column (not the display registry
-		// which the frontend uses, since the inventory rows store raw).
+		// Registry multi-select. Matches on cii.registry (the display
+		// registry) so the values line up with /api/clusters/registry-
+		// distribution, which is what the frontend populates the
+		// dropdown options from. raw_registry holds the unnormalised
+		// pull-spec prefix and was the wrong field to filter on — most
+		// fleets normalise docker.io / index.docker.io variants in
+		// cii.registry but not in cii.raw_registry.
 		if rawReg := r.URL.Query().Get("registries"); rawReg != "" {
 			values := []any{}
 			for _, v := range strings.Split(rawReg, ",") {
@@ -813,7 +817,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			}
 			if len(values) > 0 {
 				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
-				preGroupWhere += `AND cii.raw_registry IN (` + placeholders + `) `
+				preGroupWhere += `AND cii.registry IN (` + placeholders + `) `
 				preGroupArgs = append(preGroupArgs, values...)
 			}
 		}
