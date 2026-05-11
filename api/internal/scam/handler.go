@@ -1399,6 +1399,20 @@ func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			return
 		}
 
+		// Cascading-filter facets: each dropdown's options come from a
+		// scan that EXCLUDES that dropdown's own selection from the
+		// filter. So picking one cluster doesn't collapse the cluster
+		// list — the user can still add another cluster without
+		// clearing first.
+		clusters, namespaces, kinds, ferr := hostFacets(ctx, db, aclFrag, aclArgs, includeInactive, searchQuery, filterClusters, filterNamespaces, filterKinds)
+		if ferr != nil {
+			http.Error(w, "facet query failed", http.StatusInternalServerError)
+			return
+		}
+		summary.Clusters = clusters
+		summary.Namespaces = namespaces
+		summary.Kinds = kinds
+
 		if !filtersApplied && cache.ShouldStore(ctx) {
 			_ = cache.SetJSON(ctx, cs, cacheKey, hostSummaryCacheEntry{
 				Watermark: watermark,
@@ -1431,7 +1445,10 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 
 // computeHostSummary reads the deduped host set the caller can see and
 // classifies each one. Dedup is by hostname (the same FQDN can appear
-// once per cluster/namespace via a shared *.apps wildcard).
+// once per cluster/namespace via a shared *.apps wildcard). Facets
+// are computed by separate helpers because each dropdown wants its
+// own filter scope (e.g. cluster dropdown shows all clusters even
+// when one is already selected — see hostFacets below).
 func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
@@ -1443,22 +1460,12 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 	}
 
 	type row struct {
-		Host      string `gorm:"column:host"`
-		LBIPs     string `gorm:"column:lb_ips"`
-		Cluster   string `gorm:"column:cluster"`
-		ClusterID string `gorm:"column:cluster_id"`
-		Namespace string `gorm:"column:namespace"`
-		Kind      string `gorm:"column:kind"`
+		Host  string `gorm:"column:host"`
+		LBIPs string `gorm:"column:lb_ips"`
 	}
 	var rows []row
-	// Project all columns the categorisation + facets need on the
-	// same scan. DISTINCT ON (host) dedups for the categorisation; the
-	// facet aggregation runs over the same row set, which is correct
-	// for filter dropdowns (we want each option to appear once even
-	// if many host rows share that cluster/namespace/kind).
 	query := `
-		SELECT DISTINCT ON (he.host)
-		    he.host, he.lb_ips, he.cluster, he.cluster_id, he.namespace, he.kind
+		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
 		FROM host_exposure he
 		` + livenessJoin + `
 		WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
@@ -1470,48 +1477,96 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 		return HostSummary{}, err
 	}
 
-	clusterByID := make(map[string]string, 8)
-	namespaceSet := make(map[string]struct{}, 16)
-	kindSet := make(map[string]struct{}, 4)
-
 	var summary HostSummary
 	summary.Total = len(rows)
 	for _, r := range rows {
 		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
-		if r.ClusterID != "" {
-			// Prefer the display name when present; fall back to id.
-			label := r.Cluster
-			if label == "" {
-				label = r.ClusterID
-			}
-			clusterByID[r.ClusterID] = label
-		}
-		if r.Namespace != "" {
-			namespaceSet[r.Namespace] = struct{}{}
-		}
-		if r.Kind != "" {
-			kindSet[r.Kind] = struct{}{}
-		}
 	}
-
-	summary.Clusters = make([]HostFacetOption, 0, len(clusterByID))
-	for id, label := range clusterByID {
-		summary.Clusters = append(summary.Clusters, HostFacetOption{ID: id, Label: label})
-	}
-	sort.Slice(summary.Clusters, func(i, j int) bool { return summary.Clusters[i].Label < summary.Clusters[j].Label })
-	summary.Namespaces = sortedKeys(namespaceSet)
-	summary.Kinds = sortedKeys(kindSet)
 	return summary, nil
 }
 
-func sortedKeys(m map[string]struct{}) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
+// hostFacets returns the dropdown options for cluster / namespace /
+// kind multiselects with cascading-filter semantics: each dropdown's
+// options exclude that dropdown's *own* selection from the filter
+// scope so the user can extend the selection without having to clear
+// it first. Cluster dropdown shows all clusters even when one is
+// already selected; namespace dropdown shows namespaces present in
+// the currently-selected clusters (cluster filter still applied); etc.
+//
+// Three queries because each dropdown needs a different filter scope.
+// They're all DISTINCT scans over the host_exposure MV; cheap in
+// practice (a few thousand rows max for typical fleets).
+func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any, includeInactive bool, searchQuery string, filterClusters, filterNamespaces, filterKinds []string) (clusters []HostFacetOption, namespaces []string, kinds []string, err error) {
+	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+	if includeInactive {
+		livenessJoin = ""
 	}
-	sort.Strings(out)
-	return out
+	aclWhere := ""
+	if aclFrag != "" && aclFrag != "TRUE" {
+		aclWhere = "AND " + aclFrag
+	}
+
+	// Cluster facets: ignore cluster filter, apply the rest.
+	clusterWhere, clusterArgs := buildHostFilterClauses(searchQuery, nil, filterNamespaces, filterKinds)
+	type clusterRow struct {
+		ClusterID string `gorm:"column:cluster_id"`
+		Cluster   string `gorm:"column:cluster"`
+	}
+	var clusterRows []clusterRow
+	clusterQuery := `
+		SELECT DISTINCT he.cluster_id, he.cluster
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + clusterWhere + ` AND he.cluster_id <> ''
+		ORDER BY he.cluster
+	`
+	cArgs := append([]any{}, aclArgs...)
+	cArgs = append(cArgs, clusterArgs...)
+	if err = db.WithContext(ctx).Raw(clusterQuery, cArgs...).Scan(&clusterRows).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	clusters = make([]HostFacetOption, 0, len(clusterRows))
+	for _, r := range clusterRows {
+		label := r.Cluster
+		if label == "" {
+			label = r.ClusterID
+		}
+		clusters = append(clusters, HostFacetOption{ID: r.ClusterID, Label: label})
+	}
+
+	// Namespace facets: ignore namespace filter, apply the rest.
+	nsWhere, nsArgs := buildHostFilterClauses(searchQuery, filterClusters, nil, filterKinds)
+	nsQuery := `
+		SELECT DISTINCT he.namespace
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` AND he.namespace <> ''
+		ORDER BY he.namespace
+	`
+	nArgs := append([]any{}, aclArgs...)
+	nArgs = append(nArgs, nsArgs...)
+	if err = db.WithContext(ctx).Raw(nsQuery, nArgs...).Scan(&namespaces).Error; err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Kind facets: ignore kind filter, apply the rest.
+	kindWhere, kindArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, nil)
+	kindQuery := `
+		SELECT DISTINCT he.kind
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + kindWhere + ` AND he.kind <> ''
+		ORDER BY he.kind
+	`
+	kArgs := append([]any{}, aclArgs...)
+	kArgs = append(kArgs, kindArgs...)
+	if err = db.WithContext(ctx).Raw(kindQuery, kArgs...).Scan(&kinds).Error; err != nil {
+		return nil, nil, nil, err
+	}
+
+	return clusters, namespaces, kinds, nil
 }
+
 
 func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
 	// 1. Cluster-reported LB IP wins. status.loadBalancer.ingress[].ip
