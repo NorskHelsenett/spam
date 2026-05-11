@@ -304,7 +304,10 @@
 				const body = await regRes.json().catch(() => null);
 				registryDist = Array.isArray(body) ? body : [];
 			}
-			loadHosts();
+			// Summary fires immediately for the chip; full host list
+			// stays lazy via loadHosts() (called when the Hosts tab
+			// renders) since it's only needed for the table.
+			loadHostSummary();
 		} catch {
 			error = 'Failed to load cluster data';
 		} finally {
@@ -378,31 +381,54 @@
 		finally { imageLoadingMore = false; }
 	};
 
-	const loadHosts = async () => {
-		if (hostsFetched || hostsInFlight) return;
-		hostsInFlight = true;
+	// Hosts pagination — page in chunks so the wire payload stays
+	// bounded even on large fleets. The backend orders by (host, cluster)
+	// so successive offsets are deterministic across requests; the total
+	// count for "showing N of M" comes from hostSummary so we don't pay
+	// an extra COUNT(*) round trip.
+	const hostsPageSize = 200;
+	let hostsOffset = $state(0);
+	let hostsHasMore = $state(true);
+	let hostsLoadingMore = $state(false);
+
+	const loadHostsPage = async (initial: boolean) => {
+		if (hostsInFlight || hostsLoadingMore) return;
+		if (!initial && !hostsHasMore) return;
+		if (initial) hostsInFlight = true; else hostsLoadingMore = true;
 		try {
-			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
+			const offset = initial ? 0 : hostsOffset;
+			const params = new URLSearchParams({ offset: String(offset), limit: String(hostsPageSize) });
+			const q = hostSearch.trim();
+			if (q) params.set('q', q);
+			const inactive = inactiveQS();
+			const url = `/api/clusters/hosts?${params}${inactive ? '&' + inactive.slice(1) : ''}`;
+			const res = await fetch(url, { credentials: 'include' });
 			if (res.ok) {
 				const body = await res.json().catch(() => null);
-				hosts = Array.isArray(body) ? body : [];
-				// Seed the per-host maps from inline fields so the
-				// virtual-scroll $effect sees a cache hit and skips
-				// the fallback /resolve + /meta round-trip for every
-				// row the backend already knows about.
+				const page = Array.isArray(body) ? body : [];
+				hosts = initial ? page : hosts.concat(page);
+				hostsOffset = offset + page.length;
+				hostsHasMore = page.length === hostsPageSize;
+
 				const seedRes: Record<string, HostResolve> = {};
 				const seedMeta: Record<string, HostMeta> = {};
-				for (const h of hosts) {
+				for (const h of page) {
 					if (h.resolved) seedRes[h.host] = h.resolved;
 					if (h.meta) seedMeta[h.host] = h.meta;
 				}
 				if (Object.keys(seedRes).length) hostResolutions = { ...hostResolutions, ...seedRes };
 				if (Object.keys(seedMeta).length) hostMetas = { ...hostMetas, ...seedMeta };
 			}
-			hostsFetched = true;
+			if (initial) hostsFetched = true;
 		} catch { /* silent */ }
-		finally { hostsInFlight = false; }
+		finally {
+			if (initial) hostsInFlight = false;
+			else hostsLoadingMore = false;
+		}
 	};
+
+	const loadHosts = () => loadHostsPage(true);
+	const loadMoreHosts = () => loadHostsPage(false);
 
 	// Lazy-load metadata only for hosts visible in the virtual scroll viewport.
 	$effect(() => {
@@ -411,6 +437,16 @@
 			fetchHostResolve(h.host);
 			fetchHostMeta(h.host);
 		}
+	});
+
+	// Infinite scroll: when the virtualised viewport reaches the last
+	// 25% of the currently loaded rows, fetch the next page. Server-side
+	// pagination (offset / limit) keeps each request bounded.
+	$effect(() => {
+		if (!hostsHasMore || hostsLoadingMore || hostsInFlight) return;
+		if (sortedHosts.length === 0) return;
+		const trigger = Math.max(0, Math.floor(sortedHosts.length * 0.75));
+		if (hostVirt.end >= trigger) loadMoreHosts();
 	});
 
 	// In-flight trackers. The cached-result dedup (`if (hostMetas[host])
@@ -481,6 +517,35 @@
 		if (activeTab === 'images') loadImages();
 	});
 
+	// Lazy-load the host list when the Hosts tab is first opened. Calling
+	// loadHosts() unconditionally on every tab change would re-fire on
+	// every render; the in-flight + hostsFetched guards inside the
+	// function make it a single-fire effect.
+	$effect(() => {
+		if (activeTab === 'hosts') loadHosts();
+	});
+
+	// Debounced search: when the user types in the host search box,
+	// reset pagination and reload page 1 against the server. 200ms is
+	// snappy without firing on every keystroke.
+	let hostSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const q = hostSearch; // track
+		if (!browser) return;
+		if (activeTab !== 'hosts' && !hostsFetched) return;
+		if (hostSearchTimer) clearTimeout(hostSearchTimer);
+		hostSearchTimer = setTimeout(() => {
+			hostsFetched = false;
+			hostsOffset = 0;
+			hostsHasMore = true;
+			hosts = [];
+			loadHosts();
+		}, 200);
+		// Suppress linter / svelte-check warning when q is technically
+		// unused — its only purpose is to register reactivity.
+		void q;
+	});
+
 	// When the "Show inactive" toggle flips, invalidate the lazy-load
 	// caches and refetch the three top-level payloads so they reflect
 	// the new scope.
@@ -522,31 +587,37 @@
 		return false;
 	};
 
-	const exposureCounts = $derived.by(() => {
-		const seen = new Map<string, HostRow>();
-		for (const h of hosts) {
-			if (!seen.has(h.host)) seen.set(h.host, h);
-		}
-		let external = 0;
-		let internal = 0;
-		let pending = 0;
-		for (const [host, h] of seen) {
-			const r = hostResolutions[host];
-			if (!r) { pending++; continue; }
-			// DNS resolved — use that
-			if (!r.error) {
-				if (r.is_local) internal++; else external++;
-				continue;
-			}
-			// DNS unresolvable — fall back to LB IP
-			const firstLB = h.lb_ips?.split(',')[0]?.trim();
-			if (firstLB && isPrivateIP(firstLB)) { internal++; continue; }
-			if (firstLB) { external++; continue; }
-			// No DNS, no LB — unknown, count as external
-			external++;
-		}
-		return { external, internal, pending };
+	// Exposure counts come from /api/clusters/hosts/summary — a tiny
+	// aggregate endpoint, so the chip renders without waiting on the
+	// 1MB hosts list (which the Hosts tab still loads lazily). The
+	// classification (LB IP first, then cached DNS) lives server-side
+	// so "pending" reflects genuinely unknown hosts rather than
+	// "haven't scrolled there yet" — see HostSummaryHandler.
+	let hostSummary = $state<{ external: number; internal: number; pending: number; total: number }>({
+		external: 0,
+		internal: 0,
+		pending: 0,
+		total: 0
 	});
+
+	const loadHostSummary = async () => {
+		try {
+			const res = await fetch(`/api/clusters/hosts/summary${inactiveQS()}`, { credentials: 'include' });
+			if (res.ok) {
+				const body = await res.json().catch(() => null);
+				if (body && typeof body === 'object') {
+					hostSummary = {
+						external: body.external ?? 0,
+						internal: body.internal ?? 0,
+						pending: body.pending ?? 0,
+						total: body.total ?? 0
+					};
+				}
+			}
+		} catch { /* silent — chip just stays zeroed */ }
+	};
+
+	const exposureCounts = $derived(hostSummary);
 	const exposureSegments = $derived([
 		{ label: 'External', value: exposureCounts.external, color: 'var(--red)' },
 		{ label: 'Internal', value: exposureCounts.internal, color: 'var(--green)' }
@@ -663,21 +734,17 @@
 		(hostActiveWorkloadsOnly ? 1 : 0)
 	);
 
+	// Search is server-side (hostSearch drives the q= param via the
+	// debounce effect below). Categorical filters (clusters / namespaces
+	// / kinds / active-workloads-only) remain client-side for now and
+	// only operate on the rows already loaded — a known limitation that
+	// will follow once those move server-side too.
 	const filteredHosts = $derived(
 		hosts.filter((h) => {
 			if (hostActiveWorkloadsOnly && h.workload_count === 0) return false;
 			if (hostSelectedClusters.length > 0 && !hostSelectedClusters.includes(h.cluster || h.cluster_id)) return false;
 			if (hostSelectedNamespaces.length > 0 && !hostSelectedNamespaces.includes(h.namespace)) return false;
 			if (hostSelectedKinds.length > 0 && !hostSelectedKinds.includes(h.kind)) return false;
-			if (hostSearch.trim()) {
-				const q = hostSearch.trim().toLowerCase();
-				const fields = [
-					h.host, h.namespace, h.name,
-					h.cluster, h.cluster_id, h.environment,
-					h.kind, h.ingress_class, h.backends, h.lb_ips
-				];
-				if (!fields.some((f) => f && f.toLowerCase().includes(q))) return false;
-			}
 			return true;
 		})
 	);
@@ -1184,8 +1251,10 @@
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Hosts</h2>
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Hostnames exposed via Ingress and route resources.
-								{#if hostActiveFilterCount > 0}
-									<span class="text-[var(--text-muted)]">&middot; showing {filteredHosts.length} of {hosts.length}</span>
+								{#if hostActiveFilterCount > 0 || hostsHasMore}
+									<span class="text-[var(--text-muted)]">
+										&middot; showing {filteredHosts.length} of {hostSummary.total || hosts.length}{hostSearch.trim() ? ' matching' : ''}
+									</span>
 								{/if}
 							</p>
 						</div>

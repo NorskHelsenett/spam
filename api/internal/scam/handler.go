@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"net/http"
@@ -932,15 +933,44 @@ type hostMetaLite struct {
 	HasFavicon bool   `json:"has_favicon"`
 }
 
-// HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and
+// HostsHandler returns FQDNs exposed via Ingress, HTTPRoute, and
 // IngressRoute. Reads from the host_exposure / exposed_digests
 // materialised views (see 20260509_create_host_exposure_views.sql);
 // freshness is ingest-driven via hostexposure.TriggerRefresh from the
 // CallcenterHandler hook.
+//
+// Pagination via offset+limit. Default limit is 200; the frontend
+// requests subsequent pages as the user scrolls so the wire payload
+// per request stays bounded. The total count for "showing N of M" is
+// served by HostSummaryHandler (no separate COUNT(*) round trip).
+const (
+	hostsDefaultLimit = 200
+	hostsMaxLimit     = 500
+)
+
 func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeOnly := r.URL.Query().Get("active_only") == "true"
 		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = hostsDefaultLimit
+		}
+		if limit > hostsMaxLimit {
+			limit = hostsMaxLimit
+		}
+		// Free-text search. ILIKE across the fields the old client-side
+		// search covered (host, cluster, namespace, name, environment,
+		// kind, ingress_class, backends, lb_ips). The frontend table
+		// search input drives this — categorical filters (cluster /
+		// namespace / kind multiselect, active-only) are still applied
+		// client-side on loaded rows and will follow in a separate pass.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
 
 		rows := []HostRow{}
 		ctx := r.Context()
@@ -974,6 +1004,24 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
+		searchWhere := ""
+		var searchArgs []any
+		if searchQuery != "" {
+			pattern := "%" + searchQuery + "%"
+			searchWhere = `AND (
+				he.host ILIKE ?
+				OR he.cluster ILIKE ?
+				OR he.namespace ILIKE ?
+				OR he.name ILIKE ?
+				OR he.environment ILIKE ?
+				OR he.kind ILIKE ?
+				OR he.ingress_class ILIKE ?
+				OR he.backends ILIKE ?
+				OR he.lb_ips ILIKE ?
+			)`
+			searchArgs = []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
+		}
+
 		// workload_count is the count of distinct image digests that
 		// sit on this URL's backend chain (see exposed_digests MV).
 		// Better signal than the old EndpointSlice ready-address count
@@ -996,11 +1044,15 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			      AND ed.exposure_kind = he.kind
 			      AND ed.exposure_name = he.name
 			) w ON TRUE
-			WHERE TRUE ` + aclWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + searchWhere + `
 			ORDER BY he.host, he.cluster
+			LIMIT ? OFFSET ?
 		`
+		queryArgs := append([]any{}, aclArgs...)
+		queryArgs = append(queryArgs, searchArgs...)
+		queryArgs = append(queryArgs, limit, offset)
 
-		if err := db.Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
 			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -1008,6 +1060,180 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// HostSummary is the small response shape backing the cluster page's
+// exposure chip. The page used to slice these counts client-side off
+// the full /api/clusters/hosts payload — that meant ~1MB on the wire
+// just to render four numbers, and "pending" included every host
+// that hadn't entered the virtual-scroll viewport yet (because each
+// host's DNS resolution was lazy-loaded only when visible).
+//
+// Server-side aggregation fixes both: tiny payload, and `Pending`
+// genuinely means "no cached resolution and no LB IP to classify by",
+// which is the only honest definition of unknown.
+type HostSummary struct {
+	External int `json:"external"`
+	Internal int `json:"internal"`
+	Pending  int `json:"pending"`
+	Total    int `json:"total"`
+}
+
+const hostSummaryCacheKeyPrefix = "hosts:summary:v1:"
+const hostSummaryCacheTTL = 30 * time.Minute
+
+type hostSummaryCacheEntry struct {
+	Watermark time.Time   `json:"watermark"`
+	Summary   HostSummary `json:"summary"`
+}
+
+// HostSummaryHandler returns aggregate exposure counts for the hosts
+// the caller is allowed to see. The endpoint is meant for the cluster
+// overview chip / donut — it is NOT a substitute for the full hosts
+// list, just the summary numbers.
+//
+// Categorisation rules (intentionally different order from the
+// frontend's previous client-side logic — we trust the cluster-
+// reported LB IP first because it's the actual assigned address in
+// the resource's status block, more authoritative than DNS which
+// just says where queries resolve):
+//   - if the host has at least one LB IP, classify by RFC1918 range
+//     of the first one (private → internal, public → external);
+//   - else if a cached DNS resolution exists with no error, fall
+//     back to IsLocal (covers NodePort / ClusterIP-only services
+//     whose Ingress doesn't surface an LB IP);
+//   - else → pending (no LB IP, no DNS, genuinely unknown).
+//
+// Cached in kv_store keyed on the ACL fragment + the host_exposure MV
+// watermark, so the cache invalidates naturally on the next MV refresh.
+func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "he.cluster_id")
+		if deny {
+			writeJSON(w, http.StatusOK, HostSummary{})
+			return
+		}
+
+		// Same cold-start guard as the full list — return zeros rather
+		// than 5xx while the MVs are still WITH NO DATA.
+		if ready, err := spamdb.HostExposureViewsPopulated(ctx, db); err != nil || !ready {
+			writeJSON(w, http.StatusOK, HostSummary{})
+			return
+		}
+
+		watermark := hostExposureWatermark(ctx, db)
+		cacheKey := buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive)
+
+		if entry, ok, _ := cache.GetJSON[hostSummaryCacheEntry](ctx, cs, cacheKey); ok {
+			if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+				writeJSON(w, http.StatusOK, entry.Summary)
+				return
+			}
+		}
+
+		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive)
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		if cache.ShouldStore(ctx) {
+			_ = cache.SetJSON(ctx, cs, cacheKey, hostSummaryCacheEntry{
+				Watermark: watermark,
+				Summary:   summary,
+			}, hostSummaryCacheTTL)
+		}
+
+		writeJSON(w, http.StatusOK, summary)
+	}
+}
+
+func hostExposureWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var refreshedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'host_exposure' LIMIT 1",
+	).Scan(&refreshedAt)
+	return refreshedAt
+}
+
+func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive bool) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(struct {
+		Frag            string
+		Args            []any
+		IncludeInactive bool
+	}{aclFrag, aclArgs, includeInactive})
+	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
+}
+
+// computeHostSummary reads the deduped host set the caller can see and
+// classifies each one. Dedup is by hostname (the same FQDN can appear
+// once per cluster/namespace via a shared *.apps wildcard).
+func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool) (HostSummary, error) {
+	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+	if includeInactive {
+		livenessJoin = ""
+	}
+	aclWhere := ""
+	if aclFrag != "" && aclFrag != "TRUE" {
+		aclWhere = "AND " + aclFrag
+	}
+
+	type row struct {
+		Host  string `gorm:"column:host"`
+		LBIPs string `gorm:"column:lb_ips"`
+	}
+	var rows []row
+	query := `
+		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + `
+		ORDER BY he.host
+	`
+	if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+		return HostSummary{}, err
+	}
+
+	var summary HostSummary
+	summary.Total = len(rows)
+	for _, r := range rows {
+		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
+	}
+	return summary, nil
+}
+
+func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
+	// 1. Cluster-reported LB IP wins. status.loadBalancer.ingress[].ip
+	//    for Ingress, Gateway.status.addresses[] for Gateway API — the
+	//    actual address the cluster has assigned. A private RFC1918 IP
+	//    here means the LoadBalancer is internal-only; a public IP
+	//    means the host is directly exposed via it.
+	if first := strings.TrimSpace(strings.SplitN(lbIPs, ",", 2)[0]); first != "" {
+		if isPrivateIP(first) {
+			s.Internal++
+		} else {
+			s.External++
+		}
+		return s
+	}
+	// 2. No LB IP (NodePort, ClusterIP-only behind an external DNS).
+	//    Fall back to cached DNS resolution if we have one.
+	if res, ok, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCachePrefix+host); ok && res.Error == "" {
+		if res.IsLocal {
+			s.Internal++
+		} else {
+			s.External++
+		}
+		return s
+	}
+	// 3. No LB IP and no cached DNS — genuinely unknown.
+	s.Pending++
+	return s
 }
 
 // writeAndFilterHosts applies the activeOnly filter, inlines resolve +
