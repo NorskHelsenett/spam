@@ -1186,9 +1186,34 @@
 		}
 	};
 
+	// Summary counts only — the full users management UI lives at
+	// /admin/users. This page just renders the headline cards.
+	type UserCountRow = { approved: boolean; hidden: boolean; role: string };
+	let users: UserCountRow[] = $state([]);
+	let usersLoading = $state(true);
+	const approvedUsers = $derived(users.filter((u) => u.approved && !u.hidden));
+	const adminCount = $derived(approvedUsers.filter((u) => u.role === 'admin').length);
+	const readerCount = $derived(approvedUsers.filter((u) => u.role === 'global_reader').length);
+	const defaultCount = $derived(approvedUsers.filter((u) => u.role === 'default').length);
+	const pendingUsers = $derived(users.filter((u) => !u.approved && !u.hidden));
+
+	const loadUserCounts = async () => {
+		usersLoading = true;
+		try {
+			const response = await fetch('/api/admin/users', { credentials: 'include' });
+			if (!response.ok) { users = []; return; }
+			users = await response.json();
+		} catch {
+			users = [];
+		} finally {
+			usersLoading = false;
+		}
+	};
+
 	onMount(() => {
 		if (browser) {
 			loadProviders();
+			loadUserCounts();
 			loadOSVStatus().then(() => {
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
@@ -1240,7 +1265,27 @@
 			</div>
 		</header>
 
-		<div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+			<!-- Users with access + role breakdown as subtitles -->
+			<a
+				href="/admin/users"
+				class="metric-card space-y-1 rounded-2xl p-4 transition hover:bg-[var(--hover-bg-subtle)]"
+			>
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Users</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{usersLoading ? '—' : approvedUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">
+					{usersLoading ? '' : `${adminCount} admin · ${readerCount} reader · ${defaultCount} default`}
+				</p>
+			</a>
+			<!-- Pending users -->
+			<a
+				href="/admin/users"
+				class="metric-card space-y-1 rounded-2xl p-4 transition hover:bg-[var(--hover-bg-subtle)]"
+			>
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Pending</h3>
+				<p class="text-3xl font-bold {!usersLoading && pendingUsers.length > 0 ? 'text-amber-400' : 'text-[var(--text-bright)]'}">{usersLoading ? '—' : pendingUsers.length}</p>
+				<p class="text-xs text-[var(--text-muted)]">awaiting approval</p>
+			</a>
 			<!-- Providers -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Providers</h3>
