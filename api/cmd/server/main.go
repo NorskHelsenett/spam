@@ -158,6 +158,7 @@ func run() error {
 		"migrations/20260511_create_cluster_image_inventory_view.sql",
 		"migrations/20260511a_create_safe_jsonb_cast_fn.sql",
 		"migrations/20260511b_jobs_perf_indexes.sql",
+		"migrations/20260511c_jobs_vuln_meta_unique_active.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

@@ -203,6 +203,12 @@ const vulnMetaEnqueueCap = 1000
 // that doesn't already have a cached metadata row. Best-effort — a
 // failure to enqueue is logged but does not fail the calling scan.
 // Safe to call with duplicates or unknown IDs; the store dedupes.
+//
+// Duplicate-key collisions from the ux_jobs_vuln_meta_active partial
+// unique index are expected during normal operation (two replicas /
+// two scan-completion hooks racing on the same id between the
+// missing-check and CreateJob) and are silently skipped, matching
+// the pattern in scheduleNextFeedRefresh.
 func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) {
 	missing, err := vulnmeta.IDsMissingMetadata(ctx, db, vulnIDs)
 	if err != nil {
@@ -214,6 +220,10 @@ func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) 
 			Type:    JobTypeVulnMetaFetch,
 			Payload: VulnMetaFetchPayload{VulnID: id},
 		}); err != nil {
+			if strings.Contains(err.Error(), "duplicate key") ||
+				strings.Contains(err.Error(), "ux_jobs_vuln_meta_active") {
+				continue
+			}
 			log.Printf("vulnmeta: enqueue %s: %v", id, err)
 		}
 	}
@@ -225,6 +235,16 @@ func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) 
 // for each (up to vulnMetaEnqueueCap). Call from every scan-
 // completion hook — the LEFT JOIN filter means steady-state is
 // cheap; only new vulns actually enqueue.
+//
+// The second NOT IN excludes vuln_ids that already have an active
+// VULN_META_FETCH job. Without it, every scan-completion hook re-
+// enqueues the same backlog because processVulnMetaFetch returns
+// success-without-row for "not_found_upstream" and "upstream_error"
+// branches — those vuln_ids stay permanently absent from
+// vuln_metadata and slip past the first NOT IN forever. Prod
+// accumulated 18.8M duplicate jobs for 505k distinct ids before this
+// check was in place. The ux_jobs_vuln_meta_active partial unique
+// index is the DB-level safety net against races between replicas.
 func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 	var ids []string
 	if err := db.WithContext(ctx).Raw(`
@@ -236,6 +256,13 @@ func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 			WHERE vuln_id <> '_none' AND vuln_id <> ''
 		) u
 		WHERE vuln_id NOT IN (SELECT vuln_id FROM vuln_metadata)
+		  AND vuln_id NOT IN (
+		      SELECT payload->>'vuln_id'
+		      FROM jobs
+		      WHERE type = 'VULN_META_FETCH'
+		        AND status IN ('QUEUED', 'RETRY', 'RUNNING')
+		        AND payload->>'vuln_id' IS NOT NULL
+		  )
 		LIMIT ?
 	`, vulnMetaEnqueueCap).Scan(&ids).Error; err != nil {
 		log.Printf("vulnmeta: scan for missing: %v", err)
