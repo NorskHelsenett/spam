@@ -221,6 +221,20 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// a glance.
 				api.Get("/admin/jobs", uiapi.AdminJobsHandler(db, authService))
 
+				// Admin database storage view — read-only, no audit wrap.
+				// Surfaces pg_catalog/pg_stat_user_tables so an operator can
+				// see per-table sizes, row counts, and bloat signals when
+				// chasing performance issues.
+				api.Get("/admin/db/storage", uiapi.AdminDBStorageHandler(db, authService))
+
+				// Admin database maintenance — enqueues ANALYZE / VACUUM
+				// ANALYZE jobs per table. VACUUM FULL / REINDEX are
+				// deliberately not exposed (they take AccessExclusiveLock).
+				// /recent returns the last 50 maintenance jobs so the UI
+				// can show per-row state.
+				api.Post("/admin/db/maintenance", uiapi.AdminDBMaintenanceHandler(db, authService))
+				api.Get("/admin/db/maintenance/recent", uiapi.AdminDBMaintenanceRecentHandler(db, authService))
+
 				// Bulk vuln-feed refresh (CISA KEV, FIRST.org EPSS).
 				// Manual trigger jumps the auto-schedule queue; status is
 				// poll-friendly for the admin UI's progress bar.

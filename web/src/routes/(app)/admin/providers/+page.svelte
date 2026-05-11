@@ -1191,6 +1191,24 @@
 	type UserCountRow = { approved: boolean; hidden: boolean; role: string };
 	let users: UserCountRow[] = $state([]);
 	let usersLoading = $state(true);
+
+	// DB storage headline — full per-table breakdown lives at /admin/database.
+	let dbSizeBytes = $state<number | null>(null);
+	let dbTableCount = $state<number | null>(null);
+	let dbStorageLoading = $state(true);
+
+	const formatBytes = (bytes: number | null) => {
+		if (bytes == null) return '—';
+		if (bytes < 1024) return `${bytes} B`;
+		const units = ['KB', 'MB', 'GB', 'TB'];
+		let value = bytes / 1024;
+		let i = 0;
+		while (value >= 1024 && i < units.length - 1) {
+			value /= 1024;
+			i++;
+		}
+		return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[i]}`;
+	};
 	const approvedUsers = $derived(users.filter((u) => u.approved && !u.hidden));
 	const adminCount = $derived(approvedUsers.filter((u) => u.role === 'admin').length);
 	const readerCount = $derived(approvedUsers.filter((u) => u.role === 'global_reader').length);
@@ -1210,10 +1228,31 @@
 		}
 	};
 
+	const loadDBStorage = async () => {
+		dbStorageLoading = true;
+		try {
+			const response = await fetch('/api/admin/db/storage', { credentials: 'include' });
+			if (!response.ok) {
+				dbSizeBytes = null;
+				dbTableCount = null;
+				return;
+			}
+			const data = await response.json();
+			dbSizeBytes = typeof data.database_bytes === 'number' ? data.database_bytes : null;
+			dbTableCount = typeof data.table_count === 'number' ? data.table_count : null;
+		} catch {
+			dbSizeBytes = null;
+			dbTableCount = null;
+		} finally {
+			dbStorageLoading = false;
+		}
+	};
+
 	onMount(() => {
 		if (browser) {
 			loadProviders();
 			loadUserCounts();
+			loadDBStorage();
 			loadOSVStatus().then(() => {
 				const active = osvStatus.status === 'QUEUED' || osvStatus.status === 'RUNNING' || osvStatus.status === 'RETRY';
 				if (active) pollOSVStatus();
@@ -1265,7 +1304,7 @@
 			</div>
 		</header>
 
-		<div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
 			<!-- Users with access + role breakdown as subtitles -->
 			<a
 				href="/admin/users"
@@ -1304,6 +1343,15 @@
 				<p class="text-3xl font-bold text-[var(--text-bright)]">{sbomScanStatus.scanned_count ?? '—'}</p>
 				<p class="text-xs text-[var(--text-muted)]">{sbomScanStatus.pending_count != null ? `${sbomScanStatus.pending_count} pending` : 'SBOMs scanned'}</p>
 			</div>
+			<!-- Database storage -->
+			<a
+				href="/admin/database"
+				class="metric-card space-y-1 rounded-2xl p-4 transition hover:bg-[var(--hover-bg-subtle)]"
+			>
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Database</h3>
+				<p class="text-3xl font-bold text-[var(--text-bright)]">{dbStorageLoading ? '—' : formatBytes(dbSizeBytes)}</p>
+				<p class="text-xs text-[var(--text-muted)]">{dbTableCount != null ? `${dbTableCount} tables` : 'storage used'}</p>
+			</a>
 		</div>
 	</section>
 

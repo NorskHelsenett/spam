@@ -46,6 +46,7 @@ var jobPoolDefs = []adminPoolDef{
 			jobs.JobTypeProbeSecrets,
 			jobs.JobTypeFetchKEV,
 			jobs.JobTypeFetchEPSS,
+			jobs.JobTypeDBMaintenance,
 		},
 	},
 	{

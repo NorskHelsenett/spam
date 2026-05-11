@@ -76,6 +76,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchEPSS(ctx, db, job.ID)
 	case JobTypeFetchDepHealth:
 		return processFetchDepHealth(ctx, db, job.ID)
+	case JobTypeDBMaintenance:
+		return processDBMaintenance(ctx, db, job)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean

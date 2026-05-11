@@ -199,7 +199,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
@@ -226,7 +226,8 @@ let isAdmin = $state(false);
 	const adminNavLinks = [
 		{ href: '/runs', label: 'Runs', icon: Play },
 		{ href: '/admin/jobs', label: 'Jobs', icon: Layers },
-		{ href: '/admin/users', label: 'Users', icon: Users }
+		{ href: '/admin/users', label: 'Users', icon: Users },
+		{ href: '/admin/database', label: 'Database', icon: Database }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
