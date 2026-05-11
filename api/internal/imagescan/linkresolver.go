@@ -161,6 +161,12 @@ func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
 		Content []byte
 	}
 	var labelRows []labelRow
+	// j.type = 'IMAGE_SCAN' lets the planner pick idx_jobs_image_scan_digest_all
+	// (partial index on payload->>'image_digest_id' WHERE type='IMAGE_SCAN').
+	// Without the explicit type predicate, the planner can't prove the
+	// partial filter holds and falls back to a seq-scan of jobs per
+	// image_digest — pg_stat_statements caught this as a multi-second
+	// startup query on a 20M-row jobs table.
 	err := db.WithContext(ctx).Raw(`
 		SELECT id.id, a.content
 		FROM image_digests id
@@ -168,7 +174,8 @@ func BackfillSourceRepoIDs(ctx context.Context, db *gorm.DB) (int, int, error) {
 		    SELECT a.content
 		    FROM image_scan_artifacts a
 		    JOIN jobs j ON j.id = a.scan_run_id
-		    WHERE j.payload->>'image_digest_id' = id.id
+		    WHERE j.type = 'IMAGE_SCAN'
+		      AND j.payload->>'image_digest_id' = id.id
 		      AND a.category = 'labels'
 		    ORDER BY a.created_at DESC
 		    LIMIT 1
