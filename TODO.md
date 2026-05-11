@@ -220,6 +220,88 @@ Today a full image scan and an SBOM-revuln both write
 `/app/images/[id]` distinguish "scanned image" from "rechecked SBOM",
 which matters when the full scan was N days ago.
 
+### Prune old SUCCEEDED jobs
+
+The `jobs` table doubles as a permanent audit trail because nothing
+removes SUCCEEDED rows after they're processed. Without pruning it
+drifts back into multi-GB bloat over time and slows every claim query
+in proportion, even with the new composite indexes.
+
+Implementation path:
+- New job type `PRUNE_OLD_JOBS`. Self-rescheduling like FETCH_KEV /
+  FETCH_EPSS — daily cadence is fine.
+- Handler deletes `WHERE status = 'SUCCEEDED' AND finished_at <
+  NOW() - INTERVAL '30 days'`. Chunked DELETE in a loop with
+  configurable batch size (default 10k) so it doesn't spike WAL.
+- Optionally also prune `FAILED` rows older than N days, but those
+  are more interesting to keep for forensics — make the threshold
+  separate and larger (e.g. 90 days).
+- Retention window configurable via env var
+  (`JOBS_RETENTION_DAYS_SUCCEEDED`, default 30).
+- Partial unique index `ux_jobs_prune_active` on `type='PRUNE_OLD_JOBS'`
+  to keep the schedule idempotent across replicas.
+
+Want this in place *before* the next swamp accumulates from any
+source, not just VULN_META_FETCH.
+
+### Tune postgres shared_buffers / work_mem
+
+Stock postgres config is the default: `shared_buffers=128MB`,
+`work_mem=4MB`, `effective_cache_size=4GB`. The container has 32 GB
+RAM available so postgres is leaving most of it unused — visible as
+~92% cache hit ratio (under the 99% healthy target for an OLTP DB)
+and millions of temp files from sorts that overflow `work_mem`.
+
+Implementation path:
+- Extend `postgresql.primary.extraArgs` in the Helm chart with:
+  ```yaml
+  - "-c"
+  - "shared_buffers=4GB"
+  - "-c"
+  - "work_mem=32MB"
+  - "-c"
+  - "maintenance_work_mem=1GB"
+  - "-c"
+  - "effective_cache_size=24GB"
+  ```
+- Bundles into the existing extraArgs (already used for the
+  `pg_stat_statements` preload), so this is one rolling restart.
+- `shared_buffers` requires postgres restart; the other three are
+  reload-only — but bundling keeps one source of truth.
+
+Expected effect: cache hit ratio → 98%+, MV-refresh sorts stop
+spilling to disk, planner picks index scans more often. Revisit
+the numbers a week after the next change rolls; if the slow-queries
+panel is still spilling, push `shared_buffers` higher.
+
+### Tombstone `vuln_metadata` rows for upstream-unknown CVEs
+
+`processVulnMetaFetch` returns success-without-writing for two
+branches: `not_found_upstream` (OSV/EUVD says the CVE doesn't exist)
+and `upstream_error` (transient 403/429/5xx, decode mismatch,
+timeout). Both leave the vuln_id permanently absent from
+`vuln_metadata`. The new `EnqueueMissingVulnMeta` "already pending"
+check + `ux_jobs_vuln_meta_active` unique index bound the damage,
+but a vuln_id whose upstream lookup *will never succeed* keeps
+getting re-enqueued on every scan — small steady churn forever.
+
+Implementation path:
+- Add `vuln_metadata.lookup_status` column: enum
+  `('present', 'not_found_upstream', 'upstream_error')`. Default
+  `present` so existing rows don't break.
+- `processVulnMetaFetch` writes a tombstone row for the two
+  non-success branches. The dedup check in
+  `EnqueueMissingVulnMeta` already excludes anything in
+  `vuln_metadata`, so tombstones naturally suppress re-enqueue.
+- For `upstream_error` rows specifically: add a `next_retry_at`
+  column and have `EnqueueMissingVulnMeta` skip rows whose
+  `next_retry_at > NOW()`. Exponential backoff per id so a
+  flapping upstream doesn't lock vuln_ids out forever.
+
+This is belt-and-braces on top of the unique index, but it's what
+turns "bounded steady-state churn" into "zero churn for known-dead
+ids".
+
 ### Generalize HostChainDiagram to N columns
 
 Diagram hard-codes Ingress → Service → Pod. Parameterize
