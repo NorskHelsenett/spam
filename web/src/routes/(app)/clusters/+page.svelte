@@ -293,8 +293,17 @@
 				fetch(`/api/clusters/summary${qs}`, { credentials: 'include' }),
 				fetch(`/api/clusters/registry-distribution${qs}`, { credentials: 'include' })
 			]);
-			if (clusterRes.ok) clusters = (await clusterRes.json()) ?? [];
-			if (regRes.ok) registryDist = (await regRes.json()) ?? [];
+			// Defensive parse: 504s / proxy error pages return non-JSON
+			// (HTML), and a `?? []` fallback on an object body would still
+			// pass through. Array.isArray locks the expected shape.
+			if (clusterRes.ok) {
+				const body = await clusterRes.json().catch(() => null);
+				clusters = Array.isArray(body) ? body : [];
+			}
+			if (regRes.ok) {
+				const body = await regRes.json().catch(() => null);
+				registryDist = Array.isArray(body) ? body : [];
+			}
 			loadHosts();
 		} catch {
 			error = 'Failed to load cluster data';
@@ -375,7 +384,8 @@
 		try {
 			const res = await fetch(`/api/clusters/hosts${inactiveQS()}`, { credentials: 'include' });
 			if (res.ok) {
-				hosts = (await res.json()) ?? [];
+				const body = await res.json().catch(() => null);
+				hosts = Array.isArray(body) ? body : [];
 				// Seed the per-host maps from inline fields so the
 				// virtual-scroll $effect sees a cache hit and skips
 				// the fallback /resolve + /meta round-trip for every

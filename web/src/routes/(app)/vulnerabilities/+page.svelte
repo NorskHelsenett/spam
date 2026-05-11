@@ -398,8 +398,18 @@
 		if (images.length > 0) return;
 		imagesLoading = true;
 		try {
+			// /api/clusters/images/detail returns {items, limit, offset,
+			// has_more} since the pagination migration. Accept both the
+			// new shape and a bare array so a half-rolled deploy doesn't
+			// blow up here, and harden against non-array bodies (e.g. a
+			// 504 gateway HTML page parsing oddly) that would crash
+			// downstream .map / .filter on `images`.
 			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
-			if (res.ok) images = (await res.json()) ?? [];
+			if (res.ok) {
+				const body = (await res.json()) as ImageRow[] | { items?: ImageRow[] } | null;
+				const parsed = Array.isArray(body) ? body : body?.items;
+				images = Array.isArray(parsed) ? parsed : [];
+			}
 		} catch {
 			// ignore
 		} finally {
