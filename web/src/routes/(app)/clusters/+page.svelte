@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { browser } from '$app/environment';
 	import { Server, Container, Globe, ChevronDown, ExternalLink, SlidersHorizontal, Search, Bot } from 'lucide-svelte';
 	import { slide, fly } from 'svelte/transition';
@@ -350,6 +350,8 @@
 		const q = imageSearch.trim();
 		if (q) params.set('q', q);
 		if (imageSelectedRegistries.length > 0) params.set('registries', imageSelectedRegistries.join(','));
+		params.set('sort', String(imageSortKey));
+		params.set('order', imageSortDir);
 		return `/api/clusters/images/detail?${params}`;
 	};
 
@@ -358,7 +360,14 @@
 		limit: number;
 		offset: number;
 		has_more: boolean;
+		total: number;
 	};
+
+	// Fleet-wide total returned by the image-detail endpoint alongside
+	// each page. Drives "showing N of M" and the true virtual-scroll
+	// height — without it the scrollbar lies about how much content
+	// exists below the loaded set.
+	let imageTotal = $state(0);
 
 	const loadImages = async () => {
 		if (imagesFetched || imagesInFlight) return;
@@ -370,6 +379,7 @@
 				imageDetails = page.items ?? [];
 				imageOffset = imageDetails.length;
 				imageHasMore = Boolean(page.has_more);
+				imageTotal = page.total ?? 0;
 			}
 			imagesFetched = true;
 		} catch { /* silent */ }
@@ -393,6 +403,7 @@
 					imageOffset = imageDetails.length;
 				}
 				imageHasMore = Boolean(page.has_more);
+				if (page.total != null) imageTotal = page.total;
 			}
 		} catch { /* silent */ }
 		finally { imageLoadingMore = false; }
@@ -471,7 +482,10 @@
 		if (!hostsHasMore || hostsLoadingMore || hostsInFlight) return;
 		if (sortedHosts.length === 0) return;
 		const trigger = Math.max(0, sortedHosts.length - 20);
-		if (hostVirt.end >= trigger) loadMoreHosts();
+		// untrack the call so we only re-fire on the guard-state deps
+		// + scroll position above, not on internal buildHostQueryString
+		// reads.
+		if (hostVirt.end >= trigger) untrack(() => loadMoreHosts());
 	});
 
 	// In-flight trackers. The cached-result dedup (`if (hostMetas[host])
@@ -539,7 +553,37 @@
 	});
 
 	$effect(() => {
-		if (activeTab === 'images') loadImages();
+		// Same untrack guard as the hosts tab-open effect: prevents
+		// loadImages's internal reads from becoming tracked deps and
+		// causing a state-write-driven reload loop.
+		if (activeTab === 'images') untrack(() => loadImages());
+	});
+
+	// Debounced reload whenever any image filter or sort changes. Same
+	// pattern as the hosts side — server-side pagination means client
+	// can't compute the right list without re-fetching, and we reset
+	// the offset cursor so the next page lands correctly aligned with
+	// the new ORDER BY.
+	let imageFiltersTimer: ReturnType<typeof setTimeout> | null = null;
+	$effect(() => {
+		const _ = [
+			imageSearch,
+			imageSelectedRegistries.join(' '),
+			imageSortKey,
+			imageSortDir
+		];
+		if (!browser) return;
+		if (imageFiltersTimer) clearTimeout(imageFiltersTimer);
+		imageFiltersTimer = setTimeout(() => {
+			if (activeTab !== 'images' && !imagesFetched) return;
+			imagesFetched = false;
+			imageOffset = 0;
+			imageHasMore = false;
+			imageDetails = [];
+			imageTotal = 0;
+			untrack(() => loadImages());
+		}, 200);
+		void _;
 	});
 
 	// Lazy-load the host list when the Hosts tab is first opened. Calling
@@ -547,7 +591,15 @@
 	// every render; the in-flight + hostsFetched guards inside the
 	// function make it a single-fire effect.
 	$effect(() => {
-		if (activeTab === 'hosts') loadHosts();
+		// untrack so loadHosts's internal reads (hostsFetched,
+		// hostsInFlight, every filter / sort state via the URL builder)
+		// don't become deps of this effect. Without it, every successful
+		// load re-arms this effect — even though the guards inside
+		// loadHosts return early, the effect's tracked-dep set was
+		// growing on each call and the eventual write to one of them
+		// (filter reload, scroll-driven loadMore, etc.) triggered the
+		// offset=0 reload loop reported in prod.
+		if (activeTab === 'hosts') untrack(() => loadHosts());
 	});
 
 	// Debounced cluster search → reload /clusters/summary with q=.
@@ -863,14 +915,13 @@
 		[...filteredClusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
 	);
 
-	const sortedImages = $derived(
-		[...filteredImages].sort((a, b) => {
-			if (imageSortKey === 'vulns') {
-				return cmp(vulnSortKey(a), vulnSortKey(b), imageSortDir);
-			}
-			return cmp(a[imageSortKey], b[imageSortKey], imageSortDir);
-		})
-	);
+	// Image sort is applied server-side via the sort+order query params
+	// (see imagesPath + the imageFiltersTimer debounce). 'vulns' resolves
+	// to vuln_weight in the inventory_with_vulns CTE so the severity-
+	// weighted order matches the old client-side vulnSortKey but spans
+	// the entire dataset rather than the loaded page. Rendering in
+	// array order keeps the client view in sync with the server's order.
+	const sortedImages = $derived(filteredImages);
 
 	// Host sort is applied server-side via the sort+order query params;
 	// rendering the loaded page in array order keeps client and server
@@ -879,7 +930,7 @@
 
 	// Virtual scroll ranges (must be after sorted* declarations)
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
-	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH));
+	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH, imageTotal));
 	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH, hostSummary.total));
 
 	// Apply pending scroll restores once the target tab's DOM has
@@ -1142,8 +1193,10 @@
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Images</h2>
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Container images across all clusters.
-								{#if imageActiveFilterCount > 0}
-									<span class="text-[var(--text-muted)]">&middot; showing {filteredImages.length} of {imageDetails.length}</span>
+								{#if imageTotal > 0}
+									<span class="text-[var(--text-muted)]">
+										&middot; showing {imageDetails.length} of {imageTotal}{imageActiveFilterCount > 0 ? ' matching' : ''}
+									</span>
 								{/if}
 							</p>
 						</div>
@@ -1201,9 +1254,14 @@
 						// the next page. The guard inside loadMoreImages
 						// keeps rapid scroll from fanning out fetches.
 						if (imageHasMore && !imageLoadingMore) {
-							const contentH = sortedImages.length * ROW_HEIGHT;
-							const distanceToBottom = contentH - imageScrollTop - imageViewH;
-							if (distanceToBottom < ROW_HEIGHT * 10) loadMoreImages();
+							// "Near bottom of loaded rows" — gauge by the loaded
+							// count, not the true total, because the scroll
+							// container extends to imageTotal but unloaded
+							// rows past imageDetails.length are blank padding.
+							// Trigger when we approach the loaded boundary.
+							const loadedContentH = imageDetails.length * ROW_HEIGHT;
+							const distanceToLoaded = loadedContentH - imageScrollTop - imageViewH;
+							if (distanceToLoaded < ROW_HEIGHT * 10) loadMoreImages();
 						}
 					}}>
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">

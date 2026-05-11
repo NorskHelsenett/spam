@@ -747,6 +747,7 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			Limit   int   `json:"limit"`
 			Offset  int   `json:"offset"`
 			HasMore bool  `json:"has_more"`
+			Total   int64 `json:"total"`
 		}
 
 		ctx := r.Context()
@@ -822,11 +823,23 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
+		// Sort allowlist — never interpolate user input into ORDER BY.
+		// The vuln_weight column in the inventory_with_vulns CTE lets
+		// 'vulns' sort server-side using the same severity weighting
+		// the frontend used for its in-memory sort, so the table order
+		// is identical to the old client-side sort but spans the whole
+		// dataset rather than the loaded page.
+		sortColumn, sortDirection := parseImageSortParams(r.URL.Query().Get("sort"), r.URL.Query().Get("order"))
+
+		// inventory + digest_id + vuln_counts must be materialised
+		// *before* the page LIMIT so sorts on columns derived from
+		// outside cluster_image_inventory (vulns) include digests in
+		// the right global order rather than just within the page.
+		// latest_scan is scoped to inventory digests via the IN clause
+		// — bounded work even though we no longer restrict to the page.
 		// limit+1 gives us has_more without a second COUNT query.
-		// Stable ORDER BY (container_count DESC, image, digest) ensures
-		// consistent paging when nothing changes between requests.
 		query := `
-			WITH page AS (
+			WITH inventory AS (
 				SELECT
 				    cii.raw_registry, cii.registry, cii.image, cii.digest,
 				    STRING_AGG(DISTINCT cii.tag, ',' ORDER BY cii.tag) FILTER (WHERE cii.tag IS NOT NULL AND cii.tag <> '') AS tags,
@@ -838,28 +851,23 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				` + livenessJoin + `
 				WHERE TRUE ` + aclWhere + ` ` + preGroupWhere + `
 				GROUP BY cii.raw_registry, cii.registry, cii.image, cii.digest
-				ORDER BY container_count DESC, cii.image ASC, cii.digest ASC
-				LIMIT ? OFFSET ?
+			),
+			inventory_digests AS (
+				SELECT inv.*, id.id AS digest_id
+				FROM inventory inv
+				LEFT JOIN image_digests id
+				    ON id.registry   = inv.raw_registry
+				   AND id.repository = inv.image
+				   AND id.digest     = inv.digest
 			),
 			latest_scan AS (
-				-- Latest finished scan per image_digest_id. Restricted to
-				-- digests in the page by EXISTS so we don't sort all
-				-- image_scan_runs when we only need 50 rows of vuln counts.
-				SELECT DISTINCT ON (image_digest_id)
-				       image_digest_id,
-				       id AS scan_run_id
+				SELECT DISTINCT ON (isr.image_digest_id)
+				       isr.image_digest_id,
+				       isr.id AS scan_run_id
 				FROM image_scan_runs isr
-				WHERE finished_at IS NOT NULL
-				  AND EXISTS (
-				      SELECT 1
-				      FROM image_digests id
-				      JOIN page p
-				        ON p.raw_registry = id.registry
-				       AND p.image        = id.repository
-				       AND p.digest       = id.digest
-				      WHERE id.id = isr.image_digest_id
-				  )
-				ORDER BY image_digest_id, finished_at DESC
+				WHERE isr.finished_at IS NOT NULL
+				  AND isr.image_digest_id IN (SELECT digest_id FROM inventory_digests WHERE digest_id IS NOT NULL)
+				ORDER BY isr.image_digest_id, isr.finished_at DESC
 			),
 			vuln_counts AS (
 				SELECT f.image_digest_id,
@@ -867,28 +875,43 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
 				    COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS vuln_low,
-				    COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
+				    COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown,
+				    -- Severity-weighted sort key — must match the
+				    -- frontend's vulnSortKey exactly so behaviour is
+				    -- identical between server-side (current) and any
+				    -- legacy client-side path: c*1e9 + h*1e6 + m*1e3 + l.
+				    (COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')::bigint            * 1000000000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')::bigint                * 1000000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')::bigint              * 1000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE'))::bigint) AS vuln_weight
 				FROM image_vuln_findings f
 				JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
 				GROUP BY f.image_digest_id
+			),
+			inventory_with_vulns AS (
+				SELECT dl.*,
+				    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
+				    COALESCE(vc.vuln_high, 0)     AS vuln_high,
+				    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
+				    COALESCE(vc.vuln_low, 0)      AS vuln_low,
+				    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown,
+				    COALESCE(vc.vuln_weight, 0)   AS vuln_weight
+				FROM inventory_digests dl
+				LEFT JOIN vuln_counts vc ON vc.image_digest_id = dl.digest_id
+			),
+			page AS (
+				SELECT * FROM inventory_with_vulns
+				ORDER BY ` + sortColumn + ` ` + sortDirection + `, image ASC, digest ASC
+				LIMIT ? OFFSET ?
 			)
 			SELECT
 			    page.registry, page.image, page.digest,
-			    COALESCE(id.id::text, '') AS digest_id,
-			    COALESCE(page.tags, '')   AS tags,
+			    COALESCE(page.digest_id::text, '') AS digest_id,
+			    COALESCE(page.tags, '')           AS tags,
 			    page.cluster_count, page.namespace_count, page.container_count, page.last_seen,
-			    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
-			    COALESCE(vc.vuln_high, 0)     AS vuln_high,
-			    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
-			    COALESCE(vc.vuln_low, 0)      AS vuln_low,
-			    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
+			    page.vuln_critical, page.vuln_high, page.vuln_medium, page.vuln_low, page.vuln_unknown
 			FROM page
-			LEFT JOIN image_digests id
-			  ON id.registry   = page.raw_registry
-			 AND id.repository = page.image
-			 AND id.digest     = page.digest
-			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
-			ORDER BY page.container_count DESC, page.image ASC, page.digest ASC
+			ORDER BY ` + sortColumn + ` ` + sortDirection + `, page.image ASC, page.digest ASC
 		`
 
 		args := append([]any{}, aclArgs...)
@@ -906,11 +929,30 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			rows = rows[:limit]
 		}
 
+		// Total over the same filter scope. Separate query because the
+		// LIMIT+1 trick only tells us "is there at least one more"; the
+		// frontend wants the absolute count for "showing N of M" and the
+		// virtual-scroll height. Cheap when the inventory MV is hot.
+		var total int64
+		countQuery := `
+			SELECT COUNT(DISTINCT (cii.raw_registry, cii.image, cii.digest))::bigint
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + preGroupWhere + `
+		`
+		countArgs := append([]any{}, aclArgs...)
+		countArgs = append(countArgs, preGroupArgs...)
+		if err := db.WithContext(ctx).Raw(countQuery, countArgs...).Scan(&total).Error; err != nil {
+			// Soft-fail: serve the page without a total rather than 500.
+			log.Printf("ImageDetailHandler count error: %v", err)
+		}
+
 		writeJSON(w, http.StatusOK, response{
 			Items:   rows,
 			Limit:   limit,
 			Offset:  offset,
 			HasMore: hasMore,
+			Total:   total,
 		})
 	}
 }
@@ -1108,6 +1150,40 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// imageSortColumnSQL maps the frontend's ImageDetail sort keys to
+// columns available on the inventory_with_vulns CTE in
+// ImageDetailHandler. 'vulns' resolves to a severity-weighted sum
+// (vuln_weight) that mirrors the frontend's old vulnSortKey, so
+// header-click sort by Vulns spans the whole dataset and not just
+// the loaded page.
+var imageSortColumnSQL = map[string]string{
+	"registry":        "registry",
+	"image":           "image",
+	"digest":          "digest",
+	"tags":            "tags",
+	"cluster_count":   "cluster_count",
+	"namespace_count": "namespace_count",
+	"container_count": "container_count",
+	"last_seen":       "last_seen",
+	"vulns":           "vuln_weight",
+}
+
+// parseImageSortParams validates the sort + order params and returns
+// the SQL column expression + direction. The default is
+// (container_count DESC) — the previous unconfigurable behaviour, so
+// the unfiltered first-page load keeps its old order.
+func parseImageSortParams(rawSort, rawOrder string) (string, string) {
+	column, ok := imageSortColumnSQL[strings.TrimSpace(strings.ToLower(rawSort))]
+	if !ok {
+		column = "container_count"
+	}
+	direction := "DESC"
+	if strings.EqualFold(strings.TrimSpace(rawOrder), "asc") {
+		direction = "ASC"
+	}
+	return column, direction
 }
 
 // hostSortColumnSQL maps the frontend's HostRow field names to SQL
