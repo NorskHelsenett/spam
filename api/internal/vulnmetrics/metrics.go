@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
@@ -19,13 +20,13 @@ import (
 )
 
 const (
-	summaryCacheKey   = "vuln:summary:v1"
-	reposCacheKey     = "vuln:repos:v1"
-	facetsCacheKey    = "vuln:facets:v1"
+	summaryCacheKey = "vuln:summary:v1"
+	reposCacheKey   = "vuln:repos:v1"
+	facetsCacheKey  = "vuln:facets:v1"
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v4:"
+	listCachePrefix   = "vuln:list:v4:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -101,11 +102,11 @@ type VulnGroup struct {
 	// model. Both are 0 / false when neither feed has the CVE — the
 	// API always returns the fields so clients can render badges
 	// without a presence check.
-	KEVKnown            bool       `json:"kev_known"`
-	KEVKnownRansomware  bool       `json:"kev_known_ransomware"`
-	KEVDateAdded        *time.Time `json:"kev_date_added,omitempty"`
-	EPSSScore           float32    `json:"epss_score"`
-	EPSSPercentile      float32    `json:"epss_percentile"`
+	KEVKnown           bool       `json:"kev_known"`
+	KEVKnownRansomware bool       `json:"kev_known_ransomware"`
+	KEVDateAdded       *time.Time `json:"kev_date_added,omitempty"`
+	EPSSScore          float32    `json:"epss_score"`
+	EPSSPercentile     float32    `json:"epss_percentile"`
 }
 
 // VulnListResponse is the paginated shape of /api/vuln/list. Total
@@ -295,6 +296,18 @@ func TriggerRefresh(db *gorm.DB) {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
 			if _, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
 				log.Printf("vulnmetrics: background refresh: %v", err)
+				// Skipping the assetrisk cascade is deliberate — asset_risk
+				// reads from the vuln_unified MVs, so refreshing it against
+				// data we just failed to recompute would record a stale
+				// snapshot. The log line makes the staleness visible to ops
+				// instead of silently letting asset_risk drift.
+				log.Printf("vulnmetrics: skipping assetrisk cascade (vulnmetrics refresh failed)")
+			} else {
+				// asset_risk reads the unified vulnerability MVs. Cascade
+				// after the vuln refresh has had a chance to land instead
+				// of letting scan hooks trigger both families in parallel
+				// against mismatched snapshots.
+				assetrisk.TriggerRefresh(db)
 			}
 			cancel()
 

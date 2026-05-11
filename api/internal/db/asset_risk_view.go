@@ -38,6 +38,11 @@ func AssetRiskViewPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // holds the lock so the caller can decide whether to retry or treat
 // the in-flight refresh as good enough.
 func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
+	names := []string{assetRiskViewName}
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -67,17 +72,15 @@ func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", assetRiskViewRefreshLockID)
 	}()
 
+	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+		return nil
+	}
+
 	if err := refreshView(ctx, db, assetRiskViewName); err != nil {
 		return err
 	}
 
 	// Record the refresh time so the /api/triage handler can render
 	// "data as of …" without a separate metadata table.
-	refreshedAt := time.Now().UTC()
-	return db.WithContext(ctx).Exec(`
-		INSERT INTO materialized_view_refreshes (name, refreshed_at)
-		VALUES (?, ?)
-		ON CONFLICT (name)
-		DO UPDATE SET refreshed_at = EXCLUDED.refreshed_at
-	`, assetRiskViewName, refreshedAt).Error
+	return recordMaterializedViewRefresh(ctx, db, names, time.Now().UTC())
 }

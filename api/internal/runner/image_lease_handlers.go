@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/signingpolicy"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -30,15 +29,15 @@ const imageScanRunTokenTTL = 2 * time.Hour
 // keeps upload logic in one place and avoids duplicating multipart parsing
 // under HMAC auth.
 type imageScanLeaseResponse struct {
-	JobID         string                          `json:"job_id"`
-	ImageDigestID string                          `json:"image_digest_id"`
-	Registry      string                          `json:"registry"`
-	Repository    string                          `json:"repository"`
-	Digest        string                          `json:"digest"`
-	Scanners      map[string]string               `json:"scanners,omitempty"`
-	SigningPolicy *jobs.ImageScanSigningPolicy    `json:"signing_policy,omitempty"`
-	RunToken      string                          `json:"run_token"`
-	WorkerURL     string                          `json:"worker_url"`
+	JobID         string                       `json:"job_id"`
+	ImageDigestID string                       `json:"image_digest_id"`
+	Registry      string                       `json:"registry"`
+	Repository    string                       `json:"repository"`
+	Digest        string                       `json:"digest"`
+	Scanners      map[string]string            `json:"scanners,omitempty"`
+	SigningPolicy *jobs.ImageScanSigningPolicy `json:"signing_policy,omitempty"`
+	RunToken      string                       `json:"run_token"`
+	WorkerURL     string                       `json:"worker_url"`
 }
 
 // handleImageScanNext leases the next QUEUED/RETRY IMAGE_SCAN job. The
@@ -221,7 +220,6 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 	// background so the next /app/vulnerabilities load sees fresh
 	// aggregates without paying the recompute on the UI thread.
 	vulnmetrics.TriggerRefresh(s.db)
-	assetrisk.TriggerRefresh(s.db)
 	jobs.EnqueueMissingVulnMeta(r.Context(), s.db)
 
 	w.WriteHeader(http.StatusOK)

@@ -117,7 +117,6 @@ func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}
 	// run at most one recompute per burst instead of serialising the
 	// job on the expensive summary+repos query.
 	vulnmetrics.TriggerRefresh(db)
-	assetrisk.TriggerRefresh(db)
 	// Any new vuln_ids from this batch need advisory metadata
 	// fetched from OSV/EUVD. Bounded per-call; successive calls
 	// drain the backlog.
@@ -347,7 +346,6 @@ func processFetchKEV(ctx context.Context, db *gorm.DB) (interface{}, error) {
 	// dashboard cache so the next list view picks up the new boost
 	// rather than serving the previous order from cache.
 	vulnmetrics.TriggerRefresh(db)
-	assetrisk.TriggerRefresh(db)
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
@@ -370,7 +368,6 @@ func processFetchEPSS(ctx context.Context, db *gorm.DB, jobID string) (interface
 	}
 	scheduleNextFeedRefresh(ctx, db, JobTypeFetchEPSS)
 	vulnmetrics.TriggerRefresh(db)
-	assetrisk.TriggerRefresh(db)
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
