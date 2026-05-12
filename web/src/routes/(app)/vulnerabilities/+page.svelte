@@ -1171,9 +1171,9 @@
 									{#each vulnRows as row (row.idx)}
 										{@const g = row.group}
 										{#if g}
-											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
-												<td class="px-5 py-3">
-													<div class="flex flex-wrap items-center gap-2">
+											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style="height:{VULN_ROW_HEIGHT}px; max-height:{VULN_ROW_HEIGHT}px">
+												<td class="px-5 py-3 overflow-hidden">
+													<div class="flex flex-wrap items-center gap-2 overflow-hidden">
 														<a
 															href={vulnDetailHref(g.vuln_id)}
 															class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
@@ -1191,16 +1191,19 @@
 														{#each g.sources as src}
 															<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
 														{/each}
-														{#each g.aliases ?? [] as alias}
+														{#each (g.aliases ?? []).slice(0, 2) as alias}
 															<a
 																href={vulnDetailHref(alias)}
 																class="inline-flex items-center rounded-full border border-[var(--border-color)]/70 bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-tertiary)] transition hover:text-[var(--accent)]"
 																title="Alias for this advisory"
 															>{alias}</a>
 														{/each}
+														{#if (g.aliases ?? []).length > 2}
+															<span class="rounded-full border border-[var(--border-color)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-tertiary)]" title={(g.aliases ?? []).slice(2).join(', ')}>+{(g.aliases ?? []).length - 2}</span>
+														{/if}
 													</div>
 													{#if g.title}
-														<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{g.title}</p>
+														<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug line-clamp-1">{g.title}</p>
 													{/if}
 												</td>
 												<td class="px-5 py-3 whitespace-nowrap">
@@ -1221,29 +1224,36 @@
 														<p class="mt-0.5 text-xs text-[var(--text-muted)]/50">no fix available</p>
 													{/if}
 												</td>
-												<td class="px-5 py-3">
-													<div class="flex flex-col gap-1">
-														{#each g.assets as a}
+												<td class="px-5 py-3 overflow-hidden">
+													<div class="flex flex-col gap-1 overflow-hidden">
+														{#each g.assets.slice(0, 3) as a}
 															{#if a.type === 'repo'}
 																<button
 																	type="button"
-																	class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline break-all"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline truncate"
 																	onclick={() => openRepo(a.id)}
 																>
 																	<GitBranch class="h-3 w-3 shrink-0" />
-																	<span>{a.slug}</span>
+																	<span class="truncate">{a.slug}</span>
 																</button>
 															{:else}
 																<button
 																	type="button"
-																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] break-all"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
 																	onclick={() => openImageDrawer(a.id)}
 																>
 																	<Container class="h-3 w-3 shrink-0" />
-																	<span>{a.slug}</span>
+																	<span class="truncate">{a.slug}</span>
 																</button>
 															{/if}
 														{/each}
+														{#if g.assets.length > 3}
+															<a
+																href={vulnDetailHref(g.vuln_id)}
+																class="text-xs text-[var(--text-muted)] hover:text-[var(--accent)] hover:underline"
+																title="See all {g.assets.length} affected assets"
+															>+{g.assets.length - 3} more</a>
+														{/if}
 													</div>
 												</td>
 											</tr>

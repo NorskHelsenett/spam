@@ -302,6 +302,103 @@ This is belt-and-braces on top of the unique index, but it's what
 turns "bounded steady-state churn" into "zero churn for known-dead
 ids".
 
+### Verify the totals on `/vulnerabilities` summary cards
+
+Production summary shows 248,299 total vulns across 7,332 SBOMs
+(8,137 critical / 65,542 high / 104,076 medium / 70,544 low+unknown).
+These feel high enough that the methodology needs explicit
+verification before anyone screenshots them into a slide deck.
+
+`computeSummary` in `vulnmetrics/metrics.go` groups by
+`(asset_type, asset_id, canonical_id)` and counts each distinct
+triplet. That means:
+
+- CVE-X on image A AND image B counts as 2 (one per asset).
+- CVE-X reported by both grype and trivy on the same asset → 1
+  (the GROUP BY dedupes within asset).
+- CVE-X with a canonical_id matching GHSA-Y → 1 (canonical collapse).
+
+So the total is "occurrences of unique advisories across assets",
+not "distinct CVEs in the fleet". For a homelab-sized fleet with
+many shared base images, that legitimately produces six-figure
+totals — but the card label "TOTAL" doesn't tell the user that.
+
+Action items:
+- Pull the SQL apart and sanity-check the counts against a known
+  digest's raw findings.
+- Rename the card label (e.g. "asset findings" vs "distinct CVEs"),
+  or add a second number for the unique-CVE count.
+- Optionally surface a "double-counted across N assets" multiplier
+  so the figure reads less alarming for execs.
+
+### `/api/secrets/images` returns duplicates + stale images
+
+`ImageSecretsTableHandler` (in `uiapi/secrets_dashboard_images.go`,
+serving `/api/secrets/images` → the Secrets tab Images list) shows
+the same image multiple times, and surfaces digests no longer running
+in any cluster. Two related questions:
+
+- Dedup: presumably grouping is by `scan_run_id` or `image_digest_id`
+  but the JOIN to `image_scan_artifacts` (multiple categories per
+  digest) is fanning rows out. Should dedupe to one row per digest.
+- "Currently running" filter: today the result set spans every digest
+  we've ever scanned, including digests that have rolled off all
+  clusters. The Images tab on /clusters is liveness-gated against
+  `cluster_sessions`; this endpoint should match that semantic, or
+  explicitly offer an "include retired" toggle.
+
+Cross-reference: the per-digest LATERAL artifact lookup at
+`imagescan/linkresolver.go` was the same shape and was fixed with a
+type-filter + new partial index. If this endpoint follows the same
+pattern it may benefit from the same indexes already in place.
+
+### `/api/runs/{id}` returning 504 on prod
+
+Single-run detail endpoint times out on at least one run id
+(`d195b6ed-d049-4204-bf29-9b72473faf21` in prod). Probably a query
+fan-out that joins to image_vuln_findings or sbom_component_view
+without an indexed predicate, or an N+1 inside the handler. The
+60-second priv-router timeout fires before the response lands.
+
+Investigation path:
+- Look at `RunDetailHandler` (likely in `uiapi/runs.go`) — find every
+  query it issues per request, and `EXPLAIN ANALYZE` the slowest
+  against the offending run id.
+- Check whether the handler pulls `run_secrets.findings` JSONB +
+  derived dedupe (the timeline query in secrets_dashboard is heavy
+  and might have a sibling in runs).
+- If the slow path is a large jsonb_array_elements expansion, mirror
+  the dependencies-list approach: cache by version watermark, or
+  materialise into a sibling table updated on ingest.
+- Also: surface the 504 properly on the frontend so the user sees
+  "this run took too long to load" instead of a blank page.
+
+### Reconcile image vuln counts between `/vulnerabilities` and `/clusters` Images
+
+The image rows on `/clusters` Images come from `ImageDetailHandler`'s
+`vuln_counts` CTE — per-digest counts off `image_vuln_findings` joined
+to the latest finished `image_scan_runs` for that digest. The
+`/vulnerabilities` page reads `view_unified_image_vulnerabilities`,
+which de-dupes by `vuln_metadata.canonical_id` and groups across
+assets.
+
+Symptom: the "top" images on `/clusters` (sorted by weighted severity
+sum) often don't surface near the top of `/vulnerabilities`, because
+the latter ranks canonical-id rollups, not raw per-digest findings.
+
+Investigation path:
+- Pick a digest that ranks high on `/clusters` Images but isn't
+  visible on `/vulnerabilities`. Diff its rows in
+  `image_vuln_findings` vs `view_unified_image_vulnerabilities` —
+  which CVEs disappear, which got rolled up.
+- Check `vuln_metadata.canonical_id` for collapses that conflate
+  distinct issues (CVE → GHSA pairs that should stay separate).
+- Check whether the unified view excludes findings on a status flag
+  (VEX `not_affected`, ignored, fixed-but-still-present).
+- Decide a single source of truth: move `/clusters` to read from the
+  unified view (consistent but slower per row), or document the two
+  as different lenses and label them clearly in the UI.
+
 ### Generalize HostChainDiagram to N columns
 
 Diagram hard-codes Ingress → Service → Pod. Parameterize
