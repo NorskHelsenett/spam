@@ -12,7 +12,7 @@ const (
 type User struct {
 	ID               string `gorm:"primaryKey;size:36"`
 	Subject          string `gorm:"size:255;uniqueIndex;not null"`
-	Email            string `gorm:"size:255;index"`
+	Email            string `gorm:"size:255;uniqueIndex"`
 	Name             string `gorm:"size:255"`
 	// Picture stores a self-contained data URL ("data:image/jpeg;base64,...")
 	// fetched from Microsoft Graph at login. Falls back to Gravatar at the
