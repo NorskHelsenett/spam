@@ -27,10 +27,13 @@ import (
 const maxBodySize = 10 << 20 // 10 MiB
 
 // upsertItem is one observation in a callcenter batch — the JSONB
-// payload that lands in cluster_record. Defined at package scope so
-// helpers like ensureRecentScansForBatch can take a typed slice.
+// payload that lands in cluster_record plus enough out-of-band state
+// (event msg) to populate the first-class lifecycle columns without
+// JSONB-extracting every row. Defined at package scope so helpers like
+// ensureRecentScansForBatch can take a typed slice.
 type upsertItem struct {
 	data datatypes.JSON
+	msg  string
 }
 
 // resourceKeyExpr is the PostgreSQL expression that computes the unique
@@ -211,6 +214,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		keyed := make(map[string]upsertItem)
 		order := make([]string, 0, len(raw))
 		batchKinds := make(map[string]struct{}, 4)
+		// Snapshot records are processed after the regular upsert so a
+		// SNAPSHOT key list that arrives in the same batch as fresh
+		// CREATE events tombstones only stale rows, not the live ones
+		// just upserted (last_change_at < snapshot's now guard).
+		var snapshots []Incoming
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -219,6 +227,10 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			}
 			if err := validate(incoming); err != nil {
 				rejected++
+				continue
+			}
+			if incoming.Kind == "Snapshot" {
+				snapshots = append(snapshots, incoming)
 				continue
 			}
 			key := incoming.ClusterID + ":" + incoming.Kind + ":"
@@ -230,7 +242,7 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if _, seen := keyed[key]; !seen {
 				order = append(order, key)
 			}
-			keyed[key] = upsertItem{data: datatypes.JSON(item)}
+			keyed[key] = upsertItem{data: datatypes.JSON(item), msg: incoming.Msg}
 			batchKinds[incoming.Kind] = struct{}{}
 		}
 		items := make([]upsertItem, 0, len(keyed))
@@ -238,8 +250,8 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			items = append(items, keyed[key])
 		}
 
+		clusterIDs := make(map[string]struct{}, 4)
 		if len(items) > 0 {
-			clusterIDs := make(map[string]struct{}, 4)
 
 			for i := 0; i < len(items); i += 500 {
 				end := i + 500
@@ -249,19 +261,39 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 				batch := items[i:end]
 
 				var sb strings.Builder
-				args := make([]any, 0, len(batch)*2)
-				sb.WriteString("INSERT INTO cluster_record (id, data, received_at) VALUES ")
+				args := make([]any, 0, len(batch)*6)
+				sb.WriteString("INSERT INTO cluster_record (id, data, received_at, is_present, first_seen_at, last_change_at, tombstoned_at) VALUES ")
 				for j, u := range batch {
 					if j > 0 {
 						sb.WriteString(", ")
 					}
-					sb.WriteString("(gen_random_uuid(), ?, ?)")
-					args = append(args, u.data, now)
+					sb.WriteString("(gen_random_uuid(), ?, ?, ?, ?, ?, ?)")
+					isPresent := u.msg != "DELETE"
+					var tombstonedAt any
+					if !isPresent {
+						tombstonedAt = now
+					}
+					args = append(args, u.data, now, isPresent, now, now, tombstonedAt)
 				}
+				// On conflict: data/received_at/last_change_at always
+				// move forward. is_present flips both directions (DELETE
+				// → false; resource reappearing → true). tombstoned_at
+				// preserves the first-tombstone time when staying
+				// tombstoned, and clears when the resource comes back.
+				// first_seen_at is intentionally not in the SET clause —
+				// it's a write-once column.
 				sb.WriteString(` ON CONFLICT (`)
 				sb.WriteString(resourceKeyExpr)
 				sb.WriteString(`) WHERE (data->>'cluster_id') IS NOT NULL
-					DO UPDATE SET data = EXCLUDED.data, received_at = EXCLUDED.received_at`)
+					DO UPDATE SET
+						data = EXCLUDED.data,
+						received_at = EXCLUDED.received_at,
+						is_present = EXCLUDED.is_present,
+						last_change_at = EXCLUDED.last_change_at,
+						tombstoned_at = CASE
+							WHEN EXCLUDED.is_present THEN NULL
+							ELSE COALESCE(cluster_record.tombstoned_at, EXCLUDED.tombstoned_at)
+						END`)
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
 					// Surface the underlying GORM error so silent 500s
@@ -272,9 +304,8 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 				}
 			}
 
-			// Touch cluster_sessions so every live-state query can see
-			// the current session boundary. Re-scan items for cluster_ids;
-			// cheap given typical batch sizes.
+			// Collect cluster_ids touched by the upsert; snapshot
+			// processing below adds its own.
 			for _, item := range items {
 				var idOnly struct {
 					ClusterID string `json:"cluster_id"`
@@ -283,17 +314,45 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 					clusterIDs[idOnly.ClusterID] = struct{}{}
 				}
 			}
-			for clusterID := range clusterIDs {
-				if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
-					log.Printf("callcenter: touch session %s: %v", clusterID, err)
-				}
-			}
+		}
 
+		// Apply Snapshot records after the regular upsert. Tombstone
+		// rows for (cluster_id, target_kind) whose computed
+		// resource-key isn't in resource_keys, gated on
+		// `last_change_at < now` so any UPSERTs in this same batch
+		// (last_change_at = now) are protected from being immediately
+		// reverted. BEGIN/END are markers; only SNAPSHOT mutates.
+		for _, snap := range snapshots {
+			if snap.ClusterID != "" {
+				clusterIDs[snap.ClusterID] = struct{}{}
+			}
+			if err := applySnapshot(r.Context(), db, snap, now); err != nil {
+				log.Printf("callcenter: snapshot apply (cluster=%s target_kind=%s snapshot_id=%s): %v",
+					snap.ClusterID, snap.TargetKind, snap.SnapshotID, err)
+				// Don't fail the whole batch on snapshot apply errors —
+				// regular ingest already succeeded; the periodic safety
+				// snapshot will retry.
+			}
+		}
+
+		// Touch cluster_sessions for everything we just processed (regular
+		// records and Snapshots both count as liveness signals).
+		for clusterID := range clusterIDs {
+			if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
+				log.Printf("callcenter: touch session %s: %v", clusterID, err)
+			}
+		}
+
+		if len(items) > 0 || len(snapshots) > 0 {
 			payload, _ := json.Marshal(map[string]any{
-				"accepted": len(items),
-				"rejected": rejected,
+				"accepted":  len(items),
+				"snapshots": len(snapshots),
+				"rejected":  rejected,
 			})
 			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
+		}
+
+		if len(items) > 0 {
 
 			// Deploy-time scan trigger: for each unique image digest in
 			// this batch's Container records, ensure an image_digest row
@@ -338,10 +397,95 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{
-			Accepted: len(items),
-			Rejected: rejected,
+			Accepted:  len(items),
+			Snapshots: len(snapshots),
+			Rejected:  rejected,
 		})
 	}
+}
+
+// applySnapshot processes one Snapshot record. BEGIN/END are markers
+// (logged for forensics, no DB mutation). SNAPSHOT performs the
+// reconcile: tombstone every still-present row in
+// (cluster_id, target_kind) whose computed resource-key is NOT in
+// resource_keys AND whose last_change_at predates this snapshot's
+// reference time (so rows upserted in the same batch as the snapshot
+// are protected).
+//
+// `data->>'msg'` is dual-written to "DELETE" so existing readers that
+// haven't been swept to the is_present filter still see tombstoned
+// rows as deleted.
+func applySnapshot(ctx context.Context, db *gorm.DB, snap Incoming, now time.Time) error {
+	switch snap.Msg {
+	case "SNAPSHOT_BEGIN":
+		log.Printf("snapshot: BEGIN cluster=%s id=%s type=%s",
+			snap.ClusterID, snap.SnapshotID, snap.SnapshotType)
+		return nil
+	case "SNAPSHOT_END":
+		log.Printf("snapshot: END cluster=%s id=%s",
+			snap.ClusterID, snap.SnapshotID)
+		return nil
+	case "SNAPSHOT":
+		// fall through
+	default:
+		return fmt.Errorf("applySnapshot: unsupported msg %q", snap.Msg)
+	}
+
+	// Compute resource-key the same way the unique index does so the
+	// tombstone WHERE filter matches the rows that would conflict with
+	// a real upsert. Container has a composite (pod_uid/container)
+	// key; everything else is uid.
+	var keyExpr string
+	if snap.TargetKind == "Container" {
+		keyExpr = `(data->>'pod_uid') || '/' || (data->>'container')`
+	} else {
+		keyExpr = `COALESCE(data->>'uid', '')`
+	}
+
+	keys := snap.ResourceKeys
+	if keys == nil {
+		keys = []string{}
+	}
+	// Bind as JSON: GORM expands a Go []string into a comma-separated
+	// list of `?` placeholders (the usual IN-clause trick), which
+	// turns ANY(?::text[]) into a syntax error. Round-tripping through
+	// jsonb_array_elements_text keeps the parameter to a single string,
+	// avoids the array-literal escape rules, and degenerates correctly
+	// to "tombstone everything" when the slice is empty.
+	keysJSON, err := json.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("snapshot: marshal keys: %w", err)
+	}
+
+	var snapshotIDArg any
+	if snap.SnapshotID != "" {
+		snapshotIDArg = snap.SnapshotID
+	}
+
+	sql := `
+		UPDATE cluster_record
+		SET is_present = FALSE,
+		    tombstoned_at = COALESCE(tombstoned_at, ?),
+		    last_change_at = ?,
+		    last_snapshot_id = ?,
+		    data = jsonb_set(data, '{msg}', '"DELETE"')
+		WHERE data->>'cluster_id' = ?
+		  AND data->>'kind' = ?
+		  AND is_present = TRUE
+		  AND last_change_at < ?
+		  AND ` + keyExpr + ` NOT IN (
+		    SELECT jsonb_array_elements_text(?::jsonb)
+		  )`
+
+	return db.WithContext(ctx).Exec(sql,
+		now,              // tombstoned_at fallback
+		now,              // last_change_at
+		snapshotIDArg,    // last_snapshot_id (nullable)
+		snap.ClusterID,   // cluster_id
+		snap.TargetKind,  // kind
+		now,              // race-protection cutoff
+		string(keysJSON), // resource_keys as JSON array string
+	).Error
 }
 
 // ensureRecentScansForBatch is the scam ingest's deploy-time scan
@@ -469,6 +613,28 @@ func validate(r Incoming) error {
 	}
 	if r.ClusterID == "" {
 		return fmt.Errorf("missing cluster_id")
+	}
+	// Snapshot records carry no resource identity (uid/pod_uid). They
+	// validate their own envelope: BEGIN/END need a snapshot_id, the
+	// payload SNAPSHOT needs target_kind plus a (possibly empty) keys
+	// slice.
+	if r.Kind == "Snapshot" {
+		switch r.Msg {
+		case "SNAPSHOT_BEGIN", "SNAPSHOT_END":
+			if r.SnapshotID == "" {
+				return fmt.Errorf("%s missing snapshot_id", r.Msg)
+			}
+		case "SNAPSHOT":
+			if r.TargetKind == "" {
+				return fmt.Errorf("SNAPSHOT missing target_kind")
+			}
+			if !validKinds[r.TargetKind] || r.TargetKind == "Snapshot" {
+				return fmt.Errorf("SNAPSHOT invalid target_kind: %s", r.TargetKind)
+			}
+		default:
+			return fmt.Errorf("Snapshot kind requires SNAPSHOT / SNAPSHOT_BEGIN / SNAPSHOT_END msg")
+		}
+		return nil
 	}
 	if r.Kind == "Container" {
 		if r.PodUID == "" || r.Container == "" {
@@ -2539,8 +2705,9 @@ func bytesCompare(a, b net.IP) int {
 }
 
 type ingestResponse struct {
-	Accepted int `json:"accepted"`
-	Rejected int `json:"rejected,omitempty"`
+	Accepted  int `json:"accepted"`
+	Snapshots int `json:"snapshots,omitempty"`
+	Rejected  int `json:"rejected,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
