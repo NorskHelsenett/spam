@@ -9,10 +9,16 @@ import (
 
 // Record is a live-state row for a single cluster resource.
 // The table acts as a materialized view: upserts on ingest, deletes on DELETE events.
+//
+// EventID is the agent-side monotonic id stamped on each record. SCAM
+// resets it per process start; SPAM uses it via cluster_sessions
+// .last_seen_event_id to ACK the highest id stored per cluster, so
+// SCAM can detect drift (mismatch -> reconcile snapshot).
 type Record struct {
 	ID         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	Data       datatypes.JSON `gorm:"type:jsonb;not null" json:"data"`
 	ReceivedAt time.Time      `gorm:"not null;index" json:"received_at"`
+	EventID    *int64         `gorm:"index;column:event_id" json:"event_id,omitempty"`
 }
 
 func (Record) TableName() string { return "cluster_record" }
@@ -68,6 +74,11 @@ type Incoming struct {
 	Hosts        []string      `json:"hosts,omitempty"`
 	LBIPs        []string      `json:"lb_ips,omitempty"`
 	Rules        []IngressRule `json:"rules,omitempty"`
+
+	// EventID is SCAM's per-process monotonic id. Absent on older
+	// agents — those records contribute nothing to per-cluster
+	// last_seen_event_id and the comparison is effectively skipped.
+	EventID uint64 `json:"event_id,omitempty"`
 }
 
 // IngressRule is the shape of each element in an Ingress record's `rules` array.

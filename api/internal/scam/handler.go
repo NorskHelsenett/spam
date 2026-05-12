@@ -27,10 +27,15 @@ import (
 const maxBodySize = 10 << 20 // 10 MiB
 
 // upsertItem is one observation in a callcenter batch — the JSONB
-// payload that lands in cluster_record. Defined at package scope so
-// helpers like ensureRecentScansForBatch can take a typed slice.
+// payload that lands in cluster_record plus the agent-stamped
+// event_id used for the per-cluster ACK counter. eventID is 0 when
+// the incoming record didn't carry one (older agents); GREATEST in
+// the upsert preserves the existing column value in that case.
+// Defined at package scope so helpers like ensureRecentScansForBatch
+// can take a typed slice.
 type upsertItem struct {
-	data datatypes.JSON
+	data    datatypes.JSON
+	eventID uint64
 }
 
 // resourceKeyExpr is the PostgreSQL expression that computes the unique
@@ -211,6 +216,10 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		keyed := make(map[string]upsertItem)
 		order := make([]string, 0, len(raw))
 		batchKinds := make(map[string]struct{}, 4)
+		// Highest agent-stamped event_id per cluster in this batch;
+		// drives the GREATEST advancement of cluster_sessions
+		// .last_seen_event_id and feeds the ACK in the push response.
+		maxEventIDByCluster := make(map[string]uint64, 1)
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -230,8 +239,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if _, seen := keyed[key]; !seen {
 				order = append(order, key)
 			}
-			keyed[key] = upsertItem{data: datatypes.JSON(item)}
+			keyed[key] = upsertItem{data: datatypes.JSON(item), eventID: incoming.EventID}
 			batchKinds[incoming.Kind] = struct{}{}
+			if incoming.EventID > maxEventIDByCluster[incoming.ClusterID] {
+				maxEventIDByCluster[incoming.ClusterID] = incoming.EventID
+			}
 		}
 		items := make([]upsertItem, 0, len(keyed))
 		for _, key := range order {
@@ -249,19 +261,29 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 				batch := items[i:end]
 
 				var sb strings.Builder
-				args := make([]any, 0, len(batch)*2)
-				sb.WriteString("INSERT INTO cluster_record (id, data, received_at) VALUES ")
+				args := make([]any, 0, len(batch)*3)
+				sb.WriteString("INSERT INTO cluster_record (id, data, received_at, event_id) VALUES ")
 				for j, u := range batch {
 					if j > 0 {
 						sb.WriteString(", ")
 					}
-					sb.WriteString("(gen_random_uuid(), ?, ?)")
-					args = append(args, u.data, now)
+					sb.WriteString("(gen_random_uuid(), ?, ?, ?)")
+					var eventIDArg any
+					if u.eventID > 0 {
+						eventIDArg = int64(u.eventID)
+					}
+					args = append(args, u.data, now, eventIDArg)
 				}
+				// GREATEST(existing, new) preserves the highest event_id
+				// per row across out-of-order arrivals; missing values
+				// (older agents) leave the column unchanged via NULL.
 				sb.WriteString(` ON CONFLICT (`)
 				sb.WriteString(resourceKeyExpr)
 				sb.WriteString(`) WHERE (data->>'cluster_id') IS NOT NULL
-					DO UPDATE SET data = EXCLUDED.data, received_at = EXCLUDED.received_at`)
+					DO UPDATE SET
+						data = EXCLUDED.data,
+						received_at = EXCLUDED.received_at,
+						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)`)
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
 					// Surface the underlying GORM error so silent 500s
@@ -284,7 +306,7 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 				}
 			}
 			for clusterID := range clusterIDs {
-				if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
+				if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
 					log.Printf("callcenter: touch session %s: %v", clusterID, err)
 				}
 			}
@@ -337,9 +359,25 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			}
 		}
 
+		// SCAM's PushLoop reads last_seen_event_id from the response
+		// and compares to its local last-pushed event_id; on mismatch
+		// it fires a reconcile snapshot. Single-cluster batches are
+		// the common case (one agent = one cluster); we ack the first
+		// cluster encountered, which is that cluster.
+		var ackLastSeen int64
+		if len(items) > 0 {
+			var first struct {
+				ClusterID string `json:"cluster_id"`
+			}
+			if err := json.Unmarshal(items[0].data, &first); err == nil && first.ClusterID != "" {
+				ackLastSeen = lookupLastSeenEventID(r.Context(), db, first.ClusterID)
+			}
+		}
+
 		writeJSON(w, http.StatusOK, ingestResponse{
-			Accepted: len(items),
-			Rejected: rejected,
+			Accepted:        len(items),
+			Rejected:        rejected,
+			LastSeenEventID: ackLastSeen,
 		})
 	}
 }
@@ -419,7 +457,7 @@ func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "cluster_id required", http.StatusBadRequest)
 			return
 		}
-		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC()); err != nil {
+		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC(), 0); err != nil {
 			log.Printf("heartbeat: touch session %s: %v", body.ClusterID, err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
@@ -2539,8 +2577,9 @@ func bytesCompare(a, b net.IP) int {
 }
 
 type ingestResponse struct {
-	Accepted int `json:"accepted"`
-	Rejected int `json:"rejected,omitempty"`
+	Accepted        int   `json:"accepted"`
+	Rejected        int   `json:"rejected,omitempty"`
+	LastSeenEventID int64 `json:"last_seen_event_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

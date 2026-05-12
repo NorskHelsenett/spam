@@ -26,6 +26,12 @@ type ClusterSession struct {
 	ClusterID        string    `gorm:"primaryKey;size:128;column:cluster_id"`
 	SessionStartedAt time.Time `gorm:"not null;column:session_started_at"`
 	LastPushAt       time.Time `gorm:"not null;index;column:last_push_at"`
+	// LastSeenEventID is the highest agent-stamped event_id SPAM has
+	// persisted for this cluster. Returned in the push response so
+	// SCAM can detect drift vs. its local high-water mark. Resets to
+	// 0 when a SCAM agent restarts because the agent restarts its
+	// counter from 0 — any mismatch triggers SCAM to reconcile.
+	LastSeenEventID int64 `gorm:"not null;default:0;column:last_seen_event_id"`
 }
 
 func (ClusterSession) TableName() string { return "cluster_sessions" }
@@ -79,7 +85,15 @@ func resolveLiveWindow() time.Duration {
 // — leaving brand-new clusters absent from the `clusters` table and
 // therefore unclaimable. Registration must outlive the request, so we
 // run both writes against a detached context with a hard deadline.
-func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now time.Time) error {
+// maxEventID is the highest event_id observed for clusterID in the
+// current batch; 0 if no records carry one. GREATEST in the upsert
+// guarantees the stored last_seen_event_id is monotonically
+// non-decreasing within a session — except across a SCAM agent
+// restart, when the agent's counter resets to 0 and SPAM's stored
+// value becomes "ahead", which is the signal SCAM uses to fire a
+// reconcile snapshot. Heartbeats pass maxEventID=0 (no records, no
+// change).
+func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now time.Time, maxEventID int64) error {
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	if err := db.WithContext(bg).Exec(`
@@ -92,11 +106,26 @@ func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now
 		log.Printf("scam: register cluster %s: %v", clusterID, err)
 	}
 	return db.WithContext(bg).Exec(`
-		INSERT INTO cluster_sessions (cluster_id, session_started_at, last_push_at)
-		VALUES (?, ?, ?)
+		INSERT INTO cluster_sessions (cluster_id, session_started_at, last_push_at, last_seen_event_id)
+		VALUES (?, ?, ?, ?)
 		ON CONFLICT (cluster_id) DO UPDATE SET
-		  last_push_at = EXCLUDED.last_push_at
-	`, clusterID, now, now).Error
+		  last_push_at = EXCLUDED.last_push_at,
+		  last_seen_event_id = GREATEST(cluster_sessions.last_seen_event_id, EXCLUDED.last_seen_event_id)
+	`, clusterID, now, now, maxEventID).Error
+}
+
+// lookupLastSeenEventID returns the cluster's last_seen_event_id from
+// cluster_sessions, or 0 if the cluster isn't yet registered. Used by
+// CallcenterHandler to populate the ACK in the push response.
+func lookupLastSeenEventID(ctx context.Context, db *gorm.DB, clusterID string) int64 {
+	var v int64
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	_ = db.WithContext(bg).Raw(
+		`SELECT last_seen_event_id FROM cluster_sessions WHERE cluster_id = ?`,
+		clusterID,
+	).Scan(&v).Error
+	return v
 }
 
 // liveWindowInterval renders sessionLiveWindow as a PostgreSQL INTERVAL

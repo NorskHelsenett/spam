@@ -160,6 +160,7 @@ func run() error {
 		"migrations/20260511b_jobs_perf_indexes.sql",
 		"migrations/20260511c_jobs_vuln_meta_unique_active.sql",
 		"migrations/20260511d_jobs_create_run_finished_repo_index.sql",
+		"migrations/20260512a_cluster_event_id.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
