@@ -26,7 +26,7 @@ const (
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix   = "vuln:list:v4:"
+	listCachePrefix   = "vuln:list:v5:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -750,9 +750,15 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		FROM grouped g
 		LEFT JOIN cisa_kev_entries kev ON kev.cve_id = g.vuln_id
 		LEFT JOIN epss_entries     epss ON epss.cve_id = g.vuln_id
-		ORDER BY (kev.cve_id IS NOT NULL)        DESC,
+		-- Severity first (Critical → Unknown), then KEV, then EPSS,
+		-- then newer CVE year, then alphabetical id for stability.
+		-- Severity-leading matches how operators read the list — a
+		-- Critical without KEV still beats a High that is KEV-listed,
+		-- because severity is the worst-case impact and KEV / EPSS
+		-- are tiebreakers within the same impact tier.
+		ORDER BY g.sev_rank                      ASC,
+		         (kev.cve_id IS NOT NULL)        DESC,
 		         COALESCE(epss.score, 0)         DESC,
-		         g.sev_rank                      ASC,
 		         g.cve_year                      DESC NULLS LAST,
 		         g.vuln_id                       ASC
 		LIMIT ? OFFSET ?

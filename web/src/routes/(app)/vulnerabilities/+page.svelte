@@ -670,6 +670,19 @@
 		// Facets are cheap + independent of the three main loads, so fire
 		// them alongside rather than blocking the dashboard render.
 		void loadVulnFacets();
+
+		// Defensive: the reactive activeTab effect SHOULD fire
+		// fetchVulnPage(0) at component init, but in some snapshot-
+		// restore paths (back-button navigation onto this page) the
+		// $: block's prevVulnFiltersKey ends up equal to vulnFiltersKey
+		// on its first run, AND vulnLoaded / vulnInflight / vulnError
+		// are all in initial state — none of the branches fire and the
+		// Findings table is stuck on "Loading vulnerabilities" with no
+		// network call to recover from. This explicit kick guarantees
+		// page 0 is requested when the Findings tab is the active one.
+		if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0) && !vulnError) {
+			void fetchVulnPage(0);
+		}
 	});
 </script>
 
