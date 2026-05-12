@@ -15,7 +15,7 @@
 		});
 
 		stream.addEventListener('approved', () => {
-			goto('/app');
+			goto('/');
 		});
 
 		stream.onerror = () => {

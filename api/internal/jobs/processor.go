@@ -14,7 +14,9 @@ import (
 	// schedule pinned to Europe/Oslo.
 	_ "time/tzdata"
 
-	dbviews "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/dephealth"
+	"github.com/NorskHelsenett/spam/internal/sbomviews"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
@@ -72,6 +74,10 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchKEV(ctx, db)
 	case JobTypeFetchEPSS:
 		return processFetchEPSS(ctx, db, job.ID)
+	case JobTypeFetchDepHealth:
+		return processFetchDepHealth(ctx, db, job.ID)
+	case JobTypeDBMaintenance:
+		return processDBMaintenance(ctx, db, job)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -81,16 +87,20 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 	}
 }
 
+// processRefreshSBOMViews drains the deprecated REFRESH_SBOM_VIEWS job
+// queue. New refreshes run via sbomviews.TriggerRefresh — the in-process
+// gate coalesces concurrent triggers and the advisory lock serialises
+// across replicas. We keep the handler so any backlog drains cleanly,
+// but no new jobs of this type are created (see runner/handlers.go and
+// cmd/server/main.go callers, both migrated).
+//
+// We deliberately don't run the REFRESH inline here: that's exactly the
+// path that produced the lock-wait failures (failed=24 with 3 replicas
+// all leasing the same job). Firing TriggerRefresh and returning
+// success drains the backlog without queue contention.
 func processRefreshSBOMViews(ctx context.Context, db *gorm.DB) (interface{}, error) {
-	if err := dbviews.RefreshMaterializedViews(ctx, db); err != nil {
-		if errors.Is(err, dbviews.ErrRefreshLockHeld) {
-			// Another process holds the refresh lock. Retry without counting
-			// the attempt so this job runs again once the lock is released.
-			return nil, retryableError{err}
-		}
-		return nil, err
-	}
-	return map[string]string{"status": "refreshed"}, nil
+	sbomviews.TriggerRefresh(db)
+	return map[string]string{"status": "scheduled"}, nil
 }
 
 func processOSVScan(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
@@ -192,6 +202,12 @@ const vulnMetaEnqueueCap = 1000
 // that doesn't already have a cached metadata row. Best-effort — a
 // failure to enqueue is logged but does not fail the calling scan.
 // Safe to call with duplicates or unknown IDs; the store dedupes.
+//
+// Duplicate-key collisions from the ux_jobs_vuln_meta_active partial
+// unique index are expected during normal operation (two replicas /
+// two scan-completion hooks racing on the same id between the
+// missing-check and CreateJob) and are silently skipped, matching
+// the pattern in scheduleNextFeedRefresh.
 func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) {
 	missing, err := vulnmeta.IDsMissingMetadata(ctx, db, vulnIDs)
 	if err != nil {
@@ -203,6 +219,10 @@ func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) 
 			Type:    JobTypeVulnMetaFetch,
 			Payload: VulnMetaFetchPayload{VulnID: id},
 		}); err != nil {
+			if strings.Contains(err.Error(), "duplicate key") ||
+				strings.Contains(err.Error(), "ux_jobs_vuln_meta_active") {
+				continue
+			}
 			log.Printf("vulnmeta: enqueue %s: %v", id, err)
 		}
 	}
@@ -214,6 +234,16 @@ func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) 
 // for each (up to vulnMetaEnqueueCap). Call from every scan-
 // completion hook — the LEFT JOIN filter means steady-state is
 // cheap; only new vulns actually enqueue.
+//
+// The second NOT IN excludes vuln_ids that already have an active
+// VULN_META_FETCH job. Without it, every scan-completion hook re-
+// enqueues the same backlog because processVulnMetaFetch returns
+// success-without-row for "not_found_upstream" and "upstream_error"
+// branches — those vuln_ids stay permanently absent from
+// vuln_metadata and slip past the first NOT IN forever. Prod
+// accumulated 18.8M duplicate jobs for 505k distinct ids before this
+// check was in place. The ux_jobs_vuln_meta_active partial unique
+// index is the DB-level safety net against races between replicas.
 func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 	var ids []string
 	if err := db.WithContext(ctx).Raw(`
@@ -225,6 +255,13 @@ func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 			WHERE vuln_id <> '_none' AND vuln_id <> ''
 		) u
 		WHERE vuln_id NOT IN (SELECT vuln_id FROM vuln_metadata)
+		  AND vuln_id NOT IN (
+		      SELECT payload->>'vuln_id'
+		      FROM jobs
+		      WHERE type = 'VULN_META_FETCH'
+		        AND status IN ('QUEUED', 'RETRY', 'RUNNING')
+		        AND payload->>'vuln_id' IS NOT NULL
+		  )
 		LIMIT ?
 	`, vulnMetaEnqueueCap).Scan(&ids).Error; err != nil {
 		log.Printf("vulnmeta: scan for missing: %v", err)
@@ -282,6 +319,11 @@ func nextFeedRunAt(jobType JobType, from time.Time) time.Time {
 		return next
 	case JobTypeFetchKEV:
 		return from.Add(kevRefreshInterval)
+	case JobTypeFetchDepHealth:
+		// Weekly cadence — package metadata changes slowly and the
+		// upstream registries (npm/PyPI/etc) + GitHub API have rate
+		// limits we don't want to burn on noise.
+		return from.Add(7 * 24 * time.Hour)
 	default:
 		// Unknown feed type — return a safe default; the caller
 		// shouldn't reach here, the switch above is exhaustive over
@@ -329,6 +371,60 @@ func processFetchEPSS(ctx context.Context, db *gorm.DB, jobID string) (interface
 	return map[string]any{"status": "ingested", "rows": count}, nil
 }
 
+// depHealthMaxRowsPerSweep caps how many packages a single sweep
+// processes. Larger initial sweeps risk hitting GitHub rate limits;
+// smaller ones drag out the cold-start backfill. 200 strikes a
+// balance — at one sweep per week the table fills in ~10 weeks for
+// a 2k-package corpus, which is fine for a first deploy.
+const depHealthMaxRowsPerSweep = 200
+
+// processFetchDepHealth walks manifest_dependencies, refreshes
+// per-package health rows that are missing or stale, and reschedules
+// itself for next week. Streams progress (rows-written running
+// total) into Job.Result so the admin UI can render a live counter
+// without polling each package.
+//
+// In Phase 3a the runner has no concrete resolvers wired up yet;
+// the processor short-circuits to a no-op so admins can see the job
+// flow without spurious "no resolver" rows accumulating in
+// dep_health. Phase 3b plugs in npm + GitHub and the same processor
+// starts producing real data.
+func processFetchDepHealth(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	progress := func(written int) {
+		if data, jsonErr := json.Marshal(map[string]any{
+			"status":       "ingesting",
+			"rows_written": written,
+		}); jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", data)
+		}
+	}
+
+	resolvers := dephealth.RegisteredResolvers()
+	provider := dephealth.RegisteredProvider(ctx, db)
+
+	if len(resolvers) == 0 {
+		scheduleNextFeedRefresh(ctx, db, JobTypeFetchDepHealth)
+		return map[string]any{
+			"status": "skipped",
+			"reason": "no resolvers registered",
+		}, nil
+	}
+
+	runner := dephealth.NewRunner(db, resolvers, provider)
+	res, err := runner.RunOnce(ctx, depHealthMaxRowsPerSweep, progress)
+	if err != nil {
+		return nil, err
+	}
+	scheduleNextFeedRefresh(ctx, db, JobTypeFetchDepHealth)
+	assetrisk.TriggerRefresh(db) // dep-health feeds Trust signals
+	return map[string]any{
+		"status":    "ingested",
+		"total":     res.Total,
+		"refreshed": res.Refreshed,
+		"failed":    res.Failed,
+	}, nil
+}
+
 // scheduleNextFeedRefresh enqueues a follow-up FETCH_* job at the
 // next slot dictated by nextFeedRunAt for the given feed type.
 // Failures are logged but not fatal — the EnsureFeedRefreshScheduled
@@ -357,7 +453,7 @@ func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) 
 // picks up feeds without waiting for the previous schedule to fire.
 func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
 	now := time.Now()
-	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS} {
+	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS, JobTypeFetchDepHealth} {
 		// If a queued/retry job already exists, the unique index
 		// would reject a fresh insert anyway — but checking first
 		// keeps the log clean.
@@ -419,6 +515,10 @@ func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{
 	if err != nil {
 		return result, err
 	}
+	// Probe verdicts flip findings between unknown / valid / invalid;
+	// active_secret_count on asset_risk depends on which hashes are
+	// status='valid', so refresh after each probe pass.
+	assetrisk.TriggerRefresh(db)
 	return result, nil
 }
 

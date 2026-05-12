@@ -10,16 +10,35 @@ import (
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/clustersummary"
+	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/hostexposure"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
 const maxBodySize = 10 << 20 // 10 MiB
+
+// upsertItem is one observation in a callcenter batch — the JSONB
+// payload that lands in cluster_record plus enough out-of-band state
+// to populate the first-class columns without JSONB-extracting every
+// row. `msg` derives is_present/tombstoned_at; `eventID` advances the
+// per-cluster ACK counter (0 when older agents don't send one, in
+// which case GREATEST in the upsert preserves the existing value).
+// Defined at package scope so helpers like ensureRecentScansForBatch
+// can take a typed slice.
+type upsertItem struct {
+	data    datatypes.JSON
+	msg     string
+	eventID uint64
+}
 
 // resourceKeyExpr is the PostgreSQL expression that computes the unique
 // resource identity from the JSONB data column. Matches ux_cluster_record_resource.
@@ -114,6 +133,37 @@ func cteFor(r *http.Request) string {
 	return liveCTE
 }
 
+// liveCTEForCluster is liveCTE with a per-cluster filter baked into
+// the inner WHERE. Cluster_id is bound via a `?` placeholder — callers
+// pass it as the FIRST arg to db.Raw, ahead of any other placeholders
+// the trailing SELECT introduces.
+//
+// Use this in detail handlers (chain, host chain, drilldown) where the
+// request targets one cluster. The DISTINCT ON dedup then runs over a
+// few thousand rows instead of the full multi-cluster table, which is
+// the difference between sub-second and upstream-timeout at fleet
+// scale. Same liveness + DELETE guards as buildLiveCTE.
+var liveCTEForCluster = `WITH live AS (
+	SELECT DISTINCT ON (
+		cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END
+	) cr.*
+	FROM cluster_record cr
+	JOIN cluster_sessions cs ON cs.cluster_id = cr.data->>'cluster_id'
+	WHERE cr.data->>'cluster_id' = ?
+	  AND cr.data->>'msg' != 'DELETE'
+	  AND cs.last_push_at >= NOW() - ` + liveWindowInterval() + `
+	ORDER BY cr.data->>'cluster_id',
+		CASE WHEN cr.data->>'kind' = 'Container'
+		     THEN 'Container:' || (cr.data->>'pod_uid') || '/' || (cr.data->>'container')
+		     ELSE (cr.data->>'kind') || ':' || COALESCE(cr.data->>'uid', '')
+		END,
+		cr.received_at DESC
+) `
+
 // cteForWithACL is cteFor plus an injected ACL filter on the CTE's
 // cluster_id selection. The returned SQL has one `?` placeholder per
 // entry in the ACL filter's args slice (handled by the caller).
@@ -133,9 +183,11 @@ func isTruthy(v string) bool {
 // and upserts live-state rows. DELETE events are stored (not physically removed)
 // so the history is preserved. No authentication required.
 //
-// The cache Store is used only to invalidate derived caches (hosts:list:*)
-// after a successful batch — the ingest path itself doesn't read from it.
-func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
+// The cache Store parameter is retained for future per-resource cache work; the
+// hosts list now invalidates via the host_exposure MV refresh hook
+// (hostexposure.TriggerRefresh) rather than a derived-cache prefix delete, so
+// cs itself is currently unused on this path.
+func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -155,9 +207,6 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		}
 
 		now := time.Now().UTC()
-		type upsertItem struct {
-			data datatypes.JSON
-		}
 		var rejected int
 
 		// Dedupe by upsert key WITHIN the batch. Postgres disallows a
@@ -169,6 +218,15 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		keyed := make(map[string]upsertItem)
 		order := make([]string, 0, len(raw))
 		batchKinds := make(map[string]struct{}, 4)
+		// Snapshot records are processed after the regular upsert so a
+		// SNAPSHOT key list that arrives in the same batch as fresh
+		// CREATE events tombstones only stale rows, not the live ones
+		// just upserted (last_change_at < snapshot's now guard).
+		var snapshots []Incoming
+		// Highest agent-stamped event_id per cluster in this batch;
+		// drives the GREATEST advancement of cluster_sessions
+		// .last_seen_event_id and feeds the ACK in the push response.
+		maxEventIDByCluster := make(map[string]uint64, 1)
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -177,6 +235,10 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			}
 			if err := validate(incoming); err != nil {
 				rejected++
+				continue
+			}
+			if incoming.Kind == "Snapshot" {
+				snapshots = append(snapshots, incoming)
 				continue
 			}
 			key := incoming.ClusterID + ":" + incoming.Kind + ":"
@@ -188,16 +250,23 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			if _, seen := keyed[key]; !seen {
 				order = append(order, key)
 			}
-			keyed[key] = upsertItem{data: datatypes.JSON(item)}
+			keyed[key] = upsertItem{
+				data:    datatypes.JSON(item),
+				msg:     incoming.Msg,
+				eventID: incoming.EventID,
+			}
 			batchKinds[incoming.Kind] = struct{}{}
+			if incoming.EventID > maxEventIDByCluster[incoming.ClusterID] {
+				maxEventIDByCluster[incoming.ClusterID] = incoming.EventID
+			}
 		}
 		items := make([]upsertItem, 0, len(keyed))
 		for _, key := range order {
 			items = append(items, keyed[key])
 		}
 
+		clusterIDs := make(map[string]struct{}, 4)
 		if len(items) > 0 {
-			clusterIDs := make(map[string]struct{}, 4)
 
 			for i := 0; i < len(items); i += 500 {
 				end := i + 500
@@ -207,19 +276,46 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 				batch := items[i:end]
 
 				var sb strings.Builder
-				args := make([]any, 0, len(batch)*2)
-				sb.WriteString("INSERT INTO cluster_record (id, data, received_at) VALUES ")
+				args := make([]any, 0, len(batch)*7)
+				sb.WriteString("INSERT INTO cluster_record (id, data, received_at, is_present, first_seen_at, last_change_at, tombstoned_at, event_id) VALUES ")
 				for j, u := range batch {
 					if j > 0 {
 						sb.WriteString(", ")
 					}
-					sb.WriteString("(gen_random_uuid(), ?, ?)")
-					args = append(args, u.data, now)
+					sb.WriteString("(gen_random_uuid(), ?, ?, ?, ?, ?, ?, ?)")
+					isPresent := u.msg != "DELETE"
+					var tombstonedAt any
+					if !isPresent {
+						tombstonedAt = now
+					}
+					var eventIDArg any
+					if u.eventID > 0 {
+						eventIDArg = int64(u.eventID)
+					}
+					args = append(args, u.data, now, isPresent, now, now, tombstonedAt, eventIDArg)
 				}
+				// On conflict: data/received_at/last_change_at always
+				// move forward. is_present flips both directions (DELETE
+				// → false; resource reappearing → true). tombstoned_at
+				// preserves the first-tombstone time when staying
+				// tombstoned, and clears when the resource comes back.
+				// event_id uses GREATEST so out-of-order arrivals (or
+				// agents that omit it on some records) don't regress.
+				// first_seen_at is intentionally not in the SET clause —
+				// it's a write-once column.
 				sb.WriteString(` ON CONFLICT (`)
 				sb.WriteString(resourceKeyExpr)
 				sb.WriteString(`) WHERE (data->>'cluster_id') IS NOT NULL
-					DO UPDATE SET data = EXCLUDED.data, received_at = EXCLUDED.received_at`)
+					DO UPDATE SET
+						data = EXCLUDED.data,
+						received_at = EXCLUDED.received_at,
+						is_present = EXCLUDED.is_present,
+						last_change_at = EXCLUDED.last_change_at,
+						tombstoned_at = CASE
+							WHEN EXCLUDED.is_present THEN NULL
+							ELSE COALESCE(cluster_record.tombstoned_at, EXCLUDED.tombstoned_at)
+						END,
+						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)`)
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
 					// Surface the underlying GORM error so silent 500s
@@ -230,9 +326,8 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 				}
 			}
 
-			// Touch cluster_sessions so every live-state query can see
-			// the current session boundary. Re-scan items for cluster_ids;
-			// cheap given typical batch sizes.
+			// Collect cluster_ids touched by the upsert; snapshot
+			// processing below adds its own.
 			for _, item := range items {
 				var idOnly struct {
 					ClusterID string `json:"cluster_id"`
@@ -241,41 +336,243 @@ func CallcenterHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 					clusterIDs[idOnly.ClusterID] = struct{}{}
 				}
 			}
-			for clusterID := range clusterIDs {
-				if err := touchClusterSession(r.Context(), db, clusterID, now); err != nil {
-					log.Printf("callcenter: touch session %s: %v", clusterID, err)
+		}
+
+		// Apply Snapshot records after the regular upsert. Tombstone
+		// rows for (cluster_id, target_kind) whose computed
+		// resource-key isn't in resource_keys, gated on
+		// `last_change_at < now` so any UPSERTs in this same batch
+		// (last_change_at = now) are protected from being immediately
+		// reverted. BEGIN/END are markers; only SNAPSHOT mutates.
+		for _, snap := range snapshots {
+			if snap.ClusterID != "" {
+				clusterIDs[snap.ClusterID] = struct{}{}
+			}
+			if err := applySnapshot(r.Context(), db, snap, now); err != nil {
+				log.Printf("callcenter: snapshot apply (cluster=%s target_kind=%s snapshot_id=%s): %v",
+					snap.ClusterID, snap.TargetKind, snap.SnapshotID, err)
+				// Don't fail the whole batch on snapshot apply errors —
+				// regular ingest already succeeded; the periodic safety
+				// snapshot will retry.
+			}
+		}
+
+		// Touch cluster_sessions for everything we just processed —
+		// regular records and Snapshots both count as liveness signals.
+		// Per-cluster maxEventID drives the GREATEST advancement of
+		// last_seen_event_id; snapshot-only batches pass 0 here, which
+		// is a no-op against the GREATEST.
+		for clusterID := range clusterIDs {
+			if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
+				log.Printf("callcenter: touch session %s: %v", clusterID, err)
+			}
+		}
+
+		if len(items) > 0 || len(snapshots) > 0 {
+			payload, _ := json.Marshal(map[string]any{
+				"accepted":  len(items),
+				"snapshots": len(snapshots),
+				"rejected":  rejected,
+			})
+			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
+		}
+
+		if len(items) > 0 {
+
+			// Deploy-time scan trigger: for each unique image digest in
+			// this batch's Container records, ensure an image_digest row
+			// exists and a recent IMAGE_SCAN is queued. UpsertImageDigest
+			// no longer eagerly enqueues scans for non-cluster-resident
+			// images (e.g. SBOM uploads from CI), so the scan actually
+			// triggers here — exactly when an image hits a cluster.
+			//
+			// Runs asynchronously with a 30s budget so a slow scan-
+			// enqueue path doesn't extend the ingest latency the agent
+			// sees. Idempotent via the ux_jobs_image_scan_active partial
+			// unique index.
+			go ensureRecentScansForBatch(db, items)
+
+			// Fresh ingest may change which URLs exist and which images
+			// sit on a publicly-served path. Trigger a host_exposure +
+			// exposed_digests refresh so the next /api/clusters/hosts
+			// (and triage's internet_exposed signal) lands on warm
+			// projections. The trigger is debounced — high-volume
+			// Container ingest coalesces into one inflight + one
+			// pending refresh rather than re-running the chain on
+			// every batch. resolve: / hostmeta: / hostfav: caches are
+			// intentionally not touched (they track host-external
+			// state).
+			for kind := range batchKinds {
+				if hostExposureRelevantKinds[kind] {
+					hostexposure.TriggerRefresh(db)
+					break
 				}
 			}
 
-			payload, _ := json.Marshal(map[string]any{
-				"accepted": len(items),
-				"rejected": rejected,
-			})
-			events.DispatchStreamEvent(events.StreamEventScamIngest, payload)
-
-			// Fresh ingest may change which hosts/backends exist and
-			// which Services have ready endpoints behind them. Only
-			// invalidate the hosts list cache when the batch actually
-			// touched a kind that feeds the projection (see
-			// hostRelevantKinds). Container pushes — the bulk of ingest
-			// volume — no longer feed liveness, so they don't blow the
-			// cache away on every pod restart. resolve: / hostmeta: /
-			// hostfav: are intentionally not touched (they track
-			// host-external state).
-			if cs != nil {
-				for kind := range batchKinds {
-					if hostRelevantKinds[kind] {
-						_ = cache.DeleteByPrefix(r.Context(), cs, hostsListCachePrefix)
-						break
-					}
+			// cluster_summary aggregates Container/Ingress/HTTPRoute
+			// counts per cluster. The same kind set that moves
+			// host_exposure also moves the summary, so reuse the
+			// detection above. Refresh is debounced via its own gate.
+			for kind := range batchKinds {
+				if clusterSummaryRelevantKinds[kind] {
+					clustersummary.TriggerRefresh(db)
+					break
 				}
 			}
 		}
 
+		// SCAM's PushLoop reads last_seen_event_id from the response
+		// and compares to its local last-pushed event_id; on mismatch
+		// it fires a reconcile snapshot. Single-cluster batches are
+		// the common case (one agent = one cluster); we ack the first
+		// cluster encountered, which is that cluster.
+		var ackLastSeen int64
+		if len(items) > 0 {
+			var first struct {
+				ClusterID string `json:"cluster_id"`
+			}
+			if err := json.Unmarshal(items[0].data, &first); err == nil && first.ClusterID != "" {
+				ackLastSeen = lookupLastSeenEventID(r.Context(), db, first.ClusterID)
+			}
+		}
+
 		writeJSON(w, http.StatusOK, ingestResponse{
-			Accepted: len(items),
-			Rejected: rejected,
+			Accepted:        len(items),
+			Snapshots:       len(snapshots),
+			Rejected:        rejected,
+			LastSeenEventID: ackLastSeen,
 		})
+	}
+}
+
+// applySnapshot processes one Snapshot record. BEGIN/END are markers
+// (logged for forensics, no DB mutation). SNAPSHOT performs the
+// reconcile: tombstone every still-present row in
+// (cluster_id, target_kind) whose computed resource-key is NOT in
+// resource_keys AND whose last_change_at predates this snapshot's
+// reference time (so rows upserted in the same batch as the snapshot
+// are protected).
+//
+// `data->>'msg'` is dual-written to "DELETE" so existing readers that
+// haven't been swept to the is_present filter still see tombstoned
+// rows as deleted.
+func applySnapshot(ctx context.Context, db *gorm.DB, snap Incoming, now time.Time) error {
+	switch snap.Msg {
+	case "SNAPSHOT_BEGIN":
+		log.Printf("snapshot: BEGIN cluster=%s id=%s type=%s",
+			snap.ClusterID, snap.SnapshotID, snap.SnapshotType)
+		return nil
+	case "SNAPSHOT_END":
+		log.Printf("snapshot: END cluster=%s id=%s",
+			snap.ClusterID, snap.SnapshotID)
+		return nil
+	case "SNAPSHOT":
+		// fall through
+	default:
+		return fmt.Errorf("applySnapshot: unsupported msg %q", snap.Msg)
+	}
+
+	// Compute resource-key the same way the unique index does so the
+	// tombstone WHERE filter matches the rows that would conflict with
+	// a real upsert. Container has a composite (pod_uid/container)
+	// key; everything else is uid.
+	var keyExpr string
+	if snap.TargetKind == "Container" {
+		keyExpr = `(data->>'pod_uid') || '/' || (data->>'container')`
+	} else {
+		keyExpr = `COALESCE(data->>'uid', '')`
+	}
+
+	keys := snap.ResourceKeys
+	if keys == nil {
+		keys = []string{}
+	}
+	// Bind as JSON: GORM expands a Go []string into a comma-separated
+	// list of `?` placeholders (the usual IN-clause trick), which
+	// turns ANY(?::text[]) into a syntax error. Round-tripping through
+	// jsonb_array_elements_text keeps the parameter to a single string,
+	// avoids the array-literal escape rules, and degenerates correctly
+	// to "tombstone everything" when the slice is empty.
+	keysJSON, err := json.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("snapshot: marshal keys: %w", err)
+	}
+
+	var snapshotIDArg any
+	if snap.SnapshotID != "" {
+		snapshotIDArg = snap.SnapshotID
+	}
+
+	sql := `
+		UPDATE cluster_record
+		SET is_present = FALSE,
+		    tombstoned_at = COALESCE(tombstoned_at, ?),
+		    last_change_at = ?,
+		    last_snapshot_id = ?,
+		    data = jsonb_set(data, '{msg}', '"DELETE"')
+		WHERE data->>'cluster_id' = ?
+		  AND data->>'kind' = ?
+		  AND is_present = TRUE
+		  AND last_change_at < ?
+		  AND ` + keyExpr + ` NOT IN (
+		    SELECT jsonb_array_elements_text(?::jsonb)
+		  )`
+
+	return db.WithContext(ctx).Exec(sql,
+		now,              // tombstoned_at fallback
+		now,              // last_change_at
+		snapshotIDArg,    // last_snapshot_id (nullable)
+		snap.ClusterID,   // cluster_id
+		snap.TargetKind,  // kind
+		now,              // race-protection cutoff
+		string(keysJSON), // resource_keys as JSON array string
+	).Error
+}
+
+// ensureRecentScansForBatch is the scam ingest's deploy-time scan
+// trigger. For each unique (registry, repository, digest) tuple in the
+// batch's Container records, it ensures an image_digests row exists
+// and a recent IMAGE_SCAN job is queued (see assets.EnsureImageScanRecent
+// for freshness semantics). Skips DELETE / non-Container / digest-less
+// records.
+func ensureRecentScansForBatch(db *gorm.DB, items []upsertItem) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Dedupe by digest within the batch — multiple pods of the same
+	// image collapse to a single scan-enqueue attempt.
+	unique := make(map[string]assets.ImageDigestInput, len(items))
+	for _, item := range items {
+		var inc Incoming
+		if err := json.Unmarshal(item.data, &inc); err != nil {
+			continue
+		}
+		if inc.Kind != "Container" || inc.Msg == "DELETE" {
+			continue
+		}
+		if inc.Digest == "" || inc.Registry == "" || inc.Image == "" {
+			continue
+		}
+		unique[inc.Digest] = assets.ImageDigestInput{
+			Registry:   inc.Registry,
+			Repository: inc.Image,
+			Digest:     inc.Digest,
+		}
+	}
+
+	for _, in := range unique {
+		image, err := assets.UpsertImageDigest(ctx, db, in)
+		if err != nil {
+			log.Printf("scam: ensure image_digest %s/%s@%s: %v",
+				in.Registry, in.Repository, in.Digest, err)
+			continue
+		}
+		// UpsertImageDigest only auto-enqueues for *new* rows; for
+		// digests we've seen before we still need to ensure scan
+		// freshness in case the previous run is now stale.
+		if err := assets.EnsureImageScanRecent(ctx, db, image.ID); err != nil {
+			log.Printf("scam: ensure scan for %s: %v", image.ID, err)
+		}
 	}
 }
 
@@ -307,7 +604,7 @@ func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "cluster_id required", http.StatusBadRequest)
 			return
 		}
-		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC()); err != nil {
+		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC(), 0); err != nil {
 			log.Printf("heartbeat: touch session %s: %v", body.ClusterID, err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
@@ -357,6 +654,28 @@ func validate(r Incoming) error {
 	}
 	if r.ClusterID == "" {
 		return fmt.Errorf("missing cluster_id")
+	}
+	// Snapshot records carry no resource identity (uid/pod_uid). They
+	// validate their own envelope: BEGIN/END need a snapshot_id, the
+	// payload SNAPSHOT needs target_kind plus a (possibly empty) keys
+	// slice.
+	if r.Kind == "Snapshot" {
+		switch r.Msg {
+		case "SNAPSHOT_BEGIN", "SNAPSHOT_END":
+			if r.SnapshotID == "" {
+				return fmt.Errorf("%s missing snapshot_id", r.Msg)
+			}
+		case "SNAPSHOT":
+			if r.TargetKind == "" {
+				return fmt.Errorf("SNAPSHOT missing target_kind")
+			}
+			if !validKinds[r.TargetKind] || r.TargetKind == "Snapshot" {
+				return fmt.Errorf("SNAPSHOT invalid target_kind: %s", r.TargetKind)
+			}
+		default:
+			return fmt.Errorf("Snapshot kind requires SNAPSHOT / SNAPSHOT_BEGIN / SNAPSHOT_END msg")
+		}
+		return nil
 	}
 	if r.Kind == "Container" {
 		if r.PodUID == "" || r.Container == "" {
@@ -425,7 +744,14 @@ func validate(r Incoming) error {
 
 // --- Query handlers (authenticated) ---
 
-// ClusterSummaryHandler returns a high-level overview per cluster.
+// ClusterSummaryHandler returns a high-level overview per cluster. Reads
+// from the cluster_summary materialised view (see
+// 20260510a_create_cluster_summary_view.sql); freshness is ingest-driven
+// via clustersummary.TriggerRefresh from the CallcenterHandler hook.
+//
+// The MV does not embed the cluster_sessions liveness filter — that
+// depends on NOW() and is per-request — so the handler joins
+// cluster_sessions here when ?include_inactive isn't truthy.
 func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -439,33 +765,62 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			LastSeen     time.Time `json:"last_seen"`
 		}
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cs.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`
+
+		// Cold-start: the MV is created WITH NO DATA. Refreshes run
+		// asynchronously at boot and on every relevant ingest. If we
+		// catch it before the first populate, return an empty list and
+		// kick a refresh so the next request lands warm — avoids the
+		// SQLSTATE 55000 a bare SELECT would raise.
+		if ready, err := spamdb.ClusterSummaryViewPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := "JOIN cluster_sessions sess ON sess.cluster_id = cs.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		if includeInactive {
+			livenessJoin = ""
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		// Free-text search across the fields the frontend table search
+		// covered client-side. Cluster list is small (handful to a few
+		// dozen rows) so this stays as a single query without pagination.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		searchWhere := ""
+		var searchArgs []any
+		if searchQuery != "" {
+			pattern := "%" + searchQuery + "%"
+			searchWhere = `AND (cs.cluster ILIKE ? OR cs.cluster_id ILIKE ? OR cs.environment ILIKE ?)`
+			searchArgs = []any{pattern, pattern, pattern}
+		}
+
+		query := `
 			SELECT
-				data->>'cluster'     AS cluster,
-				data->>'cluster_id'  AS cluster_id,
-				data->>'environment' AS environment,
-				COUNT(*) FILTER (WHERE data->>'kind' = 'Container'
-					AND data->>'pod_phase' = 'Running') AS containers,
-				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest'))
-					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'pod_phase' = 'Running'
-						AND COALESCE(data->>'digest','') != '') AS images,
-				COUNT(DISTINCT data->>'namespace')
-					FILTER (WHERE data->>'kind' = 'Container'
-						AND data->>'pod_phase' = 'Running') AS namespaces,
-				COUNT(DISTINCT data->>'uid')
-					FILTER (WHERE data->>'kind' IN ('Ingress','HTTPRoute','GRPCRoute','IngressRoute','IngressRouteTCP')) AS ingress_count,
-				MAX(received_at) AS last_seen
-			FROM live
-			GROUP BY data->>'cluster', data->>'cluster_id', data->>'environment'
-			ORDER BY last_seen DESC
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+			    cs.cluster, cs.cluster_id, cs.environment,
+			    cs.containers, cs.images, cs.namespaces, cs.ingress_count,
+			    cs.last_seen
+			FROM cluster_summary cs
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + searchWhere + `
+			ORDER BY cs.last_seen DESC
+		`
+		queryArgs := append([]any{}, aclArgs...)
+		queryArgs = append(queryArgs, searchArgs...)
+		if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+			log.Printf("ClusterSummaryHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
@@ -474,6 +829,12 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 }
 
 // RegistryDistributionHandler returns unique image counts by registry.
+// Reads from cluster_image_inventory (see
+// 20260511_create_cluster_image_inventory_view.sql); freshness is
+// ingest-driven via clustersummary.TriggerRefresh from CallcenterHandler.
+//
+// Output cardinality is bounded by the number of registries in the
+// fleet (typically tens), so this endpoint isn't paginated.
 func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -481,23 +842,47 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 			ImageCount int64  `json:"image_count"`
 		}
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`
+
+		// Cold-start gate: MV created WITH NO DATA. Kick a refresh
+		// and return empty so the first request after fresh deploy
+		// doesn't raise SQLSTATE 55000.
+		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := ""
+		if !includeInactive {
+			livenessJoin = "JOIN cluster_sessions sess ON sess.cluster_id = cii.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		query := `
 			SELECT
-				COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-				COUNT(DISTINCT CONCAT(data->>'registry', '/', data->>'image', '@', data->>'digest')) AS image_count
-			FROM live
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'pod_phase' = 'Running'
-			  AND COALESCE(data->>'digest', '') != ''
-			GROUP BY COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub')
+			    cii.registry,
+			    COUNT(DISTINCT (cii.raw_registry || '/' || cii.image || '@' || cii.digest))::bigint AS image_count
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + `
+			GROUP BY cii.registry
 			ORDER BY image_count DESC
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+		`
+
+		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
+			log.Printf("RegistryDistributionHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
@@ -540,6 +925,12 @@ func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 // tags, plus a digest_id (from image_digests) for drawer deep-linking
 // and severity counts from the latest SUCCEEDED IMAGE_SCAN for that
 // digest.
+//
+// Reads from cluster_image_inventory (per running container) and
+// aggregates at request time so ACL on cluster_id can apply before the
+// GROUP BY. Paginated via ?limit/?offset with a has_more flag — the
+// dependencies endpoint pattern, mirrored here so the frontend can
+// infinite-scroll without loading 10k+ rows up front.
 func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		type row struct {
@@ -558,100 +949,229 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			VulnLow        int       `json:"vuln_low"`
 			VulnUnknown    int       `json:"vuln_unknown"`
 		}
+		type response struct {
+			Items   []row `json:"items"`
+			Limit   int   `json:"limit"`
+			Offset  int   `json:"offset"`
+			HasMore bool  `json:"has_more"`
+			Total   int64 `json:"total"`
+		}
+
+		ctx := r.Context()
 		rows := []row{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
 		if deny {
-			writeJSON(w, http.StatusOK, rows)
+			writeJSON(w, http.StatusOK, response{Items: rows})
 			return
 		}
-		err := db.Raw(cteForWithACL(r, aclFrag)+`,
-			agg AS (
+
+		// Cold-start gate.
+		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, response{Items: rows})
+			return
+		}
+
+		limit := 50
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+				limit = n
+			}
+		}
+		offset := 0
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := ""
+		if !includeInactive {
+			livenessJoin = "JOIN cluster_sessions sess ON sess.cluster_id = cii.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		// Free-text search across the row-level fields the frontend
+		// table used to filter client-side. Pre-aggregate filter so the
+		// GROUP BY counts (cluster_count, container_count, etc.) reflect
+		// only the matched rows.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		var preGroupWhere string
+		var preGroupArgs []any
+		if searchQuery != "" {
+			pattern := "%" + searchQuery + "%"
+			preGroupWhere += `AND (cii.registry ILIKE ? OR cii.image ILIKE ? OR cii.digest ILIKE ? OR cii.tag ILIKE ?) `
+			preGroupArgs = append(preGroupArgs, pattern, pattern, pattern, pattern)
+		}
+		// Registry multi-select. Matches on cii.registry (the display
+		// registry) so the values line up with /api/clusters/registry-
+		// distribution, which is what the frontend populates the
+		// dropdown options from. raw_registry holds the unnormalised
+		// pull-spec prefix and was the wrong field to filter on — most
+		// fleets normalise docker.io / index.docker.io variants in
+		// cii.registry but not in cii.raw_registry.
+		if rawReg := r.URL.Query().Get("registries"); rawReg != "" {
+			values := []any{}
+			for _, v := range strings.Split(rawReg, ",") {
+				if v = strings.TrimSpace(v); v != "" {
+					values = append(values, v)
+				}
+			}
+			if len(values) > 0 {
+				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
+				preGroupWhere += `AND cii.registry IN (` + placeholders + `) `
+				preGroupArgs = append(preGroupArgs, values...)
+			}
+		}
+
+		// Sort allowlist — never interpolate user input into ORDER BY.
+		// The vuln_weight column in the inventory_with_vulns CTE lets
+		// 'vulns' sort server-side using the same severity weighting
+		// the frontend used for its in-memory sort, so the table order
+		// is identical to the old client-side sort but spans the whole
+		// dataset rather than the loaded page.
+		sortColumn, sortDirection := parseImageSortParams(r.URL.Query().Get("sort"), r.URL.Query().Get("order"))
+
+		// inventory + digest_id + vuln_counts must be materialised
+		// *before* the page LIMIT so sorts on columns derived from
+		// outside cluster_image_inventory (vulns) include digests in
+		// the right global order rather than just within the page.
+		// latest_scan is scoped to inventory digests via the IN clause
+		// — bounded work even though we no longer restrict to the page.
+		// limit+1 gives us has_more without a second COUNT query.
+		query := `
+			WITH inventory AS (
 				SELECT
-					data->>'registry' AS raw_registry,
-					COALESCE(NULLIF(data->>'registry', ''), 'Docker Hub') AS registry,
-					data->>'image' AS image,
-					COALESCE(data->>'digest', '') AS digest,
-					STRING_AGG(DISTINCT NULLIF(data->>'tag', ''), ',') AS tags,
-					COUNT(DISTINCT data->>'cluster_id') AS cluster_count,
-					COUNT(DISTINCT data->>'namespace') AS namespace_count,
-					COUNT(*) AS container_count,
-					MAX(received_at) AS last_seen
-				FROM live
-				WHERE data->>'kind' = 'Container'
-				  AND data->>'pod_phase' = 'Running'
-				GROUP BY data->>'registry', data->>'image', data->>'digest'
+				    cii.raw_registry, cii.registry, cii.image, cii.digest,
+				    STRING_AGG(DISTINCT cii.tag, ',' ORDER BY cii.tag) FILTER (WHERE cii.tag IS NOT NULL AND cii.tag <> '') AS tags,
+				    COUNT(DISTINCT cii.cluster_id)::bigint AS cluster_count,
+				    COUNT(DISTINCT cii.namespace)::bigint  AS namespace_count,
+				    COUNT(*)::bigint                       AS container_count,
+				    MAX(cii.last_seen)                     AS last_seen
+				FROM cluster_image_inventory cii
+				` + livenessJoin + `
+				WHERE TRUE ` + aclWhere + ` ` + preGroupWhere + `
+				GROUP BY cii.raw_registry, cii.registry, cii.image, cii.digest
+			),
+			inventory_digests AS (
+				SELECT inv.*, id.id AS digest_id
+				FROM inventory inv
+				LEFT JOIN image_digests id
+				    ON id.registry   = inv.raw_registry
+				   AND id.repository = inv.image
+				   AND id.digest     = inv.digest
 			),
 			latest_scan AS (
-				-- Source of truth for findings is image_scan_runs, not jobs:
-				-- the nightly sbom-scanner revuln flow creates scan_run rows
-				-- with uuid.NewString() that don't correspond to any jobs.id,
-				-- so joining via jobs drops any image that's been re-scanned
-				-- against a newer grype DB since its last IMAGE_SCAN.
-				SELECT DISTINCT ON (image_digest_id)
-				       image_digest_id,
-				       id AS scan_run_id
-				FROM image_scan_runs
-				WHERE finished_at IS NOT NULL
-				ORDER BY image_digest_id, finished_at DESC
+				SELECT DISTINCT ON (isr.image_digest_id)
+				       isr.image_digest_id,
+				       isr.id AS scan_run_id
+				FROM image_scan_runs isr
+				WHERE isr.finished_at IS NOT NULL
+				  AND isr.image_digest_id IN (SELECT digest_id FROM inventory_digests WHERE digest_id IS NOT NULL)
+				ORDER BY isr.image_digest_id, isr.finished_at DESC
 			),
 			vuln_counts AS (
-				-- Qualify image_digest_id with f. — both tables expose it
-				-- after the JOIN; unqualified references are ambiguous.
 				SELECT f.image_digest_id,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')            AS vuln_critical,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')                AS vuln_high,
 				    COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')              AS vuln_medium,
 				    COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE')) AS vuln_low,
-				    COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown
+				    COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS vuln_unknown,
+				    -- Severity-weighted sort key — must match the
+				    -- frontend's vulnSortKey exactly so behaviour is
+				    -- identical between server-side (current) and any
+				    -- legacy client-side path: c*1e9 + h*1e6 + m*1e3 + l.
+				    (COUNT(*) FILTER (WHERE UPPER(severity) = 'CRITICAL')::bigint            * 1000000000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) = 'HIGH')::bigint                * 1000000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) = 'MEDIUM')::bigint              * 1000 +
+				     COUNT(*) FILTER (WHERE UPPER(severity) IN ('LOW','NEGLIGIBLE'))::bigint) AS vuln_weight
 				FROM image_vuln_findings f
 				JOIN latest_scan ls ON ls.scan_run_id = f.scan_run_id
 				GROUP BY f.image_digest_id
+			),
+			inventory_with_vulns AS (
+				SELECT dl.*,
+				    COALESCE(vc.vuln_critical, 0) AS vuln_critical,
+				    COALESCE(vc.vuln_high, 0)     AS vuln_high,
+				    COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
+				    COALESCE(vc.vuln_low, 0)      AS vuln_low,
+				    COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown,
+				    COALESCE(vc.vuln_weight, 0)   AS vuln_weight
+				FROM inventory_digests dl
+				LEFT JOIN vuln_counts vc ON vc.image_digest_id = dl.digest_id
+			),
+			page AS (
+				SELECT * FROM inventory_with_vulns
+				ORDER BY ` + sortColumn + ` ` + sortDirection + `, image ASC, digest ASC
+				LIMIT ? OFFSET ?
 			)
 			SELECT
-				agg.registry, agg.image, agg.digest,
-				COALESCE(id.id, '') AS digest_id,
-				agg.tags, agg.cluster_count, agg.namespace_count,
-				agg.container_count, agg.last_seen,
-				COALESCE(vc.vuln_critical, 0) AS vuln_critical,
-				COALESCE(vc.vuln_high, 0)     AS vuln_high,
-				COALESCE(vc.vuln_medium, 0)   AS vuln_medium,
-				COALESCE(vc.vuln_low, 0)      AS vuln_low,
-				COALESCE(vc.vuln_unknown, 0)  AS vuln_unknown
-			FROM agg
-			LEFT JOIN image_digests id
-			  ON id.registry   = agg.raw_registry
-			 AND id.repository = agg.image
-			 AND id.digest     = agg.digest
-			LEFT JOIN vuln_counts vc ON vc.image_digest_id = id.id
-			ORDER BY agg.container_count DESC, agg.image
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
-			log.Printf("clusters/images/detail: %v", err)
+			    page.registry, page.image, page.digest,
+			    COALESCE(page.digest_id::text, '') AS digest_id,
+			    COALESCE(page.tags, '')           AS tags,
+			    page.cluster_count, page.namespace_count, page.container_count, page.last_seen,
+			    page.vuln_critical, page.vuln_high, page.vuln_medium, page.vuln_low, page.vuln_unknown
+			FROM page
+			ORDER BY ` + sortColumn + ` ` + sortDirection + `, page.image ASC, page.digest ASC
+		`
+
+		args := append([]any{}, aclArgs...)
+		args = append(args, preGroupArgs...)
+		args = append(args, limit+1, offset)
+
+		if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+			log.Printf("ImageDetailHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, rows)
+
+		hasMore := len(rows) > limit
+		if hasMore {
+			rows = rows[:limit]
+		}
+
+		// Total over the same filter scope. Separate query because the
+		// LIMIT+1 trick only tells us "is there at least one more"; the
+		// frontend wants the absolute count for "showing N of M" and the
+		// virtual-scroll height. Cheap when the inventory MV is hot.
+		var total int64
+		countQuery := `
+			SELECT COUNT(DISTINCT (cii.raw_registry, cii.image, cii.digest))::bigint
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + preGroupWhere + `
+		`
+		countArgs := append([]any{}, aclArgs...)
+		countArgs = append(countArgs, preGroupArgs...)
+		if err := db.WithContext(ctx).Raw(countQuery, countArgs...).Scan(&total).Error; err != nil {
+			// Soft-fail: serve the page without a total rather than 500.
+			log.Printf("ImageDetailHandler count error: %v", err)
+		}
+
+		writeJSON(w, http.StatusOK, response{
+			Items:   rows,
+			Limit:   limit,
+			Offset:  offset,
+			HasMore: hasMore,
+			Total:   total,
+		})
 	}
 }
 
-// hostsListCachePrefix keys the cached result of HostsHandler's DB query.
-// CallcenterHandler invalidates the whole prefix on ingest so a new push
-// always shows up on the next page render; resolve:/hostmeta:/hostfav:
-// entries are left alone (they track host-external state).
-const hostsListCachePrefix = "hosts:list:"
-
-// hostsListCacheTTL is a safety-net TTL. The real freshness signal is
-// ingest-driven invalidation in CallcenterHandler; this keeps the cache
-// from growing unbounded if a tenant goes silent.
-const hostsListCacheTTL = 24 * time.Hour
-
-// hostRelevantKinds is the set of SCAM record kinds whose ingest can
-// change the output of HostsHandler. CallcenterHandler invalidates the
-// hosts list cache only when a batch contains one of these — Container
-// pushes (the bulk of ingest volume) no longer feed the projection
-// since liveness moved from pod-label match to EndpointSlice ready
-// counts, so skipping them keeps the cache warm in busy fleets.
-var hostRelevantKinds = map[string]bool{
+// hostExposureRelevantKinds is the set of SCAM record kinds whose
+// ingest can change either the host_exposure projection (URL-level
+// metadata) or the exposed_digests projection (which images sit on a
+// publicly-served path). CallcenterHandler triggers a debounced refresh
+// when a batch touches one of these — high-volume Container ingest
+// coalesces into one inflight + one pending refresh rather than
+// recomputing the chain on every batch.
+var hostExposureRelevantKinds = map[string]bool{
 	"Ingress":         true,
 	"HTTPRoute":       true,
 	"GRPCRoute":       true,
@@ -659,7 +1179,25 @@ var hostRelevantKinds = map[string]bool{
 	"IngressRoute":    true,
 	"IngressRouteTCP": true,
 	"Service":         true,
-	"EndpointSlice":   true,
+	"Container":       true,
+}
+
+// clusterSummaryRelevantKinds is the set of SCAM record kinds whose
+// ingest changes one of the columns cluster_summary aggregates:
+// container counts (Container), distinct image counts (Container with
+// digest), namespace counts (Container.namespace), and ingress_count
+// (Ingress / Gateway / Traefik routes). last_seen also moves on any of
+// these. Service and TLSRoute don't directly contribute to a column
+// but are kept aligned with hostExposureRelevantKinds so the same
+// detection covers both.
+var clusterSummaryRelevantKinds = map[string]bool{
+	"Container":       true,
+	"Ingress":         true,
+	"HTTPRoute":       true,
+	"GRPCRoute":       true,
+	"TLSRoute":        true,
+	"IngressRoute":    true,
+	"IngressRouteTCP": true,
 }
 
 // HostRow is the shape returned by HostsHandler. Resolved/Meta are
@@ -692,207 +1230,578 @@ type hostMetaLite struct {
 	HasFavicon bool   `json:"has_favicon"`
 }
 
-// HostsHandler returns all FQDNs exposed via Ingress, HTTPRoute, and IngressRoute.
+// HostsHandler returns FQDNs exposed via Ingress, HTTPRoute, and
+// IngressRoute. Reads from the host_exposure / exposed_digests
+// materialised views (see 20260509_create_host_exposure_views.sql);
+// freshness is ingest-driven via hostexposure.TriggerRefresh from the
+// CallcenterHandler hook.
+//
+// Pagination via offset+limit. Default limit is 200; the frontend
+// requests subsequent pages as the user scrolls so the wire payload
+// per request stays bounded. The total count for "showing N of M" is
+// served by HostSummaryHandler (no separate COUNT(*) round trip).
+const (
+	hostsDefaultLimit = 200
+	hostsMaxLimit     = 500
+)
+
 func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		activeOnly := r.URL.Query().Get("active_only") == "true"
 		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
 
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 {
+			limit = hostsDefaultLimit
+		}
+		if limit > hostsMaxLimit {
+			limit = hostsMaxLimit
+		}
+		// Free-text search and categorical filters all applied server-
+		// side so pagination works correctly: the old client-side filters
+		// only operated on rows already loaded, which gave wrong totals
+		// and missed unloaded matches.
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		filterClusters := parseHostFilterCSV(r.URL.Query().Get("cluster_ids"))
+		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
+		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
+		activeWorkloadsOnly := isTruthy(r.URL.Query().Get("active_workloads_only"))
+		sortColumn, sortDirection := parseHostSortParams(r.URL.Query().Get("sort"), r.URL.Query().Get("order"))
+
 		rows := []HostRow{}
-		aclFrag, aclArgs, deny := clusterACLFilter(r)
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "he.cluster_id")
 		if deny {
 			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
-		// Scope-hashed cache key: two users with the same ACL scope +
-		// include_inactive flag share a cache entry; changes to either
-		// produce a different key. Collision on an 8-byte fnv-64a is
-		// irrelevant here — worst case a user sees another scope's
-		// (different) result for up to hostsListCacheTTL, which the
-		// ingest invalidation clears anyway.
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(aclFrag))
-		for _, a := range aclArgs {
-			fmt.Fprintf(h, "|%v", a)
-		}
-		if includeInactive {
-			_, _ = h.Write([]byte("|inactive"))
-		}
-		cacheKey := fmt.Sprintf("%s%x", hostsListCachePrefix, h.Sum64())
-
-		ctx := r.Context()
-		if cached, ok, _ := cache.GetJSON[[]HostRow](ctx, cs, cacheKey); ok {
-			writeAndFilterHosts(w, cached, cs, ctx, activeOnly)
+		// Cold-start: the MVs are created WITH NO DATA. Refreshes run
+		// asynchronously at boot (see main.go) and on every relevant
+		// ingest. Until the first one lands, return an empty list
+		// rather than a SQLSTATE 55000 — same pattern as triage.
+		if ready, err := spamdb.HostExposureViewsPopulated(ctx, db); err != nil || !ready {
+			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
-		// Query structure:
-		//   hosts_raw          — flattened hostnames from Ingress /
-		//                        HTTPRoute / IngressRoute variants
-		//   service_liveness   — per-Service ready-endpoint count derived
-		//                        from EndpointSlice (the same signal
-		//                        kube-proxy uses to route traffic), with
-		//                        an ExternalName fallback for services
-		//                        that CNAME to external DNS and never
-		//                        get an EndpointSlice
-		//
-		// EndpointSlice is the authoritative "is this URL live?" signal:
-		// non-empty ready addresses ⇔ kube-proxy will send traffic. It's
-		// also far cheaper than the previous label-match approach
-		// (pod_labels @> selector across every Container row) and
-		// changes only on readiness transitions, not pod restarts —
-		// which lets CallcenterHandler skip cache invalidation on the
-		// noisy Container ingest path.
-		err := db.Raw(cteForWithACL(r, aclFrag)+`,
-			ingress_hosts AS (
-				SELECT
-					r->>'host' AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					jsonb_typeof(data->'tls') = 'array' AND jsonb_array_length(COALESCE(data->'tls', '[]'::jsonb)) > 0 AS tls,
-					CASE WHEN jsonb_typeof(data->'lb_ips') = 'array'
-						THEN COALESCE((SELECT string_agg(ip, ', ') FROM jsonb_array_elements_text(data->'lb_ips') AS ip), '')
-						ELSE '' END AS lb_ips,
-					COALESCE(data->>'ingress_class', '') AS ingress_class,
-					CASE WHEN jsonb_typeof(r->'paths') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT p->>'backend_name', ', ')
-							 FROM jsonb_array_elements(r->'paths') AS p
-							 WHERE p->>'backend_name' IS NOT NULL AND p->>'backend_name' != ''),
-							'')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
-				WHERE data->>'kind' = 'Ingress'
-				  AND jsonb_typeof(data->'rules') = 'array'
-				  AND jsonb_array_length(data->'rules') > 0
-			),
-			route_hosts AS (
-				SELECT
-					jsonb_array_elements_text(data->'hostnames') AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					FALSE AS tls,
-					'' AS lb_ips,
-					'' AS ingress_class,
-					CASE WHEN jsonb_typeof(data->'backends') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT b->>'name', ', ')
-							 FROM jsonb_array_elements(data->'backends') AS b), '')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND jsonb_typeof(data->'hostnames') = 'array'
-				  AND jsonb_array_length(data->'hostnames') > 0
-			),
-			traefik_hosts AS (
-				SELECT
-					jsonb_array_elements_text(data->'hosts') AS host,
-					data->>'kind' AS kind,
-					data->>'name' AS name,
-					data->>'namespace' AS namespace,
-					data->>'cluster' AS cluster,
-					data->>'cluster_id' AS cluster_id,
-					data->>'environment' AS environment,
-					COALESCE(data->>'tls_secret', '') != '' AS tls,
-					'' AS lb_ips,
-					'' AS ingress_class,
-					CASE WHEN jsonb_typeof(data->'backends') = 'array'
-						THEN COALESCE(
-							(SELECT string_agg(DISTINCT b->>'name', ', ')
-							 FROM jsonb_array_elements(data->'backends') AS b
-							 WHERE b->>'name' IS NOT NULL AND b->>'name' != ''),
-							'')
-						ELSE '' END AS backends,
-					received_at AS last_seen
-				FROM live
-				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND jsonb_typeof(data->'hosts') = 'array'
-				  AND jsonb_array_length(data->'hosts') > 0
-			),
-			hosts_raw AS (
-				SELECT * FROM ingress_hosts
-				UNION ALL
-				SELECT * FROM route_hosts
-				UNION ALL
-				SELECT * FROM traefik_hosts
-			),
-			service_liveness AS (
-				-- Standard selector-backed Services: count distinct ready
-				-- endpoint addresses from their EndpointSlices. Endpoints
-				-- without a conditions.ready flag are treated as ready
-				-- (older kube-proxy / controllers do not always populate
-				-- it; absence is "no opinion" rather than "not ready").
-				SELECT
-					es.data->>'cluster_id'   AS cluster_id,
-					es.data->>'namespace'    AS namespace,
-					es.data->>'service_name' AS name,
-					COUNT(DISTINCT addr)::bigint AS cnt
-				FROM live es
-				CROSS JOIN LATERAL jsonb_array_elements(
-					COALESCE(es.data->'endpoints', '[]'::jsonb)
-				) AS ep
-				CROSS JOIN LATERAL jsonb_array_elements_text(
-					COALESCE(ep->'addresses', '[]'::jsonb)
-				) AS addr
-				WHERE es.data->>'kind' = 'EndpointSlice'
-				  AND es.data->>'service_name' IS NOT NULL
-				  AND es.data->>'service_name' <> ''
-				  AND COALESCE(ep->'conditions'->>'ready', 'true') = 'true'
-				GROUP BY es.data->>'cluster_id', es.data->>'namespace', es.data->>'service_name'
+		// Liveness gate. Live mode joins cluster_sessions and filters
+		// out clusters whose agent has been silent past sessionLiveWindow.
+		// include_inactive=true skips the join entirely and surfaces
+		// every URL we've ever observed.
+		livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+		if includeInactive {
+			livenessJoin = ""
+		}
 
-				UNION ALL
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
 
-				-- ExternalName Services CNAME to external DNS — they have
-				-- no Selector and never get a controller-managed
-				-- EndpointSlice, but they always route somewhere. Treat
-				-- as live by definition so the URL doesn't disappear from
-				-- active_only views just because the target is off-cluster.
-				SELECT
-					s.data->>'cluster_id',
-					s.data->>'namespace',
-					s.data->>'name',
-					1::bigint
-				FROM live s
-				WHERE s.data->>'kind' = 'Service'
-				  AND s.data->>'service_type' = 'ExternalName'
-			)
-			SELECT h.host, h.kind, h.name, h.namespace, h.cluster, h.cluster_id,
-			       h.environment, h.tls, h.lb_ips, h.ingress_class, h.backends,
-			       COALESCE(w.total, 0) AS workload_count, h.last_seen
-			FROM hosts_raw h
+		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
+
+		// workload_count is the count of distinct image digests that
+		// sit on this URL's backend chain (see exposed_digests MV).
+		// Better signal than the old EndpointSlice ready-address count
+		// for triage UX: "how many running images are reachable here"
+		// rather than "how many TCP endpoints reply" — and it lines up
+		// directly with asset_risk's internet_exposed flag.
+		query := `
+			SELECT
+			    he.host, he.kind, he.name, he.namespace, he.cluster, he.cluster_id,
+			    he.environment, he.tls, he.lb_ips, he.ingress_class, he.backends,
+			    COALESCE(w.cnt, 0) AS workload_count, he.last_seen
+			FROM host_exposure he
+			` + livenessJoin + `
 			LEFT JOIN LATERAL (
-				SELECT SUM(sw.cnt)::bigint AS total
-				FROM unnest(string_to_array(h.backends, ', ')) AS be(name)
-				JOIN service_liveness sw
-				  ON sw.cluster_id = h.cluster_id
-				 AND sw.namespace  = h.namespace
-				 AND sw.name       = be.name
-				WHERE be.name <> ''
+			    SELECT COUNT(DISTINCT ed.digest)::bigint AS cnt
+			    FROM exposed_digests ed
+			    WHERE ed.cluster_id    = he.cluster_id
+			      AND ed.namespace     = he.namespace
+			      AND ed.host          = he.host
+			      AND ed.exposure_kind = he.kind
+			      AND ed.exposure_name = he.name
 			) w ON TRUE
-			WHERE h.host IS NOT NULL AND h.host <> ''
-			ORDER BY h.host, h.cluster
-		`, aclArgs...).Scan(&rows).Error
-		if err != nil {
+			WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
+			ORDER BY ` + sortColumn + ` ` + sortDirection + `, he.host ` + sortDirection + `, he.cluster ` + sortDirection + `
+			LIMIT ? OFFSET ?
+		`
+		queryArgs := append([]any{}, aclArgs...)
+		queryArgs = append(queryArgs, filterArgs...)
+		queryArgs = append(queryArgs, limit, offset)
+
+		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
 			log.Printf("HostsHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
 
-		_ = cache.SetJSON(ctx, cs, cacheKey, rows, hostsListCacheTTL)
+		// activeOnly (workload_count > 0) is post-paginate by design:
+		// the workload_count is a per-row scalar, and the SQL only sees
+		// it via the LATERAL subquery. Pushing it into the WHERE would
+		// require materialising the count twice. Apply in Go on the
+		// already-bounded page — cheap, and the page already paid for
+		// the rows. activeWorkloadsOnly is a sibling for the host-tab
+		// filter that hides cluster-side endpoints without running
+		// containers; activeOnly is the older URL flag for the same
+		// semantics, kept for backward compatibility.
+		if activeWorkloadsOnly {
+			activeOnly = true
+		}
+
 		writeAndFilterHosts(w, rows, cs, ctx, activeOnly)
 	}
+}
+
+// imageSortColumnSQL maps the frontend's ImageDetail sort keys to
+// columns available on the inventory_with_vulns CTE in
+// ImageDetailHandler. 'vulns' resolves to a severity-weighted sum
+// (vuln_weight) that mirrors the frontend's old vulnSortKey, so
+// header-click sort by Vulns spans the whole dataset and not just
+// the loaded page.
+var imageSortColumnSQL = map[string]string{
+	"registry":        "registry",
+	"image":           "image",
+	"digest":          "digest",
+	"tags":            "tags",
+	"cluster_count":   "cluster_count",
+	"namespace_count": "namespace_count",
+	"container_count": "container_count",
+	"last_seen":       "last_seen",
+	"vulns":           "vuln_weight",
+}
+
+// parseImageSortParams validates the sort + order params and returns
+// the SQL column expression + direction. The default is
+// (container_count DESC) — the previous unconfigurable behaviour, so
+// the unfiltered first-page load keeps its old order.
+func parseImageSortParams(rawSort, rawOrder string) (string, string) {
+	column, ok := imageSortColumnSQL[strings.TrimSpace(strings.ToLower(rawSort))]
+	if !ok {
+		column = "container_count"
+	}
+	direction := "DESC"
+	if strings.EqualFold(strings.TrimSpace(rawOrder), "asc") {
+		direction = "ASC"
+	}
+	return column, direction
+}
+
+// hostSortColumnSQL maps the frontend's HostRow field names to SQL
+// expressions over the host_exposure MV plus the LATERAL workload
+// count. Anything not in this map falls back to (host, cluster) —
+// the original ORDER BY before sort was added.
+var hostSortColumnSQL = map[string]string{
+	"host":           "he.host",
+	"cluster":        "he.cluster",
+	"cluster_id":     "he.cluster_id",
+	"namespace":      "he.namespace",
+	"name":           "he.name",
+	"kind":           "he.kind",
+	"environment":    "he.environment",
+	"ingress_class":  "he.ingress_class",
+	"workload_count": "COALESCE(w.cnt, 0)",
+	"last_seen":      "he.last_seen",
+}
+
+// parseHostSortParams returns the SQL ORDER BY column expression and
+// direction for the host list, validating both against allowlists so
+// the user-supplied params never reach the SQL string directly. The
+// fallback (host, asc) matches the pre-sort behaviour.
+func parseHostSortParams(rawSort, rawOrder string) (string, string) {
+	column, ok := hostSortColumnSQL[strings.TrimSpace(strings.ToLower(rawSort))]
+	if !ok {
+		column = "he.host"
+	}
+	direction := "ASC"
+	if strings.EqualFold(strings.TrimSpace(rawOrder), "desc") {
+		direction = "DESC"
+	}
+	return column, direction
+}
+
+// parseHostFilterCSV splits a comma-separated query-string value into
+// trimmed non-empty tokens. nil result means "no filter applied".
+func parseHostFilterCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// buildHostFilterClauses produces the WHERE fragment + args for the
+// host_exposure search box and the cluster / namespace / kind
+// multiselects. Shared between HostsHandler and HostSummaryHandler so
+// the chip counts always reflect the same row set as the table.
+func buildHostFilterClauses(searchQuery string, clusterIDs, namespaces, kinds []string) (string, []any) {
+	var parts []string
+	var args []any
+	if searchQuery != "" {
+		pattern := "%" + searchQuery + "%"
+		parts = append(parts, `(
+			he.host ILIKE ?
+			OR he.cluster ILIKE ?
+			OR he.namespace ILIKE ?
+			OR he.name ILIKE ?
+			OR he.environment ILIKE ?
+			OR he.kind ILIKE ?
+			OR he.ingress_class ILIKE ?
+			OR he.backends ILIKE ?
+			OR he.lb_ips ILIKE ?
+		)`)
+		for i := 0; i < 9; i++ {
+			args = append(args, pattern)
+		}
+	}
+	if len(clusterIDs) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(clusterIDs)), ",")
+		parts = append(parts, `(he.cluster_id IN (`+placeholders+`) OR he.cluster IN (`+placeholders+`))`)
+		for _, v := range clusterIDs {
+			args = append(args, v)
+		}
+		for _, v := range clusterIDs {
+			args = append(args, v)
+		}
+	}
+	if len(namespaces) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(namespaces)), ",")
+		parts = append(parts, `he.namespace IN (`+placeholders+`)`)
+		for _, v := range namespaces {
+			args = append(args, v)
+		}
+	}
+	if len(kinds) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(kinds)), ",")
+		parts = append(parts, `he.kind IN (`+placeholders+`)`)
+		for _, v := range kinds {
+			args = append(args, v)
+		}
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return "AND " + strings.Join(parts, " AND "), args
+}
+
+// HostSummary is the small response shape backing the cluster page's
+// exposure chip. The page used to slice these counts client-side off
+// the full /api/clusters/hosts payload — that meant ~1MB on the wire
+// just to render four numbers, and "pending" included every host
+// that hadn't entered the virtual-scroll viewport yet (because each
+// host's DNS resolution was lazy-loaded only when visible).
+//
+// Server-side aggregation fixes both: tiny payload, and `Pending`
+// genuinely means "no cached resolution and no LB IP to classify by",
+// which is the only honest definition of unknown.
+type HostSummary struct {
+	External int `json:"external"`
+	Internal int `json:"internal"`
+	Pending  int `json:"pending"`
+	Total    int `json:"total"`
+	// Distinct values for the filter dropdowns. Computed in the same
+	// query as the categorisation so the frontend doesn't have to do a
+	// separate facets round-trip. Returned for the entire ACL-scoped
+	// dataset, not the paginated table page — that's the whole point.
+	Clusters   []HostFacetOption `json:"clusters"`
+	Namespaces []string          `json:"namespaces"`
+	Kinds      []string          `json:"kinds"`
+}
+
+// HostFacetOption pairs a cluster id with its display name so the
+// multiselect can show "prod-eu-1" while the URL param carries the
+// stable id.
+type HostFacetOption struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+}
+
+const hostSummaryCacheKeyPrefix = "hosts:summary:v1:"
+const hostSummaryCacheTTL = 30 * time.Minute
+
+type hostSummaryCacheEntry struct {
+	Watermark time.Time   `json:"watermark"`
+	Summary   HostSummary `json:"summary"`
+}
+
+// HostSummaryHandler returns aggregate exposure counts for the hosts
+// the caller is allowed to see. The endpoint is meant for the cluster
+// overview chip / donut — it is NOT a substitute for the full hosts
+// list, just the summary numbers.
+//
+// Categorisation rules (intentionally different order from the
+// frontend's previous client-side logic — we trust the cluster-
+// reported LB IP first because it's the actual assigned address in
+// the resource's status block, more authoritative than DNS which
+// just says where queries resolve):
+//   - if the host has at least one LB IP, classify by RFC1918 range
+//     of the first one (private → internal, public → external);
+//   - else if a cached DNS resolution exists with no error, fall
+//     back to IsLocal (covers NodePort / ClusterIP-only services
+//     whose Ingress doesn't surface an LB IP);
+//   - else → pending (no LB IP, no DNS, genuinely unknown).
+//
+// Cached in kv_store keyed on the ACL fragment + the host_exposure MV
+// watermark, so the cache invalidates naturally on the next MV refresh.
+func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "he.cluster_id")
+		if deny {
+			writeJSON(w, http.StatusOK, HostSummary{})
+			return
+		}
+
+		// Same cold-start guard as the full list — return zeros rather
+		// than 5xx while the MVs are still WITH NO DATA.
+		if ready, err := spamdb.HostExposureViewsPopulated(ctx, db); err != nil || !ready {
+			writeJSON(w, http.StatusOK, HostSummary{})
+			return
+		}
+
+		// Same filters as HostsHandler so the chip totals correspond
+		// 1:1 with what the table is currently showing. Skips the
+		// summary cache when filters are applied (each unique filter
+		// combination would otherwise spawn its own cache entry and
+		// the kv_store would balloon for marginal benefit).
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		filterClusters := parseHostFilterCSV(r.URL.Query().Get("cluster_ids"))
+		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
+		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
+		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
+		filtersApplied := filterWhere != ""
+
+		watermark := hostExposureWatermark(ctx, db)
+		var cacheKey string
+		if !filtersApplied {
+			cacheKey = buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive)
+			if entry, ok, _ := cache.GetJSON[hostSummaryCacheEntry](ctx, cs, cacheKey); ok {
+				if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+					writeJSON(w, http.StatusOK, entry.Summary)
+					return
+				}
+			}
+		}
+
+		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive, filterWhere, filterArgs)
+		if err != nil {
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Cascading-filter facets: each dropdown's options come from a
+		// scan that EXCLUDES that dropdown's own selection from the
+		// filter. So picking one cluster doesn't collapse the cluster
+		// list — the user can still add another cluster without
+		// clearing first.
+		clusters, namespaces, kinds, ferr := hostFacets(ctx, db, aclFrag, aclArgs, includeInactive, searchQuery, filterClusters, filterNamespaces, filterKinds)
+		if ferr != nil {
+			http.Error(w, "facet query failed", http.StatusInternalServerError)
+			return
+		}
+		summary.Clusters = clusters
+		summary.Namespaces = namespaces
+		summary.Kinds = kinds
+
+		if !filtersApplied && cache.ShouldStore(ctx) {
+			_ = cache.SetJSON(ctx, cs, cacheKey, hostSummaryCacheEntry{
+				Watermark: watermark,
+				Summary:   summary,
+			}, hostSummaryCacheTTL)
+		}
+
+		writeJSON(w, http.StatusOK, summary)
+	}
+}
+
+func hostExposureWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var refreshedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'host_exposure' LIMIT 1",
+	).Scan(&refreshedAt)
+	return refreshedAt
+}
+
+func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive bool) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(struct {
+		Frag            string
+		Args            []any
+		IncludeInactive bool
+	}{aclFrag, aclArgs, includeInactive})
+	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
+}
+
+// computeHostSummary reads the deduped host set the caller can see and
+// classifies each one. Dedup is by hostname (the same FQDN can appear
+// once per cluster/namespace via a shared *.apps wildcard). Facets
+// are computed by separate helpers because each dropdown wants its
+// own filter scope (e.g. cluster dropdown shows all clusters even
+// when one is already selected — see hostFacets below).
+func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
+	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+	if includeInactive {
+		livenessJoin = ""
+	}
+	aclWhere := ""
+	if aclFrag != "" && aclFrag != "TRUE" {
+		aclWhere = "AND " + aclFrag
+	}
+
+	type row struct {
+		Host  string `gorm:"column:host"`
+		LBIPs string `gorm:"column:lb_ips"`
+	}
+	var rows []row
+	query := `
+		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
+		ORDER BY he.host
+	`
+	queryArgs := append([]any{}, aclArgs...)
+	queryArgs = append(queryArgs, filterArgs...)
+	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+		return HostSummary{}, err
+	}
+
+	var summary HostSummary
+	summary.Total = len(rows)
+	for _, r := range rows {
+		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
+	}
+	return summary, nil
+}
+
+// hostFacets returns the dropdown options for cluster / namespace /
+// kind multiselects with cascading-filter semantics: each dropdown's
+// options exclude that dropdown's *own* selection from the filter
+// scope so the user can extend the selection without having to clear
+// it first. Cluster dropdown shows all clusters even when one is
+// already selected; namespace dropdown shows namespaces present in
+// the currently-selected clusters (cluster filter still applied); etc.
+//
+// Three queries because each dropdown needs a different filter scope.
+// They're all DISTINCT scans over the host_exposure MV; cheap in
+// practice (a few thousand rows max for typical fleets).
+func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any, includeInactive bool, searchQuery string, filterClusters, filterNamespaces, filterKinds []string) (clusters []HostFacetOption, namespaces []string, kinds []string, err error) {
+	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
+	if includeInactive {
+		livenessJoin = ""
+	}
+	aclWhere := ""
+	if aclFrag != "" && aclFrag != "TRUE" {
+		aclWhere = "AND " + aclFrag
+	}
+
+	// Cluster facets: ignore cluster filter, apply the rest.
+	clusterWhere, clusterArgs := buildHostFilterClauses(searchQuery, nil, filterNamespaces, filterKinds)
+	type clusterRow struct {
+		ClusterID string `gorm:"column:cluster_id"`
+		Cluster   string `gorm:"column:cluster"`
+	}
+	var clusterRows []clusterRow
+	clusterQuery := `
+		SELECT DISTINCT he.cluster_id, he.cluster
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + clusterWhere + ` AND he.cluster_id <> ''
+		ORDER BY he.cluster
+	`
+	cArgs := append([]any{}, aclArgs...)
+	cArgs = append(cArgs, clusterArgs...)
+	if err = db.WithContext(ctx).Raw(clusterQuery, cArgs...).Scan(&clusterRows).Error; err != nil {
+		return nil, nil, nil, err
+	}
+	clusters = make([]HostFacetOption, 0, len(clusterRows))
+	for _, r := range clusterRows {
+		label := r.Cluster
+		if label == "" {
+			label = r.ClusterID
+		}
+		clusters = append(clusters, HostFacetOption{ID: r.ClusterID, Label: label})
+	}
+
+	// Namespace facets: ignore namespace filter, apply the rest.
+	nsWhere, nsArgs := buildHostFilterClauses(searchQuery, filterClusters, nil, filterKinds)
+	nsQuery := `
+		SELECT DISTINCT he.namespace
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` AND he.namespace <> ''
+		ORDER BY he.namespace
+	`
+	nArgs := append([]any{}, aclArgs...)
+	nArgs = append(nArgs, nsArgs...)
+	if err = db.WithContext(ctx).Raw(nsQuery, nArgs...).Scan(&namespaces).Error; err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Kind facets: ignore kind filter, apply the rest.
+	kindWhere, kindArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, nil)
+	kindQuery := `
+		SELECT DISTINCT he.kind
+		FROM host_exposure he
+		` + livenessJoin + `
+		WHERE TRUE ` + aclWhere + ` ` + kindWhere + ` AND he.kind <> ''
+		ORDER BY he.kind
+	`
+	kArgs := append([]any{}, aclArgs...)
+	kArgs = append(kArgs, kindArgs...)
+	if err = db.WithContext(ctx).Raw(kindQuery, kArgs...).Scan(&kinds).Error; err != nil {
+		return nil, nil, nil, err
+	}
+
+	return clusters, namespaces, kinds, nil
+}
+
+
+func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
+	// 1. Cluster-reported LB IP wins. status.loadBalancer.ingress[].ip
+	//    for Ingress, Gateway.status.addresses[] for Gateway API — the
+	//    actual address the cluster has assigned. A private RFC1918 IP
+	//    here means the LoadBalancer is internal-only; a public IP
+	//    means the host is directly exposed via it.
+	if first := strings.TrimSpace(strings.SplitN(lbIPs, ",", 2)[0]); first != "" {
+		if isPrivateIP(first) {
+			s.Internal++
+		} else {
+			s.External++
+		}
+		return s
+	}
+	// 2. No LB IP (NodePort, ClusterIP-only behind an external DNS).
+	//    Fall back to cached DNS resolution if we have one.
+	if res, ok, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCachePrefix+host); ok && res.Error == "" {
+		if res.IsLocal {
+			s.Internal++
+		} else {
+			s.External++
+		}
+		return s
+	}
+	// 3. No LB IP and no cached DNS — genuinely unknown.
+	s.Pending++
+	return s
 }
 
 // writeAndFilterHosts applies the activeOnly filter, inlines resolve +
@@ -989,9 +1898,11 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			LabelsJSON     string `gorm:"column:labels_json"`
 		}
 
-		// Step 1: All ingresses/routes in this cluster
+		// Step 1: All ingresses/routes in this cluster. liveCTEForCluster
+		// pre-filters by cluster_id so the per-branch cluster_id checks
+		// become no-ops we drop.
 		var ingresses []nsIngress
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT * FROM (
 				SELECT
 					data->>'namespace' AS namespace,
@@ -1008,7 +1919,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live
 				     CROSS JOIN LATERAL jsonb_array_elements(data->'rules') AS r
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				UNION ALL
 				SELECT
@@ -1026,7 +1936,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live,
 				     jsonb_array_elements_text(data->'hosts') AS h
 				WHERE data->>'kind' IN ('IngressRoute','IngressRouteTCP')
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				UNION ALL
 				SELECT
@@ -1044,15 +1953,14 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				FROM live,
 				     jsonb_array_elements_text(data->'hostnames') AS h
 				WHERE data->>'kind' IN ('HTTPRoute','GRPCRoute','TLSRoute')
-				  AND data->>'cluster_id' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 			) sub WHERE host IS NOT NULL AND host != ''
 			ORDER BY namespace, host
-		`, clusterID, clusterID, clusterID).Scan(&ingresses)
+		`, clusterID).Scan(&ingresses)
 
 		// Step 2: All services in this cluster
 		var services []nsSvc
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'name' AS name,
@@ -1061,13 +1969,12 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				COALESCE(data->'selector'::text, '{}') AS selector_json
 			FROM live
 			WHERE data->>'kind' = 'Service'
-			  AND data->>'cluster_id' = ?
 			ORDER BY data->>'namespace', data->>'name'
 		`, clusterID).Scan(&services)
 
 		// Step 3: All running pod groups in this cluster
 		var pods []nsPod
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'owner' AS owner,
@@ -1085,7 +1992,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			FROM live
 			WHERE data->>'kind' = 'Container'
 			  AND data->>'pod_phase' = 'Running'
-			  AND data->>'cluster_id' = ?
 			GROUP BY data->>'namespace', data->>'owner', data->>'owner_kind'
 			ORDER BY data->>'namespace', data->>'owner'
 		`, clusterID).Scan(&pods)
@@ -1255,7 +2161,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Address     string `gorm:"column:address"`
 		}
 		var epIPs []epIPRow
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
@@ -1264,7 +2170,6 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 				) AS address
 			FROM live
 			WHERE data->>'kind' = 'EndpointSlice'
-			  AND data->>'cluster_id' = ?
 		`, clusterID).Scan(&epIPs)
 
 		// Endpoint ports per service
@@ -1274,14 +2179,13 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Port        int    `gorm:"column:port"`
 		}
 		var epPortRows []epPortRow
-		db.Raw(liveCTE + `
+		db.Raw(liveCTEForCluster + `
 			SELECT DISTINCT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
 				(p->>'port')::int AS port
 			FROM live, jsonb_array_elements(data->'ports') AS p
 			WHERE data->>'kind' = 'EndpointSlice'
-			  AND data->>'cluster_id' = ?
 			  AND p->>'port' IS NOT NULL
 		`, clusterID).Scan(&epPortRows)
 
@@ -1322,7 +2226,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Look up cluster name
 		var clusterName string
-		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(liveCTEForCluster+`SELECT data->>'cluster' FROM live WHERE data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
 
 		// Sort namespaces and build result
 		type result struct {
@@ -1842,8 +2746,10 @@ func bytesCompare(a, b net.IP) int {
 }
 
 type ingestResponse struct {
-	Accepted int `json:"accepted"`
-	Rejected int `json:"rejected,omitempty"`
+	Accepted        int   `json:"accepted"`
+	Snapshots       int   `json:"snapshots,omitempty"`
+	Rejected        int   `json:"rejected,omitempty"`
+	LastSeenEventID int64 `json:"last_seen_event_id,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

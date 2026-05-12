@@ -88,7 +88,7 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 
 		q := r.URL.Query()
 		params := vulnmetrics.VulnListParams{
-			Limit:      parseIntDefault(q.Get("limit"), 100),
+			Limit:      parseIntDefault(q.Get("limit"), 50),
 			Offset:     parseIntDefault(q.Get("offset"), 0),
 			Severities: splitUpper(q.Get("severity")),
 			Query:      q.Get("q"),

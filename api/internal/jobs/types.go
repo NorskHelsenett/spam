@@ -18,6 +18,19 @@ const (
 	// startups can't double-queue.
 	JobTypeFetchKEV  JobType = "FETCH_KEV"
 	JobTypeFetchEPSS JobType = "FETCH_EPSS"
+	// FETCH_DEP_HEALTH refreshes third-party library health metadata
+	// (last activity, archived/deprecated flags, latest version,
+	// stars, issue velocity) from public registries + GitHub/GitLab.
+	// Same self-rescheduling pattern as KEV/EPSS but on a weekly
+	// cadence — packages don't change health that fast and rate-
+	// limited registries thank us for the lower QPS.
+	JobTypeFetchDepHealth JobType = "FETCH_DEP_HEALTH"
+	// DB_MAINTENANCE runs a safe-by-default Postgres maintenance op
+	// (ANALYZE or VACUUM ANALYZE) on a single named table. Driven from
+	// the admin Database page. We deliberately do not expose VACUUM
+	// FULL or REINDEX here — those acquire AccessExclusiveLock and
+	// belong behind a separate, explicit code path.
+	JobTypeDBMaintenance JobType = "DB_MAINTENANCE"
 )
 
 // VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
@@ -53,6 +66,59 @@ type ImageScanPayload struct {
 	Repository    string            `json:"repository"`
 	Digest        string            `json:"digest"`
 	Scanners      map[string]string `json:"scanners,omitempty"`
+
+	// SigningPolicy carries the cosign verification config the runner
+	// should use when running `cosign verify`. nil / empty means "no
+	// verification, just `cosign tree`" — the legacy behaviour. The
+	// worker fills this from signing_policy at job-creation time.
+	SigningPolicy *ImageScanSigningPolicy `json:"signing_policy,omitempty"`
+}
+
+// ImageScanSigningPolicy is the runtime-shaped subset of
+// signingpolicy.ResolvedPolicy that travels through the job payload.
+// Type matches the package's enum strings ("keyless" | "key").
+//
+// The KeyPEM is only populated for type='key' policies and is
+// transmitted in plaintext over the runner-internal connection
+// (already authenticated + scoped per-job by HMAC). Encryption at
+// rest in the DB protects against operator/backup leakage; transport
+// encryption is the cluster's TLS responsibility.
+//
+// The four endpoint URLs let an org point cosign at self-hosted
+// Sigstore (Fulcio/Rekor) or a separate signature registry without
+// patching the runner. Empty values keep cosign on its public-
+// Sigstore defaults.
+type ImageScanSigningPolicy struct {
+	Type           string `json:"policy_type"`
+	Issuer         string `json:"issuer,omitempty"`
+	SubjectPattern string `json:"subject_pattern,omitempty"`
+	KeyPEM         string `json:"key_pem,omitempty"`
+
+	SignatureRepository string `json:"signature_repository,omitempty"`
+	FulcioURL           string `json:"fulcio_url,omitempty"`
+	RekorURL            string `json:"rekor_url,omitempty"`
+	TUFMirrorURL        string `json:"tuf_mirror_url,omitempty"`
+}
+
+// DBMaintenanceOp enumerates the maintenance operations DB_MAINTENANCE
+// jobs may run. Keep this list narrow on purpose — every new op
+// expands the surface area for a misbehaving SQL to lock the DB.
+type DBMaintenanceOp string
+
+const (
+	DBMaintenanceOpAnalyze       DBMaintenanceOp = "analyze"
+	DBMaintenanceOpVacuumAnalyze DBMaintenanceOp = "vacuum_analyze"
+)
+
+// DBMaintenancePayload is the payload for DB_MAINTENANCE jobs. Schema +
+// Table are re-validated against pg_catalog inside the worker before
+// the statement is built, so the column identifier interpolation never
+// touches a string the caller controls without a round-trip through
+// pg_catalog first.
+type DBMaintenancePayload struct {
+	Schema    string          `json:"schema"`
+	Table     string          `json:"table"`
+	Operation DBMaintenanceOp `json:"operation"`
 }
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.

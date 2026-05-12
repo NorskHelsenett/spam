@@ -36,6 +36,10 @@ spec:
           securityContext:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- with .Values.postgresql.primary.extraArgs }}
+          args:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - containerPort: 5432
               name: postgres
@@ -63,6 +67,18 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/postgresql/data
+      {{- with .Values.postgresql.primary.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.postgresql.primary.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.postgresql.primary.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
   volumeClaimTemplates:
     - apiVersion: v1
       kind: PersistentVolumeClaim

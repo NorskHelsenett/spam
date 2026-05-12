@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/signingpolicy"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
@@ -27,14 +29,15 @@ const imageScanRunTokenTTL = 2 * time.Hour
 // keeps upload logic in one place and avoids duplicating multipart parsing
 // under HMAC auth.
 type imageScanLeaseResponse struct {
-	JobID         string            `json:"job_id"`
-	ImageDigestID string            `json:"image_digest_id"`
-	Registry      string            `json:"registry"`
-	Repository    string            `json:"repository"`
-	Digest        string            `json:"digest"`
-	Scanners      map[string]string `json:"scanners,omitempty"`
-	RunToken      string            `json:"run_token"`
-	WorkerURL     string            `json:"worker_url"`
+	JobID         string                       `json:"job_id"`
+	ImageDigestID string                       `json:"image_digest_id"`
+	Registry      string                       `json:"registry"`
+	Repository    string                       `json:"repository"`
+	Digest        string                       `json:"digest"`
+	Scanners      map[string]string            `json:"scanners,omitempty"`
+	SigningPolicy *jobs.ImageScanSigningPolicy `json:"signing_policy,omitempty"`
+	RunToken      string                       `json:"run_token"`
+	WorkerURL     string                       `json:"worker_url"`
 }
 
 // handleImageScanNext leases the next QUEUED/RETRY IMAGE_SCAN job. The
@@ -76,6 +79,14 @@ func (s *Server) handleImageScanNext(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Look up the active cosign verification policy and embed it in
+	// the lease response. Reading at lease-time (rather than at job-
+	// enqueue time) means an admin policy change takes effect on the
+	// next scan without requeueing every job in the backlog. Lookup
+	// failures are non-fatal — the runner falls back to `cosign tree`
+	// only, which preserves today's behaviour.
+	policy := loadActiveSigningPolicy(r.Context(), s.db, s.cfg.ProviderSecretsKey)
+
 	resp := imageScanLeaseResponse{
 		JobID:         job.ID,
 		ImageDigestID: payload.ImageDigestID,
@@ -83,6 +94,7 @@ func (s *Server) handleImageScanNext(w http.ResponseWriter, r *http.Request) {
 		Repository:    payload.Repository,
 		Digest:        payload.Digest,
 		Scanners:      payload.Scanners,
+		SigningPolicy: policy,
 		RunToken:      token,
 		WorkerURL:     s.cfg.WorkerURL,
 	}
@@ -214,3 +226,24 @@ func (s *Server) handleImageScanComplete(w http.ResponseWriter, r *http.Request)
 	_, _ = w.Write([]byte("ok"))
 }
 
+// loadActiveSigningPolicy returns the runtime-shaped policy for the
+// image-scan lease handler. Returns nil when no policy is configured
+// or when it's disabled — both cases mean "fall back to cosign tree
+// only", preserving today's behaviour without surprising the runner.
+func loadActiveSigningPolicy(ctx context.Context, db *gorm.DB, secretsKey []byte) *jobs.ImageScanSigningPolicy {
+	store := signingpolicy.NewStore(db, secretsKey)
+	resolved, err := store.GetEnabled(ctx)
+	if err != nil {
+		return nil
+	}
+	return &jobs.ImageScanSigningPolicy{
+		Type:                string(resolved.Type),
+		Issuer:              resolved.Issuer,
+		SubjectPattern:      resolved.SubjectPattern,
+		KeyPEM:              resolved.KeyPEM,
+		SignatureRepository: resolved.SignatureRepository,
+		FulcioURL:           resolved.FulcioURL,
+		RekorURL:            resolved.RekorURL,
+		TUFMirrorURL:        resolved.TUFMirrorURL,
+	}
+}

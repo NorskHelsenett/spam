@@ -43,9 +43,9 @@ func DependencyVulnerabilitiesHandler(db *gorm.DB, authService *auth.Service) ht
 type VEXSetRequest struct {
 	PURL          string `json:"purl"`
 	VulnID        string `json:"vuln_id"`
-	Status        string `json:"status"`         // affected | not_affected | fixed | under_investigation
-	Justification string `json:"justification"`  // optional
-	Detail        string `json:"detail"`         // optional
+	Status        string `json:"status"`        // affected | not_affected | fixed | under_investigation
+	Justification string `json:"justification"` // optional
+	Detail        string `json:"detail"`        // optional
 }
 
 // DependencyVEXHandler upserts a VEX override for a PURL+vuln pair.

@@ -15,6 +15,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
+	"github.com/NorskHelsenett/spam/internal/sbomviews"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -146,12 +147,12 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				log.Printf("failed to ingest sbom: %v", err)
 			} else if storedSBOMID != "" {
-				if _, err := jobs.CreateJob(r.Context(), s.db, jobs.CreateJobInput{
-					Type:    jobs.JobTypeRefreshSBOMViews,
-					Payload: map[string]string{"sbom_id": storedSBOMID},
-				}); err != nil {
-					log.Printf("failed to enqueue view refresh: %v", err)
-				}
+				// Coalesced background refresh — many runs landing back-to-
+				// back collapse to one inflight + one pending REFRESH per
+				// replica, and the advisory lock makes only one replica do
+				// the work. Replaces the old REFRESH_SBOM_VIEWS job which
+				// burned worker slots on lock contention.
+				sbomviews.TriggerRefresh(s.db)
 			}
 		}
 	}

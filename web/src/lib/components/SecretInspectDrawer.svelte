@@ -367,7 +367,7 @@
 					<div class="space-y-1">
 						{#each data.locations as loc}
 							<a
-								href="/app/providers/repo/{loc.repo_id}"
+								href="/providers/repo/{loc.repo_id}"
 								target="_blank"
 								rel="noopener"
 								class="flex items-start gap-2 rounded-lg px-3 py-2 text-xs transition hover:bg-[var(--hover-bg-subtle)]"

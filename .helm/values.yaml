@@ -285,6 +285,23 @@ postgresql:
 
   # Primary instance configuration
   primary:
+    # Extra postgres command-line args. Used to enable
+    # pg_stat_statements (powers the /admin/database slow-queries
+    # view). Changing this list requires a postgres restart because
+    # shared_preload_libraries is a postmaster-level setting.
+    #
+    # After the StatefulSet rolls with this enabled, an operator must
+    # run once (as superuser) in the spam DB:
+    #   CREATE EXTENSION pg_stat_statements;
+    # The SPAM app user is not a superuser and cannot do this itself.
+    extraArgs:
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.max=10000"
+      - "-c"
+      - "pg_stat_statements.track=top"
+
     # Persistent volume configuration
     persistence:
       enabled: true
@@ -321,6 +338,36 @@ postgresql:
       runAsUser: 999
       runAsGroup: 999
 
+    # Pin the PostgreSQL pod to a specific node / nodepool. Kubernetes
+    # scheduling matches node *labels* — annotations are not honored.
+    # Verify the label exists with: kubectl get nodes --show-labels
+    #
+    # Simple label match:
+    # nodeSelector:
+    #   vitistack.io/nodepool: worker2
+    nodeSelector: {}
+
+    # nodeAffinity / podAffinity for soft preferences or multi-value
+    # allowlists. Example — require one of two nodepools:
+    # affinity:
+    #   nodeAffinity:
+    #     requiredDuringSchedulingIgnoredDuringExecution:
+    #       nodeSelectorTerms:
+    #         - matchExpressions:
+    #             - key: vitistack.io/nodepool
+    #               operator: In
+    #               values: [worker2, worker3]
+    affinity: {}
+
+    # Tolerations — needed if the target node has taints (e.g. dedicated
+    # database nodepools often do).
+    # tolerations:
+    #   - key: vitistack.io/nodepool
+    #     operator: Equal
+    #     value: worker2
+    #     effect: NoSchedule
+    tolerations: []
+
 
 # Worker configuration
 # The worker processes background jobs (SBOM parsing, etc.) and hosts
@@ -331,6 +378,17 @@ postgresql:
 worker:
   enabled: true
   replicaCount: 2
+
+  # Worker job-pool concurrency. Two independent goroutine pools run in
+  # the same process: the main pool handles CREATE_RUN dispatch, feed
+  # refreshes, sync jobs, etc.; the vuln-meta pool exclusively claims
+  # VULN_META_FETCH so a large backfill (tens of thousands of jobs after
+  # a fresh OSV scan) cannot FIFO-starve user-facing dispatches.
+  # IMAGE_SCAN jobs are NOT served by either pool — they go to dedicated
+  # scanner pods sized via imageScanner.operator.maxParallelism below.
+  concurrency:
+    main: 4
+    vulnMeta: 8
 
   # Rolling strategy: keep serving throughout an upgrade.
   # maxUnavailable: 0 means we never go below the configured replica

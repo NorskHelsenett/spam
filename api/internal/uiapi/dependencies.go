@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
+	"hash/fnv"
 	"log"
 	"net/http"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"gorm.io/gorm"
 )
 
@@ -121,7 +124,7 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 				merged.component_purl,
 				merged.component_name,
 				merged.ecosystem,
-				('/app/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
+				('/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
 					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
 				) AS spam_url
 			FROM merged
@@ -640,7 +643,7 @@ func buildSpamRepoURL(baseURL, providerType, org, slug, providerBaseURL string) 
 	if providerType == "" || path == "" {
 		return ""
 	}
-	u := "/app/providers/repo?provider=" + providerType + "&path=" + path
+	u := "/providers/repo?provider=" + providerType + "&path=" + path
 	if strings.TrimSpace(providerBaseURL) != "" {
 		u += "&base_url=" + strings.TrimSpace(providerBaseURL)
 	}
@@ -850,13 +853,70 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 	return assets, nil
 }
 
-// UnifiedDependenciesResponse is the API response
+// UnifiedDependenciesResponse is the API response. HasMore is the
+// limit+1 trick: the handler asks the DB for one row past the page,
+// drops it before serialising, and reports HasMore=true. Replaces the
+// old COUNT(*) OVER () total — at scale, computing the total dominated
+// the query (full GROUP BY across both sbom_component_view and
+// manifest_dependencies) and made `?q=spa` searches unusable.
 type UnifiedDependenciesResponse struct {
 	Dependencies []UnifiedDependency `json:"dependencies"`
-	Total        int64               `json:"total"`
 	Page         int                 `json:"page"`
 	PerPage      int                 `json:"per_page"`
-	TotalPages   int                 `json:"total_pages"`
+	HasMore      bool                `json:"has_more"`
+}
+
+const unifiedDepsCacheKeyPrefix = "deps:unified:v1:"
+
+// unifiedDepsCacheTTL is intentionally long because invalidation is
+// driven by the watermark (sbom_component_view refresh + latest
+// manifest_dependencies row) — TTL only catches orphan keys whose
+// watermark moved past them.
+const unifiedDepsCacheTTL = 30 * time.Minute
+
+// unifiedDepsCacheEntry is the cached response plus the watermark at
+// compute time. ACL-scoped requests skip the cache entirely; cross-
+// repo aggregates are admin-only in Phase 3 so all callers see the
+// same data and key collisions are not a privacy issue.
+type unifiedDepsCacheEntry struct {
+	Watermark time.Time                    `json:"watermark"`
+	Response  UnifiedDependenciesResponse  `json:"response"`
+}
+
+// unifiedDepsCacheKey hashes every input that affects the response.
+// 8-byte fnv-64a collisions are harmless: the watermark check inside
+// the entry would still gate freshness, and the alternative response
+// would have been computed against identical filters anyway.
+func unifiedDepsCacheKey(page, perPage int, search, ecosystem, source, sortColumn, sortOrder string) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(struct {
+		Page, PerPage                                      int
+		Search, Ecosystem, Source, SortColumn, SortOrder   string
+	}{page, perPage, search, ecosystem, source, sortColumn, sortOrder})
+	return fmt.Sprintf("%s%x", unifiedDepsCacheKeyPrefix, h.Sum64())
+}
+
+// unifiedDepsWatermark returns the latest moment at which the
+// underlying data could have changed: the SBOM materialized view
+// refresh or the most recent manifest_dependency insert. Mirrors the
+// app_summary pattern so cache invalidation is driven by data
+// freshness, not wall-clock TTL.
+func unifiedDepsWatermark(ctx context.Context, db *gorm.DB) time.Time {
+	var sbomRefreshedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'sbom_component_view' LIMIT 1",
+	).Scan(&sbomRefreshedAt)
+
+	var latestManifestCreatedAt time.Time
+	db.WithContext(ctx).Raw(
+		"SELECT COALESCE(MAX(created_at), TIMESTAMPTZ 'epoch') FROM manifest_dependencies",
+	).Scan(&latestManifestCreatedAt)
+
+	if latestManifestCreatedAt.After(sbomRefreshedAt) {
+		return latestManifestCreatedAt
+	}
+	return sbomRefreshedAt
 }
 
 // UnifiedDependenciesHandler merges SBOM components and manifest dependencies
@@ -922,6 +982,28 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			sortOrder = "desc"
 		}
 
+		// Cache lookup for the cross-repo aggregate. We skip the cache when
+		// repo_id is set because that path is already cheap (filters down
+		// to one repo's rows) and avoids worrying about per-user
+		// invalidation. The cross-repo aggregate path is admin-only in
+		// Phase 3 so all callers share the same response shape — safe to
+		// share a cache key.
+		var cacheStore cache.Store
+		var cacheKey string
+		var watermark time.Time
+		if repoID == "" {
+			cacheStore = cache.NewPostgresStore(db)
+			watermark = unifiedDepsWatermark(r.Context(), db)
+			cacheKey = unifiedDepsCacheKey(page, perPage, search, ecosystem, source, sortColumn, sortOrder)
+			if entry, ok, _ := cache.GetJSON[unifiedDepsCacheEntry](r.Context(), cacheStore, cacheKey); ok {
+				if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(entry.Response)
+					return
+				}
+			}
+		}
+
 		// Build the query. When a source filter is specified, short-circuit to avoid
 		// scanning both sbom_component_view and manifest_dependencies unnecessarily.
 		var query string
@@ -982,7 +1064,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					GROUP BY scv.name, scv.ecosystem
 				)
 				SELECT name, ecosystem, purl, 'sbom' AS sources, version_count, sbom_count, repo_count, image_count,
-				       false AS has_direct, NULL::text[] AS scopes, COUNT(*) OVER () AS total_count
+				       false AS has_direct, NULL::text[] AS scopes
 				FROM sbom_deps
 			`
 
@@ -1024,7 +1106,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 					GROUP BY md.name, md.ecosystem
 				)
 				SELECT name, ecosystem, NULL AS purl, 'manifest' AS sources, version_count, 0 AS sbom_count, repo_count, 0 AS image_count,
-				       has_direct, scopes, COUNT(*) OVER () AS total_count
+				       has_direct, scopes
 				FROM manifest_deps
 			`
 
@@ -1138,7 +1220,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 						ON s.name = m.name
 						AND s.ecosystem = m.ecosystem
 				)
-				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, image_count, has_direct, scopes, COUNT(*) OVER () AS total_count FROM merged
+				SELECT name, ecosystem, purl, sources, version_count, sbom_count, repo_count, image_count, has_direct, scopes FROM merged
 			`
 			if source == "both" {
 				query += ` WHERE sources = 'both'`
@@ -1154,12 +1236,13 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		// Secondary sort by name for consistency
 		query += `, name ASC`
 
-		// Apply pagination
+		// Pagination: ask for one row past the page so we can report
+		// has_more without a second COUNT query. The extra row is
+		// dropped before serialising.
 		offset := (page - 1) * perPage
 		query += ` LIMIT ? OFFSET ?`
-		args = append(args, interface{}(perPage), interface{}(offset))
+		args = append(args, interface{}(perPage+1), interface{}(offset))
 
-		// Execute query — total count comes back as a window function column
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
 			log.Printf("unified deps query error: %v", err)
@@ -1168,8 +1251,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 		}
 		defer rows.Close()
 
-		var total int64
-		deps := make([]UnifiedDependency, 0)
+		deps := make([]UnifiedDependency, 0, perPage)
 		for rows.Next() {
 			var dep UnifiedDependency
 			var sources string
@@ -1180,7 +1262,7 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 				&dep.Name, &dep.Ecosystem, &purl,
 				&sources, &dep.VersionCount,
 				&dep.SBOMCount, &dep.RepoCount, &dep.ImageCount,
-				&dep.HasDirect, &scopes, &total,
+				&dep.HasDirect, &scopes,
 			); err != nil {
 				log.Printf("scan error: %v", err)
 				continue
@@ -1209,19 +1291,27 @@ func UnifiedDependenciesHandler(db *gorm.DB, authService *auth.Service) http.Han
 			deps = append(deps, dep)
 		}
 
-		totalPages := int(total) / perPage
-		if int(total)%perPage > 0 {
-			totalPages++
+		hasMore := len(deps) > perPage
+		if hasMore {
+			deps = deps[:perPage]
+		}
+
+		resp := UnifiedDependenciesResponse{
+			Dependencies: deps,
+			Page:         page,
+			PerPage:      perPage,
+			HasMore:      hasMore,
+		}
+
+		if cacheStore != nil && cache.ShouldStore(r.Context()) {
+			_ = cache.SetJSON(r.Context(), cacheStore, cacheKey, unifiedDepsCacheEntry{
+				Watermark: watermark,
+				Response:  resp,
+			}, unifiedDepsCacheTTL)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(UnifiedDependenciesResponse{
-			Dependencies: deps,
-			Total:        total,
-			Page:         page,
-			PerPage:      perPage,
-			TotalPages:   totalPages,
-		})
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 

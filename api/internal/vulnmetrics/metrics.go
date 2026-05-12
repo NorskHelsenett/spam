@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/cache"
 	spamdb "github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
@@ -19,13 +20,13 @@ import (
 )
 
 const (
-	summaryCacheKey   = "vuln:summary:v1"
-	reposCacheKey     = "vuln:repos:v1"
-	facetsCacheKey    = "vuln:facets:v1"
+	summaryCacheKey = "vuln:summary:v1"
+	reposCacheKey   = "vuln:repos:v1"
+	facetsCacheKey  = "vuln:facets:v1"
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v4:"
+	listCachePrefix   = "vuln:list:v5:"
 	summaryCacheTTL   = 7 * 24 * time.Hour
 	refreshMaxRuntime = 2 * time.Minute
 )
@@ -101,11 +102,11 @@ type VulnGroup struct {
 	// model. Both are 0 / false when neither feed has the CVE — the
 	// API always returns the fields so clients can render badges
 	// without a presence check.
-	KEVKnown            bool       `json:"kev_known"`
-	KEVKnownRansomware  bool       `json:"kev_known_ransomware"`
-	KEVDateAdded        *time.Time `json:"kev_date_added,omitempty"`
-	EPSSScore           float32    `json:"epss_score"`
-	EPSSPercentile      float32    `json:"epss_percentile"`
+	KEVKnown           bool       `json:"kev_known"`
+	KEVKnownRansomware bool       `json:"kev_known_ransomware"`
+	KEVDateAdded       *time.Time `json:"kev_date_added,omitempty"`
+	EPSSScore          float32    `json:"epss_score"`
+	EPSSPercentile     float32    `json:"epss_percentile"`
 }
 
 // VulnListResponse is the paginated shape of /api/vuln/list. Total
@@ -170,6 +171,15 @@ type cachedRepos struct {
 	Rows    []RepoRow      `json:"rows"`
 }
 
+// LoadSummary returns the cached summary if its version matches, the
+// stale cached entry if it doesn't (kicking a background refresh), or
+// computes synchronously if there's nothing cached at all.
+//
+// Stale-while-revalidate: the old version ran Refresh() inline whenever
+// the version drifted, which is the path that timed out /api/vuln/summary
+// — Refresh re-runs the unified-vuln MV refresh + computeSummary +
+// computeRepos serialised inside the request. Mirrors the pattern in
+// secrets_dashboard.go (table/trend/stats).
 func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	store := cache.NewPostgresStore(db)
 
@@ -182,8 +192,17 @@ func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 		if sameVersion(entry.Version, version) {
 			return entry.Summary, nil
 		}
+		// Stale: serve immediately, refresh in the background. The
+		// existing refreshGate inside TriggerRefresh coalesces this
+		// with any concurrent scan-completion triggers, so spammed
+		// reads don't pile up redundant refreshes.
+		TriggerRefresh(db)
+		return entry.Summary, nil
 	}
 
+	// Cache miss (first request after deploy, or cache evicted) —
+	// compute inline. After this returns, subsequent requests within
+	// the same version see a cache hit.
 	return Refresh(ctx, db, time.Now().UTC())
 }
 
@@ -224,6 +243,36 @@ func unifiedViewsReady(ctx context.Context, db *gorm.DB) bool {
 	return true
 }
 
+// EnsureFirstPopulate blocks until both unified vuln MVs are populated.
+// Spawn from a startup goroutine so HTTP serving isn't gated on it.
+//
+// Multi-replica safe: RefreshVulnUnifiedViews holds an advisory lock so
+// only one replica actually performs the REFRESH; others observe
+// ErrRefreshLockHeld and poll. We back off between iterations so a
+// transient failure (e.g. underlying scan tables still seeding) gets
+// retried instead of leaving the views unpopulated forever.
+//
+// Returns when ctx is cancelled or the views are populated.
+func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
+	backoff := 2 * time.Second
+	for {
+		if unifiedViewsReady(ctx, db) {
+			return nil
+		}
+		if err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			log.Printf("vulnmetrics: first populate refresh: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // TriggerRefresh proactively warms the summary / repos caches in the
 // background. Call from any scan-completion hook (SBOM, OSV batch,
 // image scan finish, VEX edit) so the next user hits a warm cache
@@ -247,6 +296,18 @@ func TriggerRefresh(db *gorm.DB) {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
 			if _, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
 				log.Printf("vulnmetrics: background refresh: %v", err)
+				// Skipping the assetrisk cascade is deliberate — asset_risk
+				// reads from the vuln_unified MVs, so refreshing it against
+				// data we just failed to recompute would record a stale
+				// snapshot. The log line makes the staleness visible to ops
+				// instead of silently letting asset_risk drift.
+				log.Printf("vulnmetrics: skipping assetrisk cascade (vulnmetrics refresh failed)")
+			} else {
+				// asset_risk reads the unified vulnerability MVs. Cascade
+				// after the vuln refresh has had a chance to land instead
+				// of letting scan hooks trigger both families in parallel
+				// against mismatched snapshots.
+				assetrisk.TriggerRefresh(db)
 			}
 			cancel()
 
@@ -487,11 +548,16 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 // changes the version hash, so stale keys are orphaned and expire
 // via TTL. Fresh after every scan without a manual bust.
 func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
+	// 50 is the default; 100 caps the page so a single request can't
+	// pull the whole table. Old code defaulted to 100 and capped at
+	// 500 — at scale that's a ~10x payload + planner cost for marginal
+	// scrolling benefit. The list page virtualises so smaller pages
+	// don't affect UX.
 	if p.Limit <= 0 {
-		p.Limit = 100
+		p.Limit = 50
 	}
-	if p.Limit > 500 {
-		p.Limit = 500
+	if p.Limit > 100 {
+		p.Limit = 100
 	}
 	if p.Offset < 0 {
 		p.Offset = 0
@@ -684,9 +750,15 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		FROM grouped g
 		LEFT JOIN cisa_kev_entries kev ON kev.cve_id = g.vuln_id
 		LEFT JOIN epss_entries     epss ON epss.cve_id = g.vuln_id
-		ORDER BY (kev.cve_id IS NOT NULL)        DESC,
+		-- Severity first (Critical → Unknown), then KEV, then EPSS,
+		-- then newer CVE year, then alphabetical id for stability.
+		-- Severity-leading matches how operators read the list — a
+		-- Critical without KEV still beats a High that is KEV-listed,
+		-- because severity is the worst-case impact and KEV / EPSS
+		-- are tiebreakers within the same impact tier.
+		ORDER BY g.sev_rank                      ASC,
+		         (kev.cve_id IS NOT NULL)        DESC,
 		         COALESCE(epss.score, 0)         DESC,
-		         g.sev_rank                      ASC,
 		         g.cve_year                      DESC NULLS LAST,
 		         g.vuln_id                       ASC
 		LIMIT ? OFFSET ?

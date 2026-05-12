@@ -76,6 +76,30 @@ type Pipeline struct {
 	Scanners map[string]string // category -> scanner name; empty = defaults
 	WorkDir  string            // scratch dir, writable
 	Log      LogFunc
+
+	// SigningPolicy, when non-nil, makes runSignature call `cosign
+	// verify` against the configured identity (Sigstore keyless or a
+	// pinned key) and report a real verdict. Without a policy, the
+	// scanner only runs `cosign tree` and reports verified=false.
+	SigningPolicy *SigningPolicy
+}
+
+// SigningPolicy is the runtime-shaped subset of the admin-configured
+// cosign verification policy. Type is one of "keyless" or "key".
+//
+// The four endpoint URLs map to cosign flags: SignatureRepository →
+// --signature-repository, FulcioURL → --fulcio-url, RekorURL →
+// --rekor-url, TUFMirrorURL → --tuf-mirror. Empty = cosign default.
+type SigningPolicy struct {
+	Type           string
+	Issuer         string
+	SubjectPattern string
+	KeyPEM         string
+
+	SignatureRepository string
+	FulcioURL           string
+	RekorURL            string
+	TUFMirrorURL        string
 }
 
 // Artifact is the output of one scanner invocation. Field is the multipart
@@ -179,31 +203,119 @@ func (p Pipeline) runSignature(ctx context.Context, outDir string) (Artifact, er
 		// (it prints a "No Supply Chain Security Related Artifacts found"
 		// banner), so "output exists" cannot be used as "image is signed".
 		// We parse the known marker explicitly.
-		//
-		// `verified` is deliberately NOT a claim we make here: cosign tree
-		// does not verify signatures against an identity policy. When admin
-		// config for keyless / key-based identity lands, a `cosign verify`
-		// call can supplement this with a real verdict.
-		raw, err := p.capture(ctx, "cosign", "tree", p.Ref.String())
+		treeRaw, treeErr := p.capture(ctx, "cosign", "tree", p.Ref.String())
 		payload := map[string]any{
 			"image":    p.Ref.String(),
 			"verifier": "cosign",
-			"verified": false, // no identity policy configured — always false today
+			"verified": false,
 		}
-		if err != nil {
+		if treeErr != nil {
 			payload["signed"] = false
-			payload["error"] = err.Error()
+			payload["error"] = treeErr.Error()
 		} else {
-			rawStr := string(raw)
+			rawStr := string(treeRaw)
 			payload["signed"] = !strings.Contains(rawStr, "No Supply Chain Security Related Artifacts found")
 			payload["tree_raw"] = rawStr
 		}
+
+		// When a policy is configured, run `cosign verify` against the
+		// identity it specifies and record the real verdict. Without a
+		// policy, behaviour stays as-is — verified=false unconditionally
+		// — so deployments without admin-configured signing are not
+		// disrupted.
+		if p.SigningPolicy != nil {
+			verified, verifierErr := p.cosignVerify(ctx)
+			payload["verified"] = verified
+			if p.SigningPolicy.Type != "" {
+				payload["verification_method"] = "cosign-" + p.SigningPolicy.Type
+			}
+			if p.SigningPolicy.Issuer != "" {
+				payload["verification_issuer"] = p.SigningPolicy.Issuer
+			}
+			if p.SigningPolicy.SubjectPattern != "" {
+				payload["verification_subject_pattern"] = p.SigningPolicy.SubjectPattern
+			}
+			if verifierErr != nil {
+				// Verification failure is information, not a pipeline
+				// error — record it so the upload handler can decide
+				// whether to flip verified_source on image_digests.
+				payload["verification_error"] = verifierErr.Error()
+			}
+		}
+
 		if err := writeJSON(out, payload); err != nil {
 			return Artifact{}, err
 		}
 		return Artifact{Category: CategorySignature, Scanner: name, Field: "cosign", Path: out}, nil
 	}
 	return Artifact{}, fmt.Errorf("unknown signature scanner %q", name)
+}
+
+// cosignVerify runs `cosign verify` against the configured policy and
+// returns (true, nil) only when the binary exits 0. Any non-zero exit
+// or unconfigured policy returns (false, err) so the caller records
+// the failure verbatim — better than silently falling through.
+//
+// For keyless mode, --certificate-identity-regexp + --certificate-
+// oidc-issuer match the Sigstore Fulcio cert chain. For key mode,
+// the public key is written to a temp file (`cosign verify` only
+// accepts a path, not stdin/env) and removed after the call.
+func (p Pipeline) cosignVerify(ctx context.Context) (bool, error) {
+	pol := p.SigningPolicy
+	if pol == nil {
+		return false, fmt.Errorf("no signing policy")
+	}
+	args := []string{"verify"}
+
+	// Endpoint overrides come first so they apply to identity flags
+	// resolved later in the same invocation. Empty = let cosign use
+	// its bundled defaults (public Sigstore).
+	if pol.FulcioURL != "" {
+		args = append(args, "--fulcio-url", pol.FulcioURL)
+	}
+	if pol.RekorURL != "" {
+		args = append(args, "--rekor-url", pol.RekorURL)
+	}
+	if pol.TUFMirrorURL != "" {
+		args = append(args, "--tuf-mirror", pol.TUFMirrorURL)
+	}
+	if pol.SignatureRepository != "" {
+		// --signature-repository is a top-level cosign flag; it lives
+		// before the verb on some versions, after on others. Recent
+		// cosign accepts it as a verify subcommand flag, which is the
+		// path we take here. If your fleet pins an older cosign that
+		// requires the env var instead, COSIGN_REPOSITORY=<url> in the
+		// scanner pod's env achieves the same thing.
+		args = append(args, "--signature-repository", pol.SignatureRepository)
+	}
+
+	switch pol.Type {
+	case "keyless":
+		if pol.Issuer == "" || pol.SubjectPattern == "" {
+			return false, fmt.Errorf("keyless policy requires issuer and subject_pattern")
+		}
+		args = append(args,
+			"--certificate-oidc-issuer", pol.Issuer,
+			"--certificate-identity-regexp", pol.SubjectPattern,
+		)
+	case "key":
+		if pol.KeyPEM == "" {
+			return false, fmt.Errorf("key policy requires key_pem")
+		}
+		keyPath := filepath.Join(p.WorkDir, "cosign-pub.pem")
+		if err := os.WriteFile(keyPath, []byte(pol.KeyPEM), 0o600); err != nil {
+			return false, fmt.Errorf("write public key: %w", err)
+		}
+		defer os.Remove(keyPath)
+		args = append(args, "--key", keyPath)
+	default:
+		return false, fmt.Errorf("unknown policy type %q", pol.Type)
+	}
+	args = append(args, p.Ref.String())
+	if _, err := p.capture(ctx, "cosign", args...); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (p Pipeline) runVuln(ctx context.Context, outDir string) (Artifact, error) {
@@ -568,13 +680,16 @@ func NewWorkDir(base, jobID string) (string, func(), error) {
 }
 
 // Scan once against the given image with sensible defaults. Intended as the
-// one-shot helper the scanner pod calls per lease.
-func Scan(ctx context.Context, ref ImageRef, scanners map[string]string, workDir string, log LogFunc) (Result, error) {
+// one-shot helper the scanner pod calls per lease. Pass a non-nil policy to
+// have the signature step actually verify identity rather than just running
+// `cosign tree`.
+func Scan(ctx context.Context, ref ImageRef, scanners map[string]string, workDir string, log LogFunc, policy *SigningPolicy) (Result, error) {
 	p := Pipeline{
-		Ref:      ref,
-		Scanners: scanners,
-		WorkDir:  workDir,
-		Log:      log,
+		Ref:           ref,
+		Scanners:      scanners,
+		WorkDir:       workDir,
+		Log:           log,
+		SigningPolicy: policy,
 	}
 	return p.Run(ctx)
 }

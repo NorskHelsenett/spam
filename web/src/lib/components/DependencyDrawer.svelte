@@ -399,7 +399,7 @@
 
 	const spamRepoUrl = (repo: UniqueRepo): string | null => {
 		if (!repo.repo_id) return null;
-		return `/app/providers/repo/${encodeURIComponent(repo.repo_id)}`;
+		return `/providers/repo/${encodeURIComponent(repo.repo_id)}`;
 	};
 
 	const handleRepoLinkClick = (event: MouseEvent, url: string) => {

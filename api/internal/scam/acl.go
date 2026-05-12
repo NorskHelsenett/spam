@@ -22,14 +22,26 @@ import (
 //     (a []string of readable cluster ids) → grant-scoped.
 //   - deny = true → no readable clusters; caller should short-circuit.
 func clusterACLFilter(r *http.Request) (string, []any, bool) {
+	return clusterACLFilterCol(r, "cr.data->>'cluster_id'")
+}
+
+// clusterACLFilterCol is the same ACL resolution as clusterACLFilter
+// but emits the IN-clause against an arbitrary column expression. Used
+// by handlers that read from materialised views with a typed
+// cluster_id column (e.g. host_exposure.cluster_id) rather than the
+// JSONB-extracted cr.data->>'cluster_id'.
+func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin {
 		return "TRUE", nil, false
 	}
 
 	provider := acl.ProviderFromRequest(r)
+	if provider == nil {
+		return "", nil, true
+	}
 	patterns, err := provider.Grants(r.Context(), subj, acl.ScopeCluster)
-	if err != nil || provider == nil {
+	if err != nil {
 		// Fail closed.
 		return "", nil, true
 	}
@@ -46,7 +58,7 @@ func clusterACLFilter(r *http.Request) (string, []any, bool) {
 	if len(ids) == 0 {
 		return "", nil, true
 	}
-	return "(cr.data->>'cluster_id' IN (?))", []any{ids}, false
+	return "(" + col + " IN (?))", []any{ids}, false
 }
 
 // canReadCluster is the per-cluster gate used by chain-style handlers

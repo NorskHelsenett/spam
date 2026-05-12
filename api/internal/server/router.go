@@ -31,6 +31,9 @@ type RouterOptions struct {
 	// provider chain (LocalProvider today, later also OIDC-derived /
 	// GitHub-App / external RBAC) stays out of handler signatures.
 	ACLProvider acl.Provider
+	// SecretsKey is the AES-GCM key used to en/decrypt provider PATs
+	// and the cosign signing policy's optional pinned key material.
+	SecretsKey []byte
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -39,10 +42,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var providerStore *providerconfig.Store
 	var appCache cache.Store
 	var aclProvider acl.Provider
+	var secretsKey []byte
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
+		secretsKey = opts.SecretsKey
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -216,15 +221,47 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				// a glance.
 				api.Get("/admin/jobs", uiapi.AdminJobsHandler(db, authService))
 
+				// Admin database storage view — read-only, no audit wrap.
+				// Surfaces pg_catalog/pg_stat_user_tables so an operator can
+				// see per-table sizes, row counts, and bloat signals when
+				// chasing performance issues.
+				api.Get("/admin/db/storage", uiapi.AdminDBStorageHandler(db, authService))
+
+				// Admin database maintenance — enqueues ANALYZE / VACUUM
+				// ANALYZE jobs per table. VACUUM FULL / REINDEX are
+				// deliberately not exposed (they take AccessExclusiveLock).
+				// /recent returns the last 50 maintenance jobs so the UI
+				// can show per-row state.
+				api.Post("/admin/db/maintenance", uiapi.AdminDBMaintenanceHandler(db, authService))
+				api.Post("/admin/db/maintenance/all", uiapi.AdminDBMaintenanceAllHandler(db, authService))
+				api.Get("/admin/db/maintenance/recent", uiapi.AdminDBMaintenanceRecentHandler(db, authService))
+
+				// DB activity / diagnostics — pg_stat_database aggregates,
+				// pg_stat_activity live queries, pg_stat_statements top-N
+				// (degrades cleanly if the extension isn't installed).
+				api.Get("/admin/db/activity", uiapi.AdminDBActivityHandler(db, authService))
+				api.Get("/admin/db/live-queries", uiapi.AdminDBLiveQueriesHandler(db, authService))
+				api.Get("/admin/db/slow-queries", uiapi.AdminDBSlowQueriesHandler(db, authService))
+
 				// Bulk vuln-feed refresh (CISA KEV, FIRST.org EPSS).
 				// Manual trigger jumps the auto-schedule queue; status is
 				// poll-friendly for the admin UI's progress bar.
 				api.Post("/admin/feeds/{feed}/refresh", uiapi.AdminFeedRefreshHandler(db, authService))
 				api.Get("/admin/feeds/status", uiapi.AdminFeedsStatusHandler(db, authService))
 
+				// Cosign signing policy — admin manages the verifier
+				// identity used by the image scanner. The image-scanner
+				// reads the same row directly via the worker DB, so the
+				// admin endpoint only needs GET (redacted) + PUT.
+				api.Get("/admin/signing/cosign-policy", uiapi.AdminSigningPolicyGetHandler(db, authService, secretsKey))
+				api.Put("/admin/signing/cosign-policy", uiapi.AdminSigningPolicyPutHandler(db, authService, secretsKey))
+
 				// Stats
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
+
+				// Triage — asset-centric "fix this now" dashboard backing /app.
+				api.Get("/triage", uiapi.TriageHandler(db, authService))
 
 				// Ecosystems endpoint
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService, appCache))
@@ -275,6 +312,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
 				api.Get("/clusters/chain", scam.ClusterChainHandler(db))
 				api.Get("/clusters/hosts", scam.HostsHandler(db, appCache))
+				api.Get("/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
 				api.Get("/clusters/hosts/chain", scam.HostChainHandler(db))
 				api.Get("/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
 				api.Get("/clusters/hosts/meta", scam.HostMetaHandler(appCache))

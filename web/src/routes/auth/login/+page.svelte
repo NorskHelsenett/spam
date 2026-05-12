@@ -9,7 +9,7 @@
 	onMount(async () => {
 		try {
 			const response = await fetch('/api/auth/me', { credentials: 'include' });
-			if (response.ok) goto('/app');
+			if (response.ok) goto('/');
 		} catch {
 			// not logged in — stay
 		}

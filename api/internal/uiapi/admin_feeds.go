@@ -33,6 +33,8 @@ func feedTypeFromName(name string) (jobs.JobType, bool) {
 		return jobs.JobTypeFetchKEV, true
 	case "epss":
 		return jobs.JobTypeFetchEPSS, true
+	case "dep_health", "dep-health", "dephealth":
+		return jobs.JobTypeFetchDepHealth, true
 	default:
 		return "", false
 	}
@@ -129,7 +131,7 @@ func AdminFeedsStatusHandler(db *gorm.DB, authService *auth.Service) http.Handle
 
 		out := feedStatusResponse{
 			FetchedAt: time.Now(),
-			Feeds:     make([]feedStatus, 0, 2),
+			Feeds:     make([]feedStatus, 0, 3),
 		}
 
 		for _, p := range []struct {
@@ -138,6 +140,7 @@ func AdminFeedsStatusHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		}{
 			{"kev", jobs.JobTypeFetchKEV},
 			{"epss", jobs.JobTypeFetchEPSS},
+			{"dep_health", jobs.JobTypeFetchDepHealth},
 		} {
 			st := feedStatus{Feed: p.feedName}
 

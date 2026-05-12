@@ -1,0 +1,1106 @@
+<script lang="ts">
+	import { onMount, tick } from 'svelte';
+	import { browser } from '$app/environment';
+	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
+	import { get } from 'svelte/store';
+	import { Search, Folder, ChevronRight, X, PlugZap, RotateCcw } from 'lucide-svelte';
+	import QueueStatus from '$lib/components/QueueStatus.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
+	import { providersState } from '$lib/stores/providersState';
+	import RepoTable from '$lib/components/RepoTable.svelte';
+	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
+	import Pagination from '$lib/components/Pagination.svelte';
+	import Toggle from '$lib/components/Toggle.svelte';
+	import type {
+		RepoData,
+		GroupData,
+		GitHubResponse,
+		GitLabProjectsResponse,
+		GitLabGroupsResponse,
+		CustomProvider
+	} from '$lib/types/providers';
+
+	// Tab state
+	let activeTab: string = $state('');
+
+	// Providers come from the admin-managed list. No client-side add flow:
+	// configuration lives in /admin/providers and is the only source.
+	let customProviders: CustomProvider[] = $state([]);
+
+	// GitHub state
+	let ghOwner = $state('NorskHelsenett');
+	let ghProviderId = $state<string | null>(null);
+	let ghRepos: RepoData[] = $state([]);
+	let ghLoading = $state(false);
+	let ghError = $state('');
+	let ghErrorUrl = $state('');
+	let ghPage = $state(1);
+	let ghHasNextPage = $state(false);
+	let ghTotalCount = $state(0);
+
+	// GitLab state
+	let glGroup = $state('gitlab-org');
+	let glProjects: RepoData[] = $state([]);
+	let glSubgroups: GroupData[] = $state([]);
+	let glLoading = $state(false);
+	let glError = $state('');
+	let glErrorUrl = $state('');
+	let glPage = $state(1);
+	let glHasNextPage = $state(false);
+	let glTotalCount = $state(0);
+	let glIncludeSubgroups = $state(true);
+	let glGroupPath: string[] = $state([]);
+
+	// Custom provider state (for active custom tab)
+	let cpGroup = $state('');
+	let cpProjects: RepoData[] = $state([]);
+	let cpSubgroups: GroupData[] = $state([]);
+	let cpLoading = $state(false);
+	let cpError = $state('');
+	let cpErrorUrl = $state('');
+	let cpPage = $state(1);
+	let cpHasNextPage = $state(false);
+	let cpTotalCount = $state(0);
+	let cpIncludeSubgroups = $state(true);
+	let cpGroupPath: string[] = $state([]);
+
+	const pageSize = 30;
+
+	// Client-side filter: when off, show only direct projects of the current group
+	const filterDirectProjects = (projects: RepoData[], group: string) => {
+		if (!group) return projects;
+		const prefix = group.endsWith('/') ? group : group + '/';
+		return projects.filter(p => {
+			const sub = p.full_path.startsWith(prefix) ? p.full_path.slice(prefix.length) : '';
+			return sub !== '' && !sub.includes('/');
+		});
+	};
+
+	const glFilteredProjects = $derived(
+		glIncludeSubgroups ? glProjects : filterDirectProjects(glProjects, glGroup)
+	);
+	const cpFilteredProjects = $derived(
+		cpIncludeSubgroups ? cpProjects : filterDirectProjects(cpProjects, cpGroup)
+	);
+
+	// Sorting state
+	let sortColumn = $state<string>('');
+	let sortDirection = $state<'asc' | 'desc'>('asc');
+
+	// Bulk scan state — keyed by tab ID so multiple providers can queue concurrently
+	type TabQueueState = { done: boolean; total: number; errors: string[] };
+	let queueStates = $state<Record<string, TabQueueState>>({});
+	const isQueueing = (tab: string) => tab in queueStates && !queueStates[tab].done;
+
+	// Table column definitions
+	const githubColumns = [
+		{ key: 'name', label: 'Repository' },
+		{ key: 'language', label: 'Language' },
+		{ key: 'updated', label: 'Last Updated' },
+		{ key: 'status', label: 'Status', align: 'center' as const },
+		{ key: 'actions', label: '', align: 'right' as const }
+	];
+
+	const gitlabColumns = [
+		{ key: 'name', label: 'Project' },
+		{ key: 'path', label: 'Path' },
+		{ key: 'language', label: 'Language' },
+		{ key: 'updated', label: 'Last Activity' },
+		{ key: 'status', label: 'Status', align: 'center' as const },
+		{ key: 'actions', label: '', align: 'right' as const }
+	];
+
+	// Save state to store when navigating away
+	const saveState = () => {
+		providersState.set({
+			activeTab,
+			ghOwner,
+			ghRepos,
+			ghPage,
+			ghHasNextPage,
+			ghTotalCount,
+			glGroup,
+			glProjects,
+			glSubgroups,
+			glPage,
+			glHasNextPage,
+			glTotalCount,
+			glIncludeSubgroups,
+			glGroupPath,
+			cpGroup,
+			cpProjects,
+			cpSubgroups,
+			cpPage,
+			cpHasNextPage,
+			cpTotalCount,
+			cpIncludeSubgroups,
+			cpGroupPath,
+			customProviders,
+			lastUpdated: Date.now()
+		});
+	};
+
+	// Restore state from store
+	const restoreState = () => {
+		const state = get(providersState);
+		// Only restore if state was saved recently (within 30 minutes)
+		if (state.lastUpdated && Date.now() - state.lastUpdated < 30 * 60 * 1000) {
+			activeTab = state.activeTab;
+			ghOwner = state.ghOwner;
+			ghRepos = state.ghRepos;
+			ghPage = state.ghPage;
+			ghHasNextPage = state.ghHasNextPage;
+			ghTotalCount = state.ghTotalCount;
+			glGroup = state.glGroup;
+			glProjects = state.glProjects;
+			glSubgroups = state.glSubgroups;
+			glPage = state.glPage;
+			glHasNextPage = state.glHasNextPage;
+			glTotalCount = state.glTotalCount;
+			glIncludeSubgroups = state.glIncludeSubgroups;
+			glGroupPath = state.glGroupPath;
+			cpGroup = state.cpGroup;
+			cpProjects = state.cpProjects;
+			cpSubgroups = state.cpSubgroups;
+			cpPage = state.cpPage;
+			cpHasNextPage = state.cpHasNextPage;
+			cpTotalCount = state.cpTotalCount;
+			cpIncludeSubgroups = state.cpIncludeSubgroups;
+			cpGroupPath = state.cpGroupPath;
+			return true; // State was restored
+		}
+		return false; // No valid state to restore
+	};
+
+	// Load admin-managed providers. The DB is the only source.
+	const loadCustomProviders = async () => {
+		if (!browser) return;
+		customProviders = await loadManagedProviders();
+		if (customProviders.length === 0) {
+			ghProviderId = null;
+		}
+	};
+
+	const isProviderType = (value: string): value is CustomProvider['type'] => {
+		return value === 'github' || value === 'gitlab' || value === 'gitea' || value === 'forgejo';
+	};
+
+	type ManagedProvider = {
+		id: string;
+		name: string;
+		type: CustomProvider['type'];
+		base_url: string;
+		owner_path?: string;
+		is_public: boolean;
+	};
+
+	const loadManagedProviders = async (): Promise<CustomProvider[]> => {
+		if (!browser) return [];
+		try {
+			const response = await fetch('/api/providers/instances', { credentials: 'include' });
+			if (!response.ok) return [];
+			const data: ManagedProvider[] = await response.json();
+			if (!Array.isArray(data)) return [];
+			return data
+				.filter((entry) => entry && isProviderType(entry.type))
+				.map((entry) => ({
+					id: entry.id,
+					name: entry.name,
+					type: entry.type,
+					baseUrl: entry.base_url,
+					ownerPath: entry.owner_path || '',
+					isPublic: entry.is_public
+				}));
+		} catch {
+			return [];
+		}
+	};
+
+	// Get active provider (always backed by an admin-configured row)
+	const getActiveCustomProvider = (): CustomProvider | undefined => {
+		return customProviders.find(p => p.id === activeTab);
+	};
+
+	// GitHub functions
+	const fetchGitHubRepos = async (page = 1) => {
+		const owner = ghOwner.trim();
+		if (!owner) return;
+
+		ghLoading = true;
+		ghError = '';
+		ghErrorUrl = '';
+
+		try {
+			const params = new URLSearchParams({
+				page: String(page),
+				page_size: String(pageSize)
+			});
+			// Use explicit provider_id, or resolve from managed providers so the
+			// request hits the cache instead of the live GitHub API.
+			const resolvedProvider = ghProviderId
+				? (customProviders.find(p => p.id === ghProviderId) ?? null)
+				: (customProviders.find(p => p.type === 'github' && (!p.ownerPath || p.ownerPath === owner)) ?? null);
+			const resolvedProviderId = resolvedProvider?.id ?? null;
+			if (resolvedProviderId) {
+				params.set('provider_id', resolvedProviderId);
+			}
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
+
+
+			const response = await fetch(`/api/providers/github/${encodeURIComponent(owner)}/repos?${params}`, {
+				credentials: 'include'
+			});
+
+			if (!response.ok) {
+				if (response.status === 404) {
+					ghError = `Owner "${ghOwner}" not found on GitHub.`;
+				} else if (response.status === 429) {
+					ghError = 'Rate limited by GitHub API. Try again later.';
+				} else if (response.status === 401) {
+					ghError = 'Please log in to access this feature.';
+				} else {
+					ghError = `Failed to fetch repositories (${response.status}).`;
+				}
+				if (resolvedProvider?.baseUrl) {
+					ghErrorUrl = `${resolvedProvider.baseUrl}/${owner}`;
+				}
+				ghRepos = [];
+				return;
+			}
+
+			const data: GitHubResponse = await response.json();
+			ghRepos = data.repos || [];
+			ghPage = page;
+			ghHasNextPage = data.has_next_page;
+			ghTotalCount = data.total_count;
+		} catch (err) {
+			ghError = 'Failed to connect to API.';
+			ghRepos = [];
+		} finally {
+			ghLoading = false;
+		}
+	};
+
+	// GitLab functions
+	const fetchGitLabProjects = async (page = 1) => {
+		glLoading = true;
+		glError = '';
+
+		try {
+			const params = new URLSearchParams({
+				page: String(page),
+				page_size: String(pageSize),
+				include_subgroups: 'true'
+			});
+			if (glGroup.trim()) params.set('group', glGroup);
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
+
+			const response = await fetch(`/api/providers/gitlab/projects?${params}`, {
+				credentials: 'include'
+			});
+
+			if (!response.ok) {
+				if (response.status === 404) {
+					glError = `Group "${glGroup}" not found on GitLab.`;
+				} else if (response.status === 429) {
+					glError = 'Rate limited by GitLab API. Try again later.';
+				} else if (response.status === 401) {
+					glError = 'Please log in to access this feature.';
+				} else {
+					glError = `Failed to fetch projects (${response.status}).`;
+				}
+					glProjects = [];
+				return;
+			}
+
+			const data: GitLabProjectsResponse = await response.json();
+			glProjects = data.projects || [];
+			glPage = page;
+			glHasNextPage = data.has_next_page;
+			glTotalCount = data.total_count;
+		} catch (err) {
+			glError = 'Failed to connect to API.';
+			glProjects = [];
+		} finally {
+			glLoading = false;
+		}
+	};
+
+	const fetchGitLabSubgroups = async () => {
+		try {
+			let all: GroupData[] = [];
+			let page = 1;
+			while (true) {
+				const params = new URLSearchParams({
+					page: String(page),
+					page_size: '50'
+				});
+				if (glGroup.trim()) params.set('group', glGroup);
+
+				const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
+					credentials: 'include'
+				});
+
+				if (!response.ok) break;
+				const data: GitLabGroupsResponse = await response.json();
+				all = [...all, ...(data.groups || [])];
+				glSubgroups = all;
+				if (!data.has_next_page) break;
+				page++;
+			}
+		} catch {
+			if (glSubgroups.length === 0) glSubgroups = [];
+		}
+	};
+
+	// Custom provider functions
+	const fetchCustomProjects = async (provider: CustomProvider, page = 1) => {
+		if (provider.type === 'github') {
+			cpProjects = [];
+			cpLoading = false;
+			cpError = '';
+			return;
+		}
+		cpLoading = true;
+		cpError = '';
+
+		try {
+			const params = new URLSearchParams({
+				page: String(page),
+				page_size: String(pageSize),
+				base_url: provider.baseUrl,
+				provider_id: provider.id
+			});
+			if (sortColumn) {
+				params.set('sort', sortColumn);
+				params.set('order', sortDirection);
+			}
+
+			const groupPath = cpGroup.trim();
+			let url: string;
+
+			if (provider.type === 'gitlab') {
+				params.set('include_subgroups', 'true');
+				if (groupPath) params.set('group', groupPath);
+				url = `/api/providers/gitlab/projects?${params}`;
+			} else {
+				// Gitea/Forgejo (both use the same API)
+				url = groupPath
+					? `/api/providers/gitea/${encodeURIComponent(groupPath)}/repos?${params}`
+					: `/api/providers/gitea/repos?${params}`;
+			}
+
+			const response = await fetch(url, {
+				credentials: 'include'
+			});
+
+			if (!response.ok) {
+				if (response.status === 404) {
+					cpError = `"${cpGroup}" not found.`;
+				} else if (response.status === 429) {
+					cpError = 'Rate limited. Try again later.';
+				} else if (response.status === 401) {
+					cpError = 'Please log in to access this feature.';
+				} else {
+					cpError = `Failed to fetch projects (${response.status}).`;
+				}
+				cpErrorUrl = provider.baseUrl;
+				cpProjects = [];
+				return;
+			}
+
+			const data = await response.json();
+			cpProjects = data.projects || data.repos || [];
+			cpPage = page;
+			cpHasNextPage = data.has_next_page;
+			cpTotalCount = data.total_count;
+		} catch (err) {
+			cpError = 'Failed to connect to API.';
+			cpProjects = [];
+		} finally {
+			cpLoading = false;
+		}
+	};
+
+	const fetchCustomSubgroups = async (provider: CustomProvider) => {
+		// Gitea/Forgejo don't have subgroups like GitLab
+		if (provider.type !== 'gitlab') {
+			cpSubgroups = [];
+			return;
+		}
+
+		try {
+			let all: GroupData[] = [];
+			let page = 1;
+			while (true) {
+				const params = new URLSearchParams({
+					page: String(page),
+					page_size: '50',
+					base_url: provider.baseUrl,
+					provider_id: provider.id
+				});
+
+				const groupPath = cpGroup.trim();
+				if (groupPath) params.set('group', groupPath);
+
+				const response = await fetch(`/api/providers/gitlab/subgroups?${params}`, {
+					credentials: 'include'
+				});
+
+				if (!response.ok) break;
+				const data: GitLabGroupsResponse = await response.json();
+				all = [...all, ...(data.groups || [])];
+				cpSubgroups = all;
+				if (!data.has_next_page) break;
+				page++;
+			}
+		} catch {
+			if (cpSubgroups.length === 0) cpSubgroups = [];
+		}
+	};
+
+	const navigateToSubgroup = (group: GroupData) => {
+		glGroupPath = [...glGroupPath, glGroup];
+		glGroup = group.full_path;
+		glPage = 1;
+		fetchGitLabProjects(1);
+		fetchGitLabSubgroups();
+	};
+
+	const navigateBack = (index?: number) => {
+		if (index !== undefined) {
+			glGroup = glGroupPath[index];
+			glGroupPath = glGroupPath.slice(0, index);
+		} else if (glGroupPath.length > 0) {
+			glGroup = glGroupPath.pop()!;
+			glGroupPath = [...glGroupPath];
+		}
+		glPage = 1;
+		fetchGitLabProjects(1);
+		fetchGitLabSubgroups();
+	};
+
+	const navigateToCustomSubgroup = (provider: CustomProvider, group: GroupData) => {
+		if (provider.type === 'github') return;
+		cpGroupPath = [...cpGroupPath, cpGroup];
+		cpGroup = group.full_path;
+		cpPage = 1;
+		fetchCustomProjects(provider, 1);
+		fetchCustomSubgroups(provider);
+	};
+
+	const navigateCustomBack = (provider: CustomProvider, index?: number) => {
+		if (provider.type === 'github') return;
+		if (index !== undefined) {
+			cpGroup = cpGroupPath[index];
+			cpGroupPath = cpGroupPath.slice(0, index);
+		} else if (cpGroupPath.length > 0) {
+			cpGroup = cpGroupPath.pop()!;
+			cpGroupPath = [...cpGroupPath];
+		}
+		cpPage = 1;
+		fetchCustomProjects(provider, 1);
+		fetchCustomSubgroups(provider);
+	};
+
+	const handleGitHubSearch = () => {
+		ghProviderId = null;
+		ghPage = 1;
+		fetchGitHubRepos(1);
+	};
+
+	type SearchGroupResult = { full_path: string; name: string; repo_count: number; provider_id: string };
+	let glSearchGroups: SearchGroupResult[] = $state([]);
+	let cpSearchGroups: SearchGroupResult[] = $state([]);
+
+	const searchReposDB = async (query: string, providerId?: string): Promise<{ projects: RepoData[]; groups: SearchGroupResult[] }> => {
+		const params = new URLSearchParams({ q: query, limit: String(pageSize) });
+		if (providerId) params.set('provider_id', providerId);
+		const res = await fetch(`/api/repos/search?${params}`, { credentials: 'include' });
+		if (!res.ok) return { projects: [], groups: [] };
+		const data = await res.json();
+		const projects = (data.results || []).map((r: any) => ({
+			name: r.slug,
+			full_path: r.org + '/' + r.slug,
+			description: '',
+			html_url: '',
+			default_branch: '',
+			languages: [],
+			is_private: false,
+			is_archived: false,
+			is_disabled: false,
+			is_fork: false,
+			topics: [],
+			created_at: '',
+			updated_at: '',
+			pushed_at: ''
+		}));
+		return { projects, groups: data.groups || [] };
+	};
+
+	const handleGitLabSearch = async () => {
+		if (!glGroup.trim()) {
+			glSearchGroups = [];
+			glGroupPath = [];
+			fetchGitLabProjects(1);
+			fetchGitLabSubgroups();
+			return;
+		}
+		glLoading = true;
+		glError = '';
+		glPage = 1;
+		glGroupPath = [];
+		glSubgroups = [];
+		try {
+			const result = await searchReposDB(glGroup);
+			glProjects = result.projects;
+			glSearchGroups = result.groups;
+			glHasNextPage = false;
+			glTotalCount = glProjects.length;
+		} catch {
+			glError = 'Search failed.';
+			glProjects = [];
+			glSearchGroups = [];
+		} finally {
+			glLoading = false;
+		}
+	};
+
+	const handleCustomSearch = async (provider: CustomProvider) => {
+		if (provider.type === 'github') {
+			ghProviderId = provider.id;
+			ghPage = 1;
+			ghOwner = provider.ownerPath || ghOwner;
+			fetchGitHubRepos(1);
+			return;
+		}
+		if (!cpGroup.trim()) {
+			cpSearchGroups = [];
+			cpGroupPath = [];
+			fetchCustomProjects(provider, 1);
+			fetchCustomSubgroups(provider);
+			return;
+		}
+		cpLoading = true;
+		cpError = '';
+		cpPage = 1;
+		cpGroupPath = [];
+		cpSubgroups = [];
+		try {
+			const result = await searchReposDB(cpGroup, provider.id);
+			cpProjects = result.projects;
+			cpSearchGroups = result.groups;
+			cpHasNextPage = false;
+			cpTotalCount = cpProjects.length;
+		} catch {
+			cpError = 'Search failed.';
+			cpProjects = [];
+			cpSearchGroups = [];
+		} finally {
+			cpLoading = false;
+		}
+	};
+
+	const handleGitHubKeydown = (e: KeyboardEvent) => {
+		if (e.key === 'Enter') handleGitHubSearch();
+	};
+
+	const handleGitLabKeydown = (e: KeyboardEvent) => {
+		if (e.key === 'Enter') handleGitLabSearch();
+	};
+
+	const handleCustomKeydown = (e: KeyboardEvent, provider: CustomProvider) => {
+		if (e.key === 'Enter') handleCustomSearch(provider);
+	};
+
+	const formatDate = (dateStr: string) => {
+		if (!dateStr) return '';
+		const date = new Date(dateStr);
+		return date.toLocaleDateString('en-US', {
+			year: 'numeric',
+			month: 'short',
+			day: 'numeric'
+		});
+	};
+
+	// Handle column sorting
+	const handleSort = (column: string) => {
+		if (sortColumn === column) {
+			sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+		} else {
+			sortColumn = column;
+			sortDirection = 'asc';
+		}
+		// Reset to page 1 and reload data with new sort
+		if (activeTab === 'github' && ghRepos.length > 0) {
+			ghPage = 1;
+			fetchGitHubRepos(1);
+		} else if (activeTab === 'gitlab' && glProjects.length > 0) {
+			glPage = 1;
+			fetchGitLabProjects(1);
+		} else if (getActiveCustomProvider()) {
+			const provider = getActiveCustomProvider();
+			if (provider?.type === 'github' && ghRepos.length > 0) {
+				ghPage = 1;
+				fetchGitHubRepos(1);
+			} else if (provider && cpProjects.length > 0) {
+				cpPage = 1;
+				fetchCustomProjects(provider, 1);
+			}
+		}
+	};
+
+	// Navigate to repo details page
+	const goToRepoDetails = (provider: string, path: string, baseUrl?: string, providerId?: string) => {
+		// Save state before navigating
+		saveState();
+		const params = new URLSearchParams({ provider, path });
+		if (baseUrl) params.set('base_url', baseUrl);
+		if (providerId) params.set('provider_id', providerId);
+		goto(`/providers/repo?${params}`);
+	};
+
+	// Trigger SBOM scan for all repos (including paginated results).
+	// Streams progress via SSE — the server emits "progress" events per page and a final "done" event.
+	// Queue All dialog state
+	let queueDialogOpen = $state(false);
+	let queueDialogContext = $state<{
+		provider: string;
+		owner: string;
+		group: string;
+		baseUrl?: string;
+		includeSubgroups: boolean;
+		providerId?: string;
+	} | null>(null);
+
+	const openQueueDialog = (
+		provider: string,
+		owner: string,
+		group: string,
+		baseUrl?: string,
+		includeSubgroups: boolean = false,
+		providerId?: string
+	) => {
+		queueDialogContext = { provider, owner, group, baseUrl, includeSubgroups, providerId };
+		queueDialogOpen = true;
+	};
+
+	const closeQueueDialog = () => {
+		queueDialogOpen = false;
+		queueDialogContext = null;
+	};
+
+	const queueAllRepos = async (
+		provider: string,
+		owner: string,
+		group: string,
+		baseUrl?: string,
+		includeSubgroups: boolean = false,
+		providerId?: string,
+		onlyNew: boolean = false
+	) => {
+		closeQueueDialog();
+		const tabId = activeTab;
+		if (isQueueing(tabId)) return;
+
+		queueStates[tabId] = { done: false, total: 0, errors: [] };
+		await tick(); // flush DOM so spinner renders before the fetch starts
+
+		try {
+			const response = await fetch('/api/scan-all', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					provider,
+					owner: owner || undefined,
+					group: group || undefined,
+					base_url: baseUrl || undefined,
+					include_subgroups: includeSubgroups,
+					provider_id: providerId || undefined,
+					only_new: onlyNew || undefined
+				})
+			});
+
+			if (!response.ok) {
+				const text = await response.text();
+				queueStates[tabId] = { ...queueStates[tabId], errors: [text || 'Failed to queue repos'] };
+			} else if (response.body) {
+				// Read the SSE stream line by line.
+				const reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				let buffer = '';
+
+				while (true) {
+					const { done, value } = await reader.read();
+					if (done) break;
+
+					buffer += decoder.decode(value, { stream: true });
+					const parts = buffer.split('\n\n');
+					buffer = parts.pop() ?? '';
+
+					for (const part of parts) {
+						let eventType = '';
+						let dataStr = '';
+						for (const line of part.trim().split('\n')) {
+							if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+							else if (line.startsWith('data: ')) dataStr = line.slice(6).trim();
+						}
+						if (!dataStr) continue;
+						try {
+							const data = JSON.parse(dataStr);
+							if (eventType === 'progress') {
+								queueStates[tabId] = { ...queueStates[tabId], total: data.queued };
+							} else if (eventType === 'done') {
+								queueStates[tabId] = { ...queueStates[tabId], total: data.total_queued, errors: data.errors || [] };
+							}
+						} catch {
+							// ignore malformed events
+						}
+					}
+				}
+			}
+		} catch (err) {
+			queueStates[tabId] = { ...queueStates[tabId], errors: [err instanceof Error ? err.message : 'Failed to queue repos'] };
+		}
+
+		queueStates[tabId] = { ...queueStates[tabId], done: true };
+
+		// Auto-dismiss after 10 seconds if no errors
+		if (queueStates[tabId].errors.length === 0) {
+			setTimeout(() => {
+				delete queueStates[tabId];
+			}, 10000);
+		}
+	};
+
+	const switchToCustomTab = (provider: CustomProvider) => {
+		activeTab = provider.id;
+		sortColumn = '';
+		sortDirection = 'asc';
+		if (provider.type === 'github') {
+			ghProviderId = provider.id;
+			ghOwner = provider.ownerPath || ghOwner;
+			ghRepos = [];
+			ghPage = 1;
+			ghHasNextPage = false;
+			ghTotalCount = 0;
+			ghError = '';
+			if (ghOwner.trim()) {
+				fetchGitHubRepos(1);
+			}
+			return;
+		}
+
+		ghProviderId = null;
+		cpGroup = provider.ownerPath || '';
+		cpProjects = [];
+		cpSubgroups = [];
+		cpGroupPath = [];
+		cpPage = 1;
+		cpError = '';
+		fetchCustomProjects(provider, 1);
+		fetchCustomSubgroups(provider);
+	};
+
+	onMount(() => {
+		if (!browser) return;
+		const init = async () => {
+			await loadCustomProviders();
+
+			if (customProviders.length === 0) {
+				return; // empty state takes over the UI
+			}
+
+			// Check for ?tab= query param (e.g. linked from run detail page)
+			const tabParam = $page.url.searchParams.get('tab');
+			if (tabParam) {
+				const targetProvider = customProviders.find((p) => p.id === tabParam);
+				if (targetProvider) {
+					switchToCustomTab(targetProvider);
+					return;
+				}
+			}
+
+			// Try to restore state from store (when coming back from repo details)
+			const restored = restoreState();
+			const activeProvider = customProviders.find((provider) => provider.id === activeTab);
+			if (activeProvider?.type === 'github') {
+				ghProviderId = activeProvider.id;
+				ghOwner = activeProvider.ownerPath || ghOwner;
+			} else {
+				ghProviderId = null;
+			}
+			if (!activeProvider || !restored) {
+				switchToCustomTab(customProviders[0]);
+			}
+		};
+		init();
+	});
+</script>
+
+<svelte:head>
+	<title>Providers - SPAM</title>
+</svelte:head>
+
+<div class="space-y-8 sm:space-y-12">
+	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+		<header>
+			<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Git Providers</h1>
+			<p class="text-sm text-[var(--text-tertiary)]">Browse repositories from configured Git providers.</p>
+		</header>
+
+		{#if customProviders.length === 0}
+			<div class="flex flex-col items-center justify-center gap-4 py-16 text-center">
+				<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-[var(--text-tertiary)]">
+					<PlugZap size={32} />
+				</div>
+				<div class="space-y-1">
+					<h3 class="text-lg font-semibold text-[var(--text-bright)]">No providers configured</h3>
+					<p class="max-w-md text-sm text-[var(--text-tertiary)]">
+						An administrator needs to configure a Git provider before repositories show up here.
+					</p>
+				</div>
+				<a
+					href="/admin/providers"
+					class="text-sm font-medium text-[var(--accent)] hover:underline"
+				>
+					Open admin settings →
+				</a>
+			</div>
+		{:else}
+		<!-- Tabs -->
+		<div class="flex flex-wrap items-center gap-2 border-b border-[var(--border-color)]">
+			{#each customProviders as provider}
+				<div class="relative flex items-center">
+					<button
+						type="button"
+						class="px-4 py-2 text-sm font-medium transition {activeTab === provider.id
+							? 'border-b-2 border-[var(--accent)] text-[var(--accent)]'
+							: 'text-[var(--text-secondary)] hover:text-[var(--text-bright)]'}"
+						onclick={() => switchToCustomTab(provider)}
+					>
+						{provider.name}
+						<span class="ml-1 text-[10px] text-[var(--text-muted)]">({provider.type})</span>
+					</button>
+				</div>
+			{/each}
+		</div>
+
+		<!-- Provider Tab Content -->
+		{#if getActiveCustomProvider()}
+			{@const provider = getActiveCustomProvider()!}
+			<div class="space-y-4">
+				{#if provider.type === 'github'}
+					<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
+						<p class="text-xs text-[var(--text-muted)]">
+							<span class="font-medium text-[var(--text-secondary)]">GitHub</span> org at
+							<span class="font-mono text-[var(--accent)]">{provider.baseUrl}</span>
+						</p>
+					</div>
+
+					<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
+						<div class="flex-1 rounded-2xl border border-[var(--border-color)] bg-transparent px-4 py-3 text-sm text-[var(--text-secondary)]">
+							<span class="text-[var(--text-tertiary)]">Owner:</span>
+							<span class="ml-2 font-medium text-[var(--text-bright)]">{provider.ownerPath || 'Unknown'}</span>
+						</div>
+						<button
+							type="button"
+							class="btn btn-outline"
+							onclick={() => handleCustomSearch(provider)}
+							disabled={ghLoading || !provider.ownerPath}
+						>
+							{ghLoading ? 'Loading...' : 'Refresh'}
+						</button>
+						<button
+							type="button"
+							class="btn btn-primary"
+							onclick={() => openQueueDialog('github', provider.ownerPath || '', '', undefined, false, provider.id)}
+						disabled={isQueueing(provider.id) || !provider.ownerPath}
+							title="Queue SBOM generation for all projects from {provider.name}"
+						>
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
+						</button>
+					</div>
+
+					{#if provider.id in queueStates}
+						<QueueStatus state={queueStates[provider.id]} singular="repo" plural="repos" />
+					{/if}
+
+					{#if !provider.ownerPath}
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+							GitHub providers must include an org or user path.
+						</div>
+					{:else if ghError}
+						<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+							<span>{ghError}</span>
+							{#if ghErrorUrl}
+								<a href="{ghErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open provider →</a>
+							{/if}
+						</div>
+					{:else if ghRepos.length === 0 && !ghLoading}
+						<p class="text-sm text-[var(--text-secondary)]">No repositories found.</p>
+					{:else if ghRepos.length > 0}
+						<RepoTable columns={githubColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+							{#each ghRepos as repo}
+								<RepoTableRow repo={repo} {formatDate} onSelect={() => goToRepoDetails('github', repo.full_path, undefined, provider.id)} />
+							{/each}
+						</RepoTable>
+
+						<Pagination
+							page={ghPage}
+							totalCount={ghTotalCount}
+							{pageSize}
+							hasNextPage={ghHasNextPage}
+							loading={ghLoading}
+							onPrevious={() => fetchGitHubRepos(ghPage - 1)}
+							onNext={() => fetchGitHubRepos(ghPage + 1)}
+						/>
+					{/if}
+				{:else}
+				<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-3">
+					<p class="text-xs text-[var(--text-muted)]">
+						<span class="font-medium text-[var(--text-secondary)]">{provider.type === 'gitlab' ? 'GitLab' : provider.type === 'forgejo' ? 'Forgejo' : 'Gitea'}</span> instance at
+						<span class="font-mono text-[var(--accent)]">{provider.baseUrl}</span>
+					</p>
+				</div>
+
+				<div class="flex flex-col gap-4 sm:flex-row sm:items-center">
+					<div class="relative flex-1">
+						<Search class="absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-tertiary)]" />
+						<input type="text" placeholder="Search groups and projects..." class="w-full rounded-2xl border border-[var(--border-color)] bg-transparent py-3 pl-11 pr-10 text-sm text-[var(--text-secondary)] placeholder-[var(--text-muted)] transition focus:border-[var(--accent)] focus:outline-none" bind:value={cpGroup} onkeydown={(e) => handleCustomKeydown(e, provider)} />
+						{#if cpGroup}
+							<button type="button" class="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)] transition hover:text-[var(--text-primary)]" onclick={() => { cpGroup = ''; cpSearchGroups = []; cpGroupPath = []; fetchCustomProjects(provider, 1); fetchCustomSubgroups(provider); }}>
+								<X class="h-4 w-4" />
+							</button>
+						{/if}
+					</div>
+					<button type="button" class="btn btn-outline" onclick={() => handleCustomSearch(provider)} disabled={cpLoading}>
+						{cpLoading ? 'Loading...' : cpGroup.trim() ? 'Search' : 'Browse All'}
+					</button>
+					<button
+						type="button"
+						class="btn btn-primary"
+						onclick={() => openQueueDialog(provider.type, cpGroup, cpGroup, provider.baseUrl, cpIncludeSubgroups, provider.id)}
+						disabled={isQueueing(provider.id)}
+						title="Queue SBOM generation for all projects from {provider.name}"
+					>
+						{isQueueing(provider.id) ? 'Queueing...' : 'Queue All'}
+					</button>
+				</div>
+
+				{#if provider.id in queueStates}
+					<QueueStatus state={queueStates[provider.id]} singular="project" plural="projects" />
+				{/if}
+
+				{#if cpGroupPath.length > 0 || cpGroup}
+					<div class="flex items-center gap-1 text-sm text-[var(--text-secondary)]">
+						{#each cpGroupPath as pathPart, i}
+							<button type="button" class="text-[var(--accent)] hover:underline" onclick={() => navigateCustomBack(provider, i)}>{pathPart ? pathPart.split('/').pop() : 'All'}</button>
+							<ChevronRight class="h-4 w-4 text-[var(--text-muted)]" />
+						{/each}
+						<span class="text-[var(--text-bright)]">{cpGroup.split('/').pop()}</span>
+					</div>
+				{/if}
+
+				{#if cpError}
+					<div class="flex items-center justify-between rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-sm text-[var(--error)]">
+						<span>{cpError}</span>
+						{#if cpErrorUrl}
+							<a href="{cpErrorUrl}" target="_blank" rel="noopener noreferrer" class="ml-4 shrink-0 text-[var(--accent)] hover:underline">Open {provider.name} →</a>
+						{/if}
+					</div>
+				{/if}
+
+				{#if cpSubgroups.length > 0}
+					<div class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Subgroups</h3>
+						<div class="flex flex-wrap gap-2">
+							{#each cpSubgroups as group}
+								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => navigateToCustomSubgroup(provider, group)}>
+									<Folder class="h-4 w-4 text-[var(--accent)]" />
+									{group.name}
+									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				{#if cpSearchGroups.length > 0}
+					<div class="space-y-2">
+						<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Groups</h3>
+						<div class="flex flex-wrap gap-2">
+							{#each cpSearchGroups as group}
+								<button type="button" class="inline-flex items-center gap-2 rounded-xl border border-[var(--border-color)] bg-[var(--card-bg)]/40 px-3 py-2 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)] hover:text-[var(--text-bright)]" onclick={() => { cpGroup = group.full_path; cpSearchGroups = []; cpGroupPath = []; fetchCustomProjects(provider, 1); fetchCustomSubgroups(provider); }}>
+									<Folder class="h-4 w-4 text-[var(--accent)]" />
+									{group.full_path}
+									<span class="text-xs text-[var(--text-muted)]">({group.repo_count})</span>
+									<ChevronRight class="h-3 w-3 text-[var(--text-muted)]" />
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				{#if provider.type === 'gitlab' && cpProjects.length > 0}
+					<div class="flex items-center gap-3">
+						<Toggle bind:checked={cpIncludeSubgroups} label="Include subgroup projects" />
+						<span class="shrink-0 text-xs text-[var(--text-muted)]">{cpFilteredProjects.length} of {cpTotalCount}</span>
+					</div>
+				{/if}
+				{#if cpFilteredProjects.length === 0 && !cpLoading && !cpError}
+					<p class="text-sm text-[var(--text-secondary)]">No projects found.</p>
+				{:else if cpFilteredProjects.length > 0}
+					<RepoTable columns={gitlabColumns} {sortColumn} {sortDirection} onSort={handleSort}>
+						{#each cpFilteredProjects as project}
+							<RepoTableRow
+								repo={project}
+								showPath
+								{formatDate}
+								onSelect={() => goToRepoDetails(provider.type, project.full_path, provider.baseUrl, provider.id)}
+							/>
+						{/each}
+					</RepoTable>
+
+					<Pagination
+						page={cpPage}
+						totalCount={cpTotalCount}
+						{pageSize}
+						hasNextPage={cpHasNextPage}
+						loading={cpLoading}
+						onPrevious={() => fetchCustomProjects(provider, cpPage - 1)}
+						onNext={() => fetchCustomProjects(provider, cpPage + 1)}
+					/>
+				{/if}
+				{/if}
+			</div>
+		{/if}
+		{/if}
+	</section>
+</div>
+
+<!-- Queue All dialog -->
+{#if queueDialogContext}
+	{@const ctx = queueDialogContext}
+	<ConfirmDialog
+		bind:open={queueDialogOpen}
+		title="Queue Scans"
+		description="Choose how to queue scans for all repositories."
+		iconVariant="default"
+		buttons={[
+			{ label: 'Cancel', variant: 'ghost', onclick: closeQueueDialog },
+			{ label: 'Only New', variant: 'ghost', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, true) },
+			{ label: 'Queue All', variant: 'primary', onclick: () => queueAllRepos(ctx.provider, ctx.owner, ctx.group, ctx.baseUrl, ctx.includeSubgroups, ctx.providerId, false) }
+		]}
+	>
+		{#snippet icon()}<RotateCcw size={26} />{/snippet}
+	</ConfirmDialog>
+{/if}

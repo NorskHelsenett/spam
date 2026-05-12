@@ -196,6 +196,28 @@ func (s *Server) handleImageResults(w http.ResponseWriter, r *http.Request) {
 				}, binding); err != nil {
 					return fmt.Errorf("store image sbom: %w", err)
 				}
+			case "signature":
+				// Verify-against-policy result: when verified=true, flip
+				// image_digests.verified_source so the existing ACL
+				// inheritance gate (acl/scope.go ReadableImageClause)
+				// starts trusting source_repo_id for this digest.
+				//
+				// We deliberately only flip TO true here, never back to
+				// false, so a transient verifier outage doesn't unwind
+				// previously-good verifications. Admin can clear via SQL
+				// if a key/identity rotation requires it.
+				if v, method, vErr := parseCosignVerified(data); vErr == nil && v {
+					now := time.Now().UTC()
+					if err := tx.Exec(`
+						UPDATE image_digests
+						   SET verified_source = true,
+						       verification_method = ?,
+						       verified_at = ?
+						 WHERE id = ?
+					`, method, now, imageDigestID).Error; err != nil {
+						log.Printf("image results: update verified_source failed: image_digest_id=%s err=%v", imageDigestID, err)
+					}
+				}
 			case "vuln":
 				if spec.scanner == "grype" {
 					n, err := imagescan.ParseAndStoreGrype(r.Context(), tx, imageDigestID, scanRunID, data)
@@ -257,6 +279,33 @@ func extractOCILabel(raw []byte, key string) string {
 		return ""
 	}
 	return strings.TrimSpace(config.Config.Labels[key])
+}
+
+// parseCosignVerified reads the JSON payload the image-scanner
+// produces for the signature artifact (see runner/imagescan
+// runSignature) and returns whether the verifier reported a
+// successful identity match. Returns the verification_method
+// alongside so the upload path can persist it on image_digests.
+//
+// Returns (false, "", err) when the JSON doesn't parse or doesn't
+// carry the expected fields — caller treats that as "not verified"
+// rather than aborting the whole upload.
+func parseCosignVerified(data []byte) (bool, string, error) {
+	var doc struct {
+		Verified           bool   `json:"verified"`
+		VerificationMethod string `json:"verification_method"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return false, "", err
+	}
+	if !doc.Verified {
+		return false, "", nil
+	}
+	method := strings.TrimSpace(doc.VerificationMethod)
+	if method == "" {
+		method = "cosign"
+	}
+	return true, method, nil
 }
 
 // detectSBOMFormat inspects the filename first, then falls back to a cheap
