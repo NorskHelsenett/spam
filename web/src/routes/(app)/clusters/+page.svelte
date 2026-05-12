@@ -1002,6 +1002,19 @@
 				<Server class="h-12 w-12 text-[var(--error)]" />
 				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">{error}</p>
 			</div>
+		{:else if clusters.length === 0 && clusterSearch.trim()}
+			<div class="flex flex-col items-center justify-center gap-5 py-24">
+				<Search class="h-12 w-12 text-[var(--text-muted)]" />
+				<p class="text-base font-medium text-[var(--text-secondary)]">No clusters match &ldquo;{clusterSearch.trim()}&rdquo;</p>
+				<p class="text-sm text-[var(--text-muted)]">Try a different search term or clear the filter.</p>
+				<button
+					type="button"
+					class="mt-2 inline-flex items-center gap-2 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
+					onclick={clearClusterFilters}
+				>
+					Clear search
+				</button>
+			</div>
 		{:else if clusters.length === 0}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
 				<Bot class="h-12 w-12 text-[var(--yellow)]" />
@@ -1195,15 +1208,7 @@
 			</section>
 		{:else if activeTab === 'images'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
-				{#if imageDetails.length === 0 && (imagesInFlight || !imagesFetched)}
-					<Loading message="Loading images" variant="spinner" size="md" />
-				{:else if imageDetails.length === 0}
-					<div class="flex flex-col items-center justify-center gap-3 py-16">
-						<Container class="h-10 w-10 text-[var(--yellow)]" />
-						<p class="text-base font-medium text-[var(--text-secondary)]">No images</p>
-						<p class="text-sm text-[var(--text-muted)]">No container images with resolved digests yet.</p>
-					</div>
-				{:else}
+				{#if imageDetails.length > 0 || imageActiveFilterCount > 0 || imagesFetched || imagesInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Images</h2>
@@ -1259,7 +1264,24 @@
 							</div>
 						</div>
 					{/if}
+				{/if}
 
+				{#if imageDetails.length === 0 && (imagesInFlight || !imagesFetched)}
+					<Loading message="Loading images" variant="spinner" size="md" />
+				{:else if imageDetails.length === 0 && imageActiveFilterCount > 0}
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Search class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">No images match your filters</p>
+						<p class="text-sm text-[var(--text-muted)]">Adjust the filters above or clear them to see every image.</p>
+						<button type="button" class="mt-2 host-clear-filters" onclick={clearImageFilters}>Clear all filters</button>
+					</div>
+				{:else if imageDetails.length === 0}
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Container class="h-10 w-10 text-[var(--yellow)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">No images</p>
+						<p class="text-sm text-[var(--text-muted)]">No container images with resolved digests yet.</p>
+					</div>
+				{:else}
 					<div class="overflow-auto [overflow-anchor:none]" style="max-height: 70vh;" bind:this={imageScrollEl} onscroll={() => {
 						imageScrollTop = imageScrollEl?.scrollTop ?? 0;
 						imageViewH = imageScrollEl?.clientHeight ?? 600;
@@ -1379,7 +1401,7 @@
 			</section>
 		{:else if activeTab === 'hosts'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
-				{#if hosts.length > 0}
+				{#if hosts.length > 0 || hostActiveFilterCount > 0 || hostsFetched || hostsInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>
 							<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Hosts</h2>
@@ -1462,6 +1484,13 @@
 
 				{#if hosts.length === 0 && (hostsInFlight || !hostsFetched)}
 					<Loading message="Loading hosts" variant="spinner" size="md" />
+				{:else if hosts.length === 0 && hostActiveFilterCount > 0}
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Search class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">No hosts match your filters</p>
+						<p class="text-sm text-[var(--text-muted)]">Adjust the filters above or clear them to see every host.</p>
+						<button type="button" class="mt-2 host-clear-filters" onclick={clearHostFilters}>Clear all filters</button>
+					</div>
 				{:else if hosts.length === 0}
 					<div class="flex flex-col items-center justify-center gap-3 py-16">
 						<Globe class="h-10 w-10 text-[var(--yellow)]" />
