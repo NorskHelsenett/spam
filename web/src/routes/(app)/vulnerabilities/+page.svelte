@@ -96,7 +96,13 @@
 		items: VulnGroup[];
 	};
 
-	const VULN_PAGE_SIZE = 100;
+	// Smaller pages = faster first paint. The upstream query CPU cost
+	// doesn't really change with LIMIT (it sorts the full grouped CTE
+	// before slicing) — but smaller pages slash wire bytes, JSON parse
+	// time, and the "Loading" window the user actually perceives. 50
+	// rows is well above one viewport's worth at VULN_ROW_HEIGHT=96px,
+	// so the visible range fits in the first page even on tall screens.
+	const VULN_PAGE_SIZE = 50;
 
 	let summary: Summary | null = null;
 	let repos: RepoRow[] = [];
@@ -597,13 +603,16 @@
 	}
 
 	// Whenever the visible window shifts, kick off fetches for any
-	// page that isn't yet cached. The virt slice overscan already
-	// lookaheads ~10 rows above/below, but page boundaries mean we
-	// may also need to fetch the next page as soon as any of its rows
-	// enter the window.
+	// page that isn't yet cached. We also fetch +1 page beyond the
+	// visible range so scrolling past a page boundary doesn't show
+	// the "loading…" placeholder rows — the next page is already
+	// warming in the background by the time the user gets there.
+	// Bounded above by the max page that actually exists.
 	$: if (vulnTotal > 0 && vulnVirt.end > vulnVirt.start) {
 		const startPage = Math.floor(vulnVirt.start / VULN_PAGE_SIZE);
-		const endPage = Math.floor((vulnVirt.end - 1) / VULN_PAGE_SIZE);
+		const visibleEnd = Math.floor((vulnVirt.end - 1) / VULN_PAGE_SIZE);
+		const maxPage = Math.floor((vulnTotal - 1) / VULN_PAGE_SIZE);
+		const endPage = Math.min(visibleEnd + 1, maxPage);
 		for (let p = startPage; p <= endPage; p++) {
 			if (!vulnPages.has(p) && !vulnInflight.has(p)) void fetchVulnPage(p);
 		}
