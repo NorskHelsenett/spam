@@ -35,10 +35,20 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 			return err
 		}
 
+		// Treat email as the human identity: one users row per email, even when
+		// the same human logs in via different issuers. Subject is overwritten
+		// to whichever issuer logged in most recently. Fall back to subject
+		// lookup when the IdP didn't return an email.
 		var user User
-		if err := tx.Where("subject = ?", claims.Subject).First(&user).Error; err != nil {
-			if !errors.Is(err, gorm.ErrRecordNotFound) {
-				return err
+		var lookupErr error
+		if claims.Email != "" {
+			lookupErr = tx.Where("email = ?", claims.Email).First(&user).Error
+		} else {
+			lookupErr = tx.Where("subject = ?", claims.Subject).First(&user).Error
+		}
+		if lookupErr != nil {
+			if !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+				return lookupErr
 			}
 
 			var count int64
@@ -89,6 +99,7 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 		} else {
 			now := time.Now()
 			updates := map[string]interface{}{
+				"subject":       claims.Subject,
 				"email":         claims.Email,
 				"name":          preferredName(claims),
 				"last_login_at": now,
@@ -97,6 +108,7 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 			if err := tx.Model(&user).Updates(updates).Error; err != nil {
 				return err
 			}
+			user.Subject = claims.Subject
 			user.Email = claims.Email
 			user.Name = preferredName(claims)
 			user.LastLoginAt = &now
