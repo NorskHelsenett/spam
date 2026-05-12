@@ -156,6 +156,13 @@ func run() error {
 		"migrations/20260510_dependency_search_indexes.sql",
 		"migrations/20260510a_create_cluster_summary_view.sql",
 		"migrations/20260510b_optimize_asset_risk_pre_aggregate.sql",
+		"migrations/20260511_create_cluster_image_inventory_view.sql",
+		"migrations/20260511a_create_safe_jsonb_cast_fn.sql",
+		"migrations/20260511b_jobs_perf_indexes.sql",
+		"migrations/20260511c_jobs_vuln_meta_unique_active.sql",
+		"migrations/20260511d_jobs_create_run_finished_repo_index.sql",
+		"migrations/20260512_cluster_record_lifecycle_columns.sql",
+		"migrations/20260512a_cluster_event_id.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

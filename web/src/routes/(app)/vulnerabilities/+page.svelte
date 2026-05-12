@@ -96,7 +96,13 @@
 		items: VulnGroup[];
 	};
 
-	const VULN_PAGE_SIZE = 100;
+	// Smaller pages = faster first paint. The upstream query CPU cost
+	// doesn't really change with LIMIT (it sorts the full grouped CTE
+	// before slicing) — but smaller pages slash wire bytes, JSON parse
+	// time, and the "Loading" window the user actually perceives. 50
+	// rows is well above one viewport's worth at VULN_ROW_HEIGHT=96px,
+	// so the visible range fits in the first page even on tall screens.
+	const VULN_PAGE_SIZE = 50;
 
 	let summary: Summary | null = null;
 	let repos: RepoRow[] = [];
@@ -398,8 +404,18 @@
 		if (images.length > 0) return;
 		imagesLoading = true;
 		try {
+			// /api/clusters/images/detail returns {items, limit, offset,
+			// has_more} since the pagination migration. Accept both the
+			// new shape and a bare array so a half-rolled deploy doesn't
+			// blow up here, and harden against non-array bodies (e.g. a
+			// 504 gateway HTML page parsing oddly) that would crash
+			// downstream .map / .filter on `images`.
 			const res = await fetch('/api/clusters/images/detail', { credentials: 'include' });
-			if (res.ok) images = (await res.json()) ?? [];
+			if (res.ok) {
+				const body = (await res.json()) as ImageRow[] | { items?: ImageRow[] } | null;
+				const parsed = Array.isArray(body) ? body : body?.items;
+				images = Array.isArray(parsed) ? parsed : [];
+			}
 		} catch {
 			// ignore
 		} finally {
@@ -587,13 +603,16 @@
 	}
 
 	// Whenever the visible window shifts, kick off fetches for any
-	// page that isn't yet cached. The virt slice overscan already
-	// lookaheads ~10 rows above/below, but page boundaries mean we
-	// may also need to fetch the next page as soon as any of its rows
-	// enter the window.
+	// page that isn't yet cached. We also fetch +1 page beyond the
+	// visible range so scrolling past a page boundary doesn't show
+	// the "loading…" placeholder rows — the next page is already
+	// warming in the background by the time the user gets there.
+	// Bounded above by the max page that actually exists.
 	$: if (vulnTotal > 0 && vulnVirt.end > vulnVirt.start) {
 		const startPage = Math.floor(vulnVirt.start / VULN_PAGE_SIZE);
-		const endPage = Math.floor((vulnVirt.end - 1) / VULN_PAGE_SIZE);
+		const visibleEnd = Math.floor((vulnVirt.end - 1) / VULN_PAGE_SIZE);
+		const maxPage = Math.floor((vulnTotal - 1) / VULN_PAGE_SIZE);
+		const endPage = Math.min(visibleEnd + 1, maxPage);
 		for (let p = startPage; p <= endPage; p++) {
 			if (!vulnPages.has(p) && !vulnInflight.has(p)) void fetchVulnPage(p);
 		}
@@ -660,6 +679,19 @@
 		// Facets are cheap + independent of the three main loads, so fire
 		// them alongside rather than blocking the dashboard render.
 		void loadVulnFacets();
+
+		// Defensive: the reactive activeTab effect SHOULD fire
+		// fetchVulnPage(0) at component init, but in some snapshot-
+		// restore paths (back-button navigation onto this page) the
+		// $: block's prevVulnFiltersKey ends up equal to vulnFiltersKey
+		// on its first run, AND vulnLoaded / vulnInflight / vulnError
+		// are all in initial state — none of the branches fire and the
+		// Findings table is stuck on "Loading vulnerabilities" with no
+		// network call to recover from. This explicit kick guarantees
+		// page 0 is requested when the Findings tab is the active one.
+		if (activeTab === 'vulnerabilities' && !vulnLoaded && !vulnInflight.has(0) && !vulnError) {
+			void fetchVulnPage(0);
+		}
 	});
 </script>
 
@@ -972,7 +1004,7 @@
 									{#each filteredRepos.slice(repoVirt.start, repoVirt.end) as repo}
 										<tr
 											class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
-											style="height:{ROW_HEIGHT}px"
+											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
 											onclick={() => openRepo(repo.repo_id)}
 										>
 											<td class="px-5 py-3">
@@ -1057,7 +1089,7 @@
 									{#each filteredImages.slice(imageVirt.start, imageVirt.end) as img}
 										<tr
 											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
-											style="height:{ROW_HEIGHT}px"
+											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
 											onclick={() => openImageDrawer(img.digest_id)}
 										>
 											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
@@ -1161,9 +1193,9 @@
 									{#each vulnRows as row (row.idx)}
 										{@const g = row.group}
 										{#if g}
-											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)] overflow-hidden" style="height:{VULN_ROW_HEIGHT}px">
-												<td class="px-5 py-3">
-													<div class="flex flex-wrap items-center gap-2">
+											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style="height:{VULN_ROW_HEIGHT}px; max-height:{VULN_ROW_HEIGHT}px">
+												<td class="px-5 py-3 overflow-hidden">
+													<div class="flex flex-wrap items-center gap-2 overflow-hidden">
 														<a
 															href={vulnDetailHref(g.vuln_id)}
 															class="font-mono font-semibold text-[var(--accent)] hover:underline break-all"
@@ -1181,16 +1213,19 @@
 														{#each g.sources as src}
 															<span class="inline-flex items-center rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-xs">{src}</span>
 														{/each}
-														{#each g.aliases ?? [] as alias}
+														{#each (g.aliases ?? []).slice(0, 2) as alias}
 															<a
 																href={vulnDetailHref(alias)}
 																class="inline-flex items-center rounded-full border border-[var(--border-color)]/70 bg-[var(--hover-bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-tertiary)] transition hover:text-[var(--accent)]"
 																title="Alias for this advisory"
 															>{alias}</a>
 														{/each}
+														{#if (g.aliases ?? []).length > 2}
+															<span class="rounded-full border border-[var(--border-color)]/40 px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-tertiary)]" title={(g.aliases ?? []).slice(2).join(', ')}>+{(g.aliases ?? []).length - 2}</span>
+														{/if}
 													</div>
 													{#if g.title}
-														<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug">{g.title}</p>
+														<p class="mt-0.5 text-xs text-[var(--text-muted)] leading-snug line-clamp-1">{g.title}</p>
 													{/if}
 												</td>
 												<td class="px-5 py-3 whitespace-nowrap">
@@ -1211,29 +1246,36 @@
 														<p class="mt-0.5 text-xs text-[var(--text-muted)]/50">no fix available</p>
 													{/if}
 												</td>
-												<td class="px-5 py-3">
-													<div class="flex flex-col gap-1">
-														{#each g.assets as a}
+												<td class="px-5 py-3 overflow-hidden">
+													<div class="flex flex-col gap-1 overflow-hidden">
+														{#each g.assets.slice(0, 3) as a}
 															{#if a.type === 'repo'}
 																<button
 																	type="button"
-																	class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline break-all"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline truncate"
 																	onclick={() => openRepo(a.id)}
 																>
 																	<GitBranch class="h-3 w-3 shrink-0" />
-																	<span>{a.slug}</span>
+																	<span class="truncate">{a.slug}</span>
 																</button>
 															{:else}
 																<button
 																	type="button"
-																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] break-all"
+																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
 																	onclick={() => openImageDrawer(a.id)}
 																>
 																	<Container class="h-3 w-3 shrink-0" />
-																	<span>{a.slug}</span>
+																	<span class="truncate">{a.slug}</span>
 																</button>
 															{/if}
 														{/each}
+														{#if g.assets.length > 3}
+															<a
+																href={vulnDetailHref(g.vuln_id)}
+																class="text-xs text-[var(--text-muted)] hover:text-[var(--accent)] hover:underline"
+																title="See all {g.assets.length} affected assets"
+															>+{g.assets.length - 3} more</a>
+														{/if}
 													</div>
 												</td>
 											</tr>

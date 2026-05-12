@@ -36,17 +36,25 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 		}
 
 		rows := []ImageSecretRow{}
+		// try_bytea_to_jsonb (see migration 20260511a) catches conversion
+		// errors per row and returns NULL on bad bytes / malformed JSON.
+		// Without it a single corrupted artifact 500'd the whole
+		// endpoint, because Postgres can evaluate WHERE predicates in
+		// any order and a "filter bad rows first" guard didn't reliably
+		// prevent the cast.
 		err := db.WithContext(r.Context()).Raw(`
 			WITH latest_per_image AS (
 				SELECT DISTINCT ON (isr.image_digest_id)
 					isr.image_digest_id,
 					isr.finished_at,
-					isa.content
+					try_bytea_to_jsonb(isa.content) AS payload
 				FROM image_scan_runs isr
 				JOIN image_scan_artifacts isa
 					ON isa.scan_run_id = isr.id
 				WHERE isa.category = 'secrets'
 				  AND isa.scanner  = 'betterleaks'
+				  AND isa.content IS NOT NULL
+				  AND octet_length(isa.content) > 2
 				ORDER BY isr.image_digest_id, isr.finished_at DESC NULLS LAST
 			)
 			SELECT
@@ -54,14 +62,13 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 				id.registry   AS registry,
 				id.repository AS repository,
 				id.digest     AS digest,
-				jsonb_array_length(convert_from(l.content, 'utf8')::jsonb) AS finding_count,
+				jsonb_array_length(l.payload) AS finding_count,
 				l.finished_at AS last_scanned_at
 			FROM latest_per_image l
 			JOIN image_digests id ON id.id = l.image_digest_id
-			WHERE l.content IS NOT NULL
-			  AND octet_length(l.content) > 2
-			  AND jsonb_typeof(convert_from(l.content, 'utf8')::jsonb) = 'array'
-			  AND jsonb_array_length(convert_from(l.content, 'utf8')::jsonb) > 0
+			WHERE l.payload IS NOT NULL
+			  AND jsonb_typeof(l.payload) = 'array'
+			  AND jsonb_array_length(l.payload) > 0
 			ORDER BY finding_count DESC, l.finished_at DESC NULLS LAST
 			LIMIT 500
 		`).Scan(&rows).Error

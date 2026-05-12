@@ -25,6 +25,12 @@ const (
 	// cadence — packages don't change health that fast and rate-
 	// limited registries thank us for the lower QPS.
 	JobTypeFetchDepHealth JobType = "FETCH_DEP_HEALTH"
+	// DB_MAINTENANCE runs a safe-by-default Postgres maintenance op
+	// (ANALYZE or VACUUM ANALYZE) on a single named table. Driven from
+	// the admin Database page. We deliberately do not expose VACUUM
+	// FULL or REINDEX here — those acquire AccessExclusiveLock and
+	// belong behind a separate, explicit code path.
+	JobTypeDBMaintenance JobType = "DB_MAINTENANCE"
 )
 
 // VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
@@ -92,6 +98,27 @@ type ImageScanSigningPolicy struct {
 	FulcioURL           string `json:"fulcio_url,omitempty"`
 	RekorURL            string `json:"rekor_url,omitempty"`
 	TUFMirrorURL        string `json:"tuf_mirror_url,omitempty"`
+}
+
+// DBMaintenanceOp enumerates the maintenance operations DB_MAINTENANCE
+// jobs may run. Keep this list narrow on purpose — every new op
+// expands the surface area for a misbehaving SQL to lock the DB.
+type DBMaintenanceOp string
+
+const (
+	DBMaintenanceOpAnalyze       DBMaintenanceOp = "analyze"
+	DBMaintenanceOpVacuumAnalyze DBMaintenanceOp = "vacuum_analyze"
+)
+
+// DBMaintenancePayload is the payload for DB_MAINTENANCE jobs. Schema +
+// Table are re-validated against pg_catalog inside the worker before
+// the statement is built, so the column identifier interpolation never
+// touches a string the caller controls without a round-trip through
+// pg_catalog first.
+type DBMaintenancePayload struct {
+	Schema    string          `json:"schema"`
+	Table     string          `json:"table"`
+	Operation DBMaintenanceOp `json:"operation"`
 }
 
 // CreateRunPayload is the payload for CREATE_RUN jobs.

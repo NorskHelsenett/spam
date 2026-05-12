@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
-	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
@@ -205,7 +204,6 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 		// landed, warm the dashboard cache before an operator hits
 		// the list page.
 		vulnmetrics.TriggerRefresh(db)
-		assetrisk.TriggerRefresh(db)
 		jobs.EnqueueMissingVulnMeta(r.Context(), db)
 
 		w.WriteHeader(http.StatusNoContent)
@@ -253,7 +251,6 @@ func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 		// the recompute cost on the UI thread. Coalesced so a batch
 		// of completions produces at most one refresh + one follow-up.
 		vulnmetrics.TriggerRefresh(db)
-		assetrisk.TriggerRefresh(db)
 		jobs.EnqueueMissingVulnMeta(r.Context(), db)
 
 		w.WriteHeader(http.StatusNoContent)

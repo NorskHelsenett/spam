@@ -8,11 +8,28 @@ import (
 )
 
 // Record is a live-state row for a single cluster resource.
-// The table acts as a materialized view: upserts on ingest, deletes on DELETE events.
+// The table acts as a materialized view: upserts on ingest, tombstones
+// (is_present=false) on DELETE events and snapshot reconciles.
+//
+// Lifecycle columns are first-class so reads don't have to JSONB-extract
+// to filter for "currently present"; data->>'msg' is dual-written for
+// backward compatibility with existing readers and is migrated out in a
+// later sweep.
+//
+// EventID is the agent-side monotonic id stamped on each record. SCAM
+// resets it per process start; SPAM uses it via cluster_sessions
+// .last_seen_event_id to ACK the highest id stored per cluster, so
+// SCAM can detect drift (mismatch -> reconcile snapshot).
 type Record struct {
-	ID         uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
-	Data       datatypes.JSON `gorm:"type:jsonb;not null" json:"data"`
-	ReceivedAt time.Time      `gorm:"not null;index" json:"received_at"`
+	ID             uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
+	Data           datatypes.JSON `gorm:"type:jsonb;not null" json:"data"`
+	ReceivedAt     time.Time      `gorm:"not null;index" json:"received_at"`
+	IsPresent      bool           `gorm:"not null;default:true" json:"is_present"`
+	FirstSeenAt    time.Time      `gorm:"not null;default:now()" json:"first_seen_at"`
+	LastChangeAt   time.Time      `gorm:"not null;default:now()" json:"last_change_at"`
+	TombstonedAt   *time.Time     `json:"tombstoned_at,omitempty"`
+	LastSnapshotID *string        `json:"last_snapshot_id,omitempty"`
+	EventID        *int64         `gorm:"index;column:event_id" json:"event_id,omitempty"`
 }
 
 func (Record) TableName() string { return "cluster_record" }
@@ -68,6 +85,22 @@ type Incoming struct {
 	Hosts        []string      `json:"hosts,omitempty"`
 	LBIPs        []string      `json:"lb_ips,omitempty"`
 	Rules        []IngressRule `json:"rules,omitempty"`
+
+	// Snapshot-only fields. Present on kind="Snapshot" records:
+	//   SNAPSHOT_BEGIN — snapshot_id + snapshot_type ("init"|"reconcile")
+	//   SNAPSHOT      — snapshot_id + target_kind + resource_keys (the
+	//                   authoritative set of currently-present rows for
+	//                   target_kind in this cluster)
+	//   SNAPSHOT_END  — snapshot_id (terminator)
+	SnapshotID   string   `json:"snapshot_id,omitempty"`
+	SnapshotType string   `json:"snapshot_type,omitempty"`
+	TargetKind   string   `json:"target_kind,omitempty"`
+	ResourceKeys []string `json:"resource_keys,omitempty"`
+
+	// EventID is SCAM's per-process monotonic id. Absent on older
+	// agents — those records contribute nothing to per-cluster
+	// last_seen_event_id and the comparison is effectively skipped.
+	EventID uint64 `json:"event_id,omitempty"`
 }
 
 // IngressRule is the shape of each element in an Ingress record's `rules` array.
@@ -85,7 +118,10 @@ func (r Incoming) ResourceKey() string {
 	return r.ClusterID + ":" + r.Kind + ":" + r.UID
 }
 
-// validKinds is the set of record kinds SCAM emits.
+// validKinds is the set of record kinds SCAM emits. Snapshot is a
+// meta-record (not a resource itself) — it carries an authoritative
+// key list per target_kind that the ingest handler uses to tombstone
+// rows the cluster no longer reports.
 var validKinds = map[string]bool{
 	"Container":       true,
 	"Service":         true,
@@ -101,13 +137,19 @@ var validKinds = map[string]bool{
 	"IngressRouteTCP": true,
 	"IngressRouteUDP": true,
 	"EndpointSlice":   true,
+	"Snapshot":        true,
 }
 
-// validEvents is the set of event types SCAM emits.
+// validEvents is the set of event types SCAM emits. SNAPSHOT and its
+// BEGIN/END envelope are emitted with kind=Snapshot; SNAPSHOT carries
+// the resource-key list, BEGIN/END are transaction markers.
 var validEvents = map[string]bool{
-	"INITIAL":  true,
-	"ADD":      true,
-	"UPDATE":   true,
-	"DELETE":   true,
-	"EXPOSURE": true,
+	"INITIAL":         true,
+	"ADD":             true,
+	"UPDATE":          true,
+	"DELETE":          true,
+	"EXPOSURE":        true,
+	"SNAPSHOT":        true,
+	"SNAPSHOT_BEGIN":  true,
+	"SNAPSHOT_END":    true,
 }

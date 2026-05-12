@@ -199,7 +199,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 
@@ -225,7 +225,9 @@ let isAdmin = $state(false);
 	// config + user management.
 	const adminNavLinks = [
 		{ href: '/runs', label: 'Runs', icon: Play },
-		{ href: '/admin/jobs', label: 'Jobs', icon: Layers }
+		{ href: '/admin/jobs', label: 'Jobs', icon: Layers },
+		{ href: '/admin/users', label: 'Users', icon: Users },
+		{ href: '/admin/database', label: 'Database', icon: Database }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
@@ -311,7 +313,7 @@ let isAdmin = $state(false);
 	const pageStore = page;
 
 	$effect(() => {
-		if ($pageStore.url?.pathname === '/users') {
+		if ($pageStore.url?.pathname === '/admin/users') {
 			newUserCount.set(0);
 		}
 	});
@@ -380,12 +382,12 @@ let isAdmin = $state(false);
 				<button
 					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
-						isActive('/admin/providers') || isActive('/users')
+						isActive('/admin/providers')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
 					onclick={() => goto('/admin/providers')}
-					aria-current={isActive('/admin/providers') || isActive('/users') ? 'page' : undefined}
+					aria-current={isActive('/admin/providers') ? 'page' : undefined}
 					aria-label="Settings"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
