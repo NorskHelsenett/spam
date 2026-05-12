@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/events"
@@ -23,6 +24,11 @@ type ensureUserResult struct {
 
 func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUserResult, error) {
 	var result ensureUserResult
+
+	// EntraID returns emails with original casing (e.g. Jonas.Bo.Grimsgaard@nhn.no)
+	// while other IdPs lowercase them. Normalize here so login is the single
+	// point of truth and existing rows are healed on next sign-in.
+	claims.Email = strings.ToLower(strings.TrimSpace(claims.Email))
 
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := ensureGroups(tx); err != nil {
