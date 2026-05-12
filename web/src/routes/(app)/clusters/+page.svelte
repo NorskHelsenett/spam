@@ -149,6 +149,11 @@
 	};
 
 	let clusters: ClusterRow[] = $state([]);
+	// Unfiltered snapshot of the cluster summary — drives the page-level
+	// metric cards and donuts so they stay stable when the user searches.
+	// Refreshed alongside `clusters` whenever there is no active cluster
+	// search, and explicitly when `includeInactive` toggles.
+	let clustersAll: ClusterRow[] = $state([]);
 	let registryDist: RegistryDist[] = $state([]);
 	let imageDetails: ImageDetail[] = $state([]);
 	let hosts: HostRow[] = $state([]);
@@ -300,6 +305,40 @@
 		return `/api/clusters/summary?${params}`;
 	};
 
+	// Unfiltered cluster + host summaries feed the page-level metric
+	// cards and donuts. Loaded once on mount and refreshed on
+	// includeInactive toggle — never re-fetched when the user changes a
+	// search query, so the cards stay stable while filtering.
+	const loadUnfiltered = async () => {
+		const params = new URLSearchParams();
+		if (includeInactive) params.set('include_inactive', 'true');
+		const qs = params.toString() ? `?${params}` : '';
+		try {
+			const [allClustersRes, allHostsRes] = await Promise.all([
+				fetch(`/api/clusters/summary${qs}`, { credentials: 'include' }),
+				fetch(`/api/clusters/hosts/summary${qs}`, { credentials: 'include' })
+			]);
+			if (allClustersRes.ok) {
+				const body = await allClustersRes.json().catch(() => null);
+				clustersAll = Array.isArray(body) ? body : [];
+			}
+			if (allHostsRes.ok) {
+				const body = await allHostsRes.json().catch(() => null);
+				if (body && typeof body === 'object') {
+					hostSummaryAll = {
+						external: body.external ?? 0,
+						internal: body.internal ?? 0,
+						pending: body.pending ?? 0,
+						total: body.total ?? 0,
+						clusters: Array.isArray(body.clusters) ? body.clusters : [],
+						namespaces: Array.isArray(body.namespaces) ? body.namespaces : [],
+						kinds: Array.isArray(body.kinds) ? body.kinds : []
+					};
+				}
+			}
+		} catch { /* silent — page-level cards just stay zeroed */ }
+	};
+
 	const loadMain = async () => {
 		try {
 			const qs = inactiveQS();
@@ -313,6 +352,10 @@
 			if (clusterRes.ok) {
 				const body = await clusterRes.json().catch(() => null);
 				clusters = Array.isArray(body) ? body : [];
+				// When no cluster search is active, this fetch IS the
+				// unfiltered set — reuse it to seed clustersAll without
+				// an extra round-trip.
+				if (!clusterSearch.trim()) clustersAll = clusters;
 			}
 			if (regRes.ok) {
 				const body = await regRes.json().catch(() => null);
@@ -535,6 +578,11 @@
 	onMount(() => {
 		if (!browser) return;
 		loadMain();
+		// Seed the unfiltered snapshot in parallel — loadMain will reuse
+		// its own response when no filter is active, but the parallel
+		// fetch covers the deep-link-with-?q= case where the filtered
+		// load would otherwise leave the page-level cards at zero.
+		loadUnfiltered();
 
 		// Relative-time ticker only — purely a display refresh, no
 		// network calls.
@@ -683,11 +731,16 @@
 		imageOffset = 0;
 		imageHasMore = false;
 		loadMain();
+		// Unfiltered snapshot has to refresh too — the activity scope
+		// changed so the totals shown on the page-level cards are stale.
+		loadUnfiltered();
 		if (activeTab === 'images') loadImages();
 	});
 
-	const totalImages = $derived(clusters.reduce((s, c) => s + c.images, 0));
-	const totalContainers = $derived(clusters.reduce((s, c) => s + c.containers, 0));
+	// Page-level metric cards bind to the unfiltered set so they don't
+	// shift around while the user types in the cluster search.
+	const totalImages = $derived(clustersAll.reduce((s, c) => s + c.images, 0));
+	const totalContainers = $derived(clustersAll.reduce((s, c) => s + c.containers, 0));
 
 	const registrySegments = $derived(
 		registryDist.map((r, i) => ({
@@ -719,6 +772,17 @@
 	// don't represent the full set of clusters/namespaces/kinds.
 	type HostFacetOption = { id: string; label: string };
 	let hostSummary = $state<{
+		external: number;
+		internal: number;
+		pending: number;
+		total: number;
+		clusters: HostFacetOption[];
+		namespaces: string[];
+		kinds: string[];
+	}>({ external: 0, internal: 0, pending: 0, total: 0, clusters: [], namespaces: [], kinds: [] });
+	// Unfiltered host summary — drives the page-level Hosts card and
+	// Network exposure donut so they don't shift while the user filters.
+	let hostSummaryAll = $state<{
 		external: number;
 		internal: number;
 		pending: number;
@@ -761,18 +825,20 @@
 						namespaces: Array.isArray(body.namespaces) ? body.namespaces : [],
 						kinds: Array.isArray(body.kinds) ? body.kinds : []
 					};
+					// When no host filter is active this fetch IS the
+					// unfiltered set — reuse it to seed hostSummaryAll
+					// without an extra round-trip.
+					if (hostActiveFilterCount === 0) hostSummaryAll = hostSummary;
 				}
 			}
 		} catch { /* silent — chip just stays zeroed */ }
 	};
 
-	const exposureCounts = $derived(hostSummary);
-	// Host count card uses the summary total, not the loaded-rows length:
-	// with server-side pagination the loaded set is just the current
-	// page, so the old derived would show e.g. "200 Unique hostnames"
-	// regardless of fleet size. Declared after hostSummary so TS sees
-	// the binding in source order.
-	const uniqueHosts = $derived(hostSummary.total);
+	// Page-level Hosts card and Network exposure donut bind to the
+	// unfiltered summary so they don't update while the user filters
+	// inside the Hosts tab.
+	const exposureCounts = $derived(hostSummaryAll);
+	const uniqueHosts = $derived(hostSummaryAll.total);
 	const exposureSegments = $derived([
 		{ label: 'External', value: exposureCounts.external, color: 'var(--red)' },
 		{ label: 'Internal', value: exposureCounts.internal, color: 'var(--green)' }
@@ -1002,20 +1068,7 @@
 				<Server class="h-12 w-12 text-[var(--error)]" />
 				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">{error}</p>
 			</div>
-		{:else if clusters.length === 0 && clusterSearch.trim()}
-			<div class="flex flex-col items-center justify-center gap-5 py-24">
-				<Search class="h-12 w-12 text-[var(--text-muted)]" />
-				<p class="text-base font-medium text-[var(--text-secondary)]">No clusters match &ldquo;{clusterSearch.trim()}&rdquo;</p>
-				<p class="text-sm text-[var(--text-muted)]">Try a different search term or clear the filter.</p>
-				<button
-					type="button"
-					class="mt-2 inline-flex items-center gap-2 rounded-full border border-[var(--accent)]/40 bg-[var(--accent)]/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--accent)] transition hover:bg-[var(--accent)]/20"
-					onclick={clearClusterFilters}
-				>
-					Clear search
-				</button>
-			</div>
-		{:else if clusters.length === 0}
+		{:else if clustersAll.length === 0}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
 				<Bot class="h-12 w-12 text-[var(--yellow)]" />
 				<p class="text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
@@ -1039,7 +1092,7 @@
 						<Server class="h-4 w-4 text-[var(--accent)]" />
 						<h2 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Clusters</h2>
 					</div>
-					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{clusters.length}</p>
+					<p class="mt-2 text-2xl font-bold text-[var(--text-bright)]">{clustersAll.length}</p>
 					<p class="mt-1 text-xs text-[var(--text-muted)]">Reporting agents</p>
 				</article>
 				<article class="metric-card p-4">
@@ -1095,7 +1148,7 @@
 	</section>
 
 	<!-- Tables -->
-	{#if !loading && !error && clusters.length > 0}
+	{#if !loading && !error && clustersAll.length > 0}
 		{#if activeTab === 'clusters'}
 			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
 				<header class="flex items-start justify-between gap-4">
@@ -1104,7 +1157,7 @@
 						<p class="text-sm text-[var(--text-tertiary)]">
 							Reporting SCAM agents and their inventory.
 							{#if clusterActiveFilterCount > 0}
-								<span class="text-[var(--text-muted)]">&middot; showing {filteredClusters.length} of {clusters.length}</span>
+								<span class="text-[var(--text-muted)]">&middot; showing {clusters.length} of {clustersAll.length}</span>
 							{/if}
 						</p>
 					</div>
@@ -1156,6 +1209,14 @@
 					</div>
 				{/if}
 
+				{#if clusters.length === 0 && clusterActiveFilterCount > 0}
+					<div class="flex flex-col items-center justify-center gap-3 py-16">
+						<Search class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-base font-medium text-[var(--text-secondary)]">{clusterSearch.trim() ? `No clusters match “${clusterSearch.trim()}”` : 'No clusters match your filters'}</p>
+						<p class="text-sm text-[var(--text-muted)]">Try a different search term or clear the filter.</p>
+						<button type="button" class="mt-2 host-clear-filters" onclick={clearClusterFilters}>Clear all filters</button>
+					</div>
+				{:else}
 				<div class="overflow-auto" style="max-height: 70vh;" bind:this={clusterScrollEl} onscroll={() => { clusterScrollTop = clusterScrollEl?.scrollTop ?? 0; clusterViewH = clusterScrollEl?.clientHeight ?? 600; }}>
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 						<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
@@ -1192,6 +1253,7 @@
 						</tbody>
 					</table>
 				</div>
+				{/if}
 
 				{#if clusterDrawerOpen && clusterDrawerRow}
 					<div
