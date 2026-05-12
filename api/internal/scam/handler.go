@@ -446,6 +446,16 @@ func applySnapshot(ctx context.Context, db *gorm.DB, snap Incoming, now time.Tim
 	if keys == nil {
 		keys = []string{}
 	}
+	// Bind as JSON: GORM expands a Go []string into a comma-separated
+	// list of `?` placeholders (the usual IN-clause trick), which
+	// turns ANY(?::text[]) into a syntax error. Round-tripping through
+	// jsonb_array_elements_text keeps the parameter to a single string,
+	// avoids the array-literal escape rules, and degenerates correctly
+	// to "tombstone everything" when the slice is empty.
+	keysJSON, err := json.Marshal(keys)
+	if err != nil {
+		return fmt.Errorf("snapshot: marshal keys: %w", err)
+	}
 
 	var snapshotIDArg any
 	if snap.SnapshotID != "" {
@@ -463,16 +473,18 @@ func applySnapshot(ctx context.Context, db *gorm.DB, snap Incoming, now time.Tim
 		  AND data->>'kind' = ?
 		  AND is_present = TRUE
 		  AND last_change_at < ?
-		  AND NOT (` + keyExpr + ` = ANY(?::text[]))`
+		  AND ` + keyExpr + ` NOT IN (
+		    SELECT jsonb_array_elements_text(?::jsonb)
+		  )`
 
 	return db.WithContext(ctx).Exec(sql,
-		now,             // tombstoned_at fallback
-		now,             // last_change_at
-		snapshotIDArg,   // last_snapshot_id (nullable)
-		snap.ClusterID,  // cluster_id
-		snap.TargetKind, // kind
-		now,             // race-protection cutoff
-		keys,            // resource_keys ANY()
+		now,              // tombstoned_at fallback
+		now,              // last_change_at
+		snapshotIDArg,    // last_snapshot_id (nullable)
+		snap.ClusterID,   // cluster_id
+		snap.TargetKind,  // kind
+		now,              // race-protection cutoff
+		string(keysJSON), // resource_keys as JSON array string
 	).Error
 }
 
