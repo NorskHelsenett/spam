@@ -1159,7 +1159,7 @@
 						<tbody class="text-[var(--text-secondary)]">
 							{#if clusterVirt.topPad > 0}<tr style="height:{clusterVirt.topPad}px"><td colspan="7"></td></tr>{/if}
 							{#each sortedClusters.slice(clusterVirt.start, clusterVirt.end) as c}
-								<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{ROW_HEIGHT}px" onclick={() => openClusterDrawer(c)}>
+								<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px" onclick={() => openClusterDrawer(c)}>
 									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
 									<td class="px-5 py-3">
 										{#if c.environment}
@@ -1296,7 +1296,7 @@
 								{#each sortedImages.slice(imageVirt.start, imageVirt.end) as img}
 									<tr
 										class="border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
-										style="height:{ROW_HEIGHT}px"
+										style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
 										onclick={() => { if (img.digest_id) openImageDrawer(img.digest_id); }}
 									>
 										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
@@ -1486,7 +1486,7 @@
 								{#each sortedHosts.slice(hostVirt.start, hostVirt.end) as h}
 									{@const resolved = hostResolutions[h.host]}
 									{@const meta = hostMetas[h.host]}
-									<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{HOST_ROW_HEIGHT}px;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
+									<tr class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {chainDrawerOpen && chainDrawerRow?.host === h.host && chainDrawerRow?.cluster_id === h.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{HOST_ROW_HEIGHT}px;max-height:{HOST_ROW_HEIGHT}px;{h.backends && h.workload_count === 0 ? ' opacity: 0.4;' : ''}" onclick={() => openChainDrawer(h)}>
 										<td class="w-12 py-3 pl-5 pr-0">
 											<div class="flex h-7 w-7 items-center justify-center">
 												{#if meta?.has_favicon}
@@ -1514,11 +1514,11 @@
 												{/if}
 											</div>
 										</td>
-										<td class="px-5 py-3 text-xs">
-											<div class="flex items-center gap-3">
+										<td class="px-5 py-3 text-xs overflow-hidden">
+											<div class="flex items-center gap-3 overflow-hidden">
 												<span class="w-6 text-[10px] uppercase tracking-wider text-[var(--text-tertiary)]">lb</span>
 												{#if h.lb_ips}
-													<code class="text-[var(--text-secondary)]">{h.lb_ips}</code>
+													<code class="truncate text-[var(--text-secondary)]" title={h.lb_ips}>{h.lb_ips}</code>
 													{#if !(resolved && !resolved.error)}
 														{#if isPrivateIP(h.lb_ips.split(',')[0].trim())}
 															<span class="rounded-full bg-[var(--blue)]/15 px-1.5 py-0.5 text-[10px] font-medium text-[var(--blue)]">local</span>

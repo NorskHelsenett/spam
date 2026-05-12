@@ -982,7 +982,7 @@
 									{#each filteredRepos.slice(repoVirt.start, repoVirt.end) as repo}
 										<tr
 											class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
-											style="height:{ROW_HEIGHT}px"
+											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
 											onclick={() => openRepo(repo.repo_id)}
 										>
 											<td class="px-5 py-3">
@@ -1067,7 +1067,7 @@
 									{#each filteredImages.slice(imageVirt.start, imageVirt.end) as img}
 										<tr
 											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
-											style="height:{ROW_HEIGHT}px"
+											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
 											onclick={() => openImageDrawer(img.digest_id)}
 										>
 											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
