@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -58,16 +59,16 @@ const resourceKeyExpr = `(
 // liveCTE deduplicates cluster_record rows to one-per-resource-identity
 // AND restricts to currently-live clusters. Combined:
 //
-//	- DISTINCT ON takes the latest non-DELETE row per resource (belt-
-//	  and-braces against any residual msg-duplication; the
-//	  20260420_dedupe_cluster_record_msg migration plus the resource-
-//	  keyed unique index normally guarantee this).
-//	- Join to cluster_sessions filters out silent clusters whose
-//	  agent hasn't heartbeated within sessionLiveWindow. Heartbeats
-//	  and data pushes both bump last_push_at, so a quiet-but-alive
-//	  cluster stays visible. We deliberately don't gate on
-//	  session_started_at — agent reconnects shouldn't wipe prior
-//	  resources, since the agent doesn't reliably re-INITIAL.
+//   - DISTINCT ON takes the latest non-DELETE row per resource (belt-
+//     and-braces against any residual msg-duplication; the
+//     20260420_dedupe_cluster_record_msg migration plus the resource-
+//     keyed unique index normally guarantee this).
+//   - Join to cluster_sessions filters out silent clusters whose
+//     agent hasn't heartbeated within sessionLiveWindow. Heartbeats
+//     and data pushes both bump last_push_at, so a quiet-but-alive
+//     cluster stays visible. We deliberately don't gate on
+//     session_started_at — agent reconnects shouldn't wipe prior
+//     resources, since the agent doesn't reliably re-INITIAL.
 //
 // Every live-state query reads FROM live and gets both behaviours
 // for free — no per-query session-filter boilerplate.
@@ -1544,17 +1545,16 @@ type hostSummaryCacheEntry struct {
 // overview chip / donut — it is NOT a substitute for the full hosts
 // list, just the summary numbers.
 //
-// Categorisation rules (intentionally different order from the
-// frontend's previous client-side logic — we trust the cluster-
-// reported LB IP first because it's the actual assigned address in
-// the resource's status block, more authoritative than DNS which
-// just says where queries resolve):
-//   - if the host has at least one LB IP, classify by RFC1918 range
-//     of the first one (private → internal, public → external);
-//   - else if a cached DNS resolution exists with no error, fall
-//     back to IsLocal (covers NodePort / ClusterIP-only services
-//     whose Ingress doesn't surface an LB IP);
-//   - else → pending (no LB IP, no DNS, genuinely unknown).
+// Categorisation rules:
+//   - first resolve the hostname through SPAM_HOST_DNS_RESOLVER
+//     (defaults to 9.9.9.9) and classify that result. This answers
+//     the operator-facing question: "does public DNS point this host
+//     at a public address?";
+//   - if DNS is unavailable/unresolvable, fall back to the cluster-
+//     reported LoadBalancer IP;
+//   - internal means RFC1918/loopback, plus any operator-owned ranges
+//     in SPAM_HOST_INTERNAL_CIDRS. Everything else is external;
+//   - else → pending (no usable DNS and no LB IP).
 //
 // Cached in kv_store keyed on the ACL fragment + the host_exposure MV
 // watermark, so the cache invalidates naturally on the next MV refresh.
@@ -1646,7 +1646,9 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 		Frag            string
 		Args            []any
 		IncludeInactive bool
-	}{aclFrag, aclArgs, includeInactive})
+		Resolver        string
+		InternalCIDRs   []string
+	}{aclFrag, aclArgs, includeInactive, hostDNSResolverAddr, hostInternalCIDRStrings()})
 	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
 }
 
@@ -1774,13 +1776,25 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 	return clusters, namespaces, kinds, nil
 }
 
-
 func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
-	// 1. Cluster-reported LB IP wins. status.loadBalancer.ingress[].ip
-	//    for Ingress, Gateway.status.addresses[] for Gateway API — the
-	//    actual address the cluster has assigned. A private RFC1918 IP
-	//    here means the LoadBalancer is internal-only; a public IP
-	//    means the host is directly exposed via it.
+	// 1. Public-DNS perspective wins. The cluster may report a private
+	//    LoadBalancer address while split-horizon/public DNS points the
+	//    host at an external address. For exposure reporting, the DNS
+	//    result is the more useful operator signal.
+	if host != "" {
+		res := resolveHost(ctx, cs, host)
+		if res.Error == "" && len(res.IPs) > 0 {
+			if res.IsLocal {
+				s.Internal++
+			} else {
+				s.External++
+			}
+			return s
+		}
+	}
+	// 2. DNS missing/unresolvable. Fall back to cluster-reported LB IP:
+	//    status.loadBalancer.ingress[].ip for Ingress,
+	//    Gateway.status.addresses[] for Gateway API.
 	if first := strings.TrimSpace(strings.SplitN(lbIPs, ",", 2)[0]); first != "" {
 		if isPrivateIP(first) {
 			s.Internal++
@@ -1789,17 +1803,7 @@ func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s
 		}
 		return s
 	}
-	// 2. No LB IP (NodePort, ClusterIP-only behind an external DNS).
-	//    Fall back to cached DNS resolution if we have one.
-	if res, ok, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCachePrefix+host); ok && res.Error == "" {
-		if res.IsLocal {
-			s.Internal++
-		} else {
-			s.External++
-		}
-		return s
-	}
-	// 3. No LB IP and no cached DNS — genuinely unknown.
+	// 3. No usable DNS and no LB IP — genuinely unknown.
 	s.Pending++
 	return s
 }
@@ -1831,7 +1835,7 @@ func writeAndFilterHosts(w http.ResponseWriter, rows []HostRow, cs cache.Store, 
 		host := rows[i].Host
 		hc, ok := seen[host]
 		if !ok {
-			if res, found, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCachePrefix+host); found {
+			if res, found, _ := cache.GetJSON[resolveResult](ctx, cs, resolveCacheKey(host)); found {
 				r := res
 				hc.resolved = &r
 			}
@@ -1882,10 +1886,10 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Backends     string `json:"backends"`
 		}
 		type nsSvc struct {
-			Namespace   string `json:"namespace"`
-			Name        string `json:"name"`
-			ServiceType string `json:"service_type"`
-			PortsJSON   string `gorm:"column:ports_json"`
+			Namespace    string `json:"namespace"`
+			Name         string `json:"name"`
+			ServiceType  string `json:"service_type"`
+			PortsJSON    string `gorm:"column:ports_json"`
 			SelectorJSON string `gorm:"column:selector_json"`
 		}
 		type nsPod struct {
@@ -1902,7 +1906,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 		// pre-filters by cluster_id so the per-branch cluster_id checks
 		// become no-ops we drop.
 		var ingresses []nsIngress
-		db.Raw(liveCTEForCluster + `
+		db.Raw(liveCTEForCluster+`
 			SELECT * FROM (
 				SELECT
 					data->>'namespace' AS namespace,
@@ -1960,7 +1964,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 2: All services in this cluster
 		var services []nsSvc
-		db.Raw(liveCTEForCluster + `
+		db.Raw(liveCTEForCluster+`
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'name' AS name,
@@ -1974,7 +1978,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 
 		// Step 3: All running pod groups in this cluster
 		var pods []nsPod
-		db.Raw(liveCTEForCluster + `
+		db.Raw(liveCTEForCluster+`
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'owner' AS owner,
@@ -2036,9 +2040,9 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Backends     string `json:"backends"`
 		}
 		type nsChain struct {
-			Namespace string         `json:"namespace"`
-			Ingresses []chainIng     `json:"ingresses"`
-			Services  []chainSvc     `json:"services"`
+			Namespace string          `json:"namespace"`
+			Ingresses []chainIng      `json:"ingresses"`
+			Services  []chainSvc      `json:"services"`
 			Pods      []chainPodGroup `json:"pods"`
 		}
 
@@ -2161,7 +2165,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Address     string `gorm:"column:address"`
 		}
 		var epIPs []epIPRow
-		db.Raw(liveCTEForCluster + `
+		db.Raw(liveCTEForCluster+`
 			SELECT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
@@ -2179,7 +2183,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Port        int    `gorm:"column:port"`
 		}
 		var epPortRows []epPortRow
-		db.Raw(liveCTEForCluster + `
+		db.Raw(liveCTEForCluster+`
 			SELECT DISTINCT
 				data->>'namespace' AS namespace,
 				data->>'service_name' AS service_name,
@@ -2285,14 +2289,14 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Protocol   string `json:"protocol,omitempty"`
 		}
 		type chainService struct {
-			Name        string            `json:"name"`
-			Namespace   string            `json:"namespace"`
-			ServiceType string            `json:"service_type"`
-			Ports       []chainPort       `json:"ports"`
-			Selector    map[string]string `json:"selector"`
-			PodCount    int64             `json:"pod_count"`
-			EndpointIPs   []string `json:"endpoint_ips,omitempty"`
-			EndpointPorts []int    `json:"endpoint_ports,omitempty"`
+			Name          string            `json:"name"`
+			Namespace     string            `json:"namespace"`
+			ServiceType   string            `json:"service_type"`
+			Ports         []chainPort       `json:"ports"`
+			Selector      map[string]string `json:"selector"`
+			PodCount      int64             `json:"pod_count"`
+			EndpointIPs   []string          `json:"endpoint_ips,omitempty"`
+			EndpointPorts []int             `json:"endpoint_ports,omitempty"`
 		}
 		type chainContainer struct {
 			Name     string `json:"name"`
@@ -2302,12 +2306,12 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Registry string `json:"registry"`
 		}
 		type chainPodGroup struct {
-			Owner        string           `json:"owner"`
-			OwnerKind    string           `json:"owner_kind"`
-			PodCount     int64            `json:"pod_count"`
-			Phase        string           `json:"phase"`
-			Containers   []chainContainer `json:"containers"`
-			ServiceName  string           `json:"service_name"`
+			Owner       string           `json:"owner"`
+			OwnerKind   string           `json:"owner_kind"`
+			PodCount    int64            `json:"pod_count"`
+			Phase       string           `json:"phase"`
+			Containers  []chainContainer `json:"containers"`
+			ServiceName string           `json:"service_name"`
 		}
 		type chainResponse struct {
 			Host      string          `json:"host"`
@@ -2337,7 +2341,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
-		err := db.Raw(liveCTE + `
+		err := db.Raw(liveCTE+`
 			SELECT * FROM (
 				-- Ingress
 				SELECT
@@ -2449,9 +2453,9 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 		}
 		if len(backends) > 0 {
 			type svcRow struct {
-				Name        string `json:"name"`
-				Namespace   string `json:"namespace"`
-				ServiceType string `json:"service_type"`
+				Name         string `json:"name"`
+				Namespace    string `json:"namespace"`
+				ServiceType  string `json:"service_type"`
 				PortsJSON    string `gorm:"column:ports_json"`
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
@@ -2674,6 +2678,96 @@ const (
 	resolveTTL         = 24 * time.Hour
 )
 
+var (
+	hostDNSResolverAddr = resolveHostDNSResolverAddr()
+	hostDNSResolver     = &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, network, hostDNSResolverAddr)
+		},
+	}
+	hostInternalCIDRs = parseHostInternalCIDRs()
+)
+
+func resolveHostDNSResolverAddr() string {
+	raw := strings.TrimSpace(os.Getenv("SPAM_HOST_DNS_RESOLVER"))
+	if raw == "" {
+		return "9.9.9.9:53"
+	}
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return raw
+	}
+	return net.JoinHostPort(raw, "53")
+}
+
+func resolveCacheKey(host string) string {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(hostDNSResolverAddr))
+	for _, cidr := range hostInternalCIDRs {
+		_, _ = h.Write([]byte(cidr.String()))
+	}
+	return fmt.Sprintf("%s%x:%s", resolveCachePrefix, h.Sum64(), host)
+}
+
+func parseHostInternalCIDRs() []*net.IPNet {
+	raw := strings.TrimSpace(os.Getenv("SPAM_HOST_INTERNAL_CIDRS"))
+	if raw == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(entry)
+		if err != nil {
+			log.Printf("scam: ignoring invalid SPAM_HOST_INTERNAL_CIDRS entry %q: %v", entry, err)
+			continue
+		}
+		out = append(out, cidr)
+	}
+	return out
+}
+
+func hostInternalCIDRStrings() []string {
+	if len(hostInternalCIDRs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(hostInternalCIDRs))
+	for _, cidr := range hostInternalCIDRs {
+		out = append(out, cidr.String())
+	}
+	return out
+}
+
+func resolveHost(ctx context.Context, cs cache.Store, host string) resolveResult {
+	cacheKey := resolveCacheKey(host)
+	if cached, ok, _ := cache.GetJSON[resolveResult](ctx, cs, cacheKey); ok {
+		return cached
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	ips, err := hostDNSResolver.LookupHost(lookupCtx, host)
+	if err != nil {
+		res := resolveResult{Host: host, Error: "unresolvable"}
+		_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
+		return res
+	}
+
+	local := false
+	if len(ips) > 0 {
+		local = isPrivateIP(ips[0])
+	}
+
+	res := resolveResult{Host: host, IPs: ips, IsLocal: local}
+	_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
+	return res
+}
+
 // ResolveHostHandler does a DNS lookup for a given host and returns the IPs.
 // Used as a per-host fallback when HostsHandler's list response ships
 // without an inline resolve entry (first time a host is seen after
@@ -2688,29 +2782,7 @@ func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
 		}
 
 		ctx := r.Context()
-		cacheKey := resolveCachePrefix + host
-
-		if cached, ok, _ := cache.GetJSON[resolveResult](ctx, cs, cacheKey); ok {
-			writeJSON(w, http.StatusOK, cached)
-			return
-		}
-
-		ips, err := net.LookupHost(host)
-		if err != nil {
-			res := resolveResult{Host: host, Error: "unresolvable"}
-			_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
-			writeJSON(w, http.StatusOK, res)
-			return
-		}
-
-		local := false
-		if len(ips) > 0 {
-			local = isPrivateIP(ips[0])
-		}
-
-		res := resolveResult{Host: host, IPs: ips, IsLocal: local}
-		_ = cache.SetJSON(ctx, cs, cacheKey, res, resolveTTL)
-		writeJSON(w, http.StatusOK, res)
+		writeJSON(w, http.StatusOK, resolveHost(ctx, cs, host))
 	}
 }
 
@@ -2727,6 +2799,11 @@ func isPrivateIP(ipStr string) bool {
 	}
 	for _, r := range privateRanges {
 		if bytesCompare(ip.To16(), r.start.To16()) >= 0 && bytesCompare(ip.To16(), r.end.To16()) <= 0 {
+			return true
+		}
+	}
+	for _, cidr := range hostInternalCIDRs {
+		if cidr.Contains(ip) {
 			return true
 		}
 	}

@@ -141,6 +141,11 @@
 			updateSyncState(parsePayload(event));
 		});
 
+		appEventSource.addEventListener('vuln_meta_updated', (event) => {
+			const payload = parsePayload(event);
+			window.dispatchEvent(new CustomEvent('spam:vuln-meta-updated', { detail: payload }));
+		});
+
 		appEventSource.addEventListener('shutting_down', (event) => {
 			console.warn('sse shutting down', parsePayload(event));
 		});

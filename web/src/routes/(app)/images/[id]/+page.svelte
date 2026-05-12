@@ -7,8 +7,6 @@
 		ArrowLeft,
 		Container,
 		ExternalLink,
-		Loader2,
-		XCircle,
 		CheckCircle,
 		Clock,
 		Server,
@@ -23,6 +21,8 @@
 	} from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import ImageScanDetail from '$lib/components/ImageScanDetail.svelte';
+	import RunTable, { type RunTableItem } from '$lib/components/RunTable.svelte';
+	import VulnerabilitiesDialog, { type VulnerabilityDialogItem } from '$lib/components/VulnerabilitiesDialog.svelte';
 
 	type LinkedRepo = {
 		repo_id: string;
@@ -79,36 +79,14 @@
 	let error = $state('');
 	let activeTab = $state('scans');
 	let copied = $state(false);
+	let vulnDialogOpen = $state(false);
+	let vulnDialogLoading = $state(false);
+	let vulnDialogData = $state<VulnerabilityDialogItem[]>([]);
 
 	const shortDigest = (digest: string) => {
 		const i = digest.indexOf(':');
 		if (i < 0) return digest.slice(0, 12);
 		return digest.slice(0, i + 13);
-	};
-
-	const statusIcon = (s: string) => {
-		switch (s) {
-			case 'SUCCEEDED':
-				return CheckCircle;
-			case 'FAILED':
-				return XCircle;
-			case 'RUNNING':
-				return Loader2;
-			default:
-				return Clock;
-		}
-	};
-	const statusColor = (s: string) => {
-		switch (s) {
-			case 'SUCCEEDED':
-				return 'var(--success)';
-			case 'FAILED':
-				return 'var(--error)';
-			case 'RUNNING':
-				return 'var(--accent)';
-			default:
-				return 'var(--text-tertiary)';
-		}
 	};
 
 	const copyDigest = async () => {
@@ -135,6 +113,7 @@
 			}
 			image = await res.json();
 			latestScan = null;
+			vulnDialogData = [];
 			if (image?.latest_scan_id) {
 				const scanRes = await fetch(`/api/runs/${image.latest_scan_id}`, { credentials: 'include' });
 				if (scanRes.ok) latestScan = await scanRes.json();
@@ -171,15 +150,6 @@
 		if (!iso) return '—';
 		return new Date(iso).toLocaleDateString();
 	};
-	const formatDuration = (start: string, end?: string) => {
-		const s = new Date(start).getTime();
-		const e = end ? new Date(end).getTime() : Date.now();
-		const secs = Math.max(0, Math.floor((e - s) / 1000));
-		if (secs < 60) return `${secs}s`;
-		const m = Math.floor(secs / 60);
-		return `${m}m ${secs % 60}s`;
-	};
-
 	const clusterCount = $derived(
 		new Set((image?.cluster_usage ?? []).map((c) => c.cluster)).size
 	);
@@ -192,6 +162,46 @@
 	const severity = $derived(
 		image?.vuln_severity ?? { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 }
 	);
+	const scanRunTableItems = $derived<RunTableItem[]>(
+		(image?.scan_history ?? []).map((scan) => ({
+			id: scan.job_id,
+			href: `/runs/${scan.job_id}`,
+			status: scan.status,
+			started_at: scan.created_at,
+			finished_at: scan.finished_at,
+			badges: scan.vuln_count > 0
+				? [{ label: `${scan.vuln_count} vuln${scan.vuln_count === 1 ? '' : 's'}`, tone: 'warning' }]
+				: scan.status === 'SUCCEEDED'
+					? [{ label: 'clean', tone: 'success' }]
+					: []
+		}))
+	);
+
+	const openVulnDialog = async () => {
+		vulnDialogOpen = true;
+		if (vulnDialogData.length > 0) return;
+		vulnDialogLoading = true;
+		try {
+			const rows = latestScan?.image_vulns ?? [];
+			const byID = new Map<string, VulnerabilityDialogItem>();
+			for (const row of rows) {
+				if (!row?.vuln_id || byID.has(row.vuln_id)) continue;
+				byID.set(row.vuln_id, {
+					vuln_id: row.vuln_id,
+					severity: row.severity || 'UNKNOWN',
+					pkg_name: row.pkg_name || '',
+					installed_version: row.installed_version || '',
+					fixed_version: row.fixed_version || '',
+					title: row.title || '',
+					description: '',
+					sources: row.scanner ? [row.scanner] : []
+				});
+			}
+			vulnDialogData = Array.from(byID.values());
+		} finally {
+			vulnDialogLoading = false;
+		}
+	};
 </script>
 
 <svelte:head>
@@ -324,7 +334,11 @@
 				</div>
 
 				<!-- Vulnerabilities -->
-				<div class="space-y-3 metric-card rounded-2xl p-4">
+				<button
+					type="button"
+					class="space-y-3 metric-card w-full rounded-2xl p-4 text-left transition-colors hover:border-[var(--accent)]/50"
+					onclick={openVulnDialog}
+				>
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
 					<div class="grid grid-cols-2 gap-3">
 						<div>
@@ -352,7 +366,7 @@
 							</p>
 						</div>
 					</div>
-				</div>
+				</button>
 
 				<!-- Clusters -->
 				<div class="space-y-3 metric-card rounded-2xl p-4">
@@ -429,45 +443,7 @@
 								</p>
 							</div>
 						{:else}
-							<div class="space-y-3">
-								{#each image.scan_history ?? [] as s}
-									{@const Icon = statusIcon(s.status)}
-									<a
-										href={`/runs/${s.job_id}`}
-										class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]"
-									>
-										<div class="min-w-0 space-y-1">
-											<div class="flex items-center gap-2">
-												<span
-													class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium"
-													style={`background: ${statusColor(s.status)}1a; color: ${statusColor(s.status)}`}
-												>
-													<Icon size={12} class={s.status === 'RUNNING' ? 'animate-spin' : ''} />
-													{s.status}
-												</span>
-												<span class="text-xs text-[var(--text-muted)]">{formatDate(s.created_at)}</span>
-												{#if s.finished_at}
-													<span class="text-xs text-[var(--text-muted)]">
-														• {formatDuration(s.created_at, s.finished_at)}
-													</span>
-												{/if}
-											</div>
-											<p class="truncate text-xs text-[var(--text-secondary)]">
-												Run <span class="font-mono text-[var(--accent)]">{s.job_id.slice(0, 8)}</span>
-											</p>
-										</div>
-										<div class="flex items-center gap-2 text-xs">
-											{#if s.vuln_count > 0}
-												<span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300">
-													{s.vuln_count} vuln{s.vuln_count === 1 ? '' : 's'}
-												</span>
-											{:else if s.status === 'SUCCEEDED'}
-												<span class="rounded-full bg-green-500/10 px-2 py-0.5 text-green-300">clean</span>
-											{/if}
-										</div>
-									</a>
-								{/each}
-							</div>
+							<RunTable runs={scanRunTableItems} />
 						{/if}
 					{:else if activeTab === 'clusters'}
 						{#if (image.cluster_usage?.length ?? 0) === 0}
@@ -532,3 +508,5 @@
 		</article>
 	{/if}
 </div>
+
+<VulnerabilitiesDialog bind:open={vulnDialogOpen} loading={vulnDialogLoading} data={vulnDialogData} />

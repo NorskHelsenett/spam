@@ -1150,7 +1150,7 @@
 	<!-- Tables -->
 	{#if !loading && !error && clustersAll.length > 0}
 		{#if activeTab === 'clusters'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
 				<header class="flex items-start justify-between gap-4">
 					<div>
 						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
@@ -1269,7 +1269,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'images'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
 				{#if imageDetails.length > 0 || imageActiveFilterCount > 0 || imagesFetched || imagesInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>
@@ -1462,7 +1462,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
 				{#if hosts.length > 0 || hostActiveFilterCount > 0 || hostsFetched || hostsInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>
