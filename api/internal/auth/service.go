@@ -83,6 +83,13 @@ type userResponse struct {
 	EntraGroups []string               `json:"entra_groups,omitempty"`
 	Role        string                 `json:"role,omitempty"`
 	Approved    bool                   `json:"approved"`
+	// AccessToken is the user's persisted OIDC access token, surfaced
+	// here so the SPA can inspect/forward it during the ROR integration
+	// probe. Empty when the session predates the encrypted-token field
+	// or when no secrets key is configured. Treat as sensitive: anyone
+	// holding this can act as the user against downstream APIs until
+	// the token expires.
+	AccessToken string `json:"access_token,omitempty"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -336,6 +343,10 @@ func (s *Service) MeHandler() http.HandlerFunc {
 			Email:   session.Email,
 			Name:    session.Name,
 			Claims:  claims,
+		}
+
+		if tok, err := s.AccessTokenForRequest(r); err == nil {
+			response.AccessToken = tok
 		}
 
 		if session.UserID != "" {
