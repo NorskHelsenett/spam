@@ -17,6 +17,7 @@ type Signals struct {
 	AssetType string `json:"asset_type" gorm:"column:asset_type"`
 	AssetID   string `json:"asset_id"   gorm:"column:asset_id"`
 	AssetSlug string `json:"asset_slug" gorm:"column:asset_slug"`
+	ImageDigest string `json:"image_digest,omitempty" gorm:"column:image_digest"`
 
 	// Threat inputs.
 	CriticalCount     int64   `json:"critical_count"        gorm:"column:critical_count"`

@@ -1045,7 +1045,7 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 								{#each workloadImages as img}
 									<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
 										<div class="flex flex-wrap items-baseline justify-between gap-2">
-											<a href={img.digest ? `/images/${encodeURIComponent(img.digest)}` : `/images/${img.id}`} class="min-w-0 font-mono text-sm text-[var(--text-bright)] hover:text-[var(--accent)]">
+											<a href={`/images/${encodeURIComponent(img.digest)}`} class="min-w-0 font-mono text-sm text-[var(--text-bright)] hover:text-[var(--accent)]">
 												{img.registry}/{img.repository}
 												<span class="ml-1 text-xs text-[var(--text-tertiary)]">{img.digest.slice(0, 20)}…</span>
 											</a>

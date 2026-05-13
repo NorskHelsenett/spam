@@ -376,17 +376,19 @@ func loadAllRows(ctx context.Context, db *gorm.DB, p TriageParams) ([]Signals, *
 
 	q := `
 		SELECT
-			asset_type, asset_id, asset_slug,
+			ar.asset_type, ar.asset_id, ar.asset_slug,
+			COALESCE(d.digest, '') AS image_digest,
 			critical_count, high_count, kev_count, epss_max,
 			has_fix_for_critical, active_secret_count, internet_exposed,
 			signed_commits_pct, image_signed, scan_age_days, last_scan_at, has_sbom,
 			worst_dep_health_score, archived_dep_count, deprecated_dep_count,
 			max_major_behind, major_behind_dep_count
-		FROM asset_risk
+		FROM asset_risk ar
+		LEFT JOIN image_digests d ON ar.asset_type = 'image' AND ar.asset_id = d.id
 		WHERE
-		  (asset_type = 'repo'    AND ` + repoSQL + `)
-		   OR (asset_type = 'image'   AND ` + imageSQL + `)
-		   OR (asset_type = 'cluster' AND ` + clusterSQL + `)
+		  (ar.asset_type = 'repo'    AND ` + repoSQL + `)
+		   OR (ar.asset_type = 'image'   AND ` + imageSQL + `)
+		   OR (ar.asset_type = 'cluster' AND ` + clusterSQL + `)
 	`
 
 	var rows []Signals

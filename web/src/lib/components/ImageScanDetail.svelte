@@ -216,9 +216,9 @@
 					</div>
 				{/if}
 				<div class="mt-3 flex flex-wrap items-center gap-3">
-					{#if run.image_digest_id}
+					{#if run.image_digest}
 						<a
-							href={run.image_digest ? `/images/${encodeURIComponent(run.image_digest)}` : `/images/${run.image_digest_id}`}
+							href={`/images/${encodeURIComponent(run.image_digest)}`}
 							class="inline-flex items-center gap-2 rounded-lg border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-1.5 text-sm text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
 						>
 							<Container class="h-4 w-4" />

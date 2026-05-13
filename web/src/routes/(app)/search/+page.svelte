@@ -208,8 +208,8 @@
 			return;
 		}
 		if (r.type === 'image') {
-			if (r.value || r.image_id) {
-				goto(`/images/${encodeURIComponent(r.value ?? r.image_id)}`);
+			if (r.value) {
+				goto(`/images/${encodeURIComponent(r.value)}`);
 			} else {
 				goto('/clusters');
 			}

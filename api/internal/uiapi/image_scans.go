@@ -349,7 +349,7 @@ func parseBetterleaksArtifact(raw []byte, maxRows int) []ImageSecretListRow {
 	return out
 }
 
-// ImageDetailResponse aggregates everything the /app/images/{id} page
+// ImageDetailResponse aggregates everything the /app/images/{digest} page
 // needs in one round-trip: image identity, the claimed source repo,
 // where the image is running in your clusters, and a scan-history
 // list. The latest successful scan's full findings live under its
@@ -442,22 +442,15 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 		if err := db.WithContext(ctx).
 			Table("image_digests").
 			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
-			Where("id = ?", id).
+			Where("digest = ?", id).
+			Order("created_at DESC, id DESC").
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				if err := db.WithContext(ctx).
-					Table("image_digests").
-					Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
-					Where("digest = ?", id).
-					Order("created_at DESC, id DESC").
-					First(&img).Error; err != nil {
-					notFoundOrForbidden(w)
-					return
-				}
-			} else {
-				http.Error(w, "internal error", http.StatusInternalServerError)
+				notFoundOrForbidden(w)
 				return
 			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
 		}
 
 		// Image access inheritance is only granted when the source

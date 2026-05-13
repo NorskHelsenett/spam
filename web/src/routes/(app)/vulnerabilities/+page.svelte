@@ -69,6 +69,7 @@
 		type: 'repo' | 'image';
 		id: string;
 		slug: string;
+		digest?: string;
 	};
 
 	type VulnGroup = {
@@ -1097,9 +1098,9 @@
 									{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="8"></td></tr>{/if}
 									{#each filteredImages.slice(imageVirt.start, imageVirt.end) as img}
 										<tr
-											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest ? 'bg-[var(--hover-bg-subtle)]' : ''}"
 											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
-											onclick={() => openImageDrawer(img.digest_id)}
+											onclick={() => openImageDrawer(img.digest)}
 										>
 											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
 											<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>{img.image}</td>
@@ -1272,7 +1273,7 @@
 																<button
 																	type="button"
 																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
-																	onclick={() => openImageDrawer(a.id)}
+																		onclick={() => openImageDrawer(a.digest)}
 																>
 																	<Container class="h-3 w-3 shrink-0" />
 																	<span class="truncate">{a.slug}</span>
@@ -1307,7 +1308,7 @@
 																			<button
 																				type="button"
 																				class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
-																				onclick={() => openImageDrawer(a.id)}
+																					onclick={() => openImageDrawer(a.digest)}
 																			>
 																				<Container class="h-3 w-3 shrink-0" />
 																				<span class="truncate">{a.slug}</span>

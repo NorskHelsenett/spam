@@ -248,7 +248,8 @@
 	};
 
 	const fetchImagePreview = (result: ImageResult) => {
-		const key = result.value ?? result.image_id;
+		const key = result.value;
+		if (!key) return;
 		if (imagePreviewCache.has(key)) {
 			imagePreview = imagePreviewCache.get(key)!;
 			return;
@@ -313,7 +314,7 @@
 			else if (d.base_url) params.set('base_url', d.base_url);
 			goto(`/providers/repo?${params}`);
 		} else if (item.kind === 'image') {
-			goto(`/images/${encodeURIComponent(item.data.value ?? item.data.image_id)}`);
+			goto(`/images/${encodeURIComponent(item.data.value ?? '')}`);
 		} else {
 			goto(`/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
