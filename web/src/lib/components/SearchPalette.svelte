@@ -300,9 +300,13 @@
 		searchTimer = setTimeout(() => search(query), 180);
 	};
 
-	const selectItem = (item: SearchItem) => {
+	const selectItem = (item: SearchItem, opts?: { remote?: boolean }) => {
 		if (item.kind === 'repo') {
 			const d = item.data;
+			if (opts?.remote) {
+				openRemoteRepo(d);
+				return;
+			}
 			const params = new URLSearchParams({ provider: d.provider, path: d.org + '/' + d.slug });
 			if (d.id) params.set('repo_id', d.id);
 			if (d.provider_id) params.set('provider_id', d.provider_id);
@@ -325,7 +329,7 @@
 			e.preventDefault();
 			selectedIndex = Math.max(selectedIndex - 1, 0);
 		} else if (e.key === 'Enter' && flatItems[selectedIndex]) {
-			selectItem(flatItems[selectedIndex]);
+			selectItem(flatItems[selectedIndex], { remote: e.shiftKey });
 		}
 	};
 
@@ -357,6 +361,29 @@
 
 	const providerDisplay = (base_url: string, owner_path?: string) =>
 		base_url.replace(/^https?:\/\//, '') + (owner_path ? '/' + owner_path : '');
+
+	const providerUrl = (r: RepoResult) => {
+		if (r.base_url && r.owner_path) {
+			return `${r.base_url}/${r.owner_path}/${r.slug}`;
+		}
+		if (r.base_url) {
+			return `${r.base_url}/${r.org}/${r.slug}`;
+		}
+		const domain = { github: 'github.com', gitlab: 'gitlab.com' }[r.provider];
+		if (domain) return `https://${domain}/${r.org}/${r.slug}`;
+		return `https://${r.org}/${r.slug}`;
+	};
+
+	const advancedSearchUrl = () => {
+		const q = query.trim();
+		return q ? `/search?q=${encodeURIComponent(q)}` : '/search';
+	};
+
+	const openRemoteRepo = (repo: RepoResult) => {
+		if (!browser) return;
+		window.open(providerUrl(repo), '_blank', 'noopener,noreferrer');
+		close();
+	};
 
 
 	const repoGrouped = $derived.by(() => {
@@ -824,7 +851,7 @@
 								type="button"
 								onclick={() => {
 									close();
-									goto('/search');
+									goto(advancedSearchUrl());
 								}}
 								class="-mx-3 flex w-[calc(100%+1.5rem)] items-center justify-between gap-6 rounded-xl px-3 py-2 text-left transition-colors duration-150 hover:bg-[var(--hover-bg)]"
 							>
