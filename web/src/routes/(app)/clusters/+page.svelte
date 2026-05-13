@@ -591,11 +591,13 @@
 	onMount(() => {
 		if (!browser) return;
 		loadMain();
-		// Seed the unfiltered snapshot in parallel — loadMain will reuse
-		// its own response when no filter is active, but the parallel
-		// fetch covers the deep-link-with-?q= case where the filtered
-		// load would otherwise leave the page-level cards at zero.
-		loadUnfiltered();
+		// loadMain already populates clustersAll + hostSummaryAll when
+		// no filter is active (see the !clusterSearch.trim() branch in
+		// loadMain and the hostActiveFilterCount===0 branch in
+		// loadHostSummary). Only fire the parallel unfiltered fetch
+		// when there IS a deep-link search active — otherwise it's a
+		// pure duplicate of the loadMain fan-out.
+		if (clusterSearch.trim()) loadUnfiltered();
 
 		// Relative-time ticker only — purely a display refresh, no
 		// network calls.
