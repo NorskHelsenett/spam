@@ -8,6 +8,18 @@
 	import ClusterChainDrawer from '$lib/components/ClusterChainDrawer.svelte';
 	import ImageDrawer from '$lib/components/ImageDrawer.svelte';
 	import DeployScamDialog from '$lib/components/DeployScamDialog.svelte';
+	import { isAdmin as isAdminStore } from '$lib/stores/session';
+
+	// isAdmin gates the SCAM-deploy empty-state copy. Non-admin users
+	// with zero cluster access (typical when ROR hasn't granted them
+	// anything) should not see admin-targeted "Deploy a SCAM agent"
+	// instructions — that message is correct only when an admin lands
+	// on the page with an actually-empty inventory.
+	let isAdmin = $state(false);
+	$effect(() => {
+		const unsub = isAdminStore.subscribe((v) => (isAdmin = v));
+		return unsub;
+	});
 
 	// --- Virtual scroll helpers for tables ---
 	const ROW_HEIGHT = 48;
@@ -302,7 +314,8 @@
 		if (includeInactive) params.set('include_inactive', 'true');
 		const q = clusterSearch.trim();
 		if (q) params.set('q', q);
-		return `/api/clusters/summary?${params}`;
+		const qs = params.toString();
+		return qs ? `/api/clusters/summary?${qs}` : '/api/clusters/summary';
 	};
 
 	// Unfiltered cluster + host summaries feed the page-level metric
@@ -660,10 +673,16 @@
 	});
 
 	// Debounced cluster search → reload /clusters/summary with q=.
+	// Skip the initial run: $effect always fires once on mount, and
+	// onMount() already kicks loadMain() — without this guard the
+	// page triggers a duplicate /summary + /registry-distribution +
+	// /hosts/summary fan-out 200ms after open.
 	let clusterSearchTimer: ReturnType<typeof setTimeout> | null = null;
+	let initialClusterSearch = true;
 	$effect(() => {
 		const q = clusterSearch; // track
 		if (!browser) return;
+		if (initialClusterSearch) { initialClusterSearch = false; return; }
 		if (clusterSearchTimer) clearTimeout(clusterSearchTimer);
 		clusterSearchTimer = setTimeout(() => {
 			loadMain();
@@ -1068,7 +1087,7 @@
 				<Server class="h-12 w-12 text-[var(--error)]" />
 				<p class="mt-5 text-base font-medium text-[var(--text-secondary)]">{error}</p>
 			</div>
-		{:else if clustersAll.length === 0}
+		{:else if clustersAll.length === 0 && isAdmin}
 			<div class="flex flex-col items-center justify-center gap-5 py-24">
 				<Bot class="h-12 w-12 text-[var(--yellow)]" />
 				<p class="text-base font-medium text-[var(--text-secondary)]">No cluster data yet</p>
@@ -1083,6 +1102,14 @@
 				>
 					Show install instructions
 				</button>
+			</div>
+		{:else if clustersAll.length === 0}
+			<div class="flex flex-col items-center justify-center gap-4 py-24 text-center">
+				<Bot class="h-12 w-12 text-[var(--text-tertiary)]" />
+				<p class="text-base font-medium text-[var(--text-secondary)]">No clusters available</p>
+				<p class="max-w-md text-sm text-[var(--text-muted)]">
+					Your account doesn't have read access to any clusters yet. Ask an administrator to grant you access in ROR.
+				</p>
 			</div>
 		{:else}
 			<!-- Metric cards -->

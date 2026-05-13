@@ -170,8 +170,10 @@
 					return;
 				}
 
-				const data = await response.json();
-				isAdmin = data?.role === 'admin';
+				// loadSession populates the shared store so child pages
+				// (clusters, providers, etc.) can branch empty-state
+				// messaging on role without re-fetching /api/auth/me.
+				await loadSession();
 
 				if (!cancelled) {
 					startAppStream();
@@ -202,9 +204,14 @@
 	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
+	import { isAdmin as isAdminStore, loadSession } from '$lib/stores/session';
 
 let accountDialogOpen = $state(false);
 let isAdmin = $state(false);
+$effect(() => {
+	const unsub = isAdminStore.subscribe((v) => (isAdmin = v));
+	return unsub;
+});
 
 	// Primary nav — inventory + security overviews. Visible to all
 	// authenticated users. Admin-only actions (Runs, Settings) render
