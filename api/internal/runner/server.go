@@ -77,13 +77,13 @@ func (s *Server) Start(ctx context.Context) error {
 		r.Use(middleware.Timeout(60 * time.Second))
 		r.Get("/api/sboms/{id}/download", sbomDownloadHandler(s.db))
 		r.Get("/api/sbom-scan/next", sbomScanNextHandler(s.db))
-		r.Post("/api/sbom-scan/result/{sbom_id}", sbomScanResultHandler(s.db))
+		r.Post("/api/sbom-scan/result/{sbom_id}", sbomScanResultHandler(s.db, s.cache))
 		r.Get("/api/sbom-scan/manifests/{repo_id}", sbomScanManifestsHandler(s.db))
 		// Image-SBOM vuln revuln (grype). Scanner posts grype JSON here
 		// for IMAGE_DIGEST-bound SBOMs; the handler resolves the image
 		// digest from sbom_bindings and writes findings to
 		// image_vuln_findings via the existing grype parser.
-		r.Post("/api/sbom-scan/image-result/{sbom_id}", grypeImageResultHandler(s.db))
+		r.Post("/api/sbom-scan/image-result/{sbom_id}", grypeImageResultHandler(s.db, s.cache))
 		r.Post("/api/tool-versions", toolVersionsHandler(s.db))
 		// Image scanner endpoints — the dedicated spam-image-scanner pod
 		// leases IMAGE_SCAN jobs via /next, uploads artifacts via
