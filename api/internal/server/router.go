@@ -206,13 +206,6 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.With(providerAudit).Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
-
-				// ROR API probe — admin-only diagnostic that hits the
-				// candidate ROR endpoints with the caller's session
-				// access token + service ApiKey and echoes back the raw
-				// upstream response. Used to confirm endpoint shape and
-				// auth before wiring RORProvider into the ACL chain.
-				api.Get("/admin/ror/probe", uiapi.AdminRORProbeHandler(authService, rorClient))
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
 				api.Post("/admin/osv/scan", uiapi.AdminOSVScanHandler(db, authService))
 				api.Get("/admin/osv/scan/status", uiapi.AdminOSVScanStatusHandler(db, authService))
