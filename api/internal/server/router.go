@@ -316,20 +316,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
 
-				// Cluster query endpoints — SCAM inventory (namespaces,
-				// pods, images, hostnames, LB IPs). Gated via APIGuard
-				// on the enclosing group.
-				api.Get("/clusters/summary", scam.ClusterSummaryHandler(db))
-				api.Get("/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
-				api.Get("/clusters/exposure", scam.ExposureHandler(db))
-				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
-				api.Get("/clusters/chain", scam.ClusterChainHandler(db))
-				api.Get("/clusters/hosts", scam.HostsHandler(db, appCache))
-				api.Get("/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
-				api.Get("/clusters/hosts/chain", scam.HostChainHandler(db))
-				api.Get("/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
-				api.Get("/clusters/hosts/meta", scam.HostMetaHandler(appCache))
-				api.Get("/clusters/hosts/favicon", scam.HostFaviconHandler(appCache))
+				// Cluster query endpoints used to live here, but were
+				// promoted to the approved-only group below so regular
+				// users (no admin/global_reader role) can view the
+				// clusters their ROR ACL grants them access to. The
+				// handlers already filter rows via clusterACLFilterCol,
+				// so moving out of APIGuard is safe.
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
@@ -407,6 +399,34 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 					raw.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
 				})
 			})
+		})
+
+		// Approved-user group — endpoints whose data is fully ACL-filtered
+		// per handler so regular users (no admin/global_reader role) can
+		// see only the rows their grants allow. RORProvider drives the
+		// cluster visibility here; LocalProvider stays the source of truth
+		// for repo/image grants until those are migrated.
+		r.Group(func(approved chi.Router) {
+			approved.Use(middleware.RequestID)
+			approved.Use(middleware.RealIP)
+			approved.Use(middleware.Logger)
+			approved.Use(middleware.Recoverer)
+			approved.Use(cache.Middleware)
+			approved.Use(middleware.Timeout(60 * time.Second))
+			approved.Use(authService.ApprovedGuard)
+			approved.Use(aclProviderInjector)
+
+			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
+			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
+			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))
+			approved.Get("/api/clusters/images/detail", scam.ImageDetailHandler(db))
+			approved.Get("/api/clusters/chain", scam.ClusterChainHandler(db))
+			approved.Get("/api/clusters/hosts", scam.HostsHandler(db, appCache))
+			approved.Get("/api/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
+			approved.Get("/api/clusters/hosts/chain", scam.HostChainHandler(db))
+			approved.Get("/api/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
+			approved.Get("/api/clusters/hosts/meta", scam.HostMetaHandler(appCache))
+			approved.Get("/api/clusters/hosts/favicon", scam.HostFaviconHandler(appCache))
 		})
 	}
 

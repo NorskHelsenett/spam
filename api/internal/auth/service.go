@@ -610,6 +610,43 @@ func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject,
 	return subj, nil
 }
 
+// ApprovedGuard returns middleware that lets any approved session
+// through — no admin/global_reader role required. Use this for
+// route groups whose data is fully ACL-filtered per handler (cluster
+// inventory views today, where RORProvider grants drive visibility).
+//
+// Like APIGuard, it builds the acl.Subject and stashes the user's
+// access token in the request context so Provider implementations
+// can call downstream APIs without re-threading auth.Service. The
+// crucial difference is the lack of a role check: regular approved
+// users that have no admin/global_reader group still pass through,
+// so handler-level ACL filtering becomes the only gate.
+//
+// Do NOT use this for endpoints that don't filter by ACL — without
+// the role check, regular users would see data the per-handler
+// filter doesn't restrict.
+func (s *Service) ApprovedGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, err := s.loadSession(r)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		subj, err := s.buildSubject(r.Context(), session.UserID)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		ctx := acl.WithSubject(r.Context(), subj)
+		if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+			ctx = acl.WithAccessToken(ctx, tok)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 // AdminGuard restricts a subrouter to admin sessions only. Use this to
 // wrap groups of endpoints whose data would leak credentials or secret
 // values to global_reader (e.g. /api/secrets/*, raw run-secret bodies).
