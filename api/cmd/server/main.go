@@ -267,10 +267,15 @@ func run() error {
 	// always-on without a feature gate.
 	routerOpts.RORClient = ror.New(cfg.ROR.BaseURL)
 
-	// ACL chain: LocalProvider reads acl_grants. Future stages
-	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
+	// ACL chain: LocalProvider reads acl_grants, RORProvider derives
+	// cluster grants from the NHN ROR ACL API (cached per user). Both
+	// contribute under ScopeCluster; LocalProvider remains the sole
+	// source for repo/image grants until those are migrated.
 	routerOpts.ACLProvider = &acl.ChainProvider{
-		Providers: []acl.Provider{acl.NewLocalProvider(gormDB)},
+		Providers: []acl.Provider{
+			acl.NewLocalProvider(gormDB),
+			acl.NewRORProvider(routerOpts.RORClient, routerOpts.Cache),
+		},
 	}
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {

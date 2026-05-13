@@ -57,6 +57,7 @@ func AdminRORProbeHandler(authService *auth.Service, client *ror.Client) http.Ha
 			path   string
 			body   any
 		}{
+			{"acl_lookup", "GET", "/v1/acl/lookup", nil},
 			{"clusters_filter_empty", "POST", "/v1/clusters/filter", emptyFilter},
 			{"acl_filter_empty", "POST", "/v1/acl/filter", emptyFilter},
 			{"acl_scopes", "GET", "/v1/acl/scopes", nil},

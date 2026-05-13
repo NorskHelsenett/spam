@@ -83,13 +83,6 @@ type userResponse struct {
 	EntraGroups []string               `json:"entra_groups,omitempty"`
 	Role        string                 `json:"role,omitempty"`
 	Approved    bool                   `json:"approved"`
-	// AccessToken is the user's persisted OIDC access token, surfaced
-	// here so the SPA can inspect/forward it during the ROR integration
-	// probe. Empty when the session predates the encrypted-token field
-	// or when no secrets key is configured. Treat as sensitive: anyone
-	// holding this can act as the user against downstream APIs until
-	// the token expires.
-	AccessToken string `json:"access_token,omitempty"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -301,6 +294,13 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			} else {
 				log.Printf("encrypt session access token: %v", err)
 			}
+			if token.RefreshToken != "" {
+				if blob, err := providerconfig.EncryptToken(s.secretsKey, token.RefreshToken); err == nil {
+					session.RefreshTokenEnc = blob
+				} else {
+					log.Printf("encrypt session refresh token: %v", err)
+				}
+			}
 		}
 
 		if err := s.db.Create(&session).Error; err != nil {
@@ -343,10 +343,6 @@ func (s *Service) MeHandler() http.HandlerFunc {
 			Email:   session.Email,
 			Name:    session.Name,
 			Claims:  claims,
-		}
-
-		if tok, err := s.AccessTokenForRequest(r); err == nil {
-			response.AccessToken = tok
 		}
 
 		if session.UserID != "" {
@@ -437,18 +433,18 @@ func (s *Service) LoadSession(r *http.Request) (*Session, error) {
 	return s.loadSession(r)
 }
 
-// AccessTokenForRequest decrypts the EntraID access token persisted on
-// the caller's session and returns it for use against downstream APIs
-// (e.g. ROR). Returns ("", nil) when no token is stored — callers must
-// be prepared for that case (no secrets key configured at boot, or
-// session predates this feature).
+// AccessTokenForRequest returns the user's OIDC access token for
+// downstream-API calls (e.g. ROR), auto-refreshing it via the stored
+// refresh token when it has expired or is within the oauth2 library's
+// refresh window. The rotation is persisted back to the session row
+// so other replicas see the new token on their next read.
 //
-// Errors are reserved for "session present but token decode failed",
-// which a caller may want to surface to the user as "please re-login".
-// An expired token is returned anyway; the caller decides whether to
-// use it as-is, refresh it, or reject. Right now we have no refresh
-// flow, so the access token is good for at most the OIDC token
-// lifetime (typically 60–90 min for Entra).
+// Returns ("", nil) when no secrets key is configured, when the
+// session has no encrypted token (predates this feature), or when
+// refresh fails because the refresh token has been revoked/expired —
+// caller treats "" as "downstream auth unavailable, degrade quietly."
+// A non-nil error is reserved for decode/decrypt failures, where a
+// caller may want to log + surface a "please re-login" hint.
 func (s *Service) AccessTokenForRequest(r *http.Request) (string, error) {
 	if s.secretsKey == nil {
 		return "", nil
@@ -460,11 +456,62 @@ func (s *Service) AccessTokenForRequest(r *http.Request) (string, error) {
 	if len(session.AccessTokenEnc) == 0 {
 		return "", nil
 	}
-	tok, err := providerconfig.DecryptToken(s.secretsKey, session.AccessTokenEnc)
+	access, err := providerconfig.DecryptToken(s.secretsKey, session.AccessTokenEnc)
 	if err != nil {
 		return "", fmt.Errorf("decrypt access token: %w", err)
 	}
-	return tok, nil
+
+	// Without a refresh token we just return whatever we have. The
+	// caller is responsible for handling 401s if the access token has
+	// expired upstream.
+	if len(session.RefreshTokenEnc) == 0 {
+		return access, nil
+	}
+
+	refresh, err := providerconfig.DecryptToken(s.secretsKey, session.RefreshTokenEnc)
+	if err != nil {
+		return access, nil // best-effort — fall back to current access
+	}
+
+	// oauth2.TokenSource refreshes when the token's Expiry is within
+	// ~10s of now. The library does the dance against the OIDC token
+	// endpoint and returns a new token if rotation happened.
+	tok := &oauth2.Token{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		Expiry:       session.AccessTokenExp,
+	}
+	fresh, err := s.oauthConfig.TokenSource(r.Context(), tok).Token()
+	if err != nil {
+		// Refresh failed (revoked, expired, network) — fall back to
+		// the current token. Downstream call will 401 if it's truly
+		// dead, and the SPA can prompt re-login then.
+		log.Printf("refresh access token for user %s: %v", session.UserID, err)
+		return access, nil
+	}
+	if fresh.AccessToken == access {
+		return access, nil
+	}
+
+	// Token rotated. Persist the new values so concurrent / next-pod
+	// reads pick them up. Best-effort: a write failure doesn't break
+	// the current request, the new token is still usable in-memory.
+	updates := map[string]any{}
+	if blob, err := providerconfig.EncryptToken(s.secretsKey, fresh.AccessToken); err == nil {
+		updates["access_token_enc"] = blob
+		updates["access_token_exp"] = fresh.Expiry
+	}
+	if fresh.RefreshToken != "" && fresh.RefreshToken != refresh {
+		if blob, err := providerconfig.EncryptToken(s.secretsKey, fresh.RefreshToken); err == nil {
+			updates["refresh_token_enc"] = blob
+		}
+	}
+	if len(updates) > 0 {
+		if err := s.db.WithContext(r.Context()).Model(&Session{}).Where("id = ?", session.ID).Updates(updates).Error; err != nil {
+			log.Printf("persist refreshed access token: %v", err)
+		}
+	}
+	return fresh.AccessToken, nil
 }
 
 // SessionInfo returns the minimal session snapshot for SSE/auth flows.
@@ -528,7 +575,17 @@ func (s *Service) APIGuard(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r.WithContext(acl.WithSubject(r.Context(), subj)))
+		ctx := acl.WithSubject(r.Context(), subj)
+
+		// Stash the (possibly refreshed) access token so Provider
+		// implementations can call downstream APIs on the user's
+		// behalf. Errors here are non-fatal — providers degrade to
+		// "no grants from this source" when the token is missing.
+		if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+			ctx = acl.WithAccessToken(ctx, tok)
+		}
+
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -126,3 +126,94 @@ type SortMetadata struct {
 	Field string `json:"field,omitempty"`
 	Order int    `json:"order,omitempty"`
 }
+
+// GlobalScopeSubject is the magic subject id used by ROR for global
+// access grants. When `scopes.ror.subject.globalscope.<action> = true`,
+// the user has that access against every resource in the system.
+const GlobalScopeSubject = "globalscope"
+
+// LookupResponse mirrors the body returned by GET /v1/acl/lookup.
+// Shape (per the ROR team):
+//
+//	{
+//	  "scopes": {
+//	    "<scope>": {              // "cluster", "ror", "project", ...
+//	      "subject": {
+//	        "<subject-id>": {     // cluster id, or "globalscope"
+//	          "read": bool,
+//	          "create": bool,
+//	          "update": bool,
+//	          "delete": bool,
+//	          "owner": bool,
+//	          "kuberneteslogon": bool
+//	        }
+//	      }
+//	    }
+//	  }
+//	}
+//
+// We deserialize the full permission set so V2 work (write-flavoured
+// guards, kubeconfig flows) can reuse this without another round trip.
+type LookupResponse struct {
+	Scopes map[string]LookupScope `json:"scopes"`
+}
+
+// LookupScope is the per-scope envelope; `subject` is keyed by the
+// resource id (cluster id, project id, etc.) — or GlobalScopeSubject
+// when the grant is system-wide.
+type LookupScope struct {
+	Subject map[string]LookupAccess `json:"subject"`
+}
+
+// LookupAccess is the per-subject permission tuple. All actions are
+// captured so we don't have to re-call the endpoint for write checks
+// later.
+type LookupAccess struct {
+	Read            bool `json:"read"`
+	Create          bool `json:"create"`
+	Update          bool `json:"update"`
+	Delete          bool `json:"delete"`
+	Owner           bool `json:"owner"`
+	KubernetesLogon bool `json:"kuberneteslogon"`
+}
+
+// LookupACL issues GET /v1/acl/lookup?scope=&access= and decodes the
+// response into a typed LookupResponse. Pass scope="" / access="" to
+// omit the filter — callers typically pass scope="cluster" plus
+// access="read" for the cluster-visibility flow.
+func (c *Client) LookupACL(ctx context.Context, accessToken, scope, access string) (*LookupResponse, error) {
+	if c == nil {
+		return nil, fmt.Errorf("ror client not configured")
+	}
+	path := "/v1/acl/lookup"
+	q := []string{}
+	if scope != "" {
+		q = append(q, "scope="+scope)
+	}
+	if access != "" {
+		q = append(q, "access="+access)
+	}
+	if len(q) > 0 {
+		path += "?" + strings.Join(q, "&")
+	}
+
+	res, err := c.Do(ctx, accessToken, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status < 200 || res.Status >= 300 {
+		body := res.BodyText
+		if body == "" && len(res.Body) > 0 {
+			body = string(res.Body)
+		}
+		return nil, fmt.Errorf("ror lookup: status %d: %s", res.Status, body)
+	}
+	if len(res.Body) == 0 {
+		return &LookupResponse{}, nil
+	}
+	var out LookupResponse
+	if err := json.Unmarshal(res.Body, &out); err != nil {
+		return nil, fmt.Errorf("decode lookup response: %w", err)
+	}
+	return &out, nil
+}
