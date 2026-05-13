@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
+	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink, ChevronDown } from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -258,6 +258,7 @@
 	// passed to /api/vuln/list as epss_min. EPSS is FIRST.org's daily
 	// 0–1 prediction of exploitation in the next 30 days.
 	let vulnEPSSMin = '';
+	let expandedVulns = new Set<string>();
 
 	const vulnEPSSOptions: SelectOption[] = [
 		{ value: '', label: 'Any' },
@@ -379,6 +380,14 @@
 	const openRepo = (repoId: string) => {
 		if (!repoId) return;
 		goto(`/providers/repo?repo_id=${encodeURIComponent(repoId)}`);
+	};
+
+	const toggleVulnAssets = (vulnId: string) => {
+		if (!vulnId) return;
+		const next = new Set(expandedVulns);
+		if (next.has(vulnId)) next.delete(vulnId);
+		else next.add(vulnId);
+		expandedVulns = next;
 	};
 
 	const severityClass = (s: string) => {
@@ -1193,7 +1202,8 @@
 									{#each vulnRows as row (row.idx)}
 										{@const g = row.group}
 										{#if g}
-											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style="height:{VULN_ROW_HEIGHT}px; max-height:{VULN_ROW_HEIGHT}px">
+											{@const isExpanded = expandedVulns.has(g.vuln_id)}
+											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style={isExpanded ? '' : `height:${VULN_ROW_HEIGHT}px; max-height:${VULN_ROW_HEIGHT}px`}>
 												<td class="px-5 py-3 overflow-hidden">
 													<div class="flex flex-wrap items-center gap-2 overflow-hidden">
 														<a
@@ -1267,14 +1277,55 @@
 																	<Container class="h-3 w-3 shrink-0" />
 																	<span class="truncate">{a.slug}</span>
 																</button>
-															{/if}
-														{/each}
+																{/if}
+															{/each}
 														{#if g.assets.length > 3}
-															<a
-																href={vulnDetailHref(g.vuln_id)}
-																class="text-xs text-[var(--text-muted)] hover:text-[var(--accent)] hover:underline"
-																title="See all {g.assets.length} affected assets"
-															>+{g.assets.length - 3} more</a>
+															{#if !isExpanded}
+																<button
+																	type="button"
+																	class="inline-flex items-center gap-1 self-start text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+																	aria-expanded={isExpanded}
+																	title="Show all {g.assets.length} affected assets"
+																	onclick={() => toggleVulnAssets(g.vuln_id)}
+																>
+																	<span>+{g.assets.length - 3} more</span>
+																	<ChevronDown class="h-3 w-3 transition-transform duration-200" />
+																</button>
+															{:else}
+																<div transition:slide={{ duration: 180, easing: cubicOut }} class="mt-1 flex flex-col gap-1 overflow-hidden">
+																	{#each g.assets.slice(3) as a}
+																		{#if a.type === 'repo'}
+																			<button
+																				type="button"
+																				class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline truncate"
+																				onclick={() => openRepo(a.id)}
+																			>
+																				<GitBranch class="h-3 w-3 shrink-0" />
+																				<span class="truncate">{a.slug}</span>
+																			</button>
+																		{:else}
+																			<button
+																				type="button"
+																				class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
+																				onclick={() => openImageDrawer(a.id)}
+																			>
+																				<Container class="h-3 w-3 shrink-0" />
+																				<span class="truncate">{a.slug}</span>
+																			</button>
+																		{/if}
+																	{/each}
+																</div>
+																<button
+																	type="button"
+																	class="inline-flex items-center gap-1 self-start text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+																	aria-expanded={isExpanded}
+																	title="Hide extra affected assets"
+																	onclick={() => toggleVulnAssets(g.vuln_id)}
+																>
+																	<span>Show less</span>
+																	<ChevronDown class="h-3 w-3 rotate-180 transition-transform duration-200" />
+																</button>
+															{/if}
 														{/if}
 													</div>
 												</td>
