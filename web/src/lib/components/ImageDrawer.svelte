@@ -122,7 +122,7 @@
 			</div>
 			<a
 				class="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 px-2.5 text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
-				href={`/images/${imageId}`}
+				href={detail?.digest ? `/images/${encodeURIComponent(detail.digest)}` : `/images/${imageId}`}
 				title="Open full image page"
 			>
 				Full page

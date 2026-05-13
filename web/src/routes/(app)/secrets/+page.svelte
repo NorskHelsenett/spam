@@ -104,7 +104,10 @@
 		if (days < 30) return `${days}d ago`;
 		return `${Math.floor(days / 30)}mo ago`;
 	};
-	const openImage = (id: string) => { if (id) goto(`/images/${id}`); };
+	const openImage = (id: string, digest?: string) => {
+		const ref = digest || id;
+		if (ref) goto(`/images/${encodeURIComponent(ref)}`);
+	};
 
 	const COLORS = [
 		'var(--red)',
@@ -741,7 +744,7 @@
 								{#each filteredImageSecrets as row}
 									<tr
 										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
-										onclick={() => openImage(row.image_id)}
+										onclick={() => openImage(row.image_id, row.digest)}
 									>
 										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={row.registry}>{row.registry}</td>
 										<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={row.repository}>{row.repository}</td>

@@ -106,7 +106,7 @@
 		loading = true;
 		error = '';
 		try {
-			const res = await fetch(`/api/images/${id}`, { credentials: 'include' });
+			const res = await fetch(`/api/images/${encodeURIComponent(id)}`, { credentials: 'include' });
 			if (!res.ok) {
 				error = res.status === 404 ? 'Image not found' : 'Failed to load image';
 				return;
