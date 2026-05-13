@@ -17,10 +17,9 @@ import (
 //   - POST /v1/acl/filter      — paginated ACL list
 //   - GET  /v1/acl/scopes      — scope catalog (sanity-check auth path)
 //
-// Uses the caller's persisted EntraID access token + the configured
-// service API key. Admin-only; output includes the raw upstream body
-// (HTTP status, headers, JSON), so it's not safe to expose more
-// broadly.
+// Uses the caller's persisted EntraID access token. Admin-only;
+// output includes the raw upstream body (HTTP status, headers, JSON),
+// so it's not safe to expose more broadly.
 func AdminRORProbeHandler(authService *auth.Service, client *ror.Client) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
@@ -28,7 +27,7 @@ func AdminRORProbeHandler(authService *auth.Service, client *ror.Client) http.Ha
 			return
 		}
 		if client == nil {
-			http.Error(w, "ROR client not configured (set ROR_BASE_URL / ROR_API_KEY)", http.StatusServiceUnavailable)
+			http.Error(w, "ROR client not configured", http.StatusServiceUnavailable)
 			return
 		}
 
@@ -76,9 +75,8 @@ func AdminRORProbeHandler(authService *auth.Service, client *ror.Client) http.Ha
 		}
 
 		writeJSON(w, http.StatusOK, map[string]any{
-			"base_url":    client.BaseURL,
-			"api_key_set": client.APIKey != "",
-			"results":     results,
+			"base_url": client.BaseURL,
+			"results":  results,
 		})
 	}
 }

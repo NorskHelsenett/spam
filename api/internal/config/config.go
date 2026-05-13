@@ -29,12 +29,13 @@ type Config struct {
 	ROR                RORConfig
 }
 
-// RORConfig configures the optional integration with the NHN ROR API.
-// When BaseURL is empty the integration is disabled — the admin probe
-// endpoint returns 503 and no RORProvider is appended to the ACL chain.
+// RORConfig configures the integration with the NHN ROR API. The
+// client is always built; BaseURL is an optional override for tests
+// or staging — production defaults to https://api.ror.nhn.no via
+// ror.New. Auth is the user's session-stored EntraID token only;
+// no service API key is forwarded.
 type RORConfig struct {
 	BaseURL string
-	APIKey  string
 }
 
 // OIDCConfig captures configuration for the OIDC login flow and session cookies.
@@ -89,7 +90,6 @@ func Load() (Config, error) {
 
 	cfg.ROR = RORConfig{
 		BaseURL: strings.TrimSpace(os.Getenv("ROR_BASE_URL")),
-		APIKey:  strings.TrimSpace(os.Getenv("ROR_API_KEY")),
 	}
 
 	return cfg, nil

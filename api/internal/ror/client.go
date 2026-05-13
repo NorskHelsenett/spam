@@ -3,12 +3,10 @@
 // stage that derives a user's accessible clusters from ROR ACLs;
 // other consumers may follow.
 //
-// Auth: ROR uses two headers in tandem.
-//   - Authorization: Bearer <user-entra-id-access-token>
-//   - X-API-KEY:     <service-api-key>
-//
-// The user token is supplied per-request (taken from the caller's
-// session); the API key is configured on the Client at boot.
+// Auth: the user's EntraID bearer token is forwarded per-request as
+// `Authorization: Bearer <token>`. ROR's Swagger documents an
+// additional X-API-KEY header, but in practice the user token alone
+// is accepted, so no service-side key is wired here.
 package ror
 
 import (
@@ -25,20 +23,17 @@ import (
 // Client is a thin authenticated HTTP client for the ROR API.
 type Client struct {
 	BaseURL    string
-	APIKey     string
 	HTTPClient *http.Client
 }
 
-// New builds a client with sensible defaults. baseURL defaults to the
-// production endpoint when empty; apiKey may be empty for local
-// testing where ROR has been configured to skip the X-API-KEY check.
-func New(baseURL, apiKey string) *Client {
+// New builds a client. baseURL defaults to the production endpoint
+// (https://api.ror.nhn.no) when empty; tests and staging can override.
+func New(baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = "https://api.ror.nhn.no"
 	}
 	return &Client{
 		BaseURL:    strings.TrimRight(baseURL, "/"),
-		APIKey:     apiKey,
 		HTTPClient: &http.Client{Timeout: 15 * time.Second},
 	}
 }
@@ -77,9 +72,6 @@ func (c *Client) Do(ctx context.Context, accessToken, method, path string, body 
 	}
 	if accessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+accessToken)
-	}
-	if c.APIKey != "" {
-		req.Header.Set("X-API-KEY", c.APIKey)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")

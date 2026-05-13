@@ -260,12 +260,12 @@ func run() error {
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	routerOpts.SecretsKey = cfg.ProviderSecretsKey
 
-	// ROR API client — only built when ROR_BASE_URL is set so dev
-	// envs without ROR access don't accidentally hit production.
-	if cfg.ROR.BaseURL != "" {
-		routerOpts.RORClient = ror.New(cfg.ROR.BaseURL, cfg.ROR.APIKey)
-		log.Printf("ROR client configured: base_url=%s api_key_set=%t", cfg.ROR.BaseURL, cfg.ROR.APIKey != "")
-	}
+	// ROR API client — always built; defaults to api.ror.nhn.no when
+	// ROR_BASE_URL is unset. Auth is per-user (the session-stored
+	// EntraID token); a user without ROR access just gets 401s
+	// surfaced through /api/me/clusters, so this is safe to leave
+	// always-on without a feature gate.
+	routerOpts.RORClient = ror.New(cfg.ROR.BaseURL)
 
 	// ACL chain: LocalProvider reads acl_grants. Future stages
 	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
