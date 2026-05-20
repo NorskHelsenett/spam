@@ -273,8 +273,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
 
-				// Triage — asset-centric "fix this now" dashboard backing /app.
-				api.Get("/triage", uiapi.TriageHandler(db, authService))
+				// Triage is now registered in the approved group below —
+				// the handler scopes repo/image/cluster rows independently
+				// via ReadableRepoClause / ReadableImageClause /
+				// readableClusterIDSet, so cluster-only ROR users land on
+				// a non-empty triage instead of bouncing off APIGuard's
+				// admin/global_reader gate.
 
 				// Ecosystems endpoint
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService, appCache))
@@ -344,10 +348,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/image-scans/{job_id}/artifacts/{artifact_id}/download",
 					uiapi.ImageScanArtifactDownloadHandler(db, authService))
 
-				// Image-as-first-class-entity routes: image profile page
-				// and the reverse lookup from a repo to all images built
-				// from it (matched via cached source_repo_id).
-				api.Get("/images/{id}", uiapi.ImageDetailHandler(db, authService))
+				// /api/images/{id} moved to the approved group below so
+				// cluster-only users can open the image profile for a
+				// container running in one of their clusters. The
+				// handler now uses canReadImageByID, which honors the
+				// cluster-image inheritance branch in
+				// acl.ReadableImageClause.
 				api.Get("/repos/{repo_id}/images", uiapi.RepoImagesHandler(db, authService))
 				api.Get("/repos/{repo_id}/workloads", uiapi.RepoWorkloadsHandler(db, authService))
 
@@ -362,19 +368,16 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				}
 			})
 
-			priv.Route("/api/vuln", func(v chi.Router) {
-				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
-				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
-				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
-				v.Get("/list", uiapi.VulnListHandler(db, authService))
-				v.Get("/facets", uiapi.VulnFacetsHandler(db, authService))
-			})
-			// /api/vulnerabilities/{vuln_id} — full detail view.
-			// Kept separate from /api/vuln/* because the plural form
-			// matches the /app/vulnerabilities/{vuln_id} route and
-			// resource-style paths, whereas /api/vuln/* is the list-
-			// oriented dashboard namespace.
-			priv.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
+			// /api/vuln/trend stays under APIGuard — its data source
+			// (vuln_dashboard_snapshots) is a fleet-global daily
+			// rollup with no per-asset breakdown, so there's no way
+			// to scope the series to a cluster-only user's image
+			// set. Frontend hides the chart for that persona.
+			priv.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
+			// Other /api/vuln/* endpoints + /api/vulnerabilities/{id}
+			// moved to the approved group below; each handler ACL-
+			// scopes its own rows so APIGuard's admin/global_reader
+			// gate is no longer needed.
 			// /api/secrets is split into two trust bands. Aggregate
 			// endpoints (counts + trends + per-asset tallies) carry
 			// no credential text and so are safe for global_readers.
@@ -423,6 +426,20 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// side secrets (/api/secrets/table|stats|trend) stay in
 			// the AdminOrGlobalReader band above.
 			approved.Get("/api/secrets/images", uiapi.ImageSecretsTableHandler(db, authService))
+
+			// Dashboard + vulnerability surfaces that scope rows per
+			// subject through ReadableRepoClause / ReadableImageClause
+			// (which now OR-s in cluster_image_inventory). Each handler
+			// is responsible for its own filtering — APIGuard's role
+			// gate is intentionally not in this group, so adding a
+			// new endpoint here without ACL filtering would leak data.
+			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
+			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
+			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))
+			approved.Get("/api/vuln/list", uiapi.VulnListHandler(db, authService))
+			approved.Get("/api/vuln/facets", uiapi.VulnFacetsHandler(db, authService))
+			approved.Get("/api/vuln/repos", uiapi.VulnReposHandler(db, authService))
+			approved.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
 
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))

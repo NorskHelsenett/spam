@@ -204,6 +204,50 @@ func readableRepoIDSet(r *http.Request, db *gorm.DB) (map[string]struct{}, bool,
 	return set, false, nil
 }
 
+// canReadImageByID tests whether the caller can read a specific
+// image_digests row. Honors all three access paths in
+// acl.ReadableImageClause:
+//
+//   - admin / global_reader            → always
+//   - explicit image grant             → registry / repository / digest match
+//   - repo-inheritance (verified+source) → ReadableRepoClause covers it
+//   - cluster-inheritance               → image runs in a cluster the
+//     caller has cluster_id grants on (via cluster_image_inventory)
+//
+// Used by per-resource handlers (image detail) that can't apply the
+// clause as a WHERE filter and need a simple yes/no.
+func canReadImageByID(r *http.Request, db *gorm.DB, imageID string) (bool, error) {
+	if imageID == "" {
+		return false, nil
+	}
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return true, nil
+	}
+	clause, err := acl.ReadableImageClause(r.Context(), acl.ProviderFromRequest(r), subj, "d")
+	if err != nil {
+		return false, err
+	}
+	if clause.Unrestricted {
+		return true, nil
+	}
+	if clause.Deny() {
+		return false, nil
+	}
+	// EXISTS over image_digests with the clause spliced in. A non-zero
+	// count means at least one of the OR branches in ReadableImageClause
+	// matched — that's the same gate every other ACL-aware handler uses.
+	var n int64
+	q := db.WithContext(r.Context()).
+		Table("image_digests AS d").
+		Where("d.id = ?", imageID).
+		Where(clause.SQL, clause.Args...)
+	if err := q.Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // canReadSBOM resolves an SBOM to its bound repo and delegates to
 // canReadRepoByID. For REPO_COMMIT bindings, the owning repo is
 // reached through repo_commits. For IMAGE_DIGEST bindings, access is
