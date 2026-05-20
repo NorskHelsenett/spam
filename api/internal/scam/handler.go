@@ -1030,6 +1030,22 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				preGroupArgs = append(preGroupArgs, values...)
 			}
 		}
+		// Cluster multi-select. Mirrors the Hosts tab cluster filter so
+		// the Images tab can scope down to one (or several) clusters
+		// without round-tripping a per-cluster endpoint.
+		if rawClusters := r.URL.Query().Get("cluster_ids"); rawClusters != "" {
+			values := []any{}
+			for _, v := range strings.Split(rawClusters, ",") {
+				if v = strings.TrimSpace(v); v != "" {
+					values = append(values, v)
+				}
+			}
+			if len(values) > 0 {
+				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
+				preGroupWhere += `AND cii.cluster_id IN (` + placeholders + `) `
+				preGroupArgs = append(preGroupArgs, values...)
+			}
+		}
 
 		// Sort allowlist — never interpolate user input into ORDER BY.
 		// The vuln_weight column in the inventory_with_vulns CTE lets

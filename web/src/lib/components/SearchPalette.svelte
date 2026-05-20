@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope, Container } from 'lucide-svelte';
+	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope, Container, Server, Globe, Boxes } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import VulnBadges from '$lib/components/VulnBadges.svelte';
 
@@ -35,10 +35,22 @@
 		slug?: string;   // repository (or linked repo slug)
 	};
 
+	type ClusterResult = {
+		cluster_id: string;
+		cluster: string;
+		environment: string;
+		containers: number;
+		images: number;
+		namespaces: number;
+		ingress_count: number;
+		last_seen: string;
+	};
+
 	type SearchItem =
 		| { kind: 'repo'; data: RepoResult }
 		| { kind: 'component'; data: ComponentResult }
-		| { kind: 'image'; data: ImageResult };
+		| { kind: 'image'; data: ImageResult }
+		| { kind: 'cluster'; data: ClusterResult };
 
 	type Contributor = {
 		login?: string;
@@ -75,6 +87,7 @@
 	let repoResults = $state<RepoResult[]>([]);
 	let componentResults = $state<ComponentResult[]>([]);
 	let imageResults = $state<ImageResult[]>([]);
+	let clusterResults = $state<ClusterResult[]>([]);
 	let loading = $state(false);
 	let loadingMore = $state(false);
 	let hasMore = $state(false);
@@ -97,6 +110,9 @@
 
 	const flatItems = $derived.by<SearchItem[]>(() => {
 		const items: SearchItem[] = [];
+		for (const c of clusterResults) {
+			items.push({ kind: 'cluster', data: c });
+		}
 		for (const [, group] of repoGrouped) {
 			for (const r of group.repos) {
 				items.push({ kind: 'repo', data: r });
@@ -121,6 +137,7 @@
 		repoResults = [];
 		componentResults = [];
 		imageResults = [];
+		clusterResults = [];
 		repoPreview = null;
 		contributors = [];
 		imagePreview = null;
@@ -134,6 +151,7 @@
 			repoResults = [];
 			componentResults = [];
 			imageResults = [];
+			clusterResults = [];
 			repoPreview = null;
 			hasMore = false;
 			repoOffset = 0;
@@ -142,13 +160,18 @@
 		loading = true;
 		repoOffset = 0;
 		try {
-			const [repoRes, compRes, imgRes] = await Promise.all([
+			const [repoRes, compRes, imgRes, clusterRes] = await Promise.all([
 				fetch(`/api/repos/search?q=${encodeURIComponent(q)}&limit=${LIMIT}&offset=0`),
 				fetch(`/api/dependencies?q=${encodeURIComponent(q)}&per_page=20`),
 				// Reuse the advanced-search endpoint for images so the palette
 				// matches on registry, repository, or sha256 digest without
 				// a new backend route.
-				fetch(`/api/search/advanced?q=${encodeURIComponent(q)}&target=image&per_page=15`)
+				fetch(`/api/search/advanced?q=${encodeURIComponent(q)}&target=image&per_page=15`),
+				// Cluster summary endpoint already filters by ?q= across
+				// (cluster, cluster_id, environment), which is exactly the
+				// palette's match surface. Include inactive so a temporarily-
+				// silent cluster still surfaces.
+				fetch(`/api/clusters/summary?q=${encodeURIComponent(q)}&include_inactive=true`)
 			]);
 			if (repoRes.ok) {
 				const data = await repoRes.json();
@@ -171,6 +194,14 @@
 						org: r.org,
 						slug: r.slug,
 					}));
+			}
+			if (clusterRes.ok) {
+				const data = (await clusterRes.json()) as ClusterResult[];
+				// Cap to 8 — the cluster summary endpoint returns the
+				// whole filtered list (no pagination) because the cluster
+				// count is small, but a flood of matches still shouldn't
+				// crowd out the repo/image sections of the palette.
+				clusterResults = (Array.isArray(data) ? data : []).slice(0, 8);
 			}
 			selectedIndex = 0;
 		} finally {
@@ -285,6 +316,9 @@
 			clearTimeout(previewTimer); clearTimeout(contributorsTimer);
 			fetchImagePreview(item.data);
 		} else {
+			// 'component' and 'cluster' previews render directly from the
+			// search-result row — no extra fetch needed, so cancel any
+			// pending preview/contributor loads and clear stale state.
 			repoPreview = null; contributors = []; imagePreview = null;
 			clearTimeout(previewTimer); clearTimeout(contributorsTimer); clearTimeout(imagePreviewTimer);
 			previewLoading = false;
@@ -315,6 +349,8 @@
 			goto(`/providers/repo?${params}`);
 		} else if (item.kind === 'image') {
 			goto(`/images/${encodeURIComponent(item.data.value ?? '')}`);
+		} else if (item.kind === 'cluster') {
+			goto(`/clusters/${encodeURIComponent(item.data.cluster_id)}`);
 		} else {
 			goto(`/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
@@ -462,7 +498,7 @@
 				{#if query}
 					<button
 						type="button"
-						onclick={() => { query = ''; repoResults = []; componentResults = []; repoPreview = null; inputEl?.focus(); }}
+						onclick={() => { query = ''; repoResults = []; componentResults = []; imageResults = []; clusterResults = []; repoPreview = null; imagePreview = null; inputEl?.focus(); }}
 						style="color: var(--text-muted); background: var(--bg1); border-radius: 999px; width: 18px; height: 18px; font-size: 9px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;"
 						aria-label="Clear"
 					>✕</button>
@@ -475,6 +511,32 @@
 
 					<!-- Left: results list -->
 					<div bind:this={resultsListEl} onscroll={handleResultsScroll} class="w-72 shrink-0 overflow-y-auto" style="background: var(--bg-soft); max-height: 25em;">
+
+						{#if clusterResults.length > 0}
+							<p class="px-4 pb-1 pt-3 text-[9px] font-semibold uppercase tracking-[0.18em]" style="color: var(--text-muted);">
+								Clusters
+							</p>
+							{#each clusterResults as result}
+								{@const flatIdx = flatItems.findIndex(i => i.kind === 'cluster' && i.data === result)}
+								<button
+									type="button"
+									data-search-idx={flatIdx}
+									onclick={() => selectItem({ kind: 'cluster', data: result })}
+									onmouseenter={() => (selectedIndex = flatIdx)}
+									class="flex w-full items-center gap-2.5 px-4 py-2 text-left transition-colors"
+								>
+									<Server size={12} style="flex-shrink:0; color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'};" />
+									<span class="min-w-0 flex-1 truncate text-[13px]" style="color: {flatIdx === selectedIndex ? 'var(--accent)' : 'var(--text-muted)'}; font-weight: {flatIdx === selectedIndex ? '500' : '400'};">
+										{result.cluster || result.cluster_id}
+									</span>
+									{#if result.environment}
+										<span class="shrink-0 text-[10px]" style="color: var(--text-muted); opacity: 0.7;">
+											{result.environment}
+										</span>
+									{/if}
+								</button>
+							{/each}
+						{/if}
 
 						{#if repoResults.length > 0}
 							{#each [...repoGrouped] as [, group]}
@@ -648,7 +710,9 @@
 											<span class="text-[11px]" style="color: var(--text-muted);">Last run</span>
 											<span class="ml-auto flex items-center gap-1.5 text-[11px] font-medium">
 												<span style="color: {statusColor(repoPreview.runs.latest.status)};">●</span>
-												<span style="color: var(--text-primary);">{repoPreview.runs.latest.status}</span>
+												{#if repoPreview.runs.latest.status !== 'SUCCEEDED'}
+													<span style="color: var(--text-primary);">{repoPreview.runs.latest.status}</span>
+												{/if}
 												<span style="color: var(--text-muted);">{relativeTime(repoPreview.runs.latest.finished_at)}</span>
 											</span>
 										</div>
@@ -741,6 +805,60 @@
 								style="color: var(--accent);"
 							>
 								View component <ArrowRight size={11} />
+							</button>
+
+						{:else if selectedItem?.kind === 'cluster'}
+							{@const c = selectedItem.data}
+							<div class="mb-4">
+								<div class="flex items-center gap-1.5" style="color: var(--text-muted);">
+									<Server size={12} style="flex-shrink:0" />
+									<span class="text-[10px] uppercase tracking-widest">Cluster</span>
+									{#if c.environment}
+										<span class="truncate text-[9px]" style="opacity: 0.6;">{c.environment}</span>
+									{/if}
+								</div>
+								<p class="mt-0.5 truncate text-sm font-semibold" style="color: var(--text-bright);">
+									{c.cluster || c.cluster_id}
+								</p>
+								<p class="mt-1 truncate font-mono text-[10px]" style="color: var(--text-muted);" title={c.cluster_id}>
+									{c.cluster_id}
+								</p>
+								{#if c.last_seen}
+									<p class="mt-1 text-[10px]" style="color: var(--text-muted);">
+										Last seen <span>{relativeTime(c.last_seen)}</span>
+										<span style="opacity: 0.6;">· {shortDate(c.last_seen)}</span>
+									</p>
+								{/if}
+							</div>
+							<div class="space-y-2.5">
+								<div class="flex items-center gap-2.5">
+									<Container size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Containers</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(c.containers)}</span>
+								</div>
+								<div class="flex items-center gap-2.5">
+									<Boxes size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Images</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(c.images)}</span>
+								</div>
+								<div class="flex items-center gap-2.5">
+									<Server size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Namespaces</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(c.namespaces)}</span>
+								</div>
+								<div class="flex items-center gap-2.5">
+									<Globe size={13} style="color: var(--text-muted); flex-shrink:0;" />
+									<span class="text-[11px]" style="color: var(--text-muted);">Ingresses</span>
+									<span class="ml-auto text-[11px] font-medium" style="color: var(--text-primary);">{fmt(c.ingress_count)}</span>
+								</div>
+							</div>
+							<button
+								type="button"
+								onclick={() => selectItem(selectedItem)}
+								class="mt-auto flex items-center gap-1.5 pt-5 text-[11px] font-medium transition-opacity hover:opacity-70"
+								style="color: var(--accent);"
+							>
+								Open cluster <ArrowRight size={11} />
 							</button>
 
 						{:else if selectedItem?.kind === 'image'}
@@ -839,6 +957,13 @@
 							<div>
 								<p style="color: var(--text-primary); font-size: 1em; font-weight: 500;">Repositories</p>
 								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">GitHub · GitLab · Gitea · Forgejo</p>
+							</div>
+						</div>
+						<div style="display: flex; align-items: center; gap: 1.5em;">
+							<Server size={28} style="color: var(--text-muted); flex-shrink: 0;" />
+							<div>
+								<p style="color: var(--text-primary); font-size: 1em; font-weight: 500;">Clusters</p>
+								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">Name · cluster_id · environment</p>
 							</div>
 						</div>
 						<div style="display: flex; align-items: center; gap: 1.5em;">
