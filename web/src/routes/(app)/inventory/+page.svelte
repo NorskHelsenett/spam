@@ -39,7 +39,6 @@
 		repo_id?: string;
 		repo_name?: string;
 		commit_sha?: string;
-		image_id?: string;
 		image_registry?: string;
 		image_repository?: string;
 		image_digest?: string;
@@ -184,9 +183,7 @@
 		if (sbom.asset_type === 'REPO_COMMIT' && sbom.repo_id) {
 			return `/providers/repo?repo_id=${encodeURIComponent(sbom.repo_id)}`;
 		}
-		if (sbom.asset_type === 'IMAGE_DIGEST' && sbom.image_id) {
-			return `/images/${sbom.image_id}`;
-		}
+		if (sbom.asset_type === 'IMAGE_DIGEST' && sbom.image_digest) return `/images/${encodeURIComponent(sbom.image_digest)}`;
 		return '';
 	};
 

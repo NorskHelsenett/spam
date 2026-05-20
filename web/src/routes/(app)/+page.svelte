@@ -29,6 +29,7 @@
 		asset_type: 'repo' | 'image' | 'cluster';
 		asset_id: string;
 		asset_slug: string;
+		image_digest?: string;
 		critical_count: number;
 		high_count: number;
 		kev_count: number;
@@ -300,7 +301,7 @@
 
 	const rowHref = (r: TriageRow): string => {
 		if (r.asset_type === 'repo') return `/providers/repo?repo_id=${encodeURIComponent(r.asset_id)}`;
-		if (r.asset_type === 'image') return `/images/${encodeURIComponent(r.asset_id)}`;
+		if (r.asset_type === 'image') return `/images/${encodeURIComponent(r.image_digest ?? '')}`;
 		return `/clusters?cluster_id=${encodeURIComponent(r.asset_id)}`;
 	};
 

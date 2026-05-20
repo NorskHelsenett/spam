@@ -153,6 +153,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 				// the work. Replaces the old REFRESH_SBOM_VIEWS job which
 				// burned worker slots on lock contention.
 				sbomviews.TriggerRefresh(s.db)
+				invalidateRepoMetadataCache(r.Context(), s.cache, payload.RepoID)
 			}
 		}
 	}
@@ -183,9 +184,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 					log.Printf("failed to store secrets: %v", err)
 				} else {
 					log.Printf("stored %d secret findings for run %s", len(findings), runID)
-					if s.cache != nil && payload.RepoID != "" {
-						_ = s.cache.Delete(r.Context(), "repo:metadata:"+payload.RepoID)
-					}
+					invalidateRepoMetadataCache(r.Context(), s.cache, payload.RepoID)
 				}
 			}
 		}
@@ -217,6 +216,7 @@ func (s *Server) handleResults(w http.ResponseWriter, r *http.Request) {
 							log.Printf("stored %d dependencies from manifests", len(deps))
 						}
 					}
+					invalidateRepoMetadataCache(r.Context(), s.cache, payload.RepoID)
 				}
 			}
 		}

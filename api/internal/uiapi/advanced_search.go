@@ -28,8 +28,9 @@ type AdvancedSearchResult struct {
 	// ClusterID is set for type=cluster. The UI uses it to link directly
 	// into /app/clusters pre-filtered on the target cluster.
 	ClusterID string `json:"cluster_id,omitempty"`
-	// ImageID is set for type=image. Populated from image_digests.id so
-	// the UI can navigate to /app/images/{id} for the detail page.
+	// ImageID is set for type=image. It remains the internal image row
+	// id, while Value carries the digest so the UI can navigate to
+	// /app/images/{digest} for the detail page.
 	ImageID string `json:"image_id,omitempty"`
 }
 

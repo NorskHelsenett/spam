@@ -3,6 +3,7 @@ package uiapi
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
@@ -14,12 +15,16 @@ import (
 // one image_digests row with a non-empty betterleaks finding list from its
 // most recent scan.
 type ImageSecretRow struct {
-	ImageID       string     `json:"image_id"`
-	Registry      string     `json:"registry"`
-	Repository    string     `json:"repository"`
-	Digest        string     `json:"digest"`
-	FindingCount  int64      `json:"finding_count"`
-	LastScannedAt *time.Time `json:"last_scanned_at,omitempty"`
+	ImageID        string     `json:"image_id"`
+	Registry       string     `json:"registry"`
+	Repository     string     `json:"repository"`
+	Digest         string     `json:"digest"`
+	FindingCount   int64      `json:"finding_count"`
+	LastScannedAt  *time.Time `json:"last_scanned_at,omitempty"`
+	ClusterCount   int64      `json:"cluster_count,omitempty"`
+	NamespaceCount int64      `json:"namespace_count,omitempty"`
+	ContainerCount int64      `json:"container_count,omitempty"`
+	LastSeen       *time.Time `json:"last_seen,omitempty"`
 }
 
 // ImageSecretsTableHandler returns the Images tab payload for the Secrets
@@ -53,12 +58,23 @@ func ImageSecretsTableHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		aclSQL, aclArgs := aclWhereFragment(imageClause)
 
 		rows := []ImageSecretRow{}
+		includeInactive := isSecretImageTruthy(r.URL.Query().Get("include_inactive")) ||
+			strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("scope")), "all")
+
 		// try_bytea_to_jsonb (see migration 20260511a) catches conversion
 		// errors per row and returns NULL on bad bytes / malformed JSON.
 		// Without it a single corrupted artifact 500'd the whole
 		// endpoint, because Postgres can evaluate WHERE predicates in
 		// any order and a "filter bad rows first" guard didn't reliably
 		// prevent the cast.
+		// Live filter is composed alongside the ACL clause so a single
+		// fmt.Sprintf handles both — appending the live predicate as a
+		// separate string concat after Sprintf would put it before the
+		// ORDER BY, which is brittle if the format ever changes.
+		liveFilter := ""
+		if !includeInactive {
+			liveFilter = "AND liu.digest IS NOT NULL"
+		}
 		query := fmt.Sprintf(`
 			WITH latest_per_image AS (
 				SELECT DISTINCT ON (isr.image_digest_id)
@@ -73,6 +89,22 @@ func ImageSecretsTableHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				  AND isa.content IS NOT NULL
 				  AND octet_length(isa.content) > 2
 				ORDER BY isr.image_digest_id, isr.finished_at DESC NULLS LAST
+			),
+			live_image_usage AS (
+				SELECT
+					cr.data->>'registry' AS registry,
+					cr.data->>'image'    AS repository,
+					cr.data->>'digest'   AS digest,
+					COUNT(DISTINCT cr.data->>'cluster_id') AS cluster_count,
+					COUNT(DISTINCT cr.data->>'namespace')  AS namespace_count,
+					COUNT(*)                               AS container_count,
+					MAX(cr.received_at)                    AS last_seen
+				FROM cluster_record cr
+				WHERE cr.is_present = TRUE
+				  AND cr.data->>'kind' = 'Container'
+				  AND cr.data->>'pod_phase' = 'Running'
+				  AND COALESCE(cr.data->>'digest', '') <> ''
+				GROUP BY cr.data->>'registry', cr.data->>'image', cr.data->>'digest'
 			)
 			SELECT
 				id.id         AS image_id,
@@ -80,21 +112,39 @@ func ImageSecretsTableHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				id.repository AS repository,
 				id.digest     AS digest,
 				jsonb_array_length(l.payload) AS finding_count,
-				l.finished_at AS last_scanned_at
+				l.finished_at AS last_scanned_at,
+				COALESCE(liu.cluster_count, 0)   AS cluster_count,
+				COALESCE(liu.namespace_count, 0) AS namespace_count,
+				COALESCE(liu.container_count, 0) AS container_count,
+				liu.last_seen                    AS last_seen
 			FROM latest_per_image l
 			JOIN image_digests id ON id.id = l.image_digest_id
+			LEFT JOIN live_image_usage liu
+				ON liu.registry = id.registry
+			   AND liu.repository = id.repository
+			   AND liu.digest = id.digest
 			WHERE l.payload IS NOT NULL
 			  AND jsonb_typeof(l.payload) = 'array'
 			  AND jsonb_array_length(l.payload) > 0
 			  AND %s
+			  %s
 			ORDER BY finding_count DESC, l.finished_at DESC NULLS LAST
 			LIMIT 500
-		`, aclSQL)
+		`, aclSQL, liveFilter)
 		if err := db.WithContext(r.Context()).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
 
 		writeJSON(w, http.StatusOK, rows)
+	}
+}
+
+func isSecretImageTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }

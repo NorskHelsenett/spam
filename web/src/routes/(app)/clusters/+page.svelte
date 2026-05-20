@@ -227,6 +227,7 @@
 			clusterSearch,
 			imageSearch,
 			imageSelectedRegistries,
+			imageSelectedClusters,
 			hostSearch,
 			hostSelectedClusters,
 			hostSelectedNamespaces,
@@ -244,6 +245,7 @@
 			clusterSearch?: string;
 			imageSearch?: string;
 			imageSelectedRegistries?: string[];
+			imageSelectedClusters?: string[];
 			hostSearch?: string;
 			hostSelectedClusters?: string[];
 			hostSelectedNamespaces?: string[];
@@ -256,6 +258,7 @@
 			if (v.clusterSearch !== undefined) clusterSearch = v.clusterSearch;
 			if (v.imageSearch !== undefined) imageSearch = v.imageSearch;
 			if (v.imageSelectedRegistries) imageSelectedRegistries = v.imageSelectedRegistries;
+			if (v.imageSelectedClusters) imageSelectedClusters = v.imageSelectedClusters;
 			if (v.hostSearch !== undefined) hostSearch = v.hostSearch;
 			if (v.hostSelectedClusters) hostSelectedClusters = v.hostSelectedClusters;
 			if (v.hostSelectedNamespaces) hostSelectedNamespaces = v.hostSelectedNamespaces;
@@ -406,6 +409,7 @@
 		const q = imageSearch.trim();
 		if (q) params.set('q', q);
 		if (imageSelectedRegistries.length > 0) params.set('registries', imageSelectedRegistries.join(','));
+		if (imageSelectedClusters.length > 0) params.set('cluster_ids', imageSelectedClusters.join(','));
 		params.set('sort', String(imageSortKey));
 		params.set('order', imageSortDir);
 		return `/api/clusters/images/detail?${params}`;
@@ -425,35 +429,62 @@
 	// exists below the loaded set.
 	let imageTotal = $state(0);
 
+	// Generation counter for the image fetches. Bumped on every filter /
+	// sort change so a stale in-flight response can identify itself
+	// (its captured gen no longer matches imageFetchGen) and bail out
+	// before clobbering state from the newest request. Previously the
+	// imagesInFlight boolean both guarded against duplicate calls AND
+	// blocked the next legitimate filter change while a fetch was in
+	// flight — typing or rapid sort clicks landed faster than the
+	// network and the second call returned early as a no-op, so the
+	// table stayed at the previous filter's results. The counter
+	// replaces both roles: stale responses are dropped, fresh ones
+	// always start.
+	let imageFetchGen = 0;
+	let imageFetchAbort: AbortController | null = null;
+
 	const loadImages = async () => {
-		if (imagesFetched || imagesInFlight) return;
+		if (imagesFetched) return;
+		const gen = ++imageFetchGen;
+		imageFetchAbort?.abort();
+		const ctrl = new AbortController();
+		imageFetchAbort = ctrl;
 		imagesInFlight = true;
 		try {
-			const res = await fetch(imagesPath(0), { credentials: 'include' });
+			const res = await fetch(imagesPath(0), { credentials: 'include', signal: ctrl.signal });
+			if (gen !== imageFetchGen) return;
 			if (res.ok) {
 				const page = (await res.json()) as ImageDetailPage;
+				if (gen !== imageFetchGen) return;
 				imageDetails = page.items ?? [];
 				imageOffset = imageDetails.length;
 				imageHasMore = Boolean(page.has_more);
 				imageTotal = page.total ?? 0;
 			}
 			imagesFetched = true;
-		} catch { /* silent */ }
-		finally { imagesInFlight = false; }
+		} catch { /* silent (includes aborts) */ }
+		finally {
+			if (gen === imageFetchGen) imagesInFlight = false;
+		}
 	};
 
 	// Pulls the next page and appends to the array. Triggered by the
 	// scroll handler when the viewport approaches the end of the
 	// rendered virtual list. Guarded against re-entry by
 	// imageLoadingMore so rapid scroll events don't fan out duplicate
-	// fetches.
+	// fetches. The same generation counter as loadImages also
+	// invalidates this — if the user changes filters mid-page-load,
+	// the pending append is dropped instead of polluting the new view.
 	const loadMoreImages = async () => {
 		if (!imageHasMore || imageLoadingMore) return;
 		imageLoadingMore = true;
+		const gen = imageFetchGen;
 		try {
 			const res = await fetch(imagesPath(imageOffset), { credentials: 'include' });
+			if (gen !== imageFetchGen) return;
 			if (res.ok) {
 				const page = (await res.json()) as ImageDetailPage;
+				if (gen !== imageFetchGen) return;
 				if (page.items?.length) {
 					imageDetails = [...imageDetails, ...page.items];
 					imageOffset = imageDetails.length;
@@ -632,6 +663,7 @@
 		const _ = [
 			imageSearch,
 			imageSelectedRegistries.join(' '),
+			imageSelectedClusters.join(' '),
 			imageSortKey,
 			imageSortDir
 		];
@@ -911,6 +943,7 @@
 	let imageFilterOpen = $state(false);
 	let imageSearch = $state('');
 	let imageSelectedRegistries: string[] = $state([]);
+	let imageSelectedClusters: string[] = $state([]);
 
 	// Registry options come from /api/clusters/registry-distribution
 	// (registryDist), which already aggregates every registry across
@@ -922,17 +955,32 @@
 		[...registryDist].sort((a, b) => a.registry.localeCompare(b.registry)).map((r) => ({ value: r.registry, label: r.registry }))
 	);
 
-	const imageActiveFilterCount = $derived(
-		(imageSearch.trim() ? 1 : 0) + (imageSelectedRegistries.length > 0 ? 1 : 0)
+	// Cluster options come from clustersAll (the unfiltered cluster
+	// summary loaded for the page-level metric cards) so the dropdown
+	// shows every cluster the user can see, not just the ones with
+	// loaded image-page rows. Sorted by display name; the value is
+	// cluster_id so the URL param carries the stable identifier.
+	const imageClusterOptions: MultiSelectOption[] = $derived(
+		[...clustersAll]
+			.sort((a, b) => (a.cluster || a.cluster_id).localeCompare(b.cluster || b.cluster_id))
+			.map((c) => ({ value: c.cluster_id, label: c.cluster || c.cluster_id }))
 	);
 
-	// Image search + registry filter are server-side via imagesPath().
-	// Keep filteredImages as a passthrough so render code unchanged.
+	const imageActiveFilterCount = $derived(
+		(imageSearch.trim() ? 1 : 0) +
+		(imageSelectedRegistries.length > 0 ? 1 : 0) +
+		(imageSelectedClusters.length > 0 ? 1 : 0)
+	);
+
+	// Image search + registry + cluster filters are server-side via
+	// imagesPath(). Keep filteredImages as a passthrough so render
+	// code stays unchanged.
 	const filteredImages = $derived(imageDetails);
 
 	const clearImageFilters = () => {
 		imageSearch = '';
 		imageSelectedRegistries = [];
+		imageSelectedClusters = [];
 	};
 
 	// --- Host filters ---
@@ -1179,7 +1227,7 @@
 	<!-- Tables -->
 	{#if !loading && !error && clustersAll.length > 0}
 		{#if activeTab === 'clusters'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={clusterDrawerOpen ? '80vh' : undefined}>
 				<header class="flex items-start justify-between gap-4">
 					<div>
 						<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Clusters</h2>
@@ -1298,7 +1346,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'images'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={imageDrawerOpen ? '80vh' : undefined}>
 				{#if imageDetails.length > 0 || imageActiveFilterCount > 0 || imagesFetched || imagesInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>
@@ -1345,6 +1393,11 @@
 								<div class="flex flex-col gap-1">
 									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Registry</span>
 									<MultiSelect bind:selected={imageSelectedRegistries} options={imageRegistryOptions} placeholder="All registries" size="sm" />
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Cluster</span>
+									<MultiSelect bind:selected={imageSelectedClusters} options={imageClusterOptions} placeholder="All clusters" size="sm" />
 								</div>
 
 								{#if imageActiveFilterCount > 0}
@@ -1491,7 +1544,7 @@
 				{/if}
 			</section>
 		{:else if activeTab === 'hosts'}
-			<section class="panel-surface space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
+			<section class="panel-surface min-h-[75vh] space-y-4 px-6 py-6 sm:px-10 sm:py-8" style:min-height={chainDrawerOpen ? '80vh' : undefined}>
 				{#if hosts.length > 0 || hostActiveFilterCount > 0 || hostsFetched || hostsInFlight}
 					<header class="flex items-start justify-between gap-4">
 						<div>

@@ -15,6 +15,8 @@ const (
 	StreamEventNewUser = "new_user"
 
 	StreamEventScamIngest = "scam_ingest"
+
+	StreamEventVulnMetaUpdated = "vuln_meta_updated"
 )
 
 type StreamEvent struct {

@@ -67,9 +67,10 @@ type RepoRow struct {
 // underlying DB id (repos.id or image_digests.id); Slug is a human-
 // readable label for tooltips.
 type VulnAsset struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
-	Slug string `json:"slug"`
+	Type   string `json:"type"`
+	ID     string `json:"id"`
+	Slug   string `json:"slug"`
+	Digest string `json:"digest,omitempty"`
 }
 
 // VulnGroup is one row in the /api/vuln/list response: a single CVE /
@@ -730,7 +731,7 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 					'[]'::jsonb
 				) AS sources,
 				jsonb_agg(DISTINCT jsonb_build_object(
-					'type', asset_type, 'id', asset_id, 'slug', asset_slug
+					'type', asset_type, 'id', asset_id, 'slug', asset_slug, 'digest', asset_digest
 				)) AS assets,
 				COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
 				COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
@@ -919,6 +920,7 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 			'repo'::text                                AS asset_type,
 			v.repo_id                                   AS asset_id,
 			v.repo_slug                                 AS asset_slug,
+			''::text                                    AS asset_digest,
 			v.vuln_id, v.severity, v.pkg_name,
 			v.installed_version, v.fixed_version,
 			v.title, v.description, v.source, v.cve_year
@@ -929,10 +931,12 @@ func buildAssetUnionSQL(p VulnListParams) (string, []any) {
 			'image'::text                               AS asset_type,
 			v.image_id                                  AS asset_id,
 			v.image_slug                                AS asset_slug,
+			COALESCE(d.digest, '')                      AS asset_digest,
 			v.vuln_id, v.severity, v.pkg_name,
 			v.installed_version, v.fixed_version,
 			v.title, v.description, v.source, v.cve_year
 		FROM view_unified_image_vulnerabilities v
+		LEFT JOIN image_digests d ON d.id = v.image_id
 		WHERE %s
 	`, repoSQL, imageSQL)
 

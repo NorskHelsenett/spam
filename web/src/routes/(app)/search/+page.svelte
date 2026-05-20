@@ -208,8 +208,8 @@
 			return;
 		}
 		if (r.type === 'image') {
-			if (r.image_id) {
-				goto(`/images/${r.image_id}`);
+			if (r.value) {
+				goto(`/images/${encodeURIComponent(r.value)}`);
 			} else {
 				goto('/clusters');
 			}
@@ -493,7 +493,7 @@
 										{:else}
 											{#each splitHighlighted(`${r.org}/${r.slug}`, query) as part}
 												{#if part.match}
-													<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+													<mark class="search-highlight">{part.text}</mark>
 												{:else}
 													{part.text}
 												{/if}
@@ -504,7 +504,7 @@
 										<p class="font-semibold text-[var(--text-bright)]">
 											{#each splitHighlighted(r.title, query) as part}
 												{#if part.match}
-													<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+													<mark class="search-highlight">{part.text}</mark>
 												{:else}
 													{part.text}
 												{/if}
@@ -517,7 +517,7 @@
 												<p class="mt-1 font-mono text-xs text-[var(--text-muted)]">
 													{#each splitHighlighted(r.value, query) as part}
 														{#if part.match}
-															<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+															<mark class="search-highlight">{part.text}</mark>
 														{:else}
 															{part.text}
 														{/if}
@@ -528,7 +528,7 @@
 										<p class="mt-1 line-clamp-2 text-xs text-[var(--text-tertiary)]">
 											{#each splitHighlighted(r.snippet || `${r.title} ${r.value || ''}`, query) as part}
 												{#if part.match}
-													<mark class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>
+													<mark class="search-highlight">{part.text}</mark>
 												{:else}
 													{part.text}
 												{/if}
@@ -666,7 +666,7 @@
 						</div>
 					</div>
 					</div>
-					<pre class="whitespace-pre-wrap break-words rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/35 p-4 pt-2 font-mono text-xs leading-relaxed text-[var(--text-secondary)]">{#each splitHighlighted(previewData.raw || '', previewSearch) as part}{#if part.match}<mark data-preview-hit="1" class="rounded bg-[var(--yellow-dim)] px-1 text-[var(--text-bright)]">{part.text}</mark>{:else}{part.text}{/if}{/each}</pre>
+					<pre class="whitespace-pre-wrap break-words rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/35 p-4 pt-2 font-mono text-xs leading-relaxed text-[var(--text-secondary)]">{#each splitHighlighted(previewData.raw || '', previewSearch) as part}{#if part.match}<mark data-preview-hit="1" class="search-highlight">{part.text}</mark>{:else}{part.text}{/if}{/each}</pre>
 				</div>
 			{:else}
 				<p class="text-sm text-[var(--text-muted)]">No content to preview.</p>
@@ -674,3 +674,17 @@
 		</div>
 	</div>
 </Dialog>
+
+<style>
+	.search-highlight {
+		border-radius: 0.25rem;
+		background: var(--yellow-dim);
+		color: var(--text-bright);
+		padding-inline: 0.25rem;
+	}
+
+	:global(html.light) .search-highlight {
+		background: #ffdc6f;
+		color: #2f2610;
+	}
+</style>

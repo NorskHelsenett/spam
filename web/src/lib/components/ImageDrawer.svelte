@@ -120,14 +120,16 @@
 					{detail ? shortDigest(detail.digest) : '—'}
 				</p>
 			</div>
-			<a
-				class="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 px-2.5 text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
-				href={`/images/${imageId}`}
-				title="Open full image page"
-			>
-				Full page
-				<ExternalLink class="h-3 w-3" />
-			</a>
+			{#if detail?.digest}
+				<a
+					class="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border-color)]/60 px-2.5 text-xs text-[var(--text-secondary)] transition hover:border-[var(--accent)]/40 hover:text-[var(--accent)]"
+					href={`/images/${encodeURIComponent(detail.digest)}`}
+					title="Open full image page"
+				>
+					Full page
+					<ExternalLink class="h-3 w-3" />
+				</a>
+			{/if}
 			<button
 				type="button"
 				class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition hover:bg-[var(--hover-bg)]"

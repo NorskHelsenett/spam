@@ -16,6 +16,11 @@ import (
 
 const repoMetadataCacheTTL = 15 * time.Minute
 
+type repoMetadataCacheEntry struct {
+	CachedAt time.Time            `json:"cached_at"`
+	Response RepoMetadataResponse `json:"response"`
+}
+
 // RepoMetadataHandler returns a unified metadata response for a repo.
 // GET /api/repos/metadata?repo_id=<uuid>
 func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) http.HandlerFunc {
@@ -35,8 +40,8 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 		}
 
 		cacheKey := "repo:metadata:" + repoID
-		if cached, ok, _ := cache.GetJSON[RepoMetadataResponse](r.Context(), c, cacheKey); ok {
-			writeJSON(w, http.StatusOK, cached)
+		if cached, ok, _ := cache.GetJSON[repoMetadataCacheEntry](r.Context(), c, cacheKey); ok && !repoMetadataCacheStale(r, db, repoID, cached.CachedAt) {
+			writeJSON(w, http.StatusOK, cached.Response)
 			return
 		}
 
@@ -58,9 +63,42 @@ func RepoMetadataHandler(db *gorm.DB, authService *auth.Service, c cache.Store) 
 			Hygiene:         RepoMetadataHygiene{},
 			Vulnerabilities: vulnerabilities,
 		}
-		_ = cache.SetJSON(r.Context(), c, cacheKey, resp, repoMetadataCacheTTL)
+		_ = cache.SetJSON(r.Context(), c, cacheKey, repoMetadataCacheEntry{
+			CachedAt: time.Now().UTC(),
+			Response: resp,
+		}, repoMetadataCacheTTL)
 		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+func repoMetadataCacheStale(r *http.Request, db *gorm.DB, repoID string, cachedAt time.Time) bool {
+	if cachedAt.IsZero() {
+		return true
+	}
+
+	var row struct {
+		Latest time.Time `gorm:"column:latest"`
+	}
+	err := db.WithContext(r.Context()).Raw(`
+		SELECT GREATEST(
+			COALESCE((SELECT MAX(created_at) FROM repo_commits WHERE repo_id = @repo_id), TIMESTAMPTZ 'epoch'),
+			COALESCE((SELECT MAX(finished_at) FROM jobs WHERE type = 'CREATE_RUN' AND payload->>'repo_id' = @repo_id), TIMESTAMPTZ 'epoch'),
+			COALESCE((SELECT MAX(created_at) FROM run_secrets WHERE repo_id = @repo_id), TIMESTAMPTZ 'epoch'),
+			COALESCE((
+				SELECT MAX(sb.created_at)
+				FROM sbom_bindings sb
+				JOIN repo_commits rc ON rc.id = sb.asset_ref_id AND sb.asset_type = 'REPO_COMMIT'
+				WHERE rc.repo_id = @repo_id
+			), TIMESTAMPTZ 'epoch'),
+			COALESCE((SELECT MAX(scanned_at) FROM sbom_scan_results WHERE repo_id = @repo_id), TIMESTAMPTZ 'epoch'),
+			COALESCE((SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'sbom_component_view'), TIMESTAMPTZ 'epoch'),
+			COALESCE((SELECT refreshed_at FROM materialized_view_refreshes WHERE name = 'view_unified_repositories_vulnerabilities'), TIMESTAMPTZ 'epoch')
+		) AS latest
+	`, map[string]any{"repo_id": repoID}).Scan(&row).Error
+	if err != nil {
+		return true
+	}
+	return cachedAt.UTC().Before(row.Latest.UTC())
 }
 
 func loadRepoMetadata(r *http.Request, db *gorm.DB, repoID string) (RepoMetadataRepo, string) {
