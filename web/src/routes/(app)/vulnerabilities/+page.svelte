@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
+	import { session, hasOnlyClusters } from '$lib/stores/session';
 	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
@@ -654,22 +656,45 @@
 		return next.length === list.length ? [...list, value] : next;
 	}
 
-	onMount(async () => {
-		try {
-			const [sumRes, reposRes, trendRes] = await Promise.all([
-				fetch('/api/vuln/summary', { credentials: 'include' }),
-				fetch('/api/vuln/repos', { credentials: 'include' }),
-				fetch('/api/vuln/trend?days=30', { credentials: 'include' })
-			]);
+	// Cluster-only users have no repo grants: /api/vuln/trend stays
+	// admin-gated (snapshot table is fleet-global), and /api/vuln/repos
+	// returns no rows. Skip both for those users so the page doesn't
+	// flash a "Failed to load" banner on top of an otherwise-working
+	// dashboard. The image-grouped findings list below still loads
+	// via fetchVulnPage, which scopes through ReadableImageClause.
+	async function waitForSession(timeoutMs = 2000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			if (get(session).loaded) return;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
 
-			if (!sumRes.ok || !reposRes.ok || !trendRes.ok) {
+	let isClusterOnly = false;
+
+	onMount(async () => {
+		await waitForSession();
+		isClusterOnly = get(hasOnlyClusters);
+		try {
+			const sumRes = await fetch('/api/vuln/summary', { credentials: 'include' });
+			if (!sumRes.ok) {
 				error = 'Failed to load vulnerability data';
 				return;
 			}
-
 			summary = await sumRes.json();
-			repos = await reposRes.json();
-			trend = await trendRes.json();
+
+			if (!isClusterOnly) {
+				const [reposRes, trendRes] = await Promise.all([
+					fetch('/api/vuln/repos', { credentials: 'include' }),
+					fetch('/api/vuln/trend?days=30', { credentials: 'include' }),
+				]);
+				if (!reposRes.ok || !trendRes.ok) {
+					error = 'Failed to load vulnerability data';
+					return;
+				}
+				repos = await reposRes.json();
+				trend = await trendRes.json();
+			}
 		} catch (e) {
 			error = 'Failed to fetch data';
 		} finally {
@@ -765,19 +790,28 @@
 						/>
 					{/if}
 				</div>
-				<div class="metric-card rounded-2xl p-5 lg:col-span-2">
-					<LineChart title="30-day trend" data={trend} />
-				</div>
+				{#if !isClusterOnly}
+					<div class="metric-card rounded-2xl p-5 lg:col-span-2">
+						<LineChart title="30-day trend" data={trend} />
+					</div>
+				{/if}
 			</div>
 
-			<!-- Tab selector -->
+			<!-- Tab selector. Cluster-only users drop the Repositories tab —
+			     their ACL grants no repo access until OCI label bridging
+			     lands, so the tab would always be empty. -->
 			<div class="pt-2">
 				<TabSelector
-					options={[
-						{ value: 'vulnerabilities', label: 'Vulnerabilities' },
-						{ value: 'repositories', label: 'Repositories' },
-						{ value: 'images', label: 'Images' }
-					]}
+					options={isClusterOnly
+						? [
+								{ value: 'vulnerabilities', label: 'Vulnerabilities' },
+								{ value: 'images', label: 'Images' }
+							]
+						: [
+								{ value: 'vulnerabilities', label: 'Vulnerabilities' },
+								{ value: 'repositories', label: 'Repositories' },
+								{ value: 'images', label: 'Images' }
+							]}
 					bind:value={activeTab}
 				/>
 			</div>

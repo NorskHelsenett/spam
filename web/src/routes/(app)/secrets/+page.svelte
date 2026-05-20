@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert, Container } from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import { goto } from '$app/navigation';
+	import { session, hasOnlyClusters } from '$lib/stores/session';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -286,7 +288,25 @@
 		}
 	};
 
+	// Cluster-only users have no repo grants so the /table, /stats,
+	// /trend endpoints would 403. Bounce them off this page before
+	// firing the requests. waitForSession() resolves once /api/auth/me
+	// has replied so we don't redirect-flash users whose session is
+	// still loading.
+	async function waitForSession(timeoutMs = 2000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			if (get(session).loaded) return;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+
 	onMount(async () => {
+		await waitForSession();
+		if (get(hasOnlyClusters)) {
+			void goto('/');
+			return;
+		}
 		try {
 			const [tableRes, statsRes, trendRes] = await Promise.all([
 				fetch('/api/secrets/table', { credentials: 'include' }),

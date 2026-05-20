@@ -1,9 +1,11 @@
 package uiapi
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -35,6 +37,21 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 			return
 		}
 
+		// Image-ACL splice: admins/global_readers get TRUE; cluster-only
+		// users get a cluster_image_inventory-projected subquery (see
+		// acl.ReadableImageClause). Restricted callers with no matching
+		// grants short-circuit to an empty list.
+		imageClause, err := acl.ReadableImageClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "id")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		if imageClause.Deny() {
+			writeJSON(w, http.StatusOK, []ImageSecretRow{})
+			return
+		}
+		aclSQL, aclArgs := aclWhereFragment(imageClause)
+
 		rows := []ImageSecretRow{}
 		// try_bytea_to_jsonb (see migration 20260511a) catches conversion
 		// errors per row and returns NULL on bad bytes / malformed JSON.
@@ -42,7 +59,7 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 		// endpoint, because Postgres can evaluate WHERE predicates in
 		// any order and a "filter bad rows first" guard didn't reliably
 		// prevent the cast.
-		err := db.WithContext(r.Context()).Raw(`
+		query := fmt.Sprintf(`
 			WITH latest_per_image AS (
 				SELECT DISTINCT ON (isr.image_digest_id)
 					isr.image_digest_id,
@@ -69,10 +86,11 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 			WHERE l.payload IS NOT NULL
 			  AND jsonb_typeof(l.payload) = 'array'
 			  AND jsonb_array_length(l.payload) > 0
+			  AND %s
 			ORDER BY finding_count DESC, l.finished_at DESC NULLS LAST
 			LIMIT 500
-		`).Scan(&rows).Error
-		if err != nil {
+		`, aclSQL)
+		if err := db.WithContext(r.Context()).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}

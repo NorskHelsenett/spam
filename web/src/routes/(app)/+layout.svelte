@@ -204,18 +204,27 @@
 	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
-	import { isAdmin as isAdminStore, loadSession } from '$lib/stores/session';
+	import { isAdmin as isAdminStore, hasOnlyClusters as hasOnlyClustersStore, loadSession } from '$lib/stores/session';
 
 let accountDialogOpen = $state(false);
 let isAdmin = $state(false);
+let hasOnlyClusters = $state(false);
 $effect(() => {
 	const unsub = isAdminStore.subscribe((v) => (isAdmin = v));
 	return unsub;
 });
+$effect(() => {
+	const unsub = hasOnlyClustersStore.subscribe((v) => (hasOnlyClusters = v));
+	return unsub;
+});
 
-	// Primary nav — inventory + security overviews. Visible to all
-	// authenticated users. Admin-only actions (Runs, Settings) render
-	// in a separate block below with an isAdmin gate.
+	// Primary nav — security overviews + inventory. The full list is
+	// the admin / global_reader view; cluster-only users get a filtered
+	// subset (see clusterOnlyNav below) so they don't see Dependencies /
+	// Secrets / Inventory / Providers that would all be empty for them
+	// until the OCI-label bridge brings repo grants through cluster
+	// access. Admin-only actions (Runs, Settings) render in a separate
+	// block below with an isAdmin gate.
 	const navLinks = [
 		{ href: '/', label: 'Dashboard', icon: ChartPie },
 		{ href: '/vulnerabilities', label: 'Vulnerabilities', icon: ShieldAlert },
@@ -225,6 +234,15 @@ $effect(() => {
 		{ href: '/clusters', label: 'Clusters', icon: KubernetesIcon },
 		{ href: '/inventory', label: 'Inventory', icon: Boxes }
 	] as const;
+
+	// Cluster-only users see only the surfaces that ACL-scope to their
+	// cluster_image_inventory grants. Direct-link to a hidden page
+	// (e.g. /secrets) still works in theory, but each repo-only page
+	// also installs a redirect-to-/ in its +page.ts for those users.
+	const clusterOnlyNavHrefs = new Set<string>(['/', '/vulnerabilities', '/clusters']);
+	let visibleNavLinks = $derived(
+		hasOnlyClusters ? navLinks.filter((l) => clusterOnlyNavHrefs.has(l.href)) : navLinks,
+	);
 
 	// Admin-only nav — Runs exposes the job queue (CREATE_RUN artifacts
 	// can contain credentials surfaced in scan history), Jobs is the
@@ -345,7 +363,7 @@ $effect(() => {
 <div class="flex h-screen max-h-screen overflow-hidden text-[var(--text-primary)]">
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
-			{#each navLinks as link}
+			{#each visibleNavLinks as link}
 				{#if 'groupBreak' in link && link.groupBreak}
 					<div class="h-6" aria-hidden="true"></div>
 				{/if}

@@ -122,7 +122,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 			pub.Get("/api/auth/login", authService.LoginHandler())
 			pub.Get("/api/auth/callback", authService.CallbackHandler())
-			pub.Get("/api/auth/me", authService.MeHandler())
+			pub.Get("/api/auth/me", authService.MeHandler(aclProvider))
 			pub.Post("/api/auth/logout", authService.LogoutHandler())
 
 			// Per-user ROR cluster access — gated by an approved
@@ -383,13 +383,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			priv.Route("/api/secrets", func(s chi.Router) {
 				s.Use(audit.Middleware(db, auditUserID, "secrets.read"))
 
-				// Aggregate / metadata — admin or global_reader.
+				// Repo-side aggregate / metadata — admin or global_reader.
+				// /images is not here: cluster-only users need it too,
+				// so it's registered in the approved group below.
 				s.Group(func(meta chi.Router) {
 					meta.Use(authService.AdminOrGlobalReaderGuard)
 					meta.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
 					meta.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 					meta.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
-					meta.Get("/images", uiapi.ImageSecretsTableHandler(db, authService))
 				})
 
 				// Raw credential text + state mutation — admin only.
@@ -415,6 +416,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Use(middleware.Timeout(60 * time.Second))
 			approved.Use(authService.ApprovedGuard)
 			approved.Use(aclProviderInjector)
+
+			// Image-grain secrets dashboard — readable by anyone whose
+			// ACL grants resolve to images (admin, global_reader, or
+			// cluster-only users via cluster_image_inventory). Repo-
+			// side secrets (/api/secrets/table|stats|trend) stay in
+			// the AdminOrGlobalReader band above.
+			approved.Get("/api/secrets/images", uiapi.ImageSecretsTableHandler(db, authService))
 
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))

@@ -73,16 +73,37 @@ type userClaims struct {
 }
 
 type userResponse struct {
-	UserID      string                 `json:"user_id,omitempty"`
-	Subject     string                 `json:"subject"`
-	Email       string                 `json:"email,omitempty"`
-	Name        string                 `json:"name,omitempty"`
-	Picture     string                 `json:"picture,omitempty"`
-	Claims      map[string]interface{} `json:"claims,omitempty"`
-	Groups      []string               `json:"groups,omitempty"`
-	EntraGroups []string               `json:"entra_groups,omitempty"`
-	Role        string                 `json:"role,omitempty"`
-	Approved    bool                   `json:"approved"`
+	UserID       string                 `json:"user_id,omitempty"`
+	Subject      string                 `json:"subject"`
+	Email        string                 `json:"email,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Picture      string                 `json:"picture,omitempty"`
+	Claims       map[string]interface{} `json:"claims,omitempty"`
+	Groups       []string               `json:"groups,omitempty"`
+	EntraGroups  []string               `json:"entra_groups,omitempty"`
+	Role         string                 `json:"role,omitempty"`
+	Approved     bool                   `json:"approved"`
+	Capabilities *capabilities          `json:"capabilities,omitempty"`
+}
+
+// capabilities is the per-session reveal hint the SPA uses to decide
+// which nav items and page widgets to render. It's a derived view of
+// the ACL provider chain, not a permission grant itself: handlers
+// still enforce their own scoping on every request. The frontend
+// uses it to avoid showing a dead "Secrets" tab to a cluster-only
+// user, not to gate any sensitive operation.
+//
+// Repos    = subject is admin/global_reader OR holds any repo grant
+//
+//	(wildcard or scoped) under the ACL provider chain.
+//
+// Clusters = subject is admin/global_reader OR holds any cluster
+//
+//	grant. ROR-derived cluster grants count here too, so a
+//	ROR-only user comes back as Clusters: true.
+type capabilities struct {
+	Repos    bool `json:"repos"`
+	Clusters bool `json:"clusters"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -322,7 +343,13 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 	}
 }
 
-func (s *Service) MeHandler() http.HandlerFunc {
+// MeHandler returns the current session view consumed by the SPA. The
+// aclProvider is used to compute the response's `capabilities` hint
+// (which nav items the frontend should reveal); a nil provider yields
+// admin-only capabilities for admin/global_reader callers and zero
+// capabilities for everyone else, which keeps the route safe even if
+// the router forgot to wire the chain.
+func (s *Service) MeHandler(aclProvider acl.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, err := s.loadSession(r)
 		if err != nil {
@@ -365,10 +392,42 @@ func (s *Service) MeHandler() http.HandlerFunc {
 			} else {
 				response.Picture = pictureOrGravatar("", session.Email)
 			}
+
+			subj, berr := s.buildSubject(r.Context(), session.UserID)
+			if berr == nil {
+				response.Capabilities = s.computeCapabilities(r, subj, aclProvider)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+// computeCapabilities resolves the cluster/repo grant signals the SPA
+// uses for nav-reveal decisions. Admin and global_reader short-circuit
+// to both-true; other subjects walk the provider chain. ROR-derived
+// cluster grants need the user's access token in context — we stash it
+// on a per-request basis here since /api/auth/me runs in the public
+// route group and doesn't pick up APIGuard's WithAccessToken plumbing.
+func (s *Service) computeCapabilities(r *http.Request, subj acl.Subject, p acl.Provider) *capabilities {
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return &capabilities{Repos: true, Clusters: true}
+	}
+	if p == nil {
+		return &capabilities{}
+	}
+	ctx := r.Context()
+	if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+		ctx = acl.WithAccessToken(ctx, tok)
+	}
+	caps := &capabilities{}
+	if repoPatterns, err := p.Grants(ctx, subj, acl.ScopeRepo); err == nil && len(repoPatterns) > 0 {
+		caps.Repos = true
+	}
+	if clusterPatterns, err := p.Grants(ctx, subj, acl.ScopeCluster); err == nil && len(clusterPatterns) > 0 {
+		caps.Clusters = true
+	}
+	return caps
 }
 
 func (s *Service) LogoutHandler() http.HandlerFunc {

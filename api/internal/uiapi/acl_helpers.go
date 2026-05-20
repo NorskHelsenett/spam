@@ -112,13 +112,29 @@ func notFoundOrForbidden(w http.ResponseWriter) {
 // with genuinely scoped grants don't. Tighter per-subject scoping is
 // a post-Phase-3 follow-up.
 func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
+	if hasUnrestrictedRepos(r) {
+		return true
+	}
+	notFoundOrForbidden(w)
+	return false
+}
+
+// hasUnrestrictedRepos is the bool-returning counterpart to
+// requireUnrestrictedRepos. Handlers that want to dispatch between a
+// cached cross-tenant path and a scoped per-subject recompute use this
+// to pick a branch without writing a 404; the scoped branch then
+// handles its own ACL filtering.
+func hasUnrestrictedRepos(r *http.Request) bool {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin || subj.IsGlobalReader {
 		return true
 	}
-	patterns, err := acl.ProviderFromRequest(r).Grants(r.Context(), subj, acl.ScopeRepo)
+	prov := acl.ProviderFromRequest(r)
+	if prov == nil {
+		return false
+	}
+	patterns, err := prov.Grants(r.Context(), subj, acl.ScopeRepo)
 	if err != nil {
-		http.Error(w, "failed to scope results", http.StatusInternalServerError)
 		return false
 	}
 	for _, p := range patterns {
@@ -126,7 +142,6 @@ func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 	}
-	notFoundOrForbidden(w)
 	return false
 }
 
