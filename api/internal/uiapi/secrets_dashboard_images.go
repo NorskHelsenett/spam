@@ -31,9 +31,9 @@ type ImageSecretRow struct {
 //
 // Clean (zero-finding) images are filtered out — the page is about "what
 // needs attention", consistent with the Repositories tab.
-func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func ImageSecretsTableHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 

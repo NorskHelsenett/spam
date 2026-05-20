@@ -418,9 +418,9 @@ type ImageClusterUsageRow struct {
 
 // ImageDetailHandler returns the image-profile payload.
 // GET /api/images/{id}
-func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 		id := r.PathValue("id")

@@ -22,9 +22,9 @@ import (
 // recompute against their readable repo + image set — so a ROR cluster-
 // only user sees a non-empty summary for vulns in their cluster's
 // running images instead of the previous 404.
-func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -65,9 +65,9 @@ func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 // VulnReposHandler returns per-repo vulnerability counts sorted by severity.
 //
 // GET /api/vuln/repos
-func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnReposHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -106,9 +106,9 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // The response shape is {total, limit, offset, items: VulnGroup[]}.
 // total counts distinct vuln_ids matching the filters so the client can
 // size a virtual scroller off a single page load.
-func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -175,9 +175,9 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // GET /api/vuln/facets
 //
 // Response: {"sources": ["grype", "osv"], "years": ["2024", "2023", ...]}
-func VulnFacetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnFacetsHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 		facets, err := vulnmetrics.LoadFacets(r.Context(), db)
