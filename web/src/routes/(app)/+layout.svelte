@@ -204,17 +204,27 @@
 	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
-	import { isAdmin as isAdminStore, hasOnlyClusters as hasOnlyClustersStore, loadSession } from '$lib/stores/session';
+	import { session, isAdmin as isAdminStore, hasOnlyClusters as hasOnlyClustersStore, loadSession } from '$lib/stores/session';
 
 let accountDialogOpen = $state(false);
 let isAdmin = $state(false);
 let hasOnlyClusters = $state(false);
+// Gating the nav on sessionLoaded avoids the brief flash where a
+// cluster-only user sees the full nav (with Secrets / Inventory /
+// Dependencies / Providers) before /api/auth/me lands and the
+// derived hasOnlyClusters flips. Skeleton pills render in the
+// meantime so the sidebar doesn't shift layout when items arrive.
+let sessionLoaded = $state(false);
 $effect(() => {
 	const unsub = isAdminStore.subscribe((v) => (isAdmin = v));
 	return unsub;
 });
 $effect(() => {
 	const unsub = hasOnlyClustersStore.subscribe((v) => (hasOnlyClusters = v));
+	return unsub;
+});
+$effect(() => {
+	const unsub = session.subscribe((s) => (sessionLoaded = s.loaded));
 	return unsub;
 });
 
@@ -363,28 +373,46 @@ $effect(() => {
 <div class="flex h-screen max-h-screen overflow-hidden text-[var(--text-primary)]">
 	<aside class="relative hidden h-screen min-h-screen max-h-screen w-64 flex-shrink-0 flex-col overflow-y-auto bg-[var(--main-content-bg)] px-6 py-10 md:flex">
 		<nav class="mt-32 flex-1 space-y-2" aria-label="Primary">
-			{#each visibleNavLinks as link}
-				{#if 'groupBreak' in link && link.groupBreak}
-					<div class="h-6" aria-hidden="true"></div>
-				{/if}
-				<button
-					type="button"
-					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
-						isActive(link.href)
-							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
-							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
-					}`}
-					onclick={() => goto(link.href)}
-					aria-current={isActive(link.href) ? 'page' : undefined}
-					aria-label={link.label}
-				>
-					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
-						<link.icon size={18} stroke-width={1.7} />
-					</span>
-					<span class="font-medium">{link.label}</span>
-				</button>
-			{/each}
-			{#if isAdmin}
+			{#if !sessionLoaded}
+				<!-- Skeleton pills while /api/auth/me resolves. Three rows
+				     is the cluster-only floor (Dashboard, Vulnerabilities,
+				     Clusters); admins see more items materialise as the
+				     capabilities flag confirms it. Keeps the sidebar from
+				     flashing the full menu and then yanking items away
+				     for cluster-only users. -->
+				{#each Array(3) as _}
+					<div
+						class="flex items-center gap-2 rounded-full border border-transparent px-4 py-2"
+						aria-hidden="true"
+					>
+						<span class="h-8 w-8 rounded-full bg-[var(--hover-bg-subtle)] animate-pulse"></span>
+						<span class="h-3 w-24 rounded bg-[var(--hover-bg-subtle)] animate-pulse"></span>
+					</div>
+				{/each}
+			{:else}
+				{#each visibleNavLinks as link}
+					{#if 'groupBreak' in link && link.groupBreak}
+						<div class="h-6" aria-hidden="true"></div>
+					{/if}
+					<button
+						type="button"
+						class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
+							isActive(link.href)
+								? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
+								: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
+						}`}
+						onclick={() => goto(link.href)}
+						aria-current={isActive(link.href) ? 'page' : undefined}
+						aria-label={link.label}
+					>
+						<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
+							<link.icon size={18} stroke-width={1.7} />
+						</span>
+						<span class="font-medium">{link.label}</span>
+					</button>
+				{/each}
+			{/if}
+			{#if sessionLoaded && isAdmin}
 				<div class="h-6" aria-hidden="true"></div>
 				{#each adminNavLinks as link}
 					<button

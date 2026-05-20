@@ -1,8 +1,6 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
-	import { get } from 'svelte/store';
-	import { session, hasOnlyClusters } from '$lib/stores/session';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy `export let`
@@ -85,23 +83,11 @@
 		'var(--info-dark)'
 	];
 
-	// Cluster-only users have no repo grants; /api/app/summary 404s
-	// for them via requireUnrestrictedRepos. Bounce them off this
-	// page before firing the request rather than show a broken state.
-	async function waitForSession(timeoutMs = 2000): Promise<void> {
-		const start = Date.now();
-		while (Date.now() - start < timeoutMs) {
-			if (get(session).loaded) return;
-			await new Promise((r) => setTimeout(r, 25));
-		}
-	}
-
+	// +page.ts handles the cluster-only redirect via SvelteKit's
+	// load() — by the time loadSummary runs the caller has repo
+	// access. goto/browser stay imported for any nav inside the page
+	// itself (e.g. detail-drawer deep-links).
 	const loadSummary = async () => {
-		await waitForSession();
-		if (get(hasOnlyClusters)) {
-			void goto('/');
-			return;
-		}
 		try {
 			const res = await fetch('/api/app/summary');
 			if (!res.ok) {
