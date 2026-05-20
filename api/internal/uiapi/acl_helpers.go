@@ -112,13 +112,29 @@ func notFoundOrForbidden(w http.ResponseWriter) {
 // with genuinely scoped grants don't. Tighter per-subject scoping is
 // a post-Phase-3 follow-up.
 func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
+	if hasUnrestrictedRepos(r) {
+		return true
+	}
+	notFoundOrForbidden(w)
+	return false
+}
+
+// hasUnrestrictedRepos is the bool-returning counterpart to
+// requireUnrestrictedRepos. Handlers that want to dispatch between a
+// cached cross-tenant path and a scoped per-subject recompute use this
+// to pick a branch without writing a 404; the scoped branch then
+// handles its own ACL filtering.
+func hasUnrestrictedRepos(r *http.Request) bool {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin || subj.IsGlobalReader {
 		return true
 	}
-	patterns, err := acl.ProviderFromRequest(r).Grants(r.Context(), subj, acl.ScopeRepo)
+	prov := acl.ProviderFromRequest(r)
+	if prov == nil {
+		return false
+	}
+	patterns, err := prov.Grants(r.Context(), subj, acl.ScopeRepo)
 	if err != nil {
-		http.Error(w, "failed to scope results", http.StatusInternalServerError)
 		return false
 	}
 	for _, p := range patterns {
@@ -126,7 +142,6 @@ func requireUnrestrictedRepos(w http.ResponseWriter, r *http.Request) bool {
 			return true
 		}
 	}
-	notFoundOrForbidden(w)
 	return false
 }
 
@@ -187,6 +202,50 @@ func readableRepoIDSet(r *http.Request, db *gorm.DB) (map[string]struct{}, bool,
 		set[id] = struct{}{}
 	}
 	return set, false, nil
+}
+
+// canReadImageByID tests whether the caller can read a specific
+// image_digests row. Honors all three access paths in
+// acl.ReadableImageClause:
+//
+//   - admin / global_reader            → always
+//   - explicit image grant             → registry / repository / digest match
+//   - repo-inheritance (verified+source) → ReadableRepoClause covers it
+//   - cluster-inheritance               → image runs in a cluster the
+//     caller has cluster_id grants on (via cluster_image_inventory)
+//
+// Used by per-resource handlers (image detail) that can't apply the
+// clause as a WHERE filter and need a simple yes/no.
+func canReadImageByID(r *http.Request, db *gorm.DB, imageID string) (bool, error) {
+	if imageID == "" {
+		return false, nil
+	}
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return true, nil
+	}
+	clause, err := acl.ReadableImageClause(r.Context(), acl.ProviderFromRequest(r), subj, "d")
+	if err != nil {
+		return false, err
+	}
+	if clause.Unrestricted {
+		return true, nil
+	}
+	if clause.Deny() {
+		return false, nil
+	}
+	// EXISTS over image_digests with the clause spliced in. A non-zero
+	// count means at least one of the OR branches in ReadableImageClause
+	// matched — that's the same gate every other ACL-aware handler uses.
+	var n int64
+	q := db.WithContext(r.Context()).
+		Table("image_digests AS d").
+		Where("d.id = ?", imageID).
+		Where(clause.SQL, clause.Args...)
+	if err := q.Count(&n).Error; err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // canReadSBOM resolves an SBOM to its bound repo and delegates to

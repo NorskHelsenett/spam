@@ -26,6 +26,16 @@ type Config struct {
 	DatabaseURL        string
 	OIDC               OIDCConfig
 	ProviderSecretsKey []byte
+	ROR                RORConfig
+}
+
+// RORConfig configures the integration with the NHN ROR API. The
+// client is always built; BaseURL is an optional override for tests
+// or staging — production defaults to https://api.ror.nhn.no via
+// ror.New. Auth is the user's session-stored EntraID token only;
+// no service API key is forwarded.
+type RORConfig struct {
+	BaseURL string
 }
 
 // OIDCConfig captures configuration for the OIDC login flow and session cookies.
@@ -77,6 +87,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.ProviderSecretsKey = secretKey
+
+	cfg.ROR = RORConfig{
+		BaseURL: strings.TrimSpace(os.Getenv("ROR_BASE_URL")),
+	}
 
 	return cfg, nil
 }

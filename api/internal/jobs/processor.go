@@ -16,6 +16,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
+	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/sbomviews"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
@@ -179,15 +180,30 @@ func processVulnMetaFetch(ctx context.Context, db *gorm.DB, job *Job) (interface
 		// Don't retry now — a follow-up scan pass will re-enqueue if the row
 		// is still missing. Recording "not_found_upstream" here would be a
 		// lie: we don't actually know whether the vuln exists upstream.
+		notifyVulnMetaUpdated(ctx, db, payload.VulnID, "upstream_error")
 		return map[string]string{"vuln_id": payload.VulnID, "status": "upstream_error"}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
 	if meta == nil {
+		notifyVulnMetaUpdated(ctx, db, payload.VulnID, "not_found_upstream")
 		return map[string]string{"vuln_id": payload.VulnID, "status": "not_found_upstream"}, nil
 	}
+	notifyVulnMetaUpdated(ctx, db, payload.VulnID, "enriched")
 	return map[string]string{"vuln_id": payload.VulnID, "status": "enriched"}, nil
+}
+
+func notifyVulnMetaUpdated(ctx context.Context, db *gorm.DB, vulnID string, status string) {
+	if vulnID == "" {
+		return
+	}
+	if err := events.NotifyEvent(db.WithContext(ctx), events.StreamEventVulnMetaUpdated, map[string]string{
+		"vuln_id": vulnID,
+		"status":  status,
+	}); err != nil {
+		log.Printf("vulnmeta: notify %s %s: %v", vulnID, status, err)
+	}
 }
 
 // vulnMetaEnqueueCap bounds how many VULN_META_FETCH jobs a single

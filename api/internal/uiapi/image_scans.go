@@ -349,7 +349,7 @@ func parseBetterleaksArtifact(raw []byte, maxRows int) []ImageSecretListRow {
 	return out
 }
 
-// ImageDetailResponse aggregates everything the /app/images/{id} page
+// ImageDetailResponse aggregates everything the /app/images/{digest} page
 // needs in one round-trip: image identity, the claimed source repo,
 // where the image is running in your clusters, and a scan-history
 // list. The latest successful scan's full findings live under its
@@ -418,14 +418,14 @@ type ImageClusterUsageRow struct {
 
 // ImageDetailHandler returns the image-profile payload.
 // GET /api/images/{id}
-func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 		id := r.PathValue("id")
 		if id == "" {
-			http.Error(w, "image id required", http.StatusBadRequest)
+			http.Error(w, "image reference required", http.StatusBadRequest)
 			return
 		}
 
@@ -438,10 +438,12 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			SourceRepoID   string
 			VerifiedSource bool
 		}
-		if err := db.WithContext(r.Context()).
+		ctx := r.Context()
+		if err := db.WithContext(ctx).
 			Table("image_digests").
 			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
-			Where("id = ?", id).
+			Where("digest = ?", id).
+			Order("created_at DESC, id DESC").
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				notFoundOrForbidden(w)
@@ -451,17 +453,14 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			return
 		}
 
-		// Image access inheritance is only granted when the source
-		// repo is cryptographically verified. Unsigned images fall
-		// back to admin-only until an explicit image grant path is
-		// wired in Phase 4. 404 hides the existence of images the
-		// caller can't see.
-		if img.VerifiedSource && img.SourceRepoID != "" {
-			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
-				notFoundOrForbidden(w)
-				return
-			}
-		} else if !acl.SubjectFromRequest(r).IsAdmin {
+		// Per-resource ACL gate honoring every branch of
+		// acl.ReadableImageClause: explicit image grant, verified-
+		// source repo inheritance, OR the image is currently running
+		// in a cluster the caller has cluster grants on (the path
+		// that lets ROR cluster-only users land on an image profile
+		// for one of their cluster's containers). 404 hides
+		// existence — same convention as repos.
+		if ok, err := canReadImageByID(r, db, id); err != nil || !ok {
 			notFoundOrForbidden(w)
 			return
 		}
@@ -475,9 +474,9 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 		}
 
 		// Linked source repo (cached at scan upload time).
-		resp.LinkedRepo = loadLinkedRepo(r.Context(), db, img.ID)
+		resp.LinkedRepo = loadLinkedRepo(ctx, db, img.ID)
 		if resp.LinkedRepo != nil {
-			resp.LinkedRepoContributors = loadLinkedRepoContributors(r.Context(), db, resp.LinkedRepo.RepoID, 8)
+			resp.LinkedRepoContributors = loadLinkedRepoContributors(ctx, db, resp.LinkedRepo.RepoID, 8)
 		}
 
 		// Scan history — every IMAGE_SCAN job whose payload referenced
@@ -490,7 +489,7 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			VulnCount  int        `gorm:"column:vuln_count"`
 		}
 		var history []historyRow
-		_ = db.WithContext(r.Context()).Raw(`
+		_ = db.WithContext(ctx).Raw(`
 			SELECT j.id AS job_id, j.status, j.created_at, j.finished_at,
 			       COALESCE((
 			         SELECT COUNT(*) FROM image_vuln_findings f
@@ -531,7 +530,7 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			Low      int
 			Unknown  int
 		}
-		_ = db.WithContext(r.Context()).Raw(`
+		_ = db.WithContext(ctx).Raw(`
 			WITH latest_scan AS (
 				SELECT id FROM image_scan_runs
 				WHERE image_digest_id = ? AND finished_at IS NOT NULL
@@ -566,7 +565,7 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 		// for this digest. Same query shape as /api/secrets/images but
 		// scoped to one image_digest_id. Non-fatal if the artifact JSON
 		// can't be parsed — we default to 0 rather than fail the page.
-		_ = db.WithContext(r.Context()).Raw(`
+		_ = db.WithContext(ctx).Raw(`
 			WITH latest AS (
 				SELECT isa.content
 				FROM image_scan_runs isr
@@ -594,7 +593,7 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			LastSeen  time.Time `gorm:"column:last_seen"`
 		}
 		var usage []usageRow
-		_ = db.WithContext(r.Context()).Raw(`
+		_ = db.WithContext(ctx).Raw(`
 			SELECT
 			  COALESCE(data->>'cluster', '') AS cluster,
 			  COALESCE(data->>'namespace', '') AS namespace,
@@ -979,4 +978,3 @@ func loadLinkedRepo(ctx context.Context, db *gorm.DB, imageDigestID string) *Lin
 		BaseURL: row.BaseURL, ProviderID: row.ProviderID,
 	}
 }
-

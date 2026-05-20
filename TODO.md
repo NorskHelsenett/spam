@@ -11,6 +11,26 @@ existing surfaces.
 
 ## Bugs
 
+### Cluster overview: short security status
+
+When opening a cluster (drawer or detail view), surface a compact summary strip showing: image count, vuln count, and SPAM Score.
+
+### Remove animation on front page
+
+The landing/front page should have no animation.
+
+### SBOM vulnerability scanner doesn't log or show correct state
+
+The SBOM vulnerability scanner doesn't log properly or show the correct state in the web UI.
+
+### Triage: fetch real state for cluster/image/repo filters
+
+In the triage view, selecting a cluster, image, or repo should fetch the actual items from the server (using a local cache where appropriate) so the user sees their real state instead of just the aggregated "total" counts.
+
+### Search palette: image be more like repo in search
+
+The image preview panel in search should be more like the repo visualization — richer visual layout with consistent styling and detail.
+
 ### Retry doesn't trigger an actual scanner pod
 
 `POST /api/runs/{id}/retry` resets the job to `QUEUED` and clears locks

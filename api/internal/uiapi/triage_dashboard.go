@@ -22,9 +22,9 @@ import (
 // gets cluster rows. Restricted callers don't get notFoundOrForbidden
 // because the page is the *entry point* of the app — returning a
 // scoped, possibly-empty triage list is the right answer.
-func TriageHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func TriageHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 

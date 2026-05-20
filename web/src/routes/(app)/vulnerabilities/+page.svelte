@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink } from 'lucide-svelte';
+	import { get } from 'svelte/store';
+	import { session, hasOnlyClusters } from '$lib/stores/session';
+	import { ShieldX, ShieldAlert, Shield, GitBranch, Container, SlidersHorizontal, Search, ExternalLink, ChevronDown } from 'lucide-svelte';
 	import { slide } from 'svelte/transition';
 	import { cubicOut } from 'svelte/easing';
 	import DonutChart from '$lib/components/DonutChart.svelte';
@@ -69,6 +71,7 @@
 		type: 'repo' | 'image';
 		id: string;
 		slug: string;
+		digest?: string;
 	};
 
 	type VulnGroup = {
@@ -258,6 +261,7 @@
 	// passed to /api/vuln/list as epss_min. EPSS is FIRST.org's daily
 	// 0–1 prediction of exploitation in the next 30 days.
 	let vulnEPSSMin = '';
+	let expandedVulns = new Set<string>();
 
 	const vulnEPSSOptions: SelectOption[] = [
 		{ value: '', label: 'Any' },
@@ -379,6 +383,14 @@
 	const openRepo = (repoId: string) => {
 		if (!repoId) return;
 		goto(`/providers/repo?repo_id=${encodeURIComponent(repoId)}`);
+	};
+
+	const toggleVulnAssets = (vulnId: string) => {
+		if (!vulnId) return;
+		const next = new Set(expandedVulns);
+		if (next.has(vulnId)) next.delete(vulnId);
+		else next.add(vulnId);
+		expandedVulns = next;
 	};
 
 	const severityClass = (s: string) => {
@@ -654,22 +666,45 @@
 		return next.length === list.length ? [...list, value] : next;
 	}
 
-	onMount(async () => {
-		try {
-			const [sumRes, reposRes, trendRes] = await Promise.all([
-				fetch('/api/vuln/summary', { credentials: 'include' }),
-				fetch('/api/vuln/repos', { credentials: 'include' }),
-				fetch('/api/vuln/trend?days=30', { credentials: 'include' })
-			]);
+	// Cluster-only users have no repo grants: /api/vuln/trend stays
+	// admin-gated (snapshot table is fleet-global), and /api/vuln/repos
+	// returns no rows. Skip both for those users so the page doesn't
+	// flash a "Failed to load" banner on top of an otherwise-working
+	// dashboard. The image-grouped findings list below still loads
+	// via fetchVulnPage, which scopes through ReadableImageClause.
+	async function waitForSession(timeoutMs = 2000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			if (get(session).loaded) return;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
 
-			if (!sumRes.ok || !reposRes.ok || !trendRes.ok) {
+	let isClusterOnly = false;
+
+	onMount(async () => {
+		await waitForSession();
+		isClusterOnly = get(hasOnlyClusters);
+		try {
+			const sumRes = await fetch('/api/vuln/summary', { credentials: 'include' });
+			if (!sumRes.ok) {
 				error = 'Failed to load vulnerability data';
 				return;
 			}
-
 			summary = await sumRes.json();
-			repos = await reposRes.json();
-			trend = await trendRes.json();
+
+			if (!isClusterOnly) {
+				const [reposRes, trendRes] = await Promise.all([
+					fetch('/api/vuln/repos', { credentials: 'include' }),
+					fetch('/api/vuln/trend?days=30', { credentials: 'include' }),
+				]);
+				if (!reposRes.ok || !trendRes.ok) {
+					error = 'Failed to load vulnerability data';
+					return;
+				}
+				repos = await reposRes.json();
+				trend = await trendRes.json();
+			}
 		} catch (e) {
 			error = 'Failed to fetch data';
 		} finally {
@@ -765,19 +800,28 @@
 						/>
 					{/if}
 				</div>
-				<div class="metric-card rounded-2xl p-5 lg:col-span-2">
-					<LineChart title="30-day trend" data={trend} />
-				</div>
+				{#if !isClusterOnly}
+					<div class="metric-card rounded-2xl p-5 lg:col-span-2">
+						<LineChart title="30-day trend" data={trend} />
+					</div>
+				{/if}
 			</div>
 
-			<!-- Tab selector -->
+			<!-- Tab selector. Cluster-only users drop the Repositories tab —
+			     their ACL grants no repo access until OCI label bridging
+			     lands, so the tab would always be empty. -->
 			<div class="pt-2">
 				<TabSelector
-					options={[
-						{ value: 'vulnerabilities', label: 'Vulnerabilities' },
-						{ value: 'repositories', label: 'Repositories' },
-						{ value: 'images', label: 'Images' }
-					]}
+					options={isClusterOnly
+						? [
+								{ value: 'vulnerabilities', label: 'Vulnerabilities' },
+								{ value: 'images', label: 'Images' }
+							]
+						: [
+								{ value: 'vulnerabilities', label: 'Vulnerabilities' },
+								{ value: 'repositories', label: 'Repositories' },
+								{ value: 'images', label: 'Images' }
+							]}
 					bind:value={activeTab}
 				/>
 			</div>
@@ -1088,9 +1132,9 @@
 									{#if imageVirt.topPad > 0}<tr style="height:{imageVirt.topPad}px"><td colspan="8"></td></tr>{/if}
 									{#each filteredImages.slice(imageVirt.start, imageVirt.end) as img}
 										<tr
-											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest_id ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest_id ? 'bg-[var(--hover-bg-subtle)]' : ''}"
+											class="transition hover:bg-[var(--hover-bg-subtle)] {img.digest ? 'cursor-pointer' : ''} {imageDrawerOpen && imageDrawerId === img.digest ? 'bg-[var(--hover-bg-subtle)]' : ''}"
 											style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px"
-											onclick={() => openImageDrawer(img.digest_id)}
+											onclick={() => openImageDrawer(img.digest)}
 										>
 											<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={img.registry}>{img.registry}</td>
 											<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={img.image}>{img.image}</td>
@@ -1193,7 +1237,8 @@
 									{#each vulnRows as row (row.idx)}
 										{@const g = row.group}
 										{#if g}
-											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style="height:{VULN_ROW_HEIGHT}px; max-height:{VULN_ROW_HEIGHT}px">
+											{@const isExpanded = expandedVulns.has(g.vuln_id)}
+											<tr class="align-top transition hover:bg-[var(--hover-bg-subtle)]" style={isExpanded ? '' : `height:${VULN_ROW_HEIGHT}px; max-height:${VULN_ROW_HEIGHT}px`}>
 												<td class="px-5 py-3 overflow-hidden">
 													<div class="flex flex-wrap items-center gap-2 overflow-hidden">
 														<a
@@ -1262,19 +1307,60 @@
 																<button
 																	type="button"
 																	class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
-																	onclick={() => openImageDrawer(a.id)}
+																		onclick={() => openImageDrawer(a.digest)}
 																>
 																	<Container class="h-3 w-3 shrink-0" />
 																	<span class="truncate">{a.slug}</span>
 																</button>
-															{/if}
-														{/each}
+																{/if}
+															{/each}
 														{#if g.assets.length > 3}
-															<a
-																href={vulnDetailHref(g.vuln_id)}
-																class="text-xs text-[var(--text-muted)] hover:text-[var(--accent)] hover:underline"
-																title="See all {g.assets.length} affected assets"
-															>+{g.assets.length - 3} more</a>
+															{#if !isExpanded}
+																<button
+																	type="button"
+																	class="inline-flex items-center gap-1 self-start text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+																	aria-expanded={isExpanded}
+																	title="Show all {g.assets.length} affected assets"
+																	onclick={() => toggleVulnAssets(g.vuln_id)}
+																>
+																	<span>+{g.assets.length - 3} more</span>
+																	<ChevronDown class="h-3 w-3 transition-transform duration-200" />
+																</button>
+															{:else}
+																<div transition:slide={{ duration: 180, easing: cubicOut }} class="mt-1 flex flex-col gap-1 overflow-hidden">
+																	{#each g.assets.slice(3) as a}
+																		{#if a.type === 'repo'}
+																			<button
+																				type="button"
+																				class="flex items-center gap-1.5 text-left text-xs text-[var(--accent)] hover:underline truncate"
+																				onclick={() => openRepo(a.id)}
+																			>
+																				<GitBranch class="h-3 w-3 shrink-0" />
+																				<span class="truncate">{a.slug}</span>
+																			</button>
+																		{:else}
+																			<button
+																				type="button"
+																				class="flex items-center gap-1.5 text-left text-xs text-[var(--text-secondary)] hover:text-[var(--accent)] truncate"
+																					onclick={() => openImageDrawer(a.digest)}
+																			>
+																				<Container class="h-3 w-3 shrink-0" />
+																				<span class="truncate">{a.slug}</span>
+																			</button>
+																		{/if}
+																	{/each}
+																</div>
+																<button
+																	type="button"
+																	class="inline-flex items-center gap-1 self-start text-xs text-[var(--text-muted)] transition hover:text-[var(--accent)]"
+																	aria-expanded={isExpanded}
+																	title="Hide extra affected assets"
+																	onclick={() => toggleVulnAssets(g.vuln_id)}
+																>
+																	<span>Show less</span>
+																	<ChevronDown class="h-3 w-3 rotate-180 transition-transform duration-200" />
+																</button>
+															{/if}
 														{/if}
 													</div>
 												</td>

@@ -94,6 +94,11 @@
 		// is enriched yet.
 		authorities: AuthorityRating[];
 	};
+	type VulnMetaStatus = 'idle' | 'fetching' | 'enriched' | 'not_found_upstream' | 'upstream_error';
+	type VulnMetaUpdatedPayload = {
+		vuln_id?: string;
+		status?: VulnMetaStatus;
+	};
 
 	// Route is /vuln/[id] — short URL for manual typing. The
 	// API endpoint stays at /api/vulnerabilities/{vuln_id} since
@@ -104,6 +109,7 @@
 	let data = $state<DetailResponse | null>(null);
 	let loading = $state(true);
 	let error = $state('');
+	let metaFetchStatus = $state<VulnMetaStatus>('idle');
 	// Per-repo contributor cache; repo_id → list (null = loading, [] = empty)
 	let contributors = $state<Record<string, Contributor[] | null>>({});
 
@@ -124,6 +130,11 @@
 			body.affected_images = body.affected_images ?? [];
 			body.sources = body.sources ?? [];
 			data = body;
+			if (body.enrichment) {
+				metaFetchStatus = 'enriched';
+			} else if (body.enrichment_loading && metaFetchStatus !== 'not_found_upstream' && metaFetchStatus !== 'upstream_error') {
+				metaFetchStatus = 'fetching';
+			}
 			// Kick off contributor fetches for the visible repos so the
 			// page fills in progressively. Cap at the first 20 to avoid
 			// hammering provider APIs on a vuln that hit a hundred repos.
@@ -157,12 +168,23 @@
 	onMount(() => {
 		if (!browser) return;
 		fetchDetail();
+
+		const handleVulnMetaUpdated = (event: Event) => {
+			const payload = (event as CustomEvent<VulnMetaUpdatedPayload>).detail;
+			if (payload?.vuln_id !== vulnId) return;
+			metaFetchStatus = payload.status ?? 'idle';
+			fetchDetail();
+		};
+
+		window.addEventListener('spam:vuln-meta-updated', handleVulnMetaUpdated);
+		return () => window.removeEventListener('spam:vuln-meta-updated', handleVulnMetaUpdated);
 	});
 
 	// Re-fetch on route change (same layout, different vuln_id)
 	$effect(() => {
 		vulnId;
 		if (browser && data && data.vuln_id !== vulnId) {
+			metaFetchStatus = 'idle';
 			fetchDetail();
 		}
 	});
@@ -238,6 +260,27 @@
 			case 'WEB':      return 'Web';
 			case '':         return 'Link';
 			default:         return t!;
+		}
+	};
+
+	const emptyVulnTitle = (status: VulnMetaStatus): string => {
+		switch (status) {
+			case 'not_found_upstream': return 'Vulnerability not found in SPAM or upstream';
+			case 'upstream_error':     return 'Vulnerability not found in SPAM';
+			default:                   return 'Vulnerability not found in SPAM';
+		}
+	};
+
+	const emptyVulnSubtitle = (status: VulnMetaStatus): string => {
+		switch (status) {
+			case 'fetching':
+				return 'Fetching advisory metadata from upstream sources. The page will update when the lookup finishes.';
+			case 'not_found_upstream':
+				return 'No matching advisory metadata was found upstream yet.';
+			case 'upstream_error':
+				return 'The upstream metadata lookup failed. SPAM will try again on a later metadata pass.';
+			default:
+				return 'SPAM has no affected repositories or images for this ID.';
 		}
 	};
 </script>
@@ -369,6 +412,29 @@
 				</div>
 			</div>
 		</section>
+
+		{#if data.repo_count === 0 && data.image_count === 0 && !data.enrichment}
+			<section class="panel-surface px-6 py-8 sm:px-10">
+				<div class="flex flex-col gap-4 sm:flex-row sm:items-start">
+					<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[var(--border-color)] bg-[var(--hover-bg)] text-[var(--accent)]">
+						{#if data.enrichment_loading || metaFetchStatus === 'fetching'}
+							<RefreshCw class="h-5 w-5 animate-spin" />
+						{:else}
+							<ShieldAlert class="h-5 w-5" />
+						{/if}
+					</div>
+					<div class="min-w-0 flex-1 space-y-3">
+						<div>
+							<h2 class="text-lg font-semibold text-[var(--text-bright)]">{emptyVulnTitle(metaFetchStatus)}</h2>
+							<p class="mt-1 text-sm text-[var(--text-tertiary)]">{emptyVulnSubtitle(data.enrichment_loading ? 'fetching' : metaFetchStatus)}</p>
+						</div>
+						{#if data.enrichment_loading || metaFetchStatus === 'fetching'}
+							<Loading message="Fetching advisory metadata" variant="bar" size="sm" />
+						{/if}
+					</div>
+				</div>
+			</section>
+		{/if}
 
 		<!-- Authority ratings — one row per CVE / GHSA / BIT / GO row
 		     in vuln_metadata sharing this advisory's canonical_id.

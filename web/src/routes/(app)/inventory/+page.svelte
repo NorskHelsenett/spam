@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
 	import { goto } from '$app/navigation';
+	import { get } from 'svelte/store';
+	import { session, hasOnlyClusters } from '$lib/stores/session';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy `export let`
@@ -39,7 +41,6 @@
 		repo_id?: string;
 		repo_name?: string;
 		commit_sha?: string;
-		image_id?: string;
 		image_registry?: string;
 		image_repository?: string;
 		image_digest?: string;
@@ -83,7 +84,23 @@
 		'var(--info-dark)'
 	];
 
+	// Cluster-only users have no repo grants; /api/app/summary 404s
+	// for them via requireUnrestrictedRepos. Bounce them off this
+	// page before firing the request rather than show a broken state.
+	async function waitForSession(timeoutMs = 2000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			if (get(session).loaded) return;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+
 	const loadSummary = async () => {
+		await waitForSession();
+		if (get(hasOnlyClusters)) {
+			void goto('/');
+			return;
+		}
 		try {
 			const res = await fetch('/api/app/summary');
 			if (!res.ok) {
@@ -180,9 +197,7 @@
 		if (sbom.asset_type === 'REPO_COMMIT' && sbom.repo_id) {
 			return `/providers/repo?repo_id=${encodeURIComponent(sbom.repo_id)}`;
 		}
-		if (sbom.asset_type === 'IMAGE_DIGEST' && sbom.image_id) {
-			return `/images/${sbom.image_id}`;
-		}
+		if (sbom.asset_type === 'IMAGE_DIGEST' && sbom.image_digest) return `/images/${encodeURIComponent(sbom.image_digest)}`;
 		return '';
 	};
 

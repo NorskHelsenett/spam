@@ -5,7 +5,7 @@
 	import {
 		GitBranch, Star, GitFork, Eye, AlertCircle, Tag, Users, GitCommit,
 		ArrowLeft, ExternalLink, Shield, ShieldAlert, ShieldX, FileWarning,
-		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, X, Server
+		Package, Clock, Scale, Loader2, FileCode, Microscope, Lock, Globe, Server
 	} from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
@@ -18,6 +18,8 @@
 	import EmptyRuns from '$lib/components/icons/EmptyRuns.svelte';
 	import CommitStatusIcons from '$lib/components/CommitStatusIcons.svelte';
 	import CommitDetailDialog from '$lib/components/CommitDetailDialog.svelte';
+	import RunTable, { type RunTableItem } from '$lib/components/RunTable.svelte';
+	import VulnerabilitiesDialog, { type VulnerabilityDialogItem } from '$lib/components/VulnerabilitiesDialog.svelte';
 
 	type RepoStats = {
 		stars: number;
@@ -561,36 +563,9 @@
 		fetchRepoDetails().then(() => checkActiveScans());
 	});
 
-	// Vulnerabilities dialog — /api/vuln/list now returns grouped
-	// results {total, items: VulnGroup[]}. For a repo-scoped request
-	// every group has exactly one asset (this repo), so the dialog
-	// still renders one row per CVE.
-	type VulnGroup = {
-		vuln_id: string;
-		severity: string;
-		pkg_name: string;
-		installed_version: string;
-		fixed_version: string;
-		title: string;
-		description: string;
-		sources: string[];
-		assets: Array<{ type: 'repo' | 'image'; id: string; slug: string }>;
-		repo_count: number;
-		image_count: number;
-	};
-
 	let vulnDialogOpen = $state(false);
-	let vulnDialogData = $state<VulnGroup[]>([]);
+	let vulnDialogData = $state<VulnerabilityDialogItem[]>([]);
 	let vulnDialogLoading = $state(false);
-	let vulnDialogTab = $state('all');
-
-	const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
-
-	const vulnDialogFiltered = $derived(
-		vulnDialogTab === 'all'
-			? vulnDialogData
-			: vulnDialogData.filter(v => v.severity?.toUpperCase() === vulnDialogTab)
-	);
 
 	const openVulnDialog = async () => {
 		const repoDbId = resolvedRepoDbId;
@@ -604,7 +579,7 @@
 			if (repoDbId) params.set('repo_id', repoDbId);
 			const res = await fetch(`/api/vuln/list?${params}`, { credentials: 'include' });
 			if (res.ok) {
-				const payload = (await res.json()) as { items?: VulnGroup[] };
+				const payload = (await res.json()) as { items?: VulnerabilityDialogItem[] };
 				vulnDialogData = payload.items ?? [];
 			}
 		} finally {
@@ -612,20 +587,18 @@
 		}
 	};
 
-	const severityClass = (s: string) => {
-		switch (s?.toUpperCase()) {
-			case 'CRITICAL': return 'text-red-400 border-red-500/40 bg-red-500/10';
-			case 'HIGH':     return 'text-orange-400 border-orange-500/40 bg-orange-500/10';
-			case 'MEDIUM':   return 'text-yellow-400 border-yellow-500/40 bg-yellow-500/10';
-			case 'LOW':      return 'text-blue-400 border-blue-500/40 bg-blue-500/10';
-			default:         return 'text-[var(--text-muted)] border-[var(--border-color)] bg-transparent';
-		}
-	};
-
-	const vulnUrl = (id: string) => {
-		if (id?.startsWith('CVE-')) return `https://www.cve.org/CVERecord?id=${id}`;
-		return `https://osv.dev/vulnerability/${id}`;
-	};
+	const runTableItems = $derived<RunTableItem[]>(
+		runTimeline.map((run) => ({
+			id: run.id,
+			href: `/runs/${run.id}`,
+			status: run.status,
+			started_at: run.started_at,
+			finished_at: run.finished_at,
+			duration_ms: run.duration_ms,
+			commit_sha: run.commit_sha,
+			badges: (run.artifacts ?? []).map((artifact) => ({ label: artifact }))
+		}))
+	);
 
 	// Secrets dialog
 	type SecretFinding = {
@@ -980,10 +953,19 @@
 
 					<div class="mt-[2em]">
 					{#if activeTab === 'runs'}
-						<div class="space-y-2">
-							{#if totalRuns > 0}
-								<p class="text-xs text-[var(--text-muted)]">{totalRuns} total runs</p>
-							{/if}
+						<div class="space-y-4">
+							<div class="flex items-center justify-between gap-4">
+								<div>
+									<h3 class="text-sm font-semibold text-[var(--text-bright)]">Runs</h3>
+									<p class="text-xs text-[var(--text-muted)]">{totalRuns} total run{totalRuns === 1 ? '' : 's'}</p>
+								</div>
+								{#if activeRunId}
+									<a href="/runs/{activeRunId}" class="inline-flex items-center gap-2 rounded-full border border-[var(--info)]/40 bg-[var(--info)]/10 px-3 py-1.5 text-xs font-medium text-[var(--info)] transition hover:bg-[var(--info)]/20">
+										<Loader2 class="h-3.5 w-3.5 animate-spin" />
+										{activeRunStatus}
+									</a>
+								{/if}
+							</div>
 							{#if runTimeline.length === 0}
 								<div class="flex flex-col items-center justify-center py-8 text-center">
 									<EmptyRuns class="mb-3 text-[var(--text-muted)]" />
@@ -991,35 +973,7 @@
 									<p class="mt-1 text-xs text-[var(--text-muted)]">No runs recorded for this repository yet.</p>
 								</div>
 							{:else}
-								<div class="space-y-3">
-									{#each runTimeline as run}
-										<a href="/runs/{run.id}" class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3 transition hover:border-[var(--accent)]/40 hover:bg-[var(--hover-bg-subtle)]">
-											<div class="min-w-0 space-y-1">
-												<div class="flex items-center gap-2">
-													<span class="rounded-full px-2 py-0.5 text-xs font-medium {run.status === 'SUCCEEDED' ? 'bg-green-500/10 text-green-400' : run.status === 'FAILED' ? 'bg-red-500/10 text-red-400' : 'bg-yellow-500/10 text-yellow-400'}">
-														{run.status}
-													</span>
-													<span class="text-xs text-[var(--text-muted)]">{formatDateTime(run.started_at || run.finished_at)}</span>
-													{#if run.duration_ms}
-														<span class="text-xs text-[var(--text-muted)]">• {formatDuration(run.duration_ms)}</span>
-													{/if}
-												</div>
-												{#if run.commit_sha}
-													<p class="truncate text-xs text-[var(--text-secondary)]">Commit {run.commit_sha.slice(0, 7)}</p>
-												{/if}
-											</div>
-											{#if run.artifacts && run.artifacts.length > 0}
-												<div class="flex flex-wrap gap-2 text-xs">
-													{#each run.artifacts as artifact}
-														<span class="rounded-full border border-[var(--border-color)]/60 px-2 py-0.5 text-[var(--text-secondary)]">
-															{artifact.toUpperCase()}
-														</span>
-													{/each}
-												</div>
-											{/if}
-										</a>
-									{/each}
-								</div>
+								<RunTable runs={runTableItems} />
 							{/if}
 						</div>
 					{:else if activeTab === 'workloads'}
@@ -1091,7 +1045,7 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 								{#each workloadImages as img}
 									<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
 										<div class="flex flex-wrap items-baseline justify-between gap-2">
-											<a href="/images/{img.id}" class="min-w-0 font-mono text-sm text-[var(--text-bright)] hover:text-[var(--accent)]">
+											<a href={`/images/${encodeURIComponent(img.digest)}`} class="min-w-0 font-mono text-sm text-[var(--text-bright)] hover:text-[var(--accent)]">
 												{img.registry}/{img.repository}
 												<span class="ml-1 text-xs text-[var(--text-tertiary)]">{img.digest.slice(0, 20)}…</span>
 											</a>
@@ -1249,127 +1203,7 @@ LABEL org.opencontainers.image.source=&quot;https://github.com/org/repo&quot; \
 
 <CommitDetailDialog bind:open={commitDialogOpen} commit={selectedCommit} />
 
-<!-- Vulnerabilities dialog -->
-{#if vulnDialogOpen}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div
-		class="fixed inset-0 z-50 flex items-start justify-center bg-black/60 backdrop-blur-sm p-4 pt-16 overflow-y-auto"
-		onkeydown={(e) => e.key === 'Escape' && (vulnDialogOpen = false)}
-		onclick={(e) => e.target === e.currentTarget && (vulnDialogOpen = false)}
-	>
-		<div class="w-full max-w-[60rem]">
-			<section class="w-full rounded-2xl border border-[var(--border-color)] bg-[var(--bg)] shadow-2xl overflow-hidden">
-				<!-- Header -->
-				<div class="flex items-center justify-between px-6 py-4">
-					<div class="flex items-center gap-3">
-						<ShieldX class="h-5 w-5 text-[var(--accent)]" />
-						<h2 class="text-base font-semibold text-[var(--text-bright)]">Vulnerabilities</h2>
-						{#if !vulnDialogLoading && vulnDialogData.length > 0}
-							<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs text-[var(--text-muted)]">
-								{vulnDialogFiltered.length}
-							</span>
-						{/if}
-					</div>
-					<button
-						type="button"
-						class="rounded-lg p-1.5 text-[var(--text-muted)] transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-secondary)]"
-						onclick={() => (vulnDialogOpen = false)}
-					>
-						<X class="h-4 w-4" />
-					</button>
-				</div>
-
-				<!-- Severity tabs -->
-				{#if !vulnDialogLoading && vulnDialogData.length > 0}
-					<div class="px-6 pb-2">
-						<TabSelector
-							options={[
-								{ value: 'all', label: 'All' },
-								...severityOrder
-									.filter(s => vulnDialogData.some(v => v.severity?.toUpperCase() === s))
-									.map(s => ({
-										value: s,
-										label: s.charAt(0) + s.slice(1).toLowerCase()
-									}))
-							]}
-							bind:value={vulnDialogTab}
-						/>
-					</div>
-				{/if}
-
-				<!-- Body -->
-				<div class="max-h-[70vh] overflow-y-auto">
-					{#if vulnDialogLoading}
-						<div class="flex items-center justify-center py-20">
-							<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-						</div>
-					{:else if vulnDialogData.length === 0}
-						<div class="flex flex-col items-center justify-center py-16 text-center">
-							<Shield class="mb-3 h-10 w-10 text-[var(--text-muted)]" />
-							<p class="text-sm font-medium text-[var(--text-secondary)]">No vulnerabilities found</p>
-							<p class="mt-1 text-xs text-[var(--text-muted)]">This repository has no recorded scan results.</p>
-						</div>
-					{:else}
-						<div class="space-y-1 p-2">
-							{#each vulnDialogFiltered as v}
-								<article class="rounded-xl px-5 py-4 hover:bg-[var(--hover-bg-subtle)] transition-colors">
-									<div class="flex items-start gap-4">
-										<!-- Severity pill — fixed width so all rows align -->
-										<div class="w-24 shrink-0 pt-0.5">
-											<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(v.severity)}">
-												{#if v.severity?.toUpperCase() === 'CRITICAL' || v.severity?.toUpperCase() === 'HIGH'}
-													<ShieldX class="h-3 w-3" />
-												{:else}
-													<ShieldAlert class="h-3 w-3" />
-												{/if}
-												{v.severity}
-											</span>
-										</div>
-
-										<div class="min-w-0 flex-1 space-y-1.5">
-										<!-- CVE ID + title -->
-										<div class="flex flex-wrap items-center gap-2">
-											<a
-												href={vulnUrl(v.vuln_id)}
-												target="_blank"
-												rel="noopener noreferrer"
-												class="font-mono text-sm font-semibold text-[var(--accent)] hover:underline"
-											>{v.vuln_id}</a>
-											{#each v.sources ?? [] as src}
-												<span class="rounded-full border border-[var(--border-color)] px-1.5 py-0.5 text-[10px] text-[var(--text-muted)] uppercase tracking-wide">{src}</span>
-											{/each}
-										</div>
-										{#if v.title}
-											<p class="text-sm text-[var(--text-secondary)]">{v.title}</p>
-										{/if}
-
-											<!-- Description -->
-											{#if v.description}
-												<div class="text-xs text-[var(--text-muted)] leading-relaxed">
-													<Markdown content={v.description} />
-												</div>
-											{/if}
-
-											<!-- Package + fix -->
-											<div class="flex flex-wrap items-center gap-3 text-xs text-[var(--text-muted)]">
-												<span class="font-mono">{v.pkg_name}{v.installed_version ? `@${v.installed_version}` : ''}</span>
-												{#if v.fixed_version}
-													<span class="bg-green-500/10 px-1.5 py-0.5 font-mono text-green-400">fix: {v.fixed_version}</span>
-												{:else}
-													<span class="opacity-50">no fix available</span>
-												{/if}
-											</div>
-										</div>
-									</div>
-								</article>
-							{/each}
-						</div>
-					{/if}
-				</div>
-			</section>
-		</div>
-	</div>
-{/if}
+<VulnerabilitiesDialog bind:open={vulnDialogOpen} loading={vulnDialogLoading} data={vulnDialogData} />
 
 <!-- Secrets & Issues dialog -->
 <SecretsDialog bind:open={secretsDialogOpen} loading={secretsDialogLoading} data={secretsDialogData} />

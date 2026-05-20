@@ -9,6 +9,17 @@
 	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 	import { providersState } from '$lib/stores/providersState';
 	import RepoTable from '$lib/components/RepoTable.svelte';
+	import { isAdmin as isAdminStore } from '$lib/stores/session';
+
+	// isAdmin branches the empty-state copy below — the original
+	// message ("An administrator needs to configure a Git provider")
+	// reads wrong for non-admin users, who either have no read access
+	// or whose role just can't take that action.
+	let isAdmin = $state(false);
+	$effect(() => {
+		const unsub = isAdminStore.subscribe((v) => (isAdmin = v));
+		return unsub;
+	});
 	import RepoTableRow from '$lib/components/RepoTableRow.svelte';
 	import Pagination from '$lib/components/Pagination.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
@@ -857,7 +868,7 @@
 			<p class="text-sm text-[var(--text-tertiary)]">Browse repositories from configured Git providers.</p>
 		</header>
 
-		{#if customProviders.length === 0}
+		{#if customProviders.length === 0 && isAdmin}
 			<div class="flex flex-col items-center justify-center gap-4 py-16 text-center">
 				<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-[var(--text-tertiary)]">
 					<PlugZap size={32} />
@@ -874,6 +885,18 @@
 				>
 					Open admin settings →
 				</a>
+			</div>
+		{:else if customProviders.length === 0}
+			<div class="flex flex-col items-center justify-center gap-4 py-16 text-center">
+				<div class="rounded-full border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4 text-[var(--text-tertiary)]">
+					<PlugZap size={32} />
+				</div>
+				<div class="space-y-1">
+					<h3 class="text-lg font-semibold text-[var(--text-bright)]">No repositories available</h3>
+					<p class="max-w-md text-sm text-[var(--text-tertiary)]">
+						You don't have read access to any repositories yet. Ask an administrator if you need access.
+					</p>
+				</div>
 			</div>
 		{:else}
 		<!-- Tabs -->

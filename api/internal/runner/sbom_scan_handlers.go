@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/artifacts"
+	"github.com/NorskHelsenett/spam/internal/cache"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
@@ -132,7 +134,7 @@ func sbomScanManifestsHandler(db *gorm.DB) http.HandlerFunc {
 //  4. Release the sbom_scan_leases row so the next-SBOM query can advance.
 //
 // POST /api/sbom-scan/image-result/{sbom_id}
-func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
+func grypeImageResultHandler(db *gorm.DB, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sbomID := r.PathValue("sbom_id")
 		if sbomID == "" {
@@ -205,6 +207,7 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 		// the list page.
 		vulnmetrics.TriggerRefresh(db)
 		jobs.EnqueueMissingVulnMeta(r.Context(), db)
+		invalidateReposForImageDigest(r.Context(), db, c, binding.AssetRefID)
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -214,7 +217,7 @@ func grypeImageResultHandler(db *gorm.DB) http.HandlerFunc {
 // REPO_COMMIT-bound SBOM. The sbom-scanner posts here after running
 // grype against the stored SBOM; raw_json is persisted as-is so
 // advanced_search can introspect individual matches.
-func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
+func sbomScanResultHandler(db *gorm.DB, c cache.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sbomID := r.PathValue("sbom_id")
 		if sbomID == "" {
@@ -252,7 +255,26 @@ func sbomScanResultHandler(db *gorm.DB) http.HandlerFunc {
 		// of completions produces at most one refresh + one follow-up.
 		vulnmetrics.TriggerRefresh(db)
 		jobs.EnqueueMissingVulnMeta(r.Context(), db)
+		invalidateRepoMetadataCache(r.Context(), c, repoID)
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func invalidateReposForImageDigest(ctx context.Context, db *gorm.DB, c cache.Store, imageDigestID string) {
+	if c == nil || imageDigestID == "" {
+		return
+	}
+
+	var repoIDs []string
+	if err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT source_repo_id
+		FROM image_digests
+		WHERE id = ? AND source_repo_id IS NOT NULL AND source_repo_id <> ''
+	`, imageDigestID).Scan(&repoIDs).Error; err != nil {
+		return
+	}
+	for _, repoID := range repoIDs {
+		invalidateRepoMetadataCache(ctx, c, repoID)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/handlers/health"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/ror"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/uiapi"
@@ -34,6 +35,10 @@ type RouterOptions struct {
 	// SecretsKey is the AES-GCM key used to en/decrypt provider PATs
 	// and the cosign signing policy's optional pinned key material.
 	SecretsKey []byte
+	// RORClient is the optional NHN ROR API client. When nil, the
+	// admin /ror/probe endpoint returns 503; when set, it powers the
+	// admin probe and (later) the RORProvider in the ACL chain.
+	RORClient *ror.Client
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -43,11 +48,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var appCache cache.Store
 	var aclProvider acl.Provider
 	var secretsKey []byte
+	var rorClient *ror.Client
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
 		secretsKey = opts.SecretsKey
+		rorClient = opts.RORClient
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -115,8 +122,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 
 			pub.Get("/api/auth/login", authService.LoginHandler())
 			pub.Get("/api/auth/callback", authService.CallbackHandler())
-			pub.Get("/api/auth/me", authService.MeHandler())
+			pub.Get("/api/auth/me", authService.MeHandler(aclProvider))
 			pub.Post("/api/auth/logout", authService.LogoutHandler())
+
+			// Per-user ROR cluster access — gated by an approved
+			// session only (handler self-checks via LoadSession), not
+			// APIGuard. Returns the clusters the caller can see in ROR
+			// based on their EntraID identity + the service ApiKey.
+			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(authService, rorClient))
 		})
 
 		// Pending-approval SSE accepts a pending session (pre-approval),
@@ -260,8 +273,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/stats", uiapi.StatsHandler(db, authService))
 				api.Get("/app/summary", uiapi.AppSummaryHandler(db, authService, appCache))
 
-				// Triage — asset-centric "fix this now" dashboard backing /app.
-				api.Get("/triage", uiapi.TriageHandler(db, authService))
+				// Triage is now registered in the approved group below —
+				// the handler scopes repo/image/cluster rows independently
+				// via ReadableRepoClause / ReadableImageClause /
+				// readableClusterIDSet, so cluster-only ROR users land on
+				// a non-empty triage instead of bouncing off APIGuard's
+				// admin/global_reader gate.
 
 				// Ecosystems endpoint
 				api.Get("/components/ecosystems", uiapi.EcosystemsListHandler(db, authService, appCache))
@@ -303,20 +320,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/providers/gitea/orgs", uiapi.GiteaOrgsHandler(authService, providerStore, appCache))
 				api.Get("/providers/gitea/{owner}/{repo}/details", uiapi.GiteaRepoDetailsHandler(authService, providerStore, appCache))
 
-				// Cluster query endpoints — SCAM inventory (namespaces,
-				// pods, images, hostnames, LB IPs). Gated via APIGuard
-				// on the enclosing group.
-				api.Get("/clusters/summary", scam.ClusterSummaryHandler(db))
-				api.Get("/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
-				api.Get("/clusters/exposure", scam.ExposureHandler(db))
-				api.Get("/clusters/images/detail", scam.ImageDetailHandler(db))
-				api.Get("/clusters/chain", scam.ClusterChainHandler(db))
-				api.Get("/clusters/hosts", scam.HostsHandler(db, appCache))
-				api.Get("/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
-				api.Get("/clusters/hosts/chain", scam.HostChainHandler(db))
-				api.Get("/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
-				api.Get("/clusters/hosts/meta", scam.HostMetaHandler(appCache))
-				api.Get("/clusters/hosts/favicon", scam.HostFaviconHandler(appCache))
+				// Cluster query endpoints used to live here, but were
+				// promoted to the approved-only group below so regular
+				// users (no admin/global_reader role) can view the
+				// clusters their ROR ACL grants them access to. The
+				// handlers already filter rows via clusterACLFilterCol,
+				// so moving out of APIGuard is safe.
 
 				// Runs endpoints
 				api.Get("/runs", uiapi.RunsListHandler(db, authService))
@@ -339,10 +348,12 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/image-scans/{job_id}/artifacts/{artifact_id}/download",
 					uiapi.ImageScanArtifactDownloadHandler(db, authService))
 
-				// Image-as-first-class-entity routes: image profile page
-				// and the reverse lookup from a repo to all images built
-				// from it (matched via cached source_repo_id).
-				api.Get("/images/{id}", uiapi.ImageDetailHandler(db, authService))
+				// /api/images/{id} moved to the approved group below so
+				// cluster-only users can open the image profile for a
+				// container running in one of their clusters. The
+				// handler now uses canReadImageByID, which honors the
+				// cluster-image inheritance branch in
+				// acl.ReadableImageClause.
 				api.Get("/repos/{repo_id}/images", uiapi.RepoImagesHandler(db, authService))
 				api.Get("/repos/{repo_id}/workloads", uiapi.RepoWorkloadsHandler(db, authService))
 
@@ -357,19 +368,16 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				}
 			})
 
-			priv.Route("/api/vuln", func(v chi.Router) {
-				v.Get("/summary", uiapi.VulnSummaryHandler(db, authService))
-				v.Get("/repos", uiapi.VulnReposHandler(db, authService))
-				v.Get("/trend", uiapi.VulnTrendHandler(db, authService))
-				v.Get("/list", uiapi.VulnListHandler(db, authService))
-				v.Get("/facets", uiapi.VulnFacetsHandler(db, authService))
-			})
-			// /api/vulnerabilities/{vuln_id} — full detail view.
-			// Kept separate from /api/vuln/* because the plural form
-			// matches the /app/vulnerabilities/{vuln_id} route and
-			// resource-style paths, whereas /api/vuln/* is the list-
-			// oriented dashboard namespace.
-			priv.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
+			// /api/vuln/trend stays under APIGuard — its data source
+			// (vuln_dashboard_snapshots) is a fleet-global daily
+			// rollup with no per-asset breakdown, so there's no way
+			// to scope the series to a cluster-only user's image
+			// set. Frontend hides the chart for that persona.
+			priv.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
+			// Other /api/vuln/* endpoints + /api/vulnerabilities/{id}
+			// moved to the approved group below; each handler ACL-
+			// scopes its own rows so APIGuard's admin/global_reader
+			// gate is no longer needed.
 			// /api/secrets is split into two trust bands. Aggregate
 			// endpoints (counts + trends + per-asset tallies) carry
 			// no credential text and so are safe for global_readers.
@@ -378,13 +386,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			priv.Route("/api/secrets", func(s chi.Router) {
 				s.Use(audit.Middleware(db, auditUserID, "secrets.read"))
 
-				// Aggregate / metadata — admin or global_reader.
+				// Repo-side aggregate / metadata — admin or global_reader.
+				// /images is not here: cluster-only users need it too,
+				// so it's registered in the approved group below.
 				s.Group(func(meta chi.Router) {
 					meta.Use(authService.AdminOrGlobalReaderGuard)
 					meta.Get("/table", uiapi.SecretsDashboardTableHandler(db, authService, appCache))
 					meta.Get("/stats", uiapi.SecretsDashboardStatsHandler(db, authService, appCache))
 					meta.Get("/trend", uiapi.SecretsDashboardTrendHandler(db, authService, appCache))
-					meta.Get("/images", uiapi.ImageSecretsTableHandler(db, authService))
 				})
 
 				// Raw credential text + state mutation — admin only.
@@ -394,6 +403,55 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 					raw.Post("/dismiss", uiapi.SecretDismissHandler(db, authService, appCache))
 				})
 			})
+		})
+
+		// Approved-user group — endpoints whose data is fully ACL-filtered
+		// per handler so regular users (no admin/global_reader role) can
+		// see only the rows their grants allow. RORProvider drives the
+		// cluster visibility here; LocalProvider stays the source of truth
+		// for repo/image grants until those are migrated.
+		r.Group(func(approved chi.Router) {
+			approved.Use(middleware.RequestID)
+			approved.Use(middleware.RealIP)
+			approved.Use(middleware.Logger)
+			approved.Use(middleware.Recoverer)
+			approved.Use(cache.Middleware)
+			approved.Use(middleware.Timeout(60 * time.Second))
+			approved.Use(authService.ApprovedGuard)
+			approved.Use(aclProviderInjector)
+
+			// Image-grain secrets dashboard — readable by anyone whose
+			// ACL grants resolve to images (admin, global_reader, or
+			// cluster-only users via cluster_image_inventory). Repo-
+			// side secrets (/api/secrets/table|stats|trend) stay in
+			// the AdminOrGlobalReader band above.
+			approved.Get("/api/secrets/images", uiapi.ImageSecretsTableHandler(db, authService))
+
+			// Dashboard + vulnerability surfaces that scope rows per
+			// subject through ReadableRepoClause / ReadableImageClause
+			// (which now OR-s in cluster_image_inventory). Each handler
+			// is responsible for its own filtering — APIGuard's role
+			// gate is intentionally not in this group, so adding a
+			// new endpoint here without ACL filtering would leak data.
+			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
+			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
+			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))
+			approved.Get("/api/vuln/list", uiapi.VulnListHandler(db, authService))
+			approved.Get("/api/vuln/facets", uiapi.VulnFacetsHandler(db, authService))
+			approved.Get("/api/vuln/repos", uiapi.VulnReposHandler(db, authService))
+			approved.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
+
+			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
+			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
+			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))
+			approved.Get("/api/clusters/images/detail", scam.ImageDetailHandler(db))
+			approved.Get("/api/clusters/chain", scam.ClusterChainHandler(db))
+			approved.Get("/api/clusters/hosts", scam.HostsHandler(db, appCache))
+			approved.Get("/api/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
+			approved.Get("/api/clusters/hosts/chain", scam.HostChainHandler(db))
+			approved.Get("/api/clusters/hosts/resolve", scam.ResolveHostHandler(appCache))
+			approved.Get("/api/clusters/hosts/meta", scam.HostMetaHandler(appCache))
+			approved.Get("/api/clusters/hosts/favicon", scam.HostFaviconHandler(appCache))
 		})
 	}
 

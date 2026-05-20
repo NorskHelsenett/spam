@@ -1,10 +1,12 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { fly, slide } from 'svelte/transition';
 	import { cubicOut, cubicIn } from 'svelte/easing';
 	import { KeyRound, GitBranch, SlidersHorizontal, Search, Lock, Globe, ShieldAlert, Container } from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import { goto } from '$app/navigation';
+	import { session, hasOnlyClusters } from '$lib/stores/session';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import MultiLineChart from '$lib/components/MultiLineChart.svelte';
 	import type { MultiSeries, MultiPoint } from '$lib/components/MultiLineChart.svelte';
@@ -61,18 +63,26 @@
 		digest: string;
 		finding_count: number;
 		last_scanned_at?: string;
+		cluster_count?: number;
+		namespace_count?: number;
+		container_count?: number;
+		last_seen?: string;
 	};
 
 	let activeTab = $state('repos');
 	let imageSecrets = $state<ImageSecretRow[]>([]);
 	let imageSecretsLoaded = $state(false);
 	let imageSecretsLoading = $state(false);
+	let imageIncludeInactive = $state(false);
 
-	const loadImageSecrets = async () => {
-		if (imageSecretsLoaded) return;
+	const loadImageSecrets = async (force = false) => {
+		if (!force && imageSecretsLoaded) return;
 		imageSecretsLoading = true;
 		try {
-			const res = await fetch('/api/secrets/images', { credentials: 'include' });
+			const params = new URLSearchParams();
+			if (imageIncludeInactive) params.set('include_inactive', 'true');
+			const qs = params.toString();
+			const res = await fetch(`/api/secrets/images${qs ? `?${qs}` : ''}`, { credentials: 'include' });
 			if (res.ok) imageSecrets = (await res.json()) ?? [];
 			imageSecretsLoaded = true;
 		} catch {
@@ -83,7 +93,7 @@
 	};
 
 	$effect(() => {
-		if (activeTab === 'images') loadImageSecrets();
+		if (activeTab === 'images') loadImageSecrets(true);
 	});
 
 	const shortDigest = (d: string) => (d && d.length > 14 ? d.slice(0, 14) + '…' : d ?? '');
@@ -96,7 +106,9 @@
 		if (days < 30) return `${days}d ago`;
 		return `${Math.floor(days / 30)}mo ago`;
 	};
-	const openImage = (id: string) => { if (id) goto(`/images/${id}`); };
+	const openImage = (digest?: string) => {
+		if (digest) goto(`/images/${encodeURIComponent(digest)}`);
+	};
 
 	const COLORS = [
 		'var(--red)',
@@ -168,6 +180,8 @@
 	let selectedSecretTypes: string[] = $state([]);
 	let selectedProviders: string[] = $state([]);
 	let searchQuery = $state('');
+	let selectedImageRegistries: string[] = $state([]);
+	let imageSearchQuery = $state('');
 
 	// Derive available options from loaded data, disabling combinations that yield no results
 	const secretTypesForSelectedProviders = $derived(
@@ -200,6 +214,18 @@
 		(publicOnly ? 1 : 0) + (selectedSecretTypes.length > 0 ? 1 : 0) + (selectedProviders.length > 0 ? 1 : 0) + (searchQuery.trim() ? 1 : 0)
 	);
 
+	const imageRegistryOptions: MultiSelectOption[] = $derived(
+		[...new Set(imageSecrets.map((r) => r.registry).filter(Boolean))].sort().map((r) => ({
+			value: r,
+			label: r
+		}))
+	);
+
+	const activeImageFilterCount = $derived(
+		(imageIncludeInactive ? 1 : 0) + (selectedImageRegistries.length > 0 ? 1 : 0) + (imageSearchQuery.trim() ? 1 : 0)
+	);
+	const activeVisibleFilterCount = $derived(activeTab === 'repos' ? activeFilterCount : activeImageFilterCount);
+
 	// Filtered rows (before sorting)
 	const filteredRows = $derived(
 		tableRows.filter((row) => {
@@ -224,6 +250,29 @@
 		selectedSecretTypes = [];
 		selectedProviders = [];
 		searchQuery = '';
+	};
+
+	const filteredImageSecrets = $derived(
+		imageSecrets.filter((row) => {
+			if (selectedImageRegistries.length > 0 && !selectedImageRegistries.includes(row.registry)) return false;
+			if (imageSearchQuery.trim()) {
+				const q = imageSearchQuery.trim().toLowerCase();
+				if (
+					!row.registry.toLowerCase().includes(q) &&
+					!row.repository.toLowerCase().includes(q) &&
+					!row.digest.toLowerCase().includes(q)
+				) return false;
+			}
+			return true;
+		})
+	);
+
+	const clearImageFilters = () => {
+		imageIncludeInactive = false;
+		selectedImageRegistries = [];
+		imageSearchQuery = '';
+		imageSecretsLoaded = false;
+		loadImageSecrets(true);
 	};
 
 	const fmt = (n: number) => n.toLocaleString('en-US').replace(/,/g, ' ');
@@ -286,7 +335,25 @@
 		}
 	};
 
+	// Cluster-only users have no repo grants so the /table, /stats,
+	// /trend endpoints would 403. Bounce them off this page before
+	// firing the requests. waitForSession() resolves once /api/auth/me
+	// has replied so we don't redirect-flash users whose session is
+	// still loading.
+	async function waitForSession(timeoutMs = 2000): Promise<void> {
+		const start = Date.now();
+		while (Date.now() - start < timeoutMs) {
+			if (get(session).loaded) return;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+
 	onMount(async () => {
+		await waitForSession();
+		if (get(hasOnlyClusters)) {
+			void goto('/');
+			return;
+		}
 		try {
 			const [tableRes, statsRes, trendRes] = await Promise.all([
 				fetch('/api/secrets/table', { credentials: 'include' }),
@@ -401,7 +468,7 @@
 						: 'Per-repository secret findings from the latest scan.'}
 				</p>
 			</div>
-			{#if activeTab === 'repos' && !loading && !error && tableRows.length > 0}
+			{#if ((activeTab === 'repos' && !loading && !error && tableRows.length > 0) || (activeTab === 'images' && !imageSecretsLoading && imageSecrets.length > 0))}
 				<button
 					type="button"
 					class="filter-toggle"
@@ -412,8 +479,8 @@
 				>
 					<SlidersHorizontal size={16} />
 					<span>Filters</span>
-					{#if activeFilterCount > 0}
-						<span class="filter-badge">{activeFilterCount}</span>
+					{#if activeVisibleFilterCount > 0}
+						<span class="filter-badge">{activeVisibleFilterCount}</span>
 					{/if}
 				</button>
 			{/if}
@@ -604,6 +671,60 @@
 		{/if}
 
 		{#if activeTab === 'images'}
+			{#if filterOpen && !imageSecretsLoading && imageSecrets.length > 0}
+				<div
+					transition:slide={{ duration: 220, easing: cubicOut }}
+					class="filter-bar"
+				>
+					<div class="flex flex-wrap items-start gap-6">
+						<div class="filter-field">
+							<span class="filter-field-label">Scope</span>
+							<div class="flex items-center h-[28px]">
+								<Toggle bind:checked={imageIncludeInactive} label="Include inactive" />
+							</div>
+						</div>
+
+						<div class="filter-field">
+							<span class="filter-field-label">Registries</span>
+							<MultiSelect
+								bind:selected={selectedImageRegistries}
+								options={imageRegistryOptions}
+								placeholder="All registries"
+								size="sm"
+							/>
+						</div>
+
+						<div class="filter-field filter-field-search w-[35em]">
+							<span class="filter-field-label">Search</span>
+							<div class="search-input-wrap">
+								<Search size={13} class="search-icon" />
+								<input
+									type="text"
+									class="search-input"
+									placeholder="Registry, image, digest…"
+									bind:value={imageSearchQuery}
+								/>
+							</div>
+						</div>
+
+						{#if activeImageFilterCount > 0}
+							<div class="filter-actions">
+								<span class="text-xs text-[var(--text-muted)]">
+									{filteredImageSecrets.length} of {imageSecrets.length}
+								</span>
+								<button
+									type="button"
+									class="clear-filters"
+									onclick={clearImageFilters}
+								>
+									Clear all
+								</button>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{/if}
+
 			{#if imageSecretsLoading}
 				<div class="flex flex-1 items-center justify-center">
 					<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
@@ -616,24 +737,33 @@
 						<p class="text-xs text-[var(--text-muted)]">Either no images have been scanned yet, or betterleaks returned empty arrays for every digest.</p>
 					</div>
 				</div>
+			{:else if filteredImageSecrets.length === 0}
+				<div class="flex flex-1 items-center justify-center">
+					<div class="flex flex-col items-center gap-3 text-center">
+						<Container class="h-10 w-10 text-[var(--text-muted)]" />
+						<p class="text-sm text-[var(--text-muted)]">No image secret findings match the filters.</p>
+					</div>
+				</div>
 			{:else}
 				<div class="relative flex flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 					<div class="flex-1 overflow-y-auto [overflow-anchor:none]">
 						<table class="w-full table-fixed divide-y divide-[var(--border-color)]/60 text-sm">
 							<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 								<tr>
-									<th class="w-[18%] px-5 py-3 text-left">Registry</th>
-									<th class="w-[38%] px-5 py-3 text-left">Image</th>
-									<th class="w-[16%] px-5 py-3 text-left">Digest</th>
-									<th class="w-[12%] px-5 py-3 text-right">Findings</th>
-									<th class="w-[16%] px-5 py-3 text-right">Last scanned</th>
+									<th class="w-[14%] px-5 py-3 text-left">Registry</th>
+									<th class="w-[31%] px-5 py-3 text-left">Image</th>
+									<th class="w-[14%] px-5 py-3 text-left">Digest</th>
+									<th class="w-[12%] px-5 py-3 text-right">Usage</th>
+									<th class="w-[10%] px-5 py-3 text-right">Findings</th>
+									<th class="w-[9%] px-5 py-3 text-right">Last seen</th>
+									<th class="w-[10%] px-5 py-3 text-right">Scanned</th>
 								</tr>
 							</thead>
 							<tbody class="divide-y divide-[var(--border-color)]/40 text-[var(--text-secondary)]">
-								{#each imageSecrets as row}
+								{#each filteredImageSecrets as row}
 									<tr
 										class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]"
-										onclick={() => openImage(row.image_id)}
+										onclick={() => openImage(row.digest)}
 									>
 										<td class="truncate px-5 py-3 text-xs text-[var(--text-tertiary)]" title={row.registry}>{row.registry}</td>
 										<td class="truncate px-5 py-3 font-semibold text-[var(--text-bright)]" title={row.repository}>{row.repository}</td>
@@ -644,8 +774,19 @@
 												<span class="text-xs text-[var(--text-muted)]">—</span>
 											{/if}
 										</td>
+										<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]">
+											{#if (row.container_count ?? 0) > 0}
+												<span class="tabular-nums text-[var(--text-secondary)]">{row.container_count}</span>
+												<span class="ml-1">containers</span>
+											{:else}
+												<span>inactive</span>
+											{/if}
+										</td>
 										<td class="px-5 py-3 text-right tabular-nums">
 											<span class="inline-flex items-center rounded-full bg-[var(--red)]/10 px-2.5 py-0.5 font-semibold text-xs text-[var(--red)]">{row.finding_count}</span>
+										</td>
+										<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]" title={row.last_seen ?? ''}>
+											{fmtDate(row.last_seen)}
 										</td>
 										<td class="px-5 py-3 text-right text-xs text-[var(--text-muted)]" title={row.last_scanned_at ?? ''}>
 											{fmtDate(row.last_scanned_at)}

@@ -23,6 +23,7 @@ type ctxKey int
 const (
 	subjectKey ctxKey = iota
 	providerKey
+	accessTokenKey
 )
 
 // WithProvider returns a derived context carrying p, so handlers can
@@ -75,4 +76,25 @@ func SubjectFromRequest(r *http.Request) Subject {
 		return Subject{}
 	}
 	return SubjectFromContext(r.Context())
+}
+
+// WithAccessToken stashes the caller's downstream-API bearer token on
+// the context so Provider implementations (e.g. RORProvider) can call
+// out without threading the auth.Service through every call site.
+// The token is the user's already-refreshed OIDC access token; an
+// empty string disables downstream calls for the request.
+func WithAccessToken(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, accessTokenKey, token)
+}
+
+// AccessTokenFromContext returns the token stashed by WithAccessToken,
+// or "" if none is set. Providers should treat "" as "no downstream
+// auth available — degrade to no grants" rather than failing the
+// request, so missing-middleware cases are fail-closed but quiet.
+func AccessTokenFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	tok, _ := ctx.Value(accessTokenKey).(string)
+	return tok
 }
