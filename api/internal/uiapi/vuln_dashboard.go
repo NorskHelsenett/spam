@@ -16,18 +16,44 @@ import (
 //
 // GET /api/vuln/summary
 //
-// Cross-repo aggregate: gated to admins + wildcard-grant callers in
-// Phase 3. Narrow-grant callers get 404 until scoped recomputation lands.
-func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// Two-tier dispatch: admins / global_readers / wildcard repo grants hit
+// the shared cached LoadSummary (cross-tenant aggregate). Narrow-grant
+// callers (cluster-only users, scoped grants) get a per-request scoped
+// recompute against their readable repo + image set — so a ROR cluster-
+// only user sees a non-empty summary for vulns in their cluster's
+// running images instead of the previous 404.
+func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
-			return
-		}
-		if !requireUnrestrictedRepos(w, r) {
+		if !requireApproved(w, r) {
 			return
 		}
 
-		summary, err := vulnmetrics.LoadSummary(r.Context(), db)
+		if hasUnrestrictedRepos(r) {
+			summary, err := vulnmetrics.LoadSummary(r.Context(), db)
+			if err != nil {
+				http.Error(w, "failed to load vulnerability summary", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, summary)
+			return
+		}
+
+		subj := acl.SubjectFromRequest(r)
+		prov := acl.ProviderFromRequest(r)
+		repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		imageClause, err := acl.ReadableImageClause(r.Context(), prov, subj, "d")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		repoSQL, repoArgs := repoSubquery(repoClause)
+		imageSQL, imageArgs := imageSubquery(imageClause)
+
+		summary, err := vulnmetrics.LoadSummaryScoped(r.Context(), db, repoSQL, repoArgs, imageSQL, imageArgs)
 		if err != nil {
 			http.Error(w, "failed to load vulnerability summary", http.StatusInternalServerError)
 			return
@@ -39,9 +65,9 @@ func VulnSummaryHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 // VulnReposHandler returns per-repo vulnerability counts sorted by severity.
 //
 // GET /api/vuln/repos
-func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnReposHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -80,9 +106,9 @@ func VulnReposHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // The response shape is {total, limit, offset, items: VulnGroup[]}.
 // total counts distinct vuln_ids matching the filters so the client can
 // size a virtual scroller off a single page load.
-func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -149,9 +175,9 @@ func VulnListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 // GET /api/vuln/facets
 //
 // Response: {"sources": ["grype", "osv"], "years": ["2024", "2023", ...]}
-func VulnFacetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnFacetsHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 		facets, err := vulnmetrics.LoadFacets(r.Context(), db)
@@ -167,7 +193,14 @@ func VulnFacetsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 //
 // GET /api/vuln/trend?days=30
 //
-// Cross-repo aggregate: same Phase 3 gate as VulnSummaryHandler.
+// Stays admin / global_reader / wildcard-grant gated even after the
+// summary endpoint went scoped. vuln_dashboard_snapshots persists one
+// row per day across the whole fleet — no per-asset breakdown is
+// stored, so there's no way to recompute a 30-day series scoped to a
+// cluster-only user's image set without paying a per-request scan
+// over the unified vuln views per day in the window. The frontend
+// already hides the trend chart for cluster-only users; the 404 here
+// is the defense in depth for direct API hits.
 func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if requireAuth(w, r, authService) == nil {

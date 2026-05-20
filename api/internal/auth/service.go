@@ -16,6 +16,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/gorilla/securecookie"
 	"golang.org/x/oauth2"
@@ -32,6 +33,11 @@ type Service struct {
 	authCookieName    string
 	sessionTTL        time.Duration
 	cookieSecure      bool
+	// secretsKey is the AES-GCM key used to en/decrypt EntraID access
+	// tokens persisted on the session row. nil disables persistence —
+	// downstream-API integrations that need the user's bearer token
+	// will get an empty string back from AccessTokenForRequest.
+	secretsKey []byte
 }
 
 type Config struct {
@@ -46,6 +52,10 @@ type Config struct {
 	CookieHashKey     []byte
 	CookieBlockKey    []byte
 	CookieSecure      bool
+	// SecretsKey en/decrypts the per-session EntraID access token.
+	// Optional; without it, the access token is dropped at callback
+	// time and AccessTokenForRequest returns "".
+	SecretsKey []byte
 }
 
 type authRequest struct {
@@ -63,16 +73,37 @@ type userClaims struct {
 }
 
 type userResponse struct {
-	UserID      string                 `json:"user_id,omitempty"`
-	Subject     string                 `json:"subject"`
-	Email       string                 `json:"email,omitempty"`
-	Name        string                 `json:"name,omitempty"`
-	Picture     string                 `json:"picture,omitempty"`
-	Claims      map[string]interface{} `json:"claims,omitempty"`
-	Groups      []string               `json:"groups,omitempty"`
-	EntraGroups []string               `json:"entra_groups,omitempty"`
-	Role        string                 `json:"role,omitempty"`
-	Approved    bool                   `json:"approved"`
+	UserID       string                 `json:"user_id,omitempty"`
+	Subject      string                 `json:"subject"`
+	Email        string                 `json:"email,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Picture      string                 `json:"picture,omitempty"`
+	Claims       map[string]interface{} `json:"claims,omitempty"`
+	Groups       []string               `json:"groups,omitempty"`
+	EntraGroups  []string               `json:"entra_groups,omitempty"`
+	Role         string                 `json:"role,omitempty"`
+	Approved     bool                   `json:"approved"`
+	Capabilities *capabilities          `json:"capabilities,omitempty"`
+}
+
+// capabilities is the per-session reveal hint the SPA uses to decide
+// which nav items and page widgets to render. It's a derived view of
+// the ACL provider chain, not a permission grant itself: handlers
+// still enforce their own scoping on every request. The frontend
+// uses it to avoid showing a dead "Secrets" tab to a cluster-only
+// user, not to gate any sensitive operation.
+//
+// Repos    = subject is admin/global_reader OR holds any repo grant
+//
+//	(wildcard or scoped) under the ACL provider chain.
+//
+// Clusters = subject is admin/global_reader OR holds any cluster
+//
+//	grant. ROR-derived cluster grants count here too, so a
+//	ROR-only user comes back as Clusters: true.
+type capabilities struct {
+	Repos    bool `json:"repos"`
+	Clusters bool `json:"clusters"`
 }
 
 func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) {
@@ -108,6 +139,7 @@ func NewService(ctx context.Context, cfg Config, db *gorm.DB) (*Service, error) 
 		authCookieName:    cfg.AuthCookieName,
 		sessionTTL:        cfg.SessionTTL,
 		cookieSecure:      cfg.CookieSecure,
+		secretsKey:        cfg.SecretsKey,
 	}, nil
 }
 
@@ -276,6 +308,22 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 			ExpiresAt: time.Now().Add(s.sessionTTL),
 		}
 
+		if s.secretsKey != nil && token.AccessToken != "" {
+			if blob, err := providerconfig.EncryptToken(s.secretsKey, token.AccessToken); err == nil {
+				session.AccessTokenEnc = blob
+				session.AccessTokenExp = token.Expiry
+			} else {
+				log.Printf("encrypt session access token: %v", err)
+			}
+			if token.RefreshToken != "" {
+				if blob, err := providerconfig.EncryptToken(s.secretsKey, token.RefreshToken); err == nil {
+					session.RefreshTokenEnc = blob
+				} else {
+					log.Printf("encrypt session refresh token: %v", err)
+				}
+			}
+		}
+
 		if err := s.db.Create(&session).Error; err != nil {
 			http.Error(w, "failed to persist session", http.StatusInternalServerError)
 			return
@@ -295,7 +343,13 @@ func (s *Service) CallbackHandler() http.HandlerFunc {
 	}
 }
 
-func (s *Service) MeHandler() http.HandlerFunc {
+// MeHandler returns the current session view consumed by the SPA. The
+// aclProvider is used to compute the response's `capabilities` hint
+// (which nav items the frontend should reveal); a nil provider yields
+// admin-only capabilities for admin/global_reader callers and zero
+// capabilities for everyone else, which keeps the route safe even if
+// the router forgot to wire the chain.
+func (s *Service) MeHandler(aclProvider acl.Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		session, err := s.loadSession(r)
 		if err != nil {
@@ -338,10 +392,42 @@ func (s *Service) MeHandler() http.HandlerFunc {
 			} else {
 				response.Picture = pictureOrGravatar("", session.Email)
 			}
+
+			subj, berr := s.buildSubject(r.Context(), session.UserID)
+			if berr == nil {
+				response.Capabilities = s.computeCapabilities(r, subj, aclProvider)
+			}
 		}
 
 		writeJSON(w, http.StatusOK, response)
 	}
+}
+
+// computeCapabilities resolves the cluster/repo grant signals the SPA
+// uses for nav-reveal decisions. Admin and global_reader short-circuit
+// to both-true; other subjects walk the provider chain. ROR-derived
+// cluster grants need the user's access token in context — we stash it
+// on a per-request basis here since /api/auth/me runs in the public
+// route group and doesn't pick up APIGuard's WithAccessToken plumbing.
+func (s *Service) computeCapabilities(r *http.Request, subj acl.Subject, p acl.Provider) *capabilities {
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return &capabilities{Repos: true, Clusters: true}
+	}
+	if p == nil {
+		return &capabilities{}
+	}
+	ctx := r.Context()
+	if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+		ctx = acl.WithAccessToken(ctx, tok)
+	}
+	caps := &capabilities{}
+	if repoPatterns, err := p.Grants(ctx, subj, acl.ScopeRepo); err == nil && len(repoPatterns) > 0 {
+		caps.Repos = true
+	}
+	if clusterPatterns, err := p.Grants(ctx, subj, acl.ScopeCluster); err == nil && len(clusterPatterns) > 0 {
+		caps.Clusters = true
+	}
+	return caps
 }
 
 func (s *Service) LogoutHandler() http.HandlerFunc {
@@ -406,6 +492,87 @@ func (s *Service) LoadSession(r *http.Request) (*Session, error) {
 	return s.loadSession(r)
 }
 
+// AccessTokenForRequest returns the user's OIDC access token for
+// downstream-API calls (e.g. ROR), auto-refreshing it via the stored
+// refresh token when it has expired or is within the oauth2 library's
+// refresh window. The rotation is persisted back to the session row
+// so other replicas see the new token on their next read.
+//
+// Returns ("", nil) when no secrets key is configured, when the
+// session has no encrypted token (predates this feature), or when
+// refresh fails because the refresh token has been revoked/expired —
+// caller treats "" as "downstream auth unavailable, degrade quietly."
+// A non-nil error is reserved for decode/decrypt failures, where a
+// caller may want to log + surface a "please re-login" hint.
+func (s *Service) AccessTokenForRequest(r *http.Request) (string, error) {
+	if s.secretsKey == nil {
+		return "", nil
+	}
+	session, err := s.loadSession(r)
+	if err != nil {
+		return "", err
+	}
+	if len(session.AccessTokenEnc) == 0 {
+		return "", nil
+	}
+	access, err := providerconfig.DecryptToken(s.secretsKey, session.AccessTokenEnc)
+	if err != nil {
+		return "", fmt.Errorf("decrypt access token: %w", err)
+	}
+
+	// Without a refresh token we just return whatever we have. The
+	// caller is responsible for handling 401s if the access token has
+	// expired upstream.
+	if len(session.RefreshTokenEnc) == 0 {
+		return access, nil
+	}
+
+	refresh, err := providerconfig.DecryptToken(s.secretsKey, session.RefreshTokenEnc)
+	if err != nil {
+		return access, nil // best-effort — fall back to current access
+	}
+
+	// oauth2.TokenSource refreshes when the token's Expiry is within
+	// ~10s of now. The library does the dance against the OIDC token
+	// endpoint and returns a new token if rotation happened.
+	tok := &oauth2.Token{
+		AccessToken:  access,
+		RefreshToken: refresh,
+		Expiry:       session.AccessTokenExp,
+	}
+	fresh, err := s.oauthConfig.TokenSource(r.Context(), tok).Token()
+	if err != nil {
+		// Refresh failed (revoked, expired, network) — fall back to
+		// the current token. Downstream call will 401 if it's truly
+		// dead, and the SPA can prompt re-login then.
+		log.Printf("refresh access token for user %s: %v", session.UserID, err)
+		return access, nil
+	}
+	if fresh.AccessToken == access {
+		return access, nil
+	}
+
+	// Token rotated. Persist the new values so concurrent / next-pod
+	// reads pick them up. Best-effort: a write failure doesn't break
+	// the current request, the new token is still usable in-memory.
+	updates := map[string]any{}
+	if blob, err := providerconfig.EncryptToken(s.secretsKey, fresh.AccessToken); err == nil {
+		updates["access_token_enc"] = blob
+		updates["access_token_exp"] = fresh.Expiry
+	}
+	if fresh.RefreshToken != "" && fresh.RefreshToken != refresh {
+		if blob, err := providerconfig.EncryptToken(s.secretsKey, fresh.RefreshToken); err == nil {
+			updates["refresh_token_enc"] = blob
+		}
+	}
+	if len(updates) > 0 {
+		if err := s.db.WithContext(r.Context()).Model(&Session{}).Where("id = ?", session.ID).Updates(updates).Error; err != nil {
+			log.Printf("persist refreshed access token: %v", err)
+		}
+	}
+	return fresh.AccessToken, nil
+}
+
 // SessionInfo returns the minimal session snapshot for SSE/auth flows.
 func (s *Service) SessionInfo(r *http.Request) (events.SessionInfo, error) {
 	session, err := s.loadSession(r)
@@ -467,7 +634,17 @@ func (s *Service) APIGuard(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r.WithContext(acl.WithSubject(r.Context(), subj)))
+		ctx := acl.WithSubject(r.Context(), subj)
+
+		// Stash the (possibly refreshed) access token so Provider
+		// implementations can call downstream APIs on the user's
+		// behalf. Errors here are non-fatal — providers degrade to
+		// "no grants from this source" when the token is missing.
+		if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+			ctx = acl.WithAccessToken(ctx, tok)
+		}
+
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -490,6 +667,43 @@ func (s *Service) buildSubject(ctx context.Context, userID string) (acl.Subject,
 		}
 	}
 	return subj, nil
+}
+
+// ApprovedGuard returns middleware that lets any approved session
+// through — no admin/global_reader role required. Use this for
+// route groups whose data is fully ACL-filtered per handler (cluster
+// inventory views today, where RORProvider grants drive visibility).
+//
+// Like APIGuard, it builds the acl.Subject and stashes the user's
+// access token in the request context so Provider implementations
+// can call downstream APIs without re-threading auth.Service. The
+// crucial difference is the lack of a role check: regular approved
+// users that have no admin/global_reader group still pass through,
+// so handler-level ACL filtering becomes the only gate.
+//
+// Do NOT use this for endpoints that don't filter by ACL — without
+// the role check, regular users would see data the per-handler
+// filter doesn't restrict.
+func (s *Service) ApprovedGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		session, err := s.loadSession(r)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		subj, err := s.buildSubject(r.Context(), session.UserID)
+		if err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+
+		ctx := acl.WithSubject(r.Context(), subj)
+		if tok, terr := s.AccessTokenForRequest(r); terr == nil && tok != "" {
+			ctx = acl.WithAccessToken(ctx, tok)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // AdminGuard restricts a subrouter to admin sessions only. Use this to

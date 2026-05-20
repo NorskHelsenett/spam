@@ -1038,6 +1038,134 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	return summary, nil
 }
 
+// LoadSummaryScoped is the narrow-grant counterpart to LoadSummary.
+// It recomputes severity counts and SBOM metadata against an ACL-
+// scoped subset of the unified vuln views — used when the caller is
+// not admin / global_reader and the cached cross-tenant aggregate
+// would either over-share or hard-fail.
+//
+// repoSQL / imageSQL are full predicates against the view rows (the
+// `v` alias inside the UNION CTE). Empty or "FALSE" excludes that
+// branch entirely — pass "FALSE" for both when the caller has no
+// readable assets at all (the handler should short-circuit there
+// anyway, this is belt-and-braces).
+//
+// The scoped path is intentionally uncached: results vary per-subject
+// and the per-page hit volume is bounded by the SPA dashboard load
+// pattern. If traffic warrants, cache by hash(repoSQL+imageSQL+args)
+// against the same summaryVersion as LoadSummary.
+func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (Summary, error) {
+	var summary Summary
+	if !unifiedViewsReady(ctx, db) {
+		return summary, nil
+	}
+
+	repoSQL = strings.TrimSpace(repoSQL)
+	if repoSQL == "" {
+		repoSQL = "FALSE"
+	}
+	imageSQL = strings.TrimSpace(imageSQL)
+	if imageSQL == "" {
+		imageSQL = "FALSE"
+	}
+
+	// Same canonical-aware severity dedup as computeSummary, but with
+	// the UNION inputs filtered by the caller's ACL fragments.
+	countSQL := fmt.Sprintf(`
+		WITH u AS (
+			SELECT 'repo'::text AS asset_type, v.repo_id AS asset_id, v.vuln_id, v.severity
+			FROM view_unified_repositories_vulnerabilities v
+			WHERE %s
+			UNION ALL
+			SELECT 'image'::text AS asset_type, v.image_id AS asset_id, v.vuln_id, v.severity
+			FROM view_unified_image_vulnerabilities v
+			WHERE %s
+		),
+		canonical AS (
+			SELECT
+				u.asset_type,
+				u.asset_id,
+				COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
+				MIN(CASE u.severity
+					WHEN 'CRITICAL' THEN 1
+					WHEN 'HIGH'     THEN 2
+					WHEN 'MEDIUM'   THEN 3
+					WHEN 'LOW'      THEN 4
+					ELSE 5
+				END) AS sev_rank
+			FROM u
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
+			GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
+		)
+		SELECT
+			COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+			COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+			COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+			COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+			COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+		FROM canonical
+	`, repoSQL, imageSQL)
+
+	countArgs := append([]any{}, repoArgs...)
+	countArgs = append(countArgs, imageArgs...)
+	if err := db.WithContext(ctx).Raw(countSQL, countArgs...).Scan(&summary).Error; err != nil {
+		return Summary{}, err
+	}
+
+	// Scoped scanned_sboms / last_scanned_at: bound SBOMs whose
+	// underlying asset (repo_commit or image_digest) is in the
+	// caller's readable set. The IS_PRIVATE check on repos is folded
+	// into repoSQL already so public repos count for cluster-only
+	// callers too.
+	type scanMeta struct {
+		ScannedSBOMs  int        `gorm:"column:scanned_sboms"`
+		LastScannedAt *time.Time `gorm:"column:last_scanned_at"`
+	}
+	var meta scanMeta
+	scanSQL := fmt.Sprintf(`
+		WITH readable_repo_ids AS (
+			SELECT v.repo_id AS id
+			FROM view_unified_repositories_vulnerabilities v
+			WHERE %s
+		),
+		readable_image_ids AS (
+			SELECT v.image_id AS id
+			FROM view_unified_image_vulnerabilities v
+			WHERE %s
+		),
+		readable_sboms AS (
+			SELECT DISTINCT sb.sbom_id
+			FROM sbom_bindings sb
+			WHERE (sb.asset_type = 'REPO_COMMIT' AND sb.asset_ref_id IN (
+				SELECT rc.id FROM repo_commits rc WHERE rc.repo_id IN (SELECT id FROM readable_repo_ids)
+			))
+			   OR (sb.asset_type = 'IMAGE_DIGEST' AND sb.asset_ref_id IN (SELECT id FROM readable_image_ids))
+		),
+		ts AS (
+			SELECT MAX(ssr.scanned_at) AS t
+			FROM sbom_scan_results ssr
+			WHERE ssr.repo_id IN (SELECT id FROM readable_repo_ids)
+			UNION ALL
+			SELECT MAX(isr.finished_at)
+			FROM image_scan_runs isr
+			WHERE isr.image_digest_id IN (SELECT id FROM readable_image_ids)
+		)
+		SELECT
+			(SELECT COUNT(*) FROM readable_sboms)::int AS scanned_sboms,
+			(SELECT MAX(t) FROM ts)                    AS last_scanned_at
+	`, repoSQL, imageSQL)
+	scanArgs := append([]any{}, repoArgs...)
+	scanArgs = append(scanArgs, imageArgs...)
+	if err := db.WithContext(ctx).Raw(scanSQL, scanArgs...).Scan(&meta).Error; err != nil {
+		return Summary{}, err
+	}
+	summary.ScannedSBOMs = meta.ScannedSBOMs
+	summary.LastScannedAt = meta.LastScannedAt
+	summary.TotalVulns = summary.TotalCritical + summary.TotalHigh + summary.TotalMedium + summary.TotalLow + summary.TotalUnknown
+
+	return summary, nil
+}
+
 func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, error) {
 	var version summaryVersion
 	err := db.WithContext(ctx).Raw(`

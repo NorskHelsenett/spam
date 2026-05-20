@@ -1,10 +1,12 @@
 package uiapi
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"gorm.io/gorm"
 )
@@ -34,11 +36,26 @@ type ImageSecretRow struct {
 //
 // Clean (zero-finding) images are filtered out — the page is about "what
 // needs attention", consistent with the Repositories tab.
-func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func ImageSecretsTableHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
+
+		// Image-ACL splice: admins/global_readers get TRUE; cluster-only
+		// users get a cluster_image_inventory-projected subquery (see
+		// acl.ReadableImageClause). Restricted callers with no matching
+		// grants short-circuit to an empty list.
+		imageClause, err := acl.ReadableImageClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "id")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		if imageClause.Deny() {
+			writeJSON(w, http.StatusOK, []ImageSecretRow{})
+			return
+		}
+		aclSQL, aclArgs := aclWhereFragment(imageClause)
 
 		rows := []ImageSecretRow{}
 		includeInactive := isSecretImageTruthy(r.URL.Query().Get("include_inactive")) ||
@@ -50,7 +67,15 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 		// endpoint, because Postgres can evaluate WHERE predicates in
 		// any order and a "filter bad rows first" guard didn't reliably
 		// prevent the cast.
-		query := `
+		// Live filter is composed alongside the ACL clause so a single
+		// fmt.Sprintf handles both — appending the live predicate as a
+		// separate string concat after Sprintf would put it before the
+		// ORDER BY, which is brittle if the format ever changes.
+		liveFilter := ""
+		if !includeInactive {
+			liveFilter = "AND liu.digest IS NOT NULL"
+		}
+		query := fmt.Sprintf(`
 			WITH latest_per_image AS (
 				SELECT DISTINCT ON (isr.image_digest_id)
 					isr.image_digest_id,
@@ -101,19 +126,12 @@ func ImageSecretsTableHandler(db *gorm.DB, authService *auth.Service) http.Handl
 			WHERE l.payload IS NOT NULL
 			  AND jsonb_typeof(l.payload) = 'array'
 			  AND jsonb_array_length(l.payload) > 0
-		`
-		if !includeInactive {
-			query += `
-			  AND liu.digest IS NOT NULL
-			`
-		}
-		query += `
+			  AND %s
+			  %s
 			ORDER BY finding_count DESC, l.finished_at DESC NULLS LAST
 			LIMIT 500
-		`
-
-		err := db.WithContext(r.Context()).Raw(query).Scan(&rows).Error
-		if err != nil {
+		`, aclSQL, liveFilter)
+		if err := db.WithContext(r.Context()).Raw(query, aclArgs...).Scan(&rows).Error; err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}

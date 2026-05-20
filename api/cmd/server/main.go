@@ -33,6 +33,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/secretprobe"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
+	"github.com/NorskHelsenett/spam/internal/ror"
 	"github.com/NorskHelsenett/spam/internal/runner"
 	"github.com/NorskHelsenett/spam/internal/server"
 	"github.com/NorskHelsenett/spam/internal/signingpolicy"
@@ -258,10 +259,23 @@ func run() error {
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	routerOpts.SecretsKey = cfg.ProviderSecretsKey
-	// ACL chain: LocalProvider reads acl_grants. Future stages
-	// (OIDC-claim-derived, GitHub App, external RBAC) append here.
+
+	// ROR API client — always built; defaults to api.ror.nhn.no when
+	// ROR_BASE_URL is unset. Auth is per-user (the session-stored
+	// EntraID token); a user without ROR access just gets 401s
+	// surfaced through /api/me/clusters, so this is safe to leave
+	// always-on without a feature gate.
+	routerOpts.RORClient = ror.New(cfg.ROR.BaseURL)
+
+	// ACL chain: LocalProvider reads acl_grants, RORProvider derives
+	// cluster grants from the NHN ROR ACL API (cached per user). Both
+	// contribute under ScopeCluster; LocalProvider remains the sole
+	// source for repo/image grants until those are migrated.
 	routerOpts.ACLProvider = &acl.ChainProvider{
-		Providers: []acl.Provider{acl.NewLocalProvider(gormDB)},
+		Providers: []acl.Provider{
+			acl.NewLocalProvider(gormDB),
+			acl.NewRORProvider(routerOpts.RORClient, routerOpts.Cache),
+		},
 	}
 	if warnings := routerOpts.ProviderStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
@@ -283,6 +297,7 @@ func run() error {
 		CookieHashKey:     cfg.OIDC.CookieHashKey,
 		CookieBlockKey:    cfg.OIDC.CookieBlockKey,
 		CookieSecure:      cfg.OIDC.CookieSecure,
+		SecretsKey:        cfg.ProviderSecretsKey,
 	}, gormDB)
 	if err != nil {
 		return fmt.Errorf("init oidc auth: %w", err)

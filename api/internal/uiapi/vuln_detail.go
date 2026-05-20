@@ -138,9 +138,9 @@ type VulnDetailResponse struct {
 // VULN_META_FETCH job type. If no row exists yet, we enqueue a
 // fetch job and mark enrichment_loading=true so the UI can show a
 // "enriching…" pill without failing the whole render.
-func VulnDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+func VulnDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 

@@ -98,12 +98,16 @@ func ReadableClusterClause(ctx context.Context, p Provider, subj Subject, alias 
 //
 //   - The image has a verified source (verified_source = true) AND its
 //     source_repo_id is in the readable-repo set, OR
-//   - An explicit image grant matches the image identity.
+//   - An explicit image grant matches the image identity, OR
+//   - The image is currently running in a cluster the subject can read
+//     (looked up via cluster_image_inventory).
 //
 // Unsigned images (verified_source = false) can therefore never
 // piggyback on repo access — the OCI source label is advisory until
 // signing lands. Images with no source_repo_id also require an
-// explicit grant.
+// explicit grant or cluster-inheritance hit. The cluster branch is
+// what gives a cluster-only user (no repo/image grants) access to
+// the vuln and secret data of images running in their clusters.
 func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
 	if subj.IsAdmin || subj.IsGlobalReader {
 		return Clause{Unrestricted: true}, nil
@@ -131,6 +135,13 @@ func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias st
 		return Clause{}, err
 	}
 
+	// Cluster-image inheritance. Cluster grants propagate to the images
+	// running in those clusters via the cluster_image_inventory MV.
+	clusterPatterns, err := grantsFor(ctx, p, subj, ScopeCluster)
+	if err != nil {
+		return Clause{}, err
+	}
+
 	var parts []string
 	var args []any
 	if repoClause.Unrestricted {
@@ -145,6 +156,12 @@ func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias st
 	if imageSQL != "" {
 		parts = append(parts, "("+imageSQL+")")
 		args = append(args, imageArgs...)
+	}
+
+	clusterImageSQL, clusterImageArgs := compileClusterImageInheritance(clusterPatterns, alias)
+	if clusterImageSQL != "" {
+		parts = append(parts, clusterImageSQL)
+		args = append(args, clusterImageArgs...)
 	}
 
 	if len(parts) == 0 {
@@ -261,6 +278,51 @@ func compileClusterPatterns(patterns []ScopePattern, alias string) (string, []an
 		return "", nil, false
 	}
 	return strings.Join(parts, " OR "), args, false
+}
+
+// compileClusterImageInheritance turns cluster grants into a predicate
+// that matches images present in cluster_image_inventory for any of
+// the readable cluster_ids. The fragment is parenthesised so the
+// caller can OR it next to the image and repo branches without
+// precedence surprises.
+//
+// Empty return ("", nil) means "no cluster-image inheritance" and the
+// caller should not append anything. A wildcard cluster grant expands
+// to every row in cluster_image_inventory (i.e. every image currently
+// running anywhere in the fleet) — useful for a "global cluster
+// reader" persona that doesn't carry global_reader.
+//
+// raw_registry, not the COALESCE'd `registry` column, is the join key
+// into image_digests.registry — same convention the scam ImageDetail
+// query uses.
+func compileClusterImageInheritance(patterns []ScopePattern, alias string) (string, []any) {
+	if len(patterns) == 0 {
+		return "", nil
+	}
+	wildcard := false
+	var ids []string
+	for _, p := range patterns {
+		if p.IsWildcard() {
+			wildcard = true
+			break
+		}
+		if p.ClusterID != "" {
+			ids = append(ids, p.ClusterID)
+		}
+	}
+	if wildcard {
+		return fmt.Sprintf(
+			"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory))",
+			alias, alias, alias,
+		), nil
+	}
+	if len(ids) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE cluster_id IN ?))",
+		alias, alias, alias,
+	), []any{ids}
 }
 
 func compileImagePatterns(patterns []ScopePattern, alias string) (string, []any, bool) {

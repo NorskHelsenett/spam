@@ -417,10 +417,10 @@ type ImageClusterUsageRow struct {
 }
 
 // ImageDetailHandler returns the image-profile payload.
-// GET /api/images/{id-or-digest}
-func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// GET /api/images/{id}
+func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
 			return
 		}
 		id := r.PathValue("id")
@@ -453,17 +453,14 @@ func ImageDetailHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			return
 		}
 
-		// Image access inheritance is only granted when the source
-		// repo is cryptographically verified. Unsigned images fall
-		// back to admin-only until an explicit image grant path is
-		// wired in Phase 4. 404 hides the existence of images the
-		// caller can't see.
-		if img.VerifiedSource && img.SourceRepoID != "" {
-			if ok, err := canReadRepoByID(r, db, img.SourceRepoID); err != nil || !ok {
-				notFoundOrForbidden(w)
-				return
-			}
-		} else if !acl.SubjectFromRequest(r).IsAdmin {
+		// Per-resource ACL gate honoring every branch of
+		// acl.ReadableImageClause: explicit image grant, verified-
+		// source repo inheritance, OR the image is currently running
+		// in a cluster the caller has cluster grants on (the path
+		// that lets ROR cluster-only users land on an image profile
+		// for one of their cluster's containers). 404 hides
+		// existence — same convention as repos.
+		if ok, err := canReadImageByID(r, db, id); err != nil || !ok {
 			notFoundOrForbidden(w)
 			return
 		}

@@ -243,3 +243,86 @@ func TestReadableImageClause_DeniesUnsignedByDefault(t *testing.T) {
 		t.Fatalf("image clause must require verified_source=true to inherit from repos, got %q", c.SQL)
 	}
 }
+
+func TestReadableImageClause_ClusterOnlyInheritsViaInventory(t *testing.T) {
+	// Subject has only a cluster grant (typical ROR cluster-only
+	// user). Image clause must OR-in a cluster_image_inventory
+	// subquery so vulns/secrets for running images become visible.
+	p := &stubProvider{grants: map[string][]ScopePattern{
+		ScopeCluster: {{ClusterID: "prod-eu-1"}},
+	}}
+	c, err := ReadableImageClause(context.Background(), p, Subject{UserID: "u1"}, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Unrestricted {
+		t.Fatalf("narrow cluster grant must not be unrestricted")
+	}
+	if c.Deny() {
+		t.Fatalf("cluster grant should yield a non-deny clause, got %#v", c)
+	}
+	if !strings.Contains(c.SQL, "cluster_image_inventory") {
+		t.Fatalf("expected cluster_image_inventory subquery, got %q", c.SQL)
+	}
+	if !strings.Contains(c.SQL, "(d.registry, d.repository, d.digest)") {
+		t.Fatalf("expected tuple match against image_digests, got %q", c.SQL)
+	}
+	if len(c.Args) != 1 {
+		t.Fatalf("expected 1 arg (cluster id slice), got %#v", c.Args)
+	}
+	ids, ok := c.Args[0].([]string)
+	if !ok || len(ids) != 1 || ids[0] != "prod-eu-1" {
+		t.Fatalf("expected []string{\"prod-eu-1\"}, got %#v", c.Args[0])
+	}
+}
+
+func TestReadableImageClause_ClusterAndImageGrantsOR(t *testing.T) {
+	// Subject has both: explicit image grant + cluster grant. The
+	// two branches must OR — not AND — so an image visible via
+	// either path is visible overall.
+	p := &stubProvider{grants: map[string][]ScopePattern{
+		ScopeImage:   {{Registry: "ghcr.io", Repository: "nhn/api"}},
+		ScopeCluster: {{ClusterID: "prod"}},
+	}}
+	c, err := ReadableImageClause(context.Background(), p, Subject{UserID: "u1"}, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Unrestricted || c.Deny() {
+		t.Fatalf("mixed grants must be scoped, got %#v", c)
+	}
+	if !strings.Contains(c.SQL, "d.registry = ?") {
+		t.Fatalf("expected image grant fragment, got %q", c.SQL)
+	}
+	if !strings.Contains(c.SQL, "cluster_image_inventory") {
+		t.Fatalf("expected cluster_image_inventory fragment, got %q", c.SQL)
+	}
+	if strings.Count(c.SQL, " OR ") < 1 {
+		t.Fatalf("image and cluster branches must OR, got %q", c.SQL)
+	}
+}
+
+func TestReadableImageClause_WildcardClusterGrantOpensInventory(t *testing.T) {
+	p := &stubProvider{grants: map[string][]ScopePattern{
+		ScopeCluster: {{}}, // wildcard cluster
+	}}
+	c, err := ReadableImageClause(context.Background(), p, Subject{UserID: "u1"}, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Unrestricted {
+		// Cluster wildcard does not promote to global image-read —
+		// running images are still a subset of all images. The clause
+		// must be a fleet-wide cluster_image_inventory match instead.
+		t.Fatalf("cluster wildcard should not unrestrict image clause, got %#v", c)
+	}
+	if !strings.Contains(c.SQL, "cluster_image_inventory") {
+		t.Fatalf("expected cluster_image_inventory subquery for wildcard cluster, got %q", c.SQL)
+	}
+	if strings.Contains(c.SQL, "cluster_id IN") {
+		t.Fatalf("wildcard cluster must not narrow by cluster_id, got %q", c.SQL)
+	}
+	if len(c.Args) != 0 {
+		t.Fatalf("wildcard cluster must take no bind args, got %#v", c.Args)
+	}
+}
