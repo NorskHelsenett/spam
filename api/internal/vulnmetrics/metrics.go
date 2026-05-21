@@ -403,6 +403,94 @@ func LoadTrend(ctx context.Context, db *gorm.DB, days int) ([]TrendPoint, error)
 	return rows, nil
 }
 
+// LoadTrendScoped is the narrow-grant counterpart to LoadTrend. The
+// daily snapshot table is fleet-global with no per-asset breakdown,
+// so for callers with narrower visibility we recompute the series on
+// the fly by binning the unified vuln views' scanned_at column.
+//
+// Semantics differ subtly from LoadTrend: the snapshot path returns
+// "total open severity at end-of-day X" (a true historical backlog);
+// the scoped path returns "of vulns currently in the caller's scope,
+// how many were last scanned on day X" — a scan-recency view of the
+// caller's accessible findings. It's the best we can do without
+// per-asset history, and the numbers match the rest of the dashboard
+// (summary, list) since they come from the same MV.
+//
+// repoSQL / imageSQL are the same ACL predicates LoadSummaryScoped
+// and VulnListHandler pass — predicates against the `v` alias on the
+// unified views. Empty or "FALSE" excludes that branch. Like
+// LoadSummaryScoped this path is intentionally uncached.
+func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) ([]TrendPoint, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if !unifiedViewsReady(ctx, db) {
+		return []TrendPoint{}, nil
+	}
+	repoSQL = strings.TrimSpace(repoSQL)
+	if repoSQL == "" {
+		repoSQL = "FALSE"
+	}
+	imageSQL = strings.TrimSpace(imageSQL)
+	if imageSQL == "" {
+		imageSQL = "FALSE"
+	}
+
+	query := fmt.Sprintf(`
+		WITH dates AS (
+			SELECT (CURRENT_DATE - g)::date AS d
+			FROM generate_series(0, ?::int - 1) AS g
+		),
+		scoped AS (
+			SELECT 'repo'::text AS asset_type, v.repo_id AS asset_id, v.vuln_id, v.severity, v.scanned_at::date AS day
+			FROM view_unified_repositories_vulnerabilities v
+			WHERE %s AND v.scanned_at IS NOT NULL
+			UNION ALL
+			SELECT 'image'::text AS asset_type, v.image_id AS asset_id, v.vuln_id, v.severity, v.scanned_at::date AS day
+			FROM view_unified_image_vulnerabilities v
+			WHERE %s AND v.scanned_at IS NOT NULL
+		),
+		canonical AS (
+			SELECT s.day, s.asset_type, s.asset_id,
+			       COALESCE(vm.canonical_id, s.vuln_id) AS canonical_id,
+			       MIN(CASE s.severity
+			           WHEN 'CRITICAL' THEN 1
+			           WHEN 'HIGH'     THEN 2
+			           WHEN 'MEDIUM'   THEN 3
+			           WHEN 'LOW'      THEN 4
+			           ELSE 5
+			       END) AS sev_rank
+			FROM scoped s
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = s.vuln_id
+			GROUP BY s.day, s.asset_type, s.asset_id, COALESCE(vm.canonical_id, s.vuln_id)
+		)
+		SELECT
+			TO_CHAR(d.d, 'YYYY-MM-DD') AS date,
+			COALESCE(SUM(CASE WHEN c.sev_rank = 1 THEN 1 ELSE 0 END), 0)::int AS critical,
+			COALESCE(SUM(CASE WHEN c.sev_rank = 2 THEN 1 ELSE 0 END), 0)::int AS high,
+			COALESCE(SUM(CASE WHEN c.sev_rank = 3 THEN 1 ELSE 0 END), 0)::int AS medium,
+			COALESCE(SUM(CASE WHEN c.sev_rank = 4 THEN 1 ELSE 0 END), 0)::int AS low,
+			COALESCE(SUM(CASE WHEN c.sev_rank = 5 THEN 1 ELSE 0 END), 0)::int AS unknown
+		FROM dates d
+		LEFT JOIN canonical c ON c.day = d.d
+		GROUP BY d.d
+		ORDER BY d.d ASC
+	`, repoSQL, imageSQL)
+
+	args := []any{days}
+	args = append(args, repoArgs...)
+	args = append(args, imageArgs...)
+
+	var rows []TrendPoint
+	if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		rows = []TrendPoint{}
+	}
+	return rows, nil
+}
+
 func LoadRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
 	store := cache.NewPostgresStore(db)
 	version, err := querySummaryVersion(ctx, db)

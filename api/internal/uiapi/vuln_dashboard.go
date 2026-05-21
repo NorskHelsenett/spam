@@ -199,15 +199,12 @@ func VulnFacetsHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 //
 // GET /api/vuln/trend?days=30
 //
-// Open to any approved session. vuln_dashboard_snapshots is a
-// fleet-wide daily severity roll-up with no per-asset breakdown —
-// scoping it per subject isn't possible without recomputing every
-// day's snapshot from the unified vuln views, which is too expensive
-// for the dashboard. Showing the global trend to cluster operators
-// is a deliberate trade: they get fleet context for capacity /
-// triage planning, at the cost of seeing aggregate severity counts
-// from assets they don't otherwise have access to. No identifying
-// info (asset names, repos, clusters) leaves the snapshot table.
+// Two-tier dispatch matching VulnSummaryHandler: admins /
+// global_readers / wildcard-repo callers hit the cached snapshot
+// table (true historical backlog). Everyone else gets a per-request
+// recompute scoped through their ACL — so a cluster operator's
+// trend reflects only the vulns they actually have access to,
+// matching the summary and list views on the same page.
 func VulnTrendHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireApproved(w, r) {
@@ -221,12 +218,36 @@ func VulnTrendHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			}
 		}
 
-		rows, err := vulnmetrics.LoadTrend(r.Context(), db, days)
+		if hasUnrestrictedRepos(r) {
+			rows, err := vulnmetrics.LoadTrend(r.Context(), db, days)
+			if err != nil {
+				http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		subj := acl.SubjectFromRequest(r)
+		prov := acl.ProviderFromRequest(r)
+		repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		imageClause, err := acl.ReadableImageClause(r.Context(), prov, subj, "d")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		repoSQL, repoArgs := repoSubquery(repoClause)
+		imageSQL, imageArgs := imageSubquery(imageClause)
+
+		rows, err := vulnmetrics.LoadTrendScoped(r.Context(), db, days, repoSQL, repoArgs, imageSQL, imageArgs)
 		if err != nil {
 			http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
 			return
 		}
-
 		writeJSON(w, http.StatusOK, rows)
 	}
 }
