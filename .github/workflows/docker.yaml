@@ -21,7 +21,7 @@ jobs:
       digest: ${{ steps.build-docker-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
-      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
@@ -113,7 +113,7 @@ jobs:
       digest: ${{ steps.build-repo-runner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
-      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
@@ -203,7 +203,7 @@ jobs:
       digest: ${{ steps.build-sbom-scanner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
-      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
@@ -293,7 +293,7 @@ jobs:
       digest: ${{ steps.build-image-scanner-image.outputs.digest }}
       repository: ${{ steps.export-vars.outputs.repository }}
     env:
-      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
@@ -381,7 +381,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-app, build-repo-runner, build-sbom-scanner, build-image-scanner]
     env:
-      REGISTRY_ACCESS_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN || secrets.GITHUB_TOKEN }}
+      REGISTRY_ACCESS_TOKEN: ${{ secrets.PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
