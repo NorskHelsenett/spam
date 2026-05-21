@@ -246,17 +246,14 @@ func VulnDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			}
 		}
 
-		// Affected repos — scoped by ACL. Cluster-only callers (no
-		// repo grants, no admin) have repo-side rows blanked so a
-		// public repo elsewhere in the fleet doesn't show up next to
-		// the images they actually run.
-		repoClause, err := acl.ReadableRepoClause(ctx, acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")
+		// Affected repos — scoped via the strict clause: no public-
+		// repo leak for cluster-only callers, but the OCI cluster→
+		// repo bridge still surfaces repos whose verified images
+		// run in clusters the caller has grants on.
+		repoClause, err := acl.ReadableRepoClauseStrict(ctx, acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "r")
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
-		}
-		if !hasAnyRepoGrant(r) {
-			repoClause = acl.Clause{SQL: "1 = 0"}
 		}
 		repoSQL, repoArgs := aclWhereFragment(repoClause)
 

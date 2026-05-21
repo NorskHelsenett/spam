@@ -40,7 +40,9 @@ func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 
 		subj := acl.SubjectFromRequest(r)
 		prov := acl.ProviderFromRequest(r)
-		repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+		// Strict repo clause: no public-repo leak, OCI cluster→repo
+		// bridge included. See acl.ReadableRepoClauseStrict.
+		repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
@@ -49,11 +51,6 @@ func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
-		}
-		// See triage_dashboard.go: cluster-only callers must not see
-		// repo-side findings just because public repos exist.
-		if !hasAnyRepoGrant(r) {
-			repoClause = acl.Clause{SQL: "1 = 0"}
 		}
 		repoSQL, repoArgs := repoSubquery(repoClause)
 		imageSQL, imageArgs := imageSubquery(imageClause)
@@ -76,21 +73,17 @@ func VulnReposHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		// Cluster-only callers have no repo access path; skip the
-		// global LoadRepos pull entirely instead of materialising the
-		// full repo×severity matrix only to throw it away.
-		if !hasAnyRepoGrant(r) {
-			writeJSON(w, http.StatusOK, []vulnmetrics.RepoRow{})
-			return
-		}
-
 		rows, err := vulnmetrics.LoadRepos(r.Context(), db)
 		if err != nil {
 			http.Error(w, "failed to load vulnerability repos", http.StatusInternalServerError)
 			return
 		}
 
-		readable, unrestricted, err := readableRepoIDSet(r, db)
+		// Use the strict-clause repo id set: explicit grants + OCI
+		// cluster→repo bridge, no public-repo fallback. Cluster-only
+		// callers see repos whose verified images run in their
+		// clusters and nothing else.
+		readable, unrestricted, err := readableRepoIDSetStrict(r, db)
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
@@ -153,7 +146,7 @@ func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			subj := acl.SubjectFromRequest(r)
 			prov := acl.ProviderFromRequest(r)
 
-			repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+			repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
 			if err != nil {
 				http.Error(w, "failed to scope results", http.StatusInternalServerError)
 				return
@@ -162,9 +155,6 @@ func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			if err != nil {
 				http.Error(w, "failed to scope results", http.StatusInternalServerError)
 				return
-			}
-			if !hasAnyRepoGrant(r) {
-				repoClause = acl.Clause{SQL: "1 = 0"}
 			}
 
 			params.RepoSQL, params.RepoArgs = repoSubquery(repoClause)
@@ -209,20 +199,18 @@ func VulnFacetsHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 //
 // GET /api/vuln/trend?days=30
 //
-// Stays admin / global_reader / wildcard-grant gated even after the
-// summary endpoint went scoped. vuln_dashboard_snapshots persists one
-// row per day across the whole fleet — no per-asset breakdown is
-// stored, so there's no way to recompute a 30-day series scoped to a
-// cluster-only user's image set without paying a per-request scan
-// over the unified vuln views per day in the window. The frontend
-// already hides the trend chart for cluster-only users; the 404 here
-// is the defense in depth for direct API hits.
-func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// Open to any approved session. vuln_dashboard_snapshots is a
+// fleet-wide daily severity roll-up with no per-asset breakdown —
+// scoping it per subject isn't possible without recomputing every
+// day's snapshot from the unified vuln views, which is too expensive
+// for the dashboard. Showing the global trend to cluster operators
+// is a deliberate trade: they get fleet context for capacity /
+// triage planning, at the cost of seeing aggregate severity counts
+// from assets they don't otherwise have access to. No identifying
+// info (asset names, repos, clusters) leaves the snapshot table.
+func VulnTrendHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
-			return
-		}
-		if !requireUnrestrictedRepos(w, r) {
+		if !requireApproved(w, r) {
 			return
 		}
 

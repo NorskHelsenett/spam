@@ -26,13 +26,20 @@ func (c Clause) Deny() bool {
 // "repos" or "r") is prepended to every column reference.
 //
 // Rules, in evaluation order:
-//  1. Admins → unrestricted.
+//  1. Admins / global_readers → unrestricted.
 //  2. Public repos (is_private = false) are always readable.
 //  3. Private repos are readable if any subject grant matches.
+//  4. Cluster-image bridge: if a verified image running in one of
+//     the subject's granted clusters has source_repo_id = R, then
+//     repo R is readable. This is the OCI-label trust path — a
+//     cluster operator who runs a signed image transitively gets
+//     read access to its source repo.
 //
-// If there are no grants and no public rule applies to the query, the
-// caller should check Deny(); otherwise the OR with is_private=false
-// still lets public rows through, which is the intended behavior.
+// If there are no grants the public-only rule still lets public rows
+// through, which is the intended behavior for discovery surfaces.
+// Security / dashboard handlers that must NOT leak the existence of
+// random public repos to a cluster-only operator should call
+// ReadableRepoClauseStrict instead.
 func ReadableRepoClause(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
 	if subj.IsAdmin || subj.IsGlobalReader {
 		return Clause{Unrestricted: true}, nil
@@ -42,25 +49,158 @@ func ReadableRepoClause(ctx context.Context, p Provider, subj Subject, alias str
 		alias = "repos"
 	}
 
-	patterns, err := grantsFor(ctx, p, subj, ScopeRepo)
+	grantSQL, grantArgs, allMatch, bridgeSQL, bridgeArgs, err := repoClauseParts(ctx, p, subj, alias)
 	if err != nil {
 		return Clause{}, err
 	}
-
-	grantSQL, grantArgs, allMatch := compileRepoPatterns(patterns, alias)
 	if allMatch {
 		return Clause{Unrestricted: true}, nil
 	}
 
 	publicSQL := fmt.Sprintf("%s.is_private = false", alias)
-	if grantSQL == "" {
-		// No grants: only public repos are visible.
+	parts := []string{publicSQL}
+	var args []any
+	if grantSQL != "" {
+		parts = append(parts, "("+grantSQL+")")
+		args = append(args, grantArgs...)
+	}
+	if bridgeSQL != "" {
+		parts = append(parts, "("+bridgeSQL+")")
+		args = append(args, bridgeArgs...)
+	}
+	if len(parts) == 1 {
 		return Clause{SQL: publicSQL}, nil
 	}
 	return Clause{
-		SQL:  fmt.Sprintf("(%s OR (%s))", publicSQL, grantSQL),
-		Args: grantArgs,
+		SQL:  "(" + strings.Join(parts, " OR ") + ")",
+		Args: args,
 	}, nil
+}
+
+// ReadableRepoClauseStrict is like ReadableRepoClause but drops the
+// "public repos are readable by everyone" fallback. Use it in
+// security / dashboard contexts where a caller whose only ACL entry
+// point is a cluster grant must not also see random public repos.
+//
+// Branches preserved: admin / global_reader unrestricted, explicit
+// repo grants, and the cluster-image bridge (so an operator with
+// cluster grants still sees the verified source repos of images
+// running in those clusters — i.e. the OCI-label binding).
+//
+// Subjects with none of the above get Deny.
+func ReadableRepoClauseStrict(ctx context.Context, p Provider, subj Subject, alias string) (Clause, error) {
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return Clause{Unrestricted: true}, nil
+	}
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		alias = "repos"
+	}
+
+	grantSQL, grantArgs, allMatch, bridgeSQL, bridgeArgs, err := repoClauseParts(ctx, p, subj, alias)
+	if err != nil {
+		return Clause{}, err
+	}
+	if allMatch {
+		return Clause{Unrestricted: true}, nil
+	}
+
+	var parts []string
+	var args []any
+	if grantSQL != "" {
+		parts = append(parts, "("+grantSQL+")")
+		args = append(args, grantArgs...)
+	}
+	if bridgeSQL != "" {
+		parts = append(parts, "("+bridgeSQL+")")
+		args = append(args, bridgeArgs...)
+	}
+	if len(parts) == 0 {
+		return Clause{SQL: "1 = 0"}, nil
+	}
+	return Clause{
+		SQL:  strings.Join(parts, " OR "),
+		Args: args,
+	}, nil
+}
+
+// repoClauseParts is the DRY core shared by both ReadableRepoClause
+// variants. Resolves explicit repo grants and the cluster→repo
+// bridge once so the two callers only differ on whether they OR in
+// the public-repo fallback.
+//
+// Returns: grantSQL/Args for explicit repo grants, allMatch=true if
+// any wildcard repo grant collapses both branches to unrestricted,
+// bridgeSQL/Args for the cluster→verified-image→source-repo path.
+func repoClauseParts(ctx context.Context, p Provider, subj Subject, alias string) (string, []any, bool, string, []any, error) {
+	patterns, err := grantsFor(ctx, p, subj, ScopeRepo)
+	if err != nil {
+		return "", nil, false, "", nil, err
+	}
+	grantSQL, grantArgs, allMatch := compileRepoPatterns(patterns, alias)
+	if allMatch {
+		return "", nil, true, "", nil, nil
+	}
+
+	clusterPatterns, err := grantsFor(ctx, p, subj, ScopeCluster)
+	if err != nil {
+		return "", nil, false, "", nil, err
+	}
+	bridgeSQL, bridgeArgs := compileClusterRepoBridge(clusterPatterns, alias)
+	return grantSQL, grantArgs, false, bridgeSQL, bridgeArgs, nil
+}
+
+// compileClusterRepoBridge expands a subject's cluster grants into a
+// repo-side predicate via the OCI label binding: an image running
+// in one of the granted clusters that carries a verified source
+// repo grants transitive read access to that repo. Pulled out so
+// every clause that gates on repos (ReadableRepoClause, its strict
+// variant, future per-resource checks) reuses the same SQL shape
+// instead of redoing the join.
+//
+// Empty return = no bridge contribution; caller should append
+// nothing. Wildcard cluster grant opens the bridge to every
+// verified image running anywhere in the fleet — same semantic
+// as ReadableImageClause's cluster-image inheritance branch.
+//
+// raw_registry (not the COALESCE'd "Docker Hub" label) is the join
+// key into image_digests.registry, matching the convention used in
+// scam's image queries.
+func compileClusterRepoBridge(patterns []ScopePattern, alias string) (string, []any) {
+	if len(patterns) == 0 {
+		return "", nil
+	}
+	wildcard := false
+	var ids []string
+	for _, p := range patterns {
+		if p.IsWildcard() {
+			wildcard = true
+			break
+		}
+		if p.ClusterID != "" {
+			ids = append(ids, p.ClusterID)
+		}
+	}
+	if !wildcard && len(ids) == 0 {
+		return "", nil
+	}
+	join := "JOIN cluster_image_inventory cii " +
+		"ON cii.raw_registry = d.registry " +
+		"AND cii.image = d.repository " +
+		"AND cii.digest = d.digest"
+	if wildcard {
+		return fmt.Sprintf(
+			"%s.id IN (SELECT DISTINCT d.source_repo_id FROM image_digests d %s "+
+				"WHERE d.verified_source = true AND d.source_repo_id <> '')",
+			alias, join,
+		), nil
+	}
+	return fmt.Sprintf(
+		"%s.id IN (SELECT DISTINCT d.source_repo_id FROM image_digests d %s "+
+			"WHERE d.verified_source = true AND d.source_repo_id <> '' "+
+			"AND cii.cluster_id IN ?)",
+		alias, join,
+	), []any{ids}
 }
 
 // ReadableClusterClause builds a WHERE fragment restricting rows of

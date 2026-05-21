@@ -666,12 +666,11 @@
 		return next.length === list.length ? [...list, value] : next;
 	}
 
-	// Cluster-only users have no repo grants: /api/vuln/trend stays
-	// admin-gated (snapshot table is fleet-global), and /api/vuln/repos
-	// returns no rows. Skip both for those users so the page doesn't
-	// flash a "Failed to load" banner on top of an otherwise-working
-	// dashboard. The image-grouped findings list below still loads
-	// via fetchVulnPage, which scopes through ReadableImageClause.
+	// /api/vuln/trend is now open to every approved session (the
+	// snapshot table has no per-asset breakdown to scope), so we
+	// always fetch it. /api/vuln/repos returns [] for cluster-only
+	// callers — still safe to fetch but we keep the conditional so
+	// the Repositories tab can stay hidden when it would be empty.
 	async function waitForSession(timeoutMs = 2000): Promise<void> {
 		const start = Date.now();
 		while (Date.now() - start < timeoutMs) {
@@ -686,24 +685,24 @@
 		await waitForSession();
 		isClusterOnly = get(hasOnlyClusters);
 		try {
-			const sumRes = await fetch('/api/vuln/summary', { credentials: 'include' });
-			if (!sumRes.ok) {
+			const [sumRes, trendRes] = await Promise.all([
+				fetch('/api/vuln/summary', { credentials: 'include' }),
+				fetch('/api/vuln/trend?days=30', { credentials: 'include' }),
+			]);
+			if (!sumRes.ok || !trendRes.ok) {
 				error = 'Failed to load vulnerability data';
 				return;
 			}
 			summary = await sumRes.json();
+			trend = await trendRes.json();
 
 			if (!isClusterOnly) {
-				const [reposRes, trendRes] = await Promise.all([
-					fetch('/api/vuln/repos', { credentials: 'include' }),
-					fetch('/api/vuln/trend?days=30', { credentials: 'include' }),
-				]);
-				if (!reposRes.ok || !trendRes.ok) {
+				const reposRes = await fetch('/api/vuln/repos', { credentials: 'include' });
+				if (!reposRes.ok) {
 					error = 'Failed to load vulnerability data';
 					return;
 				}
 				repos = await reposRes.json();
-				trend = await trendRes.json();
 			}
 		} catch (e) {
 			error = 'Failed to fetch data';
@@ -800,11 +799,9 @@
 						/>
 					{/if}
 				</div>
-				{#if !isClusterOnly}
-					<div class="metric-card rounded-2xl p-5 lg:col-span-2">
-						<LineChart title="30-day trend" data={trend} />
-					</div>
-				{/if}
+				<div class="metric-card rounded-2xl p-5 lg:col-span-2">
+					<LineChart title="30-day trend" data={trend} />
+				</div>
 			</div>
 
 			<!-- Tab selector. Cluster-only users drop the Repositories tab —

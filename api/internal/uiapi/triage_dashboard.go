@@ -38,7 +38,12 @@ func TriageHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		subj := acl.SubjectFromRequest(r)
 		prov := acl.ProviderFromRequest(r)
 
-		repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+		// Strict variant drops the public-repo fallback so a
+		// cluster-only operator doesn't see random public-repo
+		// findings — but keeps the OCI cluster→repo bridge, so the
+		// source repos of verified images running in their clusters
+		// still surface as triage rows.
+		repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
@@ -47,17 +52,6 @@ func TriageHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
-		}
-
-		// Cluster-only callers (no admin, no global_reader, no repo
-		// grants) shouldn't see repo-side triage rows even though
-		// ReadableRepoClause would let public repos through. Their
-		// scope is the cluster ACL — the repo branch collapses to
-		// Deny, the image branch already filters to cluster-running
-		// images via cluster_image_inventory, and the cluster branch
-		// covers their granted cluster_ids.
-		if !hasAnyRepoGrant(r) {
-			repoClause = acl.Clause{SQL: "1 = 0"}
 		}
 
 		params.RepoSQL, params.RepoArgs = triageRepoFragment(repoClause)
