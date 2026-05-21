@@ -145,6 +145,36 @@ func hasUnrestrictedRepos(r *http.Request) bool {
 	return false
 }
 
+// hasAnyRepoGrant reports whether the caller has any path to repo
+// access at all — admin, global_reader, or any (wildcard or scoped)
+// repo grant. Used by the dashboard / vuln handlers to decide whether
+// to keep ReadableRepoClause's public-repo fallback, or to force the
+// repo branch to Deny.
+//
+// The public-repo fallback inside ReadableRepoClause is fine for the
+// repo index and similar discovery surfaces — public repos are
+// public. But in the security dashboard a caller whose only entry
+// point is a cluster ACL grant (no admin role, no repo grants) has
+// no business seeing vuln rows for random public repos from across
+// the fleet. This helper picks them out so those handlers can scope
+// the repo-side rows to "nothing" without affecting the unrelated
+// discovery handlers.
+func hasAnyRepoGrant(r *http.Request) bool {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return true
+	}
+	prov := acl.ProviderFromRequest(r)
+	if prov == nil {
+		return false
+	}
+	patterns, err := prov.Grants(r.Context(), subj, acl.ScopeRepo)
+	if err != nil {
+		return false
+	}
+	return len(patterns) > 0
+}
+
 // dependencyACLFragments compiles the readable-repo set into three
 // WHERE fragments the dependency detail query needs:
 //

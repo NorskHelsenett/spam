@@ -50,6 +50,11 @@ func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
 		}
+		// See triage_dashboard.go: cluster-only callers must not see
+		// repo-side findings just because public repos exist.
+		if !hasAnyRepoGrant(r) {
+			repoClause = acl.Clause{SQL: "1 = 0"}
+		}
 		repoSQL, repoArgs := repoSubquery(repoClause)
 		imageSQL, imageArgs := imageSubquery(imageClause)
 
@@ -68,6 +73,14 @@ func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 func VulnReposHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !requireApproved(w, r) {
+			return
+		}
+
+		// Cluster-only callers have no repo access path; skip the
+		// global LoadRepos pull entirely instead of materialising the
+		// full repo×severity matrix only to throw it away.
+		if !hasAnyRepoGrant(r) {
+			writeJSON(w, http.StatusOK, []vulnmetrics.RepoRow{})
 			return
 		}
 
@@ -149,6 +162,9 @@ func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			if err != nil {
 				http.Error(w, "failed to scope results", http.StatusInternalServerError)
 				return
+			}
+			if !hasAnyRepoGrant(r) {
+				repoClause = acl.Clause{SQL: "1 = 0"}
 			}
 
 			params.RepoSQL, params.RepoArgs = repoSubquery(repoClause)

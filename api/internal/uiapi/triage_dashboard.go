@@ -49,6 +49,17 @@ func TriageHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		// Cluster-only callers (no admin, no global_reader, no repo
+		// grants) shouldn't see repo-side triage rows even though
+		// ReadableRepoClause would let public repos through. Their
+		// scope is the cluster ACL — the repo branch collapses to
+		// Deny, the image branch already filters to cluster-running
+		// images via cluster_image_inventory, and the cluster branch
+		// covers their granted cluster_ids.
+		if !hasAnyRepoGrant(r) {
+			repoClause = acl.Clause{SQL: "1 = 0"}
+		}
+
 		params.RepoSQL, params.RepoArgs = triageRepoFragment(repoClause)
 		params.ImageSQL, params.ImageArgs = triageImageFragment(imageClause)
 		params.ClusterSQL, params.ClusterArgs = triageClusterFragment(r, db)
