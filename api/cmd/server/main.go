@@ -163,6 +163,7 @@ func run() error {
 		"migrations/20260511d_jobs_create_run_finished_repo_index.sql",
 		"migrations/20260512_cluster_record_lifecycle_columns.sql",
 		"migrations/20260512a_cluster_event_id.sql",
+		"migrations/20260526_clusters_ror_metadata.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

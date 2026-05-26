@@ -228,6 +228,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// drives the GREATEST advancement of cluster_sessions
 		// .last_seen_event_id and feeds the ACK in the push response.
 		maxEventIDByCluster := make(map[string]uint64, 1)
+		// Per-cluster ROR binding from the nested `ror_metadata` group.
+		// Last-wins within a batch — agents emit the same metadata on
+		// every line, so the per-record overwrite is cheap and the
+		// final value is whatever the agent reported last.
+		rorByCluster := make(map[string]*RorMetadata, 1)
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -237,6 +242,9 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if err := validate(incoming); err != nil {
 				rejected++
 				continue
+			}
+			if incoming.RorMetadata != nil && incoming.RorMetadata.ClusterID != "" && incoming.ClusterID != "" {
+				rorByCluster[incoming.ClusterID] = incoming.RorMetadata
 			}
 			if incoming.Kind == "Snapshot" {
 				snapshots = append(snapshots, incoming)
@@ -363,10 +371,16 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// Per-cluster maxEventID drives the GREATEST advancement of
 		// last_seen_event_id; snapshot-only batches pass 0 here, which
 		// is a no-op against the GREATEST.
+		//
+		// ROR binding lands after touchClusterSession so the clusters
+		// row is guaranteed to exist (first-push insert happens inside
+		// touchClusterSession). No-op when the batch carried no
+		// ror_metadata for this cluster.
 		for clusterID := range clusterIDs {
 			if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
 				log.Printf("callcenter: touch session %s: %v", clusterID, err)
 			}
+			upsertClusterRorBinding(r.Context(), db, clusterID, rorByCluster[clusterID])
 		}
 
 		if len(items) > 0 || len(snapshots) > 0 {
@@ -1885,7 +1899,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "missing cluster_id", http.StatusBadRequest)
 			return
 		}
-		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+		if ok, err := canReadCluster(r, db, clusterID); err != nil || !ok {
 			// Return the same shape as a missing cluster — never leak
 			// existence via differential error messages.
 			http.Error(w, "not found", http.StatusNotFound)
@@ -2279,7 +2293,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "missing host, cluster_id, or namespace", http.StatusBadRequest)
 			return
 		}
-		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+		if ok, err := canReadCluster(r, db, clusterID); err != nil || !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
