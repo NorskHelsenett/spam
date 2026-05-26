@@ -122,34 +122,46 @@ func touchClusterSession(ctx context.Context, db *gorm.DB, clusterID string, now
 // grants — which speak slug — back to the kube-system UID used as the
 // join key throughout the rest of the schema.
 //
-// Idempotent: callers may invoke this on every batch; the WHERE-equal
-// short-circuit avoids a write when nothing has changed. Detaches from
-// the request context the same way touchClusterSession does, so the
-// write outlives an agent that hangs up the moment ingest acks.
+// Idempotent: callers may invoke this on every batch; the IS DISTINCT
+// FROM guard avoids a write when nothing has changed. Detaches from the
+// request context the same way touchClusterSession does, so the write
+// outlives an agent that hangs up the moment ingest acks.
 //
-// Slug conflicts (a different cluster_id row already owns this slug)
-// are logged and skipped — the partial unique index on ror_slug
-// guarantees one row per non-empty slug, and a colliding write almost
-// always means a slug was re-bound to a different physical cluster. The
-// next batch from whichever cluster wins the binding will succeed.
+// Atomic slug handoff: the partial unique index ux_clusters_ror_slug
+// allows at most one row per non-empty slug. During SCAM's identity
+// cutover the same slug previously sat on the pre-cutover slug-keyed
+// clusters row and now needs to migrate to the new UID-keyed row. The
+// transaction clears the slug from any other row first, then claims it
+// on this row — so ACL evaluations against ror_slug always see the
+// current cluster binding, never a stale one stuck on an obsolete
+// cluster_id.
 func upsertClusterRorBinding(ctx context.Context, db *gorm.DB, clusterID string, m *RorMetadata) {
 	if m == nil || strings.TrimSpace(m.ClusterID) == "" {
 		return
 	}
 	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := db.WithContext(bg).Exec(`
-		UPDATE clusters
-		SET ror_slug = ?,
-		    ror_cluster_name = ?,
-		    ror_env = ?
-		WHERE cluster_id = ?
-		  AND (ror_slug, ror_cluster_name, ror_env) IS DISTINCT FROM (?, ?, ?)
-	`,
-		m.ClusterID, m.ClusterName, m.Env,
-		clusterID,
-		m.ClusterID, m.ClusterName, m.Env,
-	).Error; err != nil {
+	err := db.WithContext(bg).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			`UPDATE clusters SET ror_slug = '' WHERE ror_slug = ? AND cluster_id <> ?`,
+			m.ClusterID, clusterID,
+		).Error; err != nil {
+			return err
+		}
+		return tx.Exec(`
+			UPDATE clusters
+			SET ror_slug = ?,
+			    ror_cluster_name = ?,
+			    ror_env = ?
+			WHERE cluster_id = ?
+			  AND (ror_slug, ror_cluster_name, ror_env) IS DISTINCT FROM (?, ?, ?)
+		`,
+			m.ClusterID, m.ClusterName, m.Env,
+			clusterID,
+			m.ClusterID, m.ClusterName, m.Env,
+		).Error
+	})
+	if err != nil {
 		log.Printf("scam: upsert ror binding cluster=%s slug=%s: %v", clusterID, m.ClusterID, err)
 	}
 }
