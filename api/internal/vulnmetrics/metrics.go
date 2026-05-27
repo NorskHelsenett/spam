@@ -690,6 +690,28 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		return VulnListResponse{Total: 0, Limit: p.Limit, Offset: p.Offset, Items: []VulnGroup{}}, nil
 	}
 
+	// Admin path: repo/image fragments evaluate to "TRUE" (or empty,
+	// which the helpers below normalise to TRUE). Combined with no
+	// per-repo narrowing, that's the signal to take the canonical
+	// summary MV fast-path.
+	canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db)
+	isAdminListing := p.RepoID == "" &&
+		(strings.TrimSpace(p.RepoSQL) == "" || strings.TrimSpace(p.RepoSQL) == "TRUE") &&
+		(strings.TrimSpace(p.ImageSQL) == "" || strings.TrimSpace(p.ImageSQL) == "TRUE")
+	if canonicalReady && isAdminListing {
+		resp, err := loadListPageFromSummary(ctx, db, p)
+		if err != nil {
+			return VulnListResponse{}, err
+		}
+		if versionErr == nil && cacheKey != "" {
+			_ = cache.SetJSON(ctx, store, cacheKey, cachedListEntry{
+				Version:  version,
+				Response: resp,
+			}, summaryCacheTTL)
+		}
+		return resp, nil
+	}
+
 	base, args := buildAssetUnionSQL(p)
 
 	// Row-level filters on the UNION result (apply before GROUP BY so
@@ -1000,6 +1022,246 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	return resp, nil
 }
 
+// loadListPageFromSummary is the admin fast-path. Reads directly from
+// the per-canonical vuln_canonical_summary MV which has the GROUP BY
+// already done, KEV / EPSS pre-joined, and a btree index matching the
+// UI's ORDER BY tuple. Page reads become index-ordered LIMIT scans.
+//
+// Filters are applied against MV columns directly:
+//   - severity        → severity IN ?
+//   - sources         → sources ?| ?  (jsonb ?| accepts text[])
+//   - fix_only        → has_fix
+//   - kev_only        → kev_known
+//   - epss_min        → epss_score >= ?
+//   - years           → cve_year IN ?
+//   - query           → LIKE on vuln_id/title/pkg_name + alias EXISTS;
+//                        asset_slug match falls back to a canonical_assets
+//                        EXISTS so admin search keeps the same surface as
+//                        the legacy union-CTE path.
+//
+// Same response shape as the legacy path so the handler doesn't see a
+// difference; same MetadataForMany aliases-and-osv-fix pass runs after.
+func loadListPageFromSummary(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
+	var where []string
+	var whereArgs []any
+	if len(p.Severities) > 0 {
+		where = append(where, "severity IN ?")
+		whereArgs = append(whereArgs, p.Severities)
+	}
+	if len(p.Sources) > 0 {
+		// sources is jsonb_agg of distinct source names. ?| takes
+		// text[]; gorm/pgx encodes []string as text[] when the column
+		// type matches.
+		where = append(where, "sources ?| ?")
+		whereArgs = append(whereArgs, p.Sources)
+	}
+	if p.FixOnly {
+		where = append(where, "has_fix")
+	}
+	if p.KEVOnly {
+		where = append(where, "kev_known")
+	}
+	if p.EPSSMin > 0 {
+		where = append(where, "epss_score >= ?")
+		whereArgs = append(whereArgs, p.EPSSMin)
+	}
+	if len(p.Years) > 0 {
+		var nums []int
+		for _, y := range p.Years {
+			n, err := strconv.Atoi(strings.TrimSpace(y))
+			if err != nil || n <= 0 {
+				continue
+			}
+			nums = append(nums, n)
+		}
+		if len(nums) > 0 {
+			where = append(where, "cve_year IN ?")
+			whereArgs = append(whereArgs, nums)
+		}
+	}
+	if q := strings.TrimSpace(p.Query); q != "" {
+		needle := "%" + strings.ToLower(q) + "%"
+		where = append(where, `(
+			LOWER(vuln_id)  LIKE ? OR LOWER(title) LIKE ? OR LOWER(pkg_name) LIKE ?
+			OR EXISTS (
+				SELECT 1 FROM vuln_metadata vm2
+				WHERE vm2.vuln_id = vcs.vuln_id
+				  AND LOWER(vm2.aliases::text) LIKE ?
+			)
+			OR EXISTS (
+				SELECT 1 FROM vuln_canonical_assets vca
+				WHERE vca.canonical_id = vcs.vuln_id
+				  AND LOWER(vca.asset_slug) LIKE ?
+			)
+		)`)
+		whereArgs = append(whereArgs, needle, needle, needle, needle, needle)
+	}
+
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = "WHERE " + strings.Join(where, " AND ")
+	}
+
+	// Total = matching canonical count. No DISTINCT needed; vuln_id is
+	// the MV's unique key.
+	var total int
+	countSQL := "SELECT COUNT(*)::int FROM vuln_canonical_summary vcs " + whereClause
+	if err := db.WithContext(ctx).Raw(countSQL, whereArgs...).Scan(&total).Error; err != nil {
+		return VulnListResponse{}, err
+	}
+
+	// Page rows. ORDER BY matches the idx_vuln_canonical_summary_rank
+	// btree precisely (per-column direction), so the planner picks
+	// an index scan + LIMIT stopping early — no sort step.
+	pageSQL := `
+		SELECT
+			vuln_id, sev_rank, cve_year,
+			severity, pkg_name, installed_version, fixed_version,
+			title, description, sources, assets,
+			repo_count, image_count,
+			kev_known, kev_known_ransomware, kev_date_added,
+			epss_score, epss_percentile
+		FROM vuln_canonical_summary vcs
+		` + whereClause + `
+		ORDER BY sev_rank                ASC,
+		         kev_known               DESC,
+		         epss_score              DESC,
+		         cve_year                DESC NULLS LAST,
+		         vuln_id                 ASC
+		LIMIT ? OFFSET ?
+	`
+	pageArgs := append([]any{}, whereArgs...)
+	pageArgs = append(pageArgs, p.Limit, p.Offset)
+
+	type groupRow struct {
+		VulnID             string          `gorm:"column:vuln_id"`
+		SevRank            int             `gorm:"column:sev_rank"`
+		CVEYear            *int            `gorm:"column:cve_year"`
+		Severity           string          `gorm:"column:severity"`
+		PkgName            string          `gorm:"column:pkg_name"`
+		InstalledVersion   string          `gorm:"column:installed_version"`
+		FixedVersion       string          `gorm:"column:fixed_version"`
+		Title              string          `gorm:"column:title"`
+		Description        string          `gorm:"column:description"`
+		Sources            json.RawMessage `gorm:"column:sources"`
+		Assets             json.RawMessage `gorm:"column:assets"`
+		RepoCount          int             `gorm:"column:repo_count"`
+		ImageCount         int             `gorm:"column:image_count"`
+		KEVKnown           bool            `gorm:"column:kev_known"`
+		KEVKnownRansomware bool            `gorm:"column:kev_known_ransomware"`
+		KEVDateAdded       *time.Time      `gorm:"column:kev_date_added"`
+		EPSSScore          float32         `gorm:"column:epss_score"`
+		EPSSPercentile     float32         `gorm:"column:epss_percentile"`
+	}
+	var raws []groupRow
+	if err := db.WithContext(ctx).Raw(pageSQL, pageArgs...).Scan(&raws).Error; err != nil {
+		return VulnListResponse{}, err
+	}
+
+	items := make([]VulnGroup, 0, len(raws))
+	for _, r := range raws {
+		var sources []string
+		if len(r.Sources) > 0 {
+			_ = json.Unmarshal(r.Sources, &sources)
+		}
+		var assets []VulnAsset
+		if len(r.Assets) > 0 {
+			_ = json.Unmarshal(r.Assets, &assets)
+		}
+		if sources == nil {
+			sources = []string{}
+		}
+		if assets == nil {
+			assets = []VulnAsset{}
+		}
+		items = append(items, VulnGroup{
+			VulnID:             r.VulnID,
+			Severity:           r.Severity,
+			PkgName:            r.PkgName,
+			InstalledVersion:   r.InstalledVersion,
+			FixedVersion:       r.FixedVersion,
+			Title:              r.Title,
+			Description:        r.Description,
+			Sources:            sources,
+			Assets:             assets,
+			RepoCount:          r.RepoCount,
+			ImageCount:         r.ImageCount,
+			KEVKnown:           r.KEVKnown,
+			KEVKnownRansomware: r.KEVKnownRansomware,
+			KEVDateAdded:       r.KEVDateAdded,
+			EPSSScore:          r.EPSSScore,
+			EPSSPercentile:     r.EPSSPercentile,
+		})
+	}
+
+	// Same MetadataForMany pass as the legacy path so the UI gets
+	// aliases and the OSV applicable-fix override.
+	if len(items) > 0 {
+		ids := make([]string, 0, len(items))
+		for _, it := range items {
+			ids = append(ids, it.VulnID)
+		}
+		if metas, err := vulnmeta.MetadataForMany(ctx, db, ids); err == nil {
+			for i := range items {
+				meta := metas[items[i].VulnID]
+				if meta == nil {
+					continue
+				}
+				aliases := vulnmeta.Aliases(meta)
+				out := aliases[:0]
+				for _, a := range aliases {
+					if a != items[i].VulnID {
+						out = append(out, a)
+					}
+				}
+				if len(out) > 0 {
+					items[i].Aliases = out
+				}
+				if fix := vulnmeta.ApplicableFix(
+					vulnmeta.ExtractOSVAffected(meta),
+					items[i].PkgName,
+					items[i].InstalledVersion,
+				); fix != "" {
+					items[i].FixedVersion = fix
+				}
+			}
+		}
+	}
+
+	return VulnListResponse{
+		Total:  total,
+		Limit:  p.Limit,
+		Offset: p.Offset,
+		Items:  items,
+	}, nil
+}
+
+// canonicalAssetWhere rewrites the unified-view-shaped ACL fragments
+// (alias `v` with columns `v.repo_id` / `v.image_id`) into a single
+// predicate against vuln_canonical_assets columns (asset_type +
+// asset_id). The substitution relies on a convention enforced by the
+// uiapi.repoSubquery / imageSubquery helpers:
+//
+//   - "TRUE"  / "FALSE" → preserved as-is.
+//   - "v.repo_id  IN (...)" / "v.image_id IN (...)" → only `v.repo_id`
+//     and `v.image_id` reference the unified-view alias; inner clause
+//     SQL uses other aliases ("r", "d"), so a literal substring
+//     replace doesn't bleed into those subqueries.
+//
+// The returned fragment is `((asset_type='repo'  AND repoSQL') OR
+// (asset_type='image' AND imageSQL'))` — the asset_type guard makes
+// "TRUE" branches scope to their own asset family without enabling
+// the other, matching the existing per-branch UNION semantics.
+//
+// IMPORTANT: if you add new ACL helpers that produce fragments with
+// other `v.<col>` references, update this function (or build a
+// canonical-shaped fragment directly) before passing them in.
+func canonicalAssetWhere(repoSQL, imageSQL string) string {
+	rc := strings.ReplaceAll(repoSQL, "v.repo_id", "asset_id")
+	ic := strings.ReplaceAll(imageSQL, "v.image_id", "asset_id")
+	return fmt.Sprintf("((asset_type = 'repo' AND %s) OR (asset_type = 'image' AND %s))", rc, ic)
+}
+
 // buildAssetUnionSQL returns the CTE body plus its bind args. Repo and
 // image branches each carry their own ACL fragment (defaults to "TRUE"
 // so the caller cannot accidentally broaden scope by omitting one).
@@ -1065,48 +1327,63 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 		return summary, nil
 	}
 
-	// Count across both repo-side and image-side vulns, collapsing
-	// CVE / GHSA / BIT variants of the same advisory to one row per
-	// (canonical, asset). Scanners occasionally store an advisory
-	// twice under different prefixes — that double-counts severity
-	// totals unless we dedupe here.
-	//
-	// MIN(sev_rank) picks the worst severity reported for each
-	// (canonical, asset) pair when the two prefixes disagree, which
-	// matches the principle of "report the most serious view".
-	if err := db.WithContext(ctx).Raw(`
-		WITH u AS (
-			SELECT 'repo'::text AS asset_type, repo_id AS asset_id, vuln_id, severity
-			FROM view_unified_repositories_vulnerabilities
-			UNION ALL
-			SELECT 'image'::text AS asset_type, image_id AS asset_id, vuln_id, severity
-			FROM view_unified_image_vulnerabilities
-		),
-		canonical AS (
+	// Count across both repo-side and image-side vulns. Each row in
+	// vuln_canonical_assets is already one (asset_type, asset_id,
+	// canonical_id) tuple with sev_rank pre-collapsed across scanner
+	// variants (CVE / GHSA / BIT for the same advisory). Falls back
+	// to the slow recompute when the canonical MV hasn't populated
+	// yet — typically only on a fresh deploy.
+	canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db)
+	if canonicalReady {
+		if err := db.WithContext(ctx).Raw(`
 			SELECT
-				u.asset_type,
-				u.asset_id,
-				COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
-				MIN(CASE u.severity
-					WHEN 'CRITICAL' THEN 1
-					WHEN 'HIGH'     THEN 2
-					WHEN 'MEDIUM'   THEN 3
-					WHEN 'LOW'      THEN 4
-					ELSE 5
-				END) AS sev_rank
-			FROM u
-			LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
-			GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
-		)
-		SELECT
-			COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
-			COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
-			COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
-			COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
-			COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
-		FROM canonical
-	`).Scan(&summary).Error; err != nil {
-		return Summary{}, err
+				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+			FROM vuln_canonical_assets
+		`).Scan(&summary).Error; err != nil {
+			return Summary{}, err
+		}
+	} else {
+		// Fallback: collapse scanner variants on the fly. Same shape
+		// as the previous body; ran in the wild until vuln_canonical_assets
+		// landed.
+		if err := db.WithContext(ctx).Raw(`
+			WITH u AS (
+				SELECT 'repo'::text AS asset_type, repo_id AS asset_id, vuln_id, severity
+				FROM view_unified_repositories_vulnerabilities
+				UNION ALL
+				SELECT 'image'::text AS asset_type, image_id AS asset_id, vuln_id, severity
+				FROM view_unified_image_vulnerabilities
+			),
+			canonical AS (
+				SELECT
+					u.asset_type,
+					u.asset_id,
+					COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
+					MIN(CASE u.severity
+						WHEN 'CRITICAL' THEN 1
+						WHEN 'HIGH'     THEN 2
+						WHEN 'MEDIUM'   THEN 3
+						WHEN 'LOW'      THEN 4
+						ELSE 5
+					END) AS sev_rank
+				FROM u
+				LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
+				GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
+			)
+			SELECT
+				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+			FROM canonical
+		`).Scan(&summary).Error; err != nil {
+			return Summary{}, err
+		}
 	}
 
 	type scanMeta struct {
@@ -1145,25 +1422,30 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 
 // LoadSummaryScoped is the narrow-grant counterpart to LoadSummary.
 // It recomputes severity counts and SBOM metadata against an ACL-
-// scoped subset of the unified vuln views — used when the caller is
+// scoped subset of the canonical vuln MV — used when the caller is
 // not admin / global_reader and the cached cross-tenant aggregate
 // would either over-share or hard-fail.
 //
-// repoSQL / imageSQL are full predicates against the view rows (the
-// `v` alias inside the UNION CTE). Empty or "FALSE" excludes that
-// branch entirely — pass "FALSE" for both when the caller has no
-// readable assets at all (the handler should short-circuit there
-// anyway, this is belt-and-braces).
+// repoSQL / imageSQL are full predicates against the unified-view row
+// (alias `v`, columns `v.repo_id` / `v.image_id`). The body rewrites
+// them to the canonical-MV column shape (asset_id, asset_type) so the
+// same fragments produced by uiapi.repoSubquery / imageSubquery work
+// against vuln_canonical_assets without churning every call site. See
+// the contract comment on canonicalAssetWhere below.
+//
+// "FALSE" excludes that branch entirely — pass "FALSE" for both when
+// the caller has no readable assets at all (the handler should
+// short-circuit there anyway, this is belt-and-braces).
 //
 // The scoped path is intentionally uncached: results vary per-subject
 // and the per-page hit volume is bounded by the SPA dashboard load
-// pattern. If traffic warrants, cache by hash(repoSQL+imageSQL+args)
-// against the same summaryVersion as LoadSummary.
+// pattern.
 func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (Summary, error) {
 	var summary Summary
 	if !unifiedViewsReady(ctx, db) {
 		return summary, nil
 	}
+	canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db)
 
 	repoSQL = strings.TrimSpace(repoSQL)
 	if repoSQL == "" {
@@ -1174,45 +1456,67 @@ func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArg
 		imageSQL = "FALSE"
 	}
 
-	// Same canonical-aware severity dedup as computeSummary, but with
-	// the UNION inputs filtered by the caller's ACL fragments.
-	countSQL := fmt.Sprintf(`
-		WITH u AS (
-			SELECT 'repo'::text AS asset_type, v.repo_id AS asset_id, v.vuln_id, v.severity
-			FROM view_unified_repositories_vulnerabilities v
-			WHERE %s
-			UNION ALL
-			SELECT 'image'::text AS asset_type, v.image_id AS asset_id, v.vuln_id, v.severity
-			FROM view_unified_image_vulnerabilities v
-			WHERE %s
-		),
-		canonical AS (
-			SELECT
-				u.asset_type,
-				u.asset_id,
-				COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
-				MIN(CASE u.severity
-					WHEN 'CRITICAL' THEN 1
-					WHEN 'HIGH'     THEN 2
-					WHEN 'MEDIUM'   THEN 3
-					WHEN 'LOW'      THEN 4
-					ELSE 5
-				END) AS sev_rank
-			FROM u
-			LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
-			GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
-		)
-		SELECT
-			COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
-			COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
-			COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
-			COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
-			COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
-		FROM canonical
-	`, repoSQL, imageSQL)
-
 	countArgs := append([]any{}, repoArgs...)
 	countArgs = append(countArgs, imageArgs...)
+
+	var countSQL string
+	if canonicalReady {
+		// Fast path: read directly from the pre-aggregated MV. The
+		// canonical-aware (asset, canonical) dedup is already baked in,
+		// so this is just a COUNT FILTER over an indexed table.
+		countSQL = fmt.Sprintf(`
+			SELECT
+				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+			FROM vuln_canonical_assets
+			WHERE %s
+		`, canonicalAssetWhere(repoSQL, imageSQL))
+	} else {
+		// Fallback used during the bootstrap window where the canonical
+		// MVs are still first-populating. Same canonical-aware dedup as
+		// computeSummary, with the UNION inputs filtered by the caller's
+		// ACL fragments.
+		countSQL = fmt.Sprintf(`
+			WITH u AS (
+				SELECT 'repo'::text AS asset_type, v.repo_id AS asset_id, v.vuln_id, v.severity
+				FROM view_unified_repositories_vulnerabilities v
+				WHERE %s
+				UNION ALL
+				SELECT 'image'::text AS asset_type, v.image_id AS asset_id, v.vuln_id, v.severity
+				FROM view_unified_image_vulnerabilities v
+				WHERE %s
+			),
+			canonical AS (
+				SELECT
+					u.asset_type,
+					u.asset_id,
+					COALESCE(vm.canonical_id, u.vuln_id) AS canonical_id,
+					MIN(CASE u.severity
+						WHEN 'CRITICAL' THEN 1
+						WHEN 'HIGH'     THEN 2
+						WHEN 'MEDIUM'   THEN 3
+						WHEN 'LOW'      THEN 4
+						ELSE 5
+					END) AS sev_rank
+				FROM u
+				LEFT JOIN vuln_metadata vm ON vm.vuln_id = u.vuln_id
+				GROUP BY u.asset_type, u.asset_id, COALESCE(vm.canonical_id, u.vuln_id)
+			)
+			SELECT
+				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
+				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
+				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
+				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
+				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
+			FROM canonical
+		`, repoSQL, imageSQL)
+		// Fallback duplicates the args (one set per UNION branch).
+		countArgs = append(append([]any{}, repoArgs...), imageArgs...)
+	}
+
 	if err := db.WithContext(ctx).Raw(countSQL, countArgs...).Scan(&summary).Error; err != nil {
 		return Summary{}, err
 	}

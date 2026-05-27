@@ -42,10 +42,33 @@ const vulnUnifiedViewRefreshLockID = 8_742_635_913
 const minMaterializedViewRefreshInterval = 30 * time.Second
 
 // vulnUnifiedViewNames are the materialized views that hold the unified
-// per-asset vulnerability rows the API filters and groups against.
+// per-asset vulnerability rows the API filters and groups against, plus
+// the two canonical MVs that ride on top of them.
+//
+// Refresh order matters and matches slice order:
+//   1. view_unified_repositories_vulnerabilities
+//   2. view_unified_image_vulnerabilities
+//   3. vuln_canonical_assets    (depends on #1 and #2 + vuln_metadata)
+//   4. vuln_canonical_summary   (depends on #3 + cisa_kev_entries + epss_entries)
+//
+// All four share the same advisory lock and freshness debounce window so
+// scan-completion triggers can't ladder them up out-of-order against
+// mismatched snapshots.
 var vulnUnifiedViewNames = []string{
 	"view_unified_repositories_vulnerabilities",
 	"view_unified_image_vulnerabilities",
+	"vuln_canonical_assets",
+	"vuln_canonical_summary",
+}
+
+// vulnCanonicalViewNames is the subset of vulnUnifiedViewNames that the
+// canonical-summary MVs comprise. Read-side gates (VulnCanonicalViewsPopulated)
+// use this to decide whether the admin /api/vuln/list path can hit the
+// summary MV directly or must fall back to the per-asset view + group
+// at request time.
+var vulnCanonicalViewNames = []string{
+	"vuln_canonical_assets",
+	"vuln_canonical_summary",
 }
 
 // EnsureViews applies SQL view definitions from the provided file paths.
@@ -439,15 +462,34 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // condition and retry rather than silently succeeding.
 var ErrRefreshLockHeld = errors.New("materialized view refresh lock held by another process")
 
-// VulnUnifiedViewsPopulated reports whether all unified vuln MVs are
-// populated. Used as a gate on read endpoints so the brief startup window
-// after a fresh deploy (MVs created WITH NO DATA, first refresh in
-// flight) returns empty results instead of a SQLSTATE 55000 error.
+// VulnUnifiedViewsPopulated reports whether the two per-finding unified
+// vuln MVs are populated. Used as a gate on read endpoints that read
+// those views directly (or via vuln_canonical_assets, which always
+// populates after they do).
+//
+// Note: this intentionally does NOT check the two canonical MVs. The
+// canonical-summary read-path has its own gate (VulnCanonicalViewsPopulated)
+// because callers can fall back to the per-finding views when the
+// canonical MVs are still cold.
 func VulnUnifiedViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	var populated bool
 	err := db.WithContext(ctx).Raw(
 		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN (?, ?)",
-		vulnUnifiedViewNames[0], vulnUnifiedViewNames[1],
+		"view_unified_repositories_vulnerabilities", "view_unified_image_vulnerabilities",
+	).Scan(&populated).Error
+	return populated, err
+}
+
+// VulnCanonicalViewsPopulated reports whether both canonical vuln MVs
+// (vuln_canonical_assets + vuln_canonical_summary) are populated.
+// LoadListPage / computeSummary use this to choose between the fast
+// pre-aggregated path and the slower fallback that re-aggregates from
+// view_unified_*_vulnerabilities at request time.
+func VulnCanonicalViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
+	var populated bool
+	err := db.WithContext(ctx).Raw(
+		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN (?, ?)",
+		vulnCanonicalViewNames[0], vulnCanonicalViewNames[1],
 	).Scan(&populated).Error
 	return populated, err
 }
