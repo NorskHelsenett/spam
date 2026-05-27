@@ -436,22 +436,27 @@ func attachClusterPresence(ctx context.Context, r *http.Request, db *gorm.DB, im
 		ContainerCount int    `gorm:"column:container_count"`
 	}
 	var rows []presenceRow
+	// Resolve cluster name via the clusters table (ror_cluster_name →
+	// ror_slug → cluster_id) so the new SCAM identity scheme — which
+	// stamps cluster_id as the kube-system UID — doesn't leak the UID
+	// through to the per-cluster presence list.
 	err := db.WithContext(ctx).Raw(`
 		SELECT
 		    cr.data->>'digest'     AS digest,
 		    cr.data->>'cluster_id' AS cluster_id,
-		    cr.data->>'cluster'    AS cluster,
+		    COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
 		    cr.data->>'environment' AS environment,
 		    cr.data->>'namespace'  AS namespace,
 		    COUNT(DISTINCT cr.data->>'pod_uid')::int AS container_count
 		FROM cluster_record cr
+		LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
 		WHERE cr.data->>'kind'      = 'Container'
 		  AND cr.data->>'pod_phase' = 'Running'
 		  AND cr.data->>'msg'       <> 'DELETE'
 		  AND cr.data->>'digest'    IN ?
 		GROUP BY cr.data->>'digest', cr.data->>'cluster_id',
-		         cr.data->>'cluster', cr.data->>'environment',
-		         cr.data->>'namespace'
+		         c.ror_cluster_name, c.ror_slug,
+		         cr.data->>'environment', cr.data->>'namespace'
 		ORDER BY cluster, namespace
 	`, digests).Scan(&rows).Error
 	if err != nil {

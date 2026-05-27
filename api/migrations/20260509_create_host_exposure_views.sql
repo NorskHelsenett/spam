@@ -117,24 +117,35 @@ WITH per_rule_backend AS (
       AND NULLIF(h,'') IS NOT NULL
 )
 SELECT
-    cluster_id,
-    MAX(cluster)                                                 AS cluster,
-    namespace,
-    MAX(environment)                                             AS environment,
-    host,
-    kind,
-    name,
-    BOOL_OR(tls)                                                 AS tls,
-    COALESCE(MAX(NULLIF(lb_ips, '')), '')                        AS lb_ips,
-    COALESCE(MAX(NULLIF(ingress_class, '')), '')                 AS ingress_class,
+    prb.cluster_id,
+    -- Resolve through the clusters table so the new SCAM identity
+    -- scheme (cluster_id = kube-system UID, ROR name lives on
+    -- clusters.ror_cluster_name via upsertClusterRorBinding) doesn't
+    -- leak the UID through to the hosts list. Falls back to the
+    -- ROR slug and finally cluster_id so a not-yet-bound cluster
+    -- still has something to render.
     COALESCE(
-        string_agg(DISTINCT backend, ', ' ORDER BY backend)
-            FILTER (WHERE backend IS NOT NULL),
+        NULLIF(MAX(c.ror_cluster_name), ''),
+        NULLIF(MAX(c.ror_slug), ''),
+        prb.cluster_id
+    )                                                            AS cluster,
+    prb.namespace,
+    MAX(prb.environment)                                         AS environment,
+    prb.host,
+    prb.kind,
+    prb.name,
+    BOOL_OR(prb.tls)                                             AS tls,
+    COALESCE(MAX(NULLIF(prb.lb_ips, '')), '')                    AS lb_ips,
+    COALESCE(MAX(NULLIF(prb.ingress_class, '')), '')             AS ingress_class,
+    COALESCE(
+        string_agg(DISTINCT prb.backend, ', ' ORDER BY prb.backend)
+            FILTER (WHERE prb.backend IS NOT NULL),
         ''
     )                                                            AS backends,
-    MAX(last_seen)                                               AS last_seen
-FROM per_rule_backend
-GROUP BY cluster_id, namespace, host, kind, name
+    MAX(prb.last_seen)                                           AS last_seen
+FROM per_rule_backend prb
+LEFT JOIN clusters c ON c.cluster_id = prb.cluster_id
+GROUP BY prb.cluster_id, prb.namespace, prb.host, prb.kind, prb.name
 WITH NO DATA;
 
 -- Unique key for REFRESH ... CONCURRENTLY. Also the natural lookup

@@ -11,6 +11,14 @@
 -- depends on NOW() and is per-request. The handler joins
 -- cluster_sessions and applies ACL on top of this MV.
 --
+-- Cluster display name is resolved through the `clusters` table rather
+-- than the per-record `data->>'cluster'` field. SCAM's new identity
+-- scheme stamps `cluster_id` as the kube-system Namespace UID and
+-- carries the ROR-friendly name in `ror_metadata`; the binding lands
+-- on clusters.ror_cluster_name via upsertClusterRorBinding. Reading
+-- `data->>'cluster'` here would surface either the UID or stale
+-- pre-cutover names depending on which record MAX() picked.
+--
 -- Refresh hooks:
 --   - CallcenterHandler triggers a debounced refresh on every ingest
 --     batch that touches Container / Ingress / HTTPRoute / etc. (see
@@ -24,7 +32,11 @@ DROP MATERIALIZED VIEW IF EXISTS cluster_summary;
 CREATE MATERIALIZED VIEW cluster_summary AS
 SELECT
     cr.data->>'cluster_id'                                          AS cluster_id,
-    MAX(cr.data->>'cluster')                                        AS cluster,
+    COALESCE(
+        NULLIF(MAX(c.ror_cluster_name), ''),
+        NULLIF(MAX(c.ror_slug), ''),
+        cr.data->>'cluster_id'
+    )                                                               AS cluster,
     MAX(cr.data->>'environment')                                    AS environment,
     COUNT(*) FILTER (
         WHERE cr.data->>'kind' = 'Container'
@@ -46,6 +58,7 @@ SELECT
     )                                                               AS ingress_count,
     MAX(cr.received_at)                                             AS last_seen
 FROM cluster_record cr
+LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
 WHERE COALESCE(cr.data->>'msg', '') <> 'DELETE'
   AND cr.data->>'cluster_id' IS NOT NULL
 GROUP BY cr.data->>'cluster_id'

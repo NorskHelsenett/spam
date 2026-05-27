@@ -2258,9 +2258,15 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
-		// Look up cluster name
+		// Resolve cluster name through clusters table — the per-record
+		// `data->>'cluster'` may carry the kube-system UID on agents
+		// emitting the new identity scheme, so go through the ROR
+		// binding written by upsertClusterRorBinding instead.
 		var clusterName string
-		db.Raw(liveCTEForCluster+`SELECT data->>'cluster' FROM live WHERE data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(`SELECT COALESCE(NULLIF(ror_cluster_name,''), NULLIF(ror_slug,''), cluster_id) FROM clusters WHERE cluster_id = ? LIMIT 1`, clusterID).Scan(&clusterName)
+		if clusterName == "" {
+			clusterName = clusterID
+		}
 
 		// Sort namespaces and build result
 		type result struct {
@@ -2353,9 +2359,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Pods      []chainPodGroup `json:"pods"`
 		}
 
-		// Look up cluster name from any record with this cluster_id.
+		// Resolve cluster name through clusters table — see the matching
+		// note in ClusterChainHandler. data->>'cluster' carries whatever
+		// SCAM stamped at ingest, which is the UID under the new
+		// identity scheme.
 		var clusterName string
-		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(`SELECT COALESCE(NULLIF(ror_cluster_name,''), NULLIF(ror_slug,''), cluster_id) FROM clusters WHERE cluster_id = ? LIMIT 1`, clusterID).Scan(&clusterName)
+		if clusterName == "" {
+			clusterName = clusterID
+		}
 
 		resp := chainResponse{Host: host, Cluster: clusterName, ClusterID: clusterID, Namespace: namespace}
 

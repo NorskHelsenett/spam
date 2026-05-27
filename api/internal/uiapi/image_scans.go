@@ -584,7 +584,10 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			), 0)
 		`, id).Scan(&resp.SecretCount).Error
 
-		// Cluster usage from the live cluster_record feed.
+		// Cluster usage from the live cluster_record feed. Resolve the
+		// cluster name via the clusters table so we don't leak the
+		// kube-system UID that the new SCAM identity scheme stamps into
+		// data->>'cluster'.
 		type usageRow struct {
 			Cluster   string    `gorm:"column:cluster"`
 			Namespace string    `gorm:"column:namespace"`
@@ -595,16 +598,17 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		var usage []usageRow
 		_ = db.WithContext(ctx).Raw(`
 			SELECT
-			  COALESCE(data->>'cluster', '') AS cluster,
-			  COALESCE(data->>'namespace', '') AS namespace,
-			  COUNT(DISTINCT data->>'pod_uid') AS pod_count,
-			  MIN(received_at) AS first_seen,
-			  MAX(received_at) AS last_seen
-			FROM cluster_record
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
-			  AND data->>'digest' = ?
-			GROUP BY 1, 2
+			  COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
+			  COALESCE(cr.data->>'namespace', '') AS namespace,
+			  COUNT(DISTINCT cr.data->>'pod_uid') AS pod_count,
+			  MIN(cr.received_at) AS first_seen,
+			  MAX(cr.received_at) AS last_seen
+			FROM cluster_record cr
+			LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
+			WHERE cr.data->>'kind' = 'Container'
+			  AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
+			  AND cr.data->>'digest' = ?
+			GROUP BY c.ror_cluster_name, c.ror_slug, cr.data->>'cluster_id', cr.data->>'namespace'
 			ORDER BY last_seen DESC
 		`, img.Digest).Scan(&usage).Error
 		resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
@@ -780,21 +784,26 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			digests = append(digests, h.Digest)
 		}
 
+		// Resolve cluster name via the clusters table — see the matching
+		// note on the cluster usage query above. The kube-system-UID
+		// identity scheme stamps cluster_id as the UID, so the friendly
+		// name has to come from ror_cluster_name (or ror_slug).
 		var wlRows []workloadRow
 		if err := db.WithContext(r.Context()).Raw(`
-			SELECT data->>'digest'     AS digest,
-			       data->>'cluster_id' AS cluster_id,
-			       COALESCE(data->>'cluster','')     AS cluster,
-			       COALESCE(data->>'namespace','')   AS namespace,
-			       COALESCE(data->>'owner','')       AS owner,
-			       COALESCE(data->>'owner_kind','')  AS owner_kind,
-			       COUNT(DISTINCT data->>'pod_uid')  AS pods
-			FROM cluster_record
-			WHERE data->>'kind' = 'Container'
-			  AND data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
-			  AND data->>'pod_phase' = 'Running'
-			  AND data->>'digest' IN ?
-			GROUP BY 1, 2, 3, 4, 5, 6
+			SELECT cr.data->>'digest'     AS digest,
+			       cr.data->>'cluster_id' AS cluster_id,
+			       COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
+			       COALESCE(cr.data->>'namespace','')   AS namespace,
+			       COALESCE(cr.data->>'owner','')       AS owner,
+			       COALESCE(cr.data->>'owner_kind','')  AS owner_kind,
+			       COUNT(DISTINCT cr.data->>'pod_uid')  AS pods
+			FROM cluster_record cr
+			LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
+			WHERE cr.data->>'kind' = 'Container'
+			  AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
+			  AND cr.data->>'pod_phase' = 'Running'
+			  AND cr.data->>'digest' IN ?
+			GROUP BY cr.data->>'digest', cr.data->>'cluster_id', c.ror_cluster_name, c.ror_slug, cr.data->>'namespace', cr.data->>'owner', cr.data->>'owner_kind'
 			ORDER BY cluster, namespace, owner
 		`, digests).Scan(&wlRows).Error; err != nil {
 			log.Printf("repo workloads handler (cluster usage): %v", err)
