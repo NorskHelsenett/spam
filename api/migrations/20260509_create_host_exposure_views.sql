@@ -118,15 +118,24 @@ WITH per_rule_backend AS (
 )
 SELECT
     prb.cluster_id,
-    -- Resolve through the clusters table so the new SCAM identity
-    -- scheme (cluster_id = kube-system UID, ROR name lives on
-    -- clusters.ror_cluster_name via upsertClusterRorBinding) doesn't
-    -- leak the UID through to the hosts list. Falls back to the
-    -- ROR slug and finally cluster_id so a not-yet-bound cluster
-    -- still has something to render.
+    -- Cluster display name resolution order:
+    --   1. clusters.ror_cluster_name  — ROR-bound friendly name (best)
+    --   2. clusters.ror_slug          — ROR slug if name isn't set
+    --   3. prb.cluster (from cr.data->>'cluster'), but only when it
+    --      differs from cluster_id — SCAM stamps `cluster` to the
+    --      operator-configured env var on the agent. When that var
+    --      is unset SCAM falls back to writing the kube-system UID
+    --      into `cluster` too, which would be the same value we'd
+    --      surface in step 4, so we NULLIF that case away.
+    --   4. cluster_id as last resort.
+    --
+    -- Mirrors the resolution in cluster_summary so a cluster whose
+    -- ROR binding hasn't landed yet still renders a readable name
+    -- on /api/clusters/hosts instead of the raw kube-system UID.
     COALESCE(
         NULLIF(MAX(c.ror_cluster_name), ''),
         NULLIF(MAX(c.ror_slug), ''),
+        NULLIF(MAX(NULLIF(prb.cluster, prb.cluster_id)), ''),
         prb.cluster_id
     )                                                            AS cluster,
     prb.namespace,

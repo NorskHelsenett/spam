@@ -62,12 +62,14 @@
 -- exposed_digests with CASCADE, which transitively drops asset_risk
 -- (it reads exposed_digests via the exposed_clusters CTE). Whenever
 -- the host_exposure migration's SHA changes, this file's SHA must
--- also change so EnsureViews re-runs the asset_risk recreate in the
--- same bootstrap pass — otherwise the recorded hash matches, the
--- file is skipped, and asset_risk stays missing forever (background
--- refresh loops with "relation does not exist", /api/triage returns
--- empty). The SQL body below is unchanged; this comment exists to
--- bump the file hash.
+-- also change. Otherwise the EnsureViews matview-existence recheck
+-- reapplies 20260509a (which creates an unoptimised asset_risk body)
+-- and stops there — this file is skipped on its hash match and the
+-- optimised pre-aggregated body never replaces the slow one.
+--
+-- The SQL body below is unchanged; bump this paragraph alongside any
+-- host_exposure edit so the optimised asset_risk body wins after
+-- the CASCADE round-trip.
 
 -- Bootstrap deadlock avoidance.
 --
