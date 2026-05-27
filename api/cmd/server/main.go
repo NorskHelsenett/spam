@@ -26,6 +26,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/hostexposure"
+	"github.com/NorskHelsenett/spam/internal/hostresolve"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/manifests"
@@ -166,6 +167,7 @@ func run() error {
 		"migrations/20260526_clusters_ror_metadata.sql",
 		"migrations/20260527_create_vuln_canonical_assets.sql",
 		"migrations/20260527a_create_vuln_canonical_summary.sql",
+		"migrations/20260527_create_host_resolution.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -287,6 +289,13 @@ func run() error {
 	}
 
 	uiapi.WarmCache(gormDB, routerOpts.ProviderStore, routerOpts.Cache)
+
+	// Background DNS-resolver worker that keeps host_resolution up to
+	// date. The /api/clusters/hosts/summary handler reads from that table
+	// instead of doing inline lookups, so this is what makes the summary
+	// endpoint fast. hostexposure.TriggerRefresh wakes the worker after
+	// each MV refresh so newly-ingested hosts get classified promptly.
+	hostresolve.Start(ctx, gormDB, routerOpts.Cache)
 
 	authService, err := auth.NewService(ctx, auth.Config{
 		IssuerURL:         cfg.OIDC.IssuerURL,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
 	spamdb "github.com/NorskHelsenett/spam/internal/db"
+	"github.com/NorskHelsenett/spam/internal/hostresolve"
 	"gorm.io/gorm"
 )
 
@@ -94,6 +95,12 @@ func TriggerRefresh(db *gorm.DB) {
 			// into triage. The asset_risk gate coalesces this with any
 			// concurrent vuln/scan triggers, so we never over-refresh.
 			assetrisk.TriggerRefresh(db)
+
+			// Newly-ingested hosts only appear in host_exposure after
+			// this refresh; nudge the hostresolve worker so the
+			// summary endpoint sees them classified within seconds
+			// instead of waiting for the next periodic tick.
+			hostresolve.Wake()
 
 			refreshGate.mu.Lock()
 			if !refreshGate.pending {

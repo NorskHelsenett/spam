@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/assets"
@@ -1683,13 +1682,14 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
 }
 
-// computeHostSummary reads the deduped host set the caller can see and
-// classifies each one. Dedup is by hostname (the same FQDN can appear
-// once per cluster/namespace via a shared *.apps wildcard). Facets
-// are computed by separate helpers because each dropdown wants its
-// own filter scope (e.g. cluster dropdown shows all clusters even
-// when one is already selected — see hostFacets below).
-func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
+// computeHostSummary aggregates the deduped host set the caller can see
+// into internal/external/pending counts. Classification comes from
+// host_resolution, which is kept up to date off the request path by
+// internal/hostresolve.Worker — so this function is pure SQL and
+// answers in milliseconds even on multi-thousand-host fleets. A host
+// that the worker hasn't reached yet shows up as "pending", same as a
+// host whose DNS lookup has failed and has no LB IP fallback.
+func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
 		livenessJoin = ""
@@ -1699,92 +1699,35 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 		aclWhere = "AND " + aclFrag
 	}
 
-	type row struct {
-		Host  string `gorm:"column:host"`
-		LBIPs string `gorm:"column:lb_ips"`
+	type aggRow struct {
+		Total    int `gorm:"column:total"`
+		Internal int `gorm:"column:internal"`
+		External int `gorm:"column:external"`
+		Pending  int `gorm:"column:pending"`
 	}
-	var rows []row
+	var agg aggRow
 	query := `
-		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
+		SELECT
+		  COUNT(DISTINCT he.host)                                                                  AS total,
+		  COUNT(DISTINCT he.host) FILTER (WHERE hr.classification = 'internal')                    AS internal,
+		  COUNT(DISTINCT he.host) FILTER (WHERE hr.classification = 'external')                    AS external,
+		  COUNT(DISTINCT he.host) FILTER (WHERE COALESCE(hr.classification, 'pending')
+		                                          NOT IN ('internal', 'external'))                 AS pending
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
-		ORDER BY he.host
-	`
+		LEFT JOIN host_resolution hr ON hr.host = he.host
+		WHERE TRUE ` + aclWhere + ` ` + filterWhere
 	queryArgs := append([]any{}, aclArgs...)
 	queryArgs = append(queryArgs, filterArgs...)
-	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&agg).Error; err != nil {
 		return HostSummary{}, err
 	}
-
-	// Warm the DNS resolve cache in parallel before the per-host
-	// classify loop. classifyHostInto calls resolveHost, which on a
-	// cache miss does a synchronous DNS lookup with a 3s timeout. A
-	// fleet with hundreds of hosts and even a small share of dead
-	// names (deleted services, stale Ingress objects) serializes into
-	// minutes of wall time and blows through the upstream 15s
-	// timeout. Warming first lets the subsequent serial classify pass
-	// hit the cache for every host. Bounded to keep DNS load
-	// reasonable on the resolver.
-	hosts := make([]string, 0, len(rows))
-	for _, r := range rows {
-		hosts = append(hosts, r.Host)
-	}
-	warmHostResolveCache(ctx, cs, hosts, 16)
-
-	var summary HostSummary
-	summary.Total = len(rows)
-	for _, r := range rows {
-		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
-	}
-	return summary, nil
-}
-
-// warmHostResolveCache fans out resolveHost calls across `workers`
-// goroutines for the unique non-empty hostnames. Each call populates
-// the kv_store cache as a side effect — the caller (a subsequent
-// classifyHostInto loop) reads from cache instead of triggering its
-// own serial lookup. Returns when every host has been resolved (or
-// the lookup has timed out and cached the negative result).
-func warmHostResolveCache(ctx context.Context, cs cache.Store, hosts []string, workers int) {
-	if workers < 1 {
-		workers = 1
-	}
-	seen := make(map[string]struct{}, len(hosts))
-	unique := make([]string, 0, len(hosts))
-	for _, h := range hosts {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
-		}
-		if _, dup := seen[h]; dup {
-			continue
-		}
-		seen[h] = struct{}{}
-		unique = append(unique, h)
-	}
-	if len(unique) == 0 {
-		return
-	}
-	if workers > len(unique) {
-		workers = len(unique)
-	}
-	jobs := make(chan string, len(unique))
-	for _, h := range unique {
-		jobs <- h
-	}
-	close(jobs)
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for h := range jobs {
-				_ = resolveHost(ctx, cs, h)
-			}
-		}()
-	}
-	wg.Wait()
+	return HostSummary{
+		Total:    agg.Total,
+		Internal: agg.Internal,
+		External: agg.External,
+		Pending:  agg.Pending,
+	}, nil
 }
 
 // hostFacets returns the dropdown options for cluster / namespace /
@@ -1867,38 +1810,6 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 	}
 
 	return clusters, namespaces, kinds, nil
-}
-
-func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
-	// 1. Public-DNS perspective wins. The cluster may report a private
-	//    LoadBalancer address while split-horizon/public DNS points the
-	//    host at an external address. For exposure reporting, the DNS
-	//    result is the more useful operator signal.
-	if host != "" {
-		res := resolveHost(ctx, cs, host)
-		if res.Error == "" && len(res.IPs) > 0 {
-			if res.IsLocal {
-				s.Internal++
-			} else {
-				s.External++
-			}
-			return s
-		}
-	}
-	// 2. DNS missing/unresolvable. Fall back to cluster-reported LB IP:
-	//    status.loadBalancer.ingress[].ip for Ingress,
-	//    Gateway.status.addresses[] for Gateway API.
-	if first := strings.TrimSpace(strings.SplitN(lbIPs, ",", 2)[0]); first != "" {
-		if isPrivateIP(first) {
-			s.Internal++
-		} else {
-			s.External++
-		}
-		return s
-	}
-	// 3. No usable DNS and no LB IP — genuinely unknown.
-	s.Pending++
-	return s
 }
 
 // writeAndFilterHosts applies the activeOnly filter, inlines resolve +
