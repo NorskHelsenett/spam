@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -80,14 +81,27 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 			continue
 		}
 		hash := fmt.Sprintf("%x", sha256.Sum256(payload))
+		declared := extractMatviewNames(payload)
 
-		// Fast path: if the stored hash already matches, no work is
-		// needed, so we don't enter the transaction at all and never
-		// touch the advisory lock. The recheck inside the lock below
+		// Fast path: stored hash matches AND every materialized view the
+		// migration declares is still present in pg_matviews. The MV
+		// existence check guards against a CASCADE drop in an unrelated
+		// later migration leaving this file's outputs gone while its hash
+		// still appears applied — without it, EnsureViews silently skips
+		// the recreate forever and background refreshes loop with
+		// "relation does not exist". The recheck inside the lock below
 		// still runs for races (two replicas both decide to do work).
 		var stored ViewSchemaVersion
 		if err := db.WithContext(ctx).First(&stored, "name = ?", path).Error; err == nil && stored.Hash == hash {
-			continue
+			ok, mverr := matviewsExist(ctx, db, declared)
+			if mverr == nil && ok {
+				continue
+			}
+			if mverr != nil {
+				log.Printf("ensure view %s: matview existence check failed, will reapply: %v", path, mverr)
+			} else {
+				log.Printf("ensure view %s: declared matview(s) missing, will reapply: %v", path, declared)
+			}
 		}
 
 		if err := applyViewWithRetry(ctx, db, path, payload, hash); err != nil {
@@ -95,6 +109,71 @@ func EnsureViews(ctx context.Context, db *gorm.DB, paths ...string) error {
 		}
 	}
 	return nil
+}
+
+// createMatviewRE matches `CREATE MATERIALIZED VIEW [IF NOT EXISTS] <name>`.
+// Used by extractMatviewNames to discover what each migration's body
+// creates so EnsureViews can verify the MVs still exist even when the
+// stored hash matches.
+var createMatviewRE = regexp.MustCompile(`(?i)CREATE\s+MATERIALIZED\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)`)
+
+// extractMatviewNames returns the set of materialized-view names the
+// SQL payload declares with CREATE MATERIALIZED VIEW. Comment lines
+// (anything after `--` on a line) are stripped first so a commented-
+// out example doesn't get treated as a real declaration.
+func extractMatviewNames(payload []byte) []string {
+	scrubbed := stripSQLLineComments(string(payload))
+	matches := createMatviewRE.FindAllStringSubmatch(scrubbed, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		n := strings.ToLower(m[1])
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		names = append(names, n)
+	}
+	return names
+}
+
+// stripSQLLineComments removes everything after `--` on each line.
+// Cheap and good-enough for migration-file scanning: we don't care
+// about quoted strings since CREATE MATERIALIZED VIEW <name> isn't a
+// pattern that naturally appears inside SQL literals in this codebase.
+func stripSQLLineComments(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, line := range strings.Split(s, "\n") {
+		if idx := strings.Index(line, "--"); idx >= 0 {
+			line = line[:idx]
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// matviewsExist reports whether every name in `names` is present in
+// pg_matviews. Returns true for an empty slice (no expectations to
+// verify). Used by EnsureViews to detect migrations whose outputs got
+// CASCADE-dropped by a later migration without that later migration
+// itself being re-run.
+func matviewsExist(ctx context.Context, db *gorm.DB, names []string) (bool, error) {
+	if len(names) == 0 {
+		return true, nil
+	}
+	var count int64
+	if err := db.WithContext(ctx).Raw(
+		"SELECT COUNT(*) FROM pg_matviews WHERE matviewname IN (?)",
+		names,
+	).Scan(&count).Error; err != nil {
+		return false, err
+	}
+	return int(count) == len(names), nil
 }
 
 // applyViewWithRetry runs a single migration under a try-then-poll
@@ -151,6 +230,7 @@ func applyViewWithRetry(ctx context.Context, db *gorm.DB, path string, payload [
 // held by another replica; (false, err) on any execution failure.
 func tryApplyView(ctx context.Context, db *gorm.DB, lockKey int64, path string, payload []byte, hash string) (bool, error) {
 	applied := false
+	declared := extractMatviewNames(payload)
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var acquired bool
 		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", lockKey).Scan(&acquired).Error; err != nil {
@@ -162,11 +242,18 @@ func tryApplyView(ctx context.Context, db *gorm.DB, lockKey int64, path string, 
 
 		// Re-check inside the lock — another replica might have
 		// committed a matching hash between our outer check and here.
+		// The MV existence check mirrors the fast-path: if a sibling
+		// replica recorded our hash but the declared MVs are gone
+		// (CASCADE drop in an unrelated migration), we still need to
+		// reapply.
 		var stored ViewSchemaVersion
 		result := tx.First(&stored, "name = ?", path)
 		if result.Error == nil && stored.Hash == hash {
-			applied = true
-			return nil
+			ok, mverr := matviewsExist(ctx, tx, declared)
+			if mverr == nil && ok {
+				applied = true
+				return nil
+			}
 		}
 
 		if err := tx.Exec(string(payload)).Error; err != nil {

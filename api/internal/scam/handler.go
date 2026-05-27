@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/assets"
@@ -1716,12 +1717,74 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 		return HostSummary{}, err
 	}
 
+	// Warm the DNS resolve cache in parallel before the per-host
+	// classify loop. classifyHostInto calls resolveHost, which on a
+	// cache miss does a synchronous DNS lookup with a 3s timeout. A
+	// fleet with hundreds of hosts and even a small share of dead
+	// names (deleted services, stale Ingress objects) serializes into
+	// minutes of wall time and blows through the upstream 15s
+	// timeout. Warming first lets the subsequent serial classify pass
+	// hit the cache for every host. Bounded to keep DNS load
+	// reasonable on the resolver.
+	hosts := make([]string, 0, len(rows))
+	for _, r := range rows {
+		hosts = append(hosts, r.Host)
+	}
+	warmHostResolveCache(ctx, cs, hosts, 16)
+
 	var summary HostSummary
 	summary.Total = len(rows)
 	for _, r := range rows {
 		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
 	}
 	return summary, nil
+}
+
+// warmHostResolveCache fans out resolveHost calls across `workers`
+// goroutines for the unique non-empty hostnames. Each call populates
+// the kv_store cache as a side effect — the caller (a subsequent
+// classifyHostInto loop) reads from cache instead of triggering its
+// own serial lookup. Returns when every host has been resolved (or
+// the lookup has timed out and cached the negative result).
+func warmHostResolveCache(ctx context.Context, cs cache.Store, hosts []string, workers int) {
+	if workers < 1 {
+		workers = 1
+	}
+	seen := make(map[string]struct{}, len(hosts))
+	unique := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if _, dup := seen[h]; dup {
+			continue
+		}
+		seen[h] = struct{}{}
+		unique = append(unique, h)
+	}
+	if len(unique) == 0 {
+		return
+	}
+	if workers > len(unique) {
+		workers = len(unique)
+	}
+	jobs := make(chan string, len(unique))
+	for _, h := range unique {
+		jobs <- h
+	}
+	close(jobs)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for h := range jobs {
+				_ = resolveHost(ctx, cs, h)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // hostFacets returns the dropdown options for cluster / namespace /
