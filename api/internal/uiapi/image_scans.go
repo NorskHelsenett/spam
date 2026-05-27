@@ -588,32 +588,54 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		// cluster name via the clusters table so we don't leak the
 		// kube-system UID that the new SCAM identity scheme stamps into
 		// data->>'cluster'.
-		type usageRow struct {
-			Cluster   string    `gorm:"column:cluster"`
-			Namespace string    `gorm:"column:namespace"`
-			PodCount  int       `gorm:"column:pod_count"`
-			FirstSeen time.Time `gorm:"column:first_seen"`
-			LastSeen  time.Time `gorm:"column:last_seen"`
-		}
-		var usage []usageRow
-		_ = db.WithContext(ctx).Raw(`
-			SELECT
-			  COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
-			  COALESCE(cr.data->>'namespace', '') AS namespace,
-			  COUNT(DISTINCT cr.data->>'pod_uid') AS pod_count,
-			  MIN(cr.received_at) AS first_seen,
-			  MAX(cr.received_at) AS last_seen
-			FROM cluster_record cr
-			LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
-			WHERE cr.data->>'kind' = 'Container'
-			  AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
-			  AND cr.data->>'digest' = ?
-			GROUP BY c.ror_cluster_name, c.ror_slug, cr.data->>'cluster_id', cr.data->>'namespace'
-			ORDER BY last_seen DESC
-		`, img.Digest).Scan(&usage).Error
-		resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
-		for _, u := range usage {
-			resp.ClusterUsage = append(resp.ClusterUsage, ImageClusterUsageRow(u))
+		//
+		// The image-read gate above (canReadImageByID) admits callers
+		// that reach the image via a verified-source repo grant or via
+		// any-cluster-running-it, so it does not by itself restrict
+		// WHICH clusters can be enumerated here. Without the per-row
+		// cluster-ACL filter, a caller with grant on one cluster would
+		// see every other cluster that happens to run the same digest.
+		// Apply the same cluster-grant fragment scam.* handlers use so
+		// the workload roster is scoped to the caller's clusters. Deny
+		// → empty ClusterUsage (the image profile is still readable
+		// via its non-cluster path).
+		aclFrag, aclArgs, deny := scam.ClusterACLFilterCol(r, "cr.data->>'cluster_id'")
+		if !deny {
+			aclWhere := ""
+			queryArgs := []any{img.Digest}
+			if aclFrag != "" && aclFrag != "TRUE" {
+				aclWhere = " AND " + aclFrag
+				queryArgs = append(queryArgs, aclArgs...)
+			}
+			type usageRow struct {
+				Cluster   string    `gorm:"column:cluster"`
+				Namespace string    `gorm:"column:namespace"`
+				PodCount  int       `gorm:"column:pod_count"`
+				FirstSeen time.Time `gorm:"column:first_seen"`
+				LastSeen  time.Time `gorm:"column:last_seen"`
+			}
+			var usage []usageRow
+			_ = db.WithContext(ctx).Raw(`
+				SELECT
+				  COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
+				  COALESCE(cr.data->>'namespace', '') AS namespace,
+				  COUNT(DISTINCT cr.data->>'pod_uid') AS pod_count,
+				  MIN(cr.received_at) AS first_seen,
+				  MAX(cr.received_at) AS last_seen
+				FROM cluster_record cr
+				LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
+				WHERE cr.data->>'kind' = 'Container'
+				  AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
+				  AND cr.data->>'digest' = ?`+aclWhere+`
+				GROUP BY c.ror_cluster_name, c.ror_slug, cr.data->>'cluster_id', cr.data->>'namespace'
+				ORDER BY last_seen DESC
+			`, queryArgs...).Scan(&usage).Error
+			resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
+			for _, u := range usage {
+				resp.ClusterUsage = append(resp.ClusterUsage, ImageClusterUsageRow(u))
+			}
+		} else {
+			resp.ClusterUsage = []ImageClusterUsageRow{}
 		}
 
 		writeJSON(w, http.StatusOK, resp)

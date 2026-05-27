@@ -29,6 +29,14 @@ func clusterACLFilter(r *http.Request) (string, []any, bool) {
 	return clusterACLFilterCol(r, "cr.data->>'cluster_id'")
 }
 
+// ClusterACLFilterCol is the exported entry point for handlers outside
+// the scam package (e.g. uiapi.ImageDetailHandler) that need to scope
+// a cluster_record read to the caller's grants. Delegates to the
+// unexported implementation.
+func ClusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
+	return clusterACLFilterCol(r, col)
+}
+
 // clusterACLFilterCol is the same ACL resolution as clusterACLFilter
 // but emits the IN-clause against an arbitrary column expression. Used
 // by handlers that read from materialised views with a typed
