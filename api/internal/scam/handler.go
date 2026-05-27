@@ -2357,7 +2357,13 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
-		err := db.Raw(liveCTE+`
+		// liveCTEForCluster narrows the dedup CTE to one cluster up
+		// front — at fleet scale the full-fleet liveCTE timed this
+		// endpoint out because DISTINCT ON had to scan every cluster's
+		// records before the trailing WHERE could filter by cluster_id.
+		// Per-cluster narrow turns sub-second; same change applies to
+		// the service and pod queries below.
+		err := db.Raw(liveCTEForCluster+`
 			SELECT * FROM (
 				-- Ingress
 				SELECT
@@ -2387,7 +2393,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						'[]') AS paths_json
 				FROM live
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				  AND EXISTS (
@@ -2412,7 +2417,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM live
 				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND ? = ANY(
@@ -2435,16 +2439,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 				  AND ? = ANY(
 				    SELECT jsonb_array_elements_text(data->'hostnames')
 				  )
 			) sub LIMIT 1
-		`, host, host, clusterID, namespace, host,
-			clusterID, namespace, host,
-			clusterID, namespace, host,
+		`, clusterID, host, host, namespace, host,
+			namespace, host,
+			namespace, host,
 		).Scan(&ing).Error
 		if err != nil {
 			log.Printf("HostChainHandler ingress query error: %v", err)
@@ -2476,7 +2479,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var svcRows []svcRow
-			err = db.Raw(liveCTE+`
+			err = db.Raw(liveCTEForCluster+`
 				SELECT
 					data->>'name' AS name,
 					data->>'namespace' AS namespace,
@@ -2485,7 +2488,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(data->'selector'::text, '{}') AS selector_json
 				FROM live
 				WHERE data->>'kind' = 'Service'
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND data->>'name' IN (?)
 			`, clusterID, namespace, backends).Scan(&svcRows).Error
@@ -2515,7 +2517,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						Containers string `gorm:"column:containers_json"`
 					}
 					var podRows []podRow
-					err = db.Raw(liveCTE+`
+					err = db.Raw(liveCTEForCluster+`
 						SELECT
 							data->>'owner' AS owner,
 							data->>'owner_kind' AS owner_kind,
@@ -2531,7 +2533,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						FROM live
 						WHERE data->>'kind' = 'Container'
 						  AND data->>'pod_phase' = 'Running'
-						  AND data->>'cluster_id' = ?
 						  AND data->>'namespace' = ?
 						  AND (data->'pod_labels') @> ?::jsonb
 						GROUP BY data->>'owner', data->>'owner_kind'
@@ -2576,7 +2577,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var extraSvcs []extraSvcRow
-			db.Raw(liveCTE+`
+			db.Raw(liveCTEForCluster+`
 				SELECT DISTINCT
 					s.data->>'name' AS name,
 					s.data->>'namespace' AS namespace,
@@ -2585,17 +2586,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(s.data->'selector'::text, '{}') AS selector_json
 				FROM live s, live c
 				WHERE s.data->>'kind' = 'Service'
-				  AND s.data->>'cluster_id' = ?
 				  AND s.data->>'namespace' = ?
 				  AND s.data->>'service_type' IN ('LoadBalancer', 'NodePort')
 				  AND c.data->>'kind' = 'Container'
 				  AND c.data->>'pod_phase' = 'Running'
-				  AND c.data->>'cluster_id' = ?
 				  AND c.data->>'namespace' = ?
 				  AND jsonb_typeof(s.data->'selector') = 'object'
 				  AND (c.data->'pod_labels') @> (s.data->'selector')
 				  AND c.data->>'owner' IN (?)
-			`, clusterID, namespace, clusterID, namespace,
+			`, clusterID, namespace, namespace,
 				func() []string {
 					owners := make([]string, 0)
 					seen := make(map[string]bool)
