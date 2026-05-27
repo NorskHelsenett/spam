@@ -21,8 +21,6 @@ import (
 // burst?" checks, and the cooldown timer into a single observe/decide/act
 // loop.
 //
-// Design: see TODO.md and commit message.
-//
 // Ticker cadence is intentionally short (~10s) so retry latency is
 // dominated by pod-start (~15s) rather than a scheduled tick. The
 // loop is idempotent — re-running it back-to-back just sees the
