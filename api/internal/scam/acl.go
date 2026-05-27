@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"gorm.io/gorm"
 )
 
 // clusterACLFilter resolves the caller's cluster-read grants into a
@@ -18,11 +19,22 @@ import (
 // Results:
 //   - fragment = "TRUE" (no args) → admin or wildcard grant; no-op
 //     filter.
-//   - fragment = "(cr.data->>'cluster_id' IN (?))" with one args entry
-//     (a []string of readable cluster ids) → grant-scoped.
+//   - fragment with two `?` placeholders bound to the same []string of
+//     pattern identifiers → grant-scoped. The IN-clause subquery
+//     resolves each identifier as either a cluster_id (kube-system
+//     UID, used by local grants) or a ror_slug (used by ROR-sourced
+//     grants); see clusterACLFilterCol for the rationale.
 //   - deny = true → no readable clusters; caller should short-circuit.
 func clusterACLFilter(r *http.Request) (string, []any, bool) {
 	return clusterACLFilterCol(r, "cr.data->>'cluster_id'")
+}
+
+// ClusterACLFilterCol is the exported entry point for handlers outside
+// the scam package (e.g. uiapi.ImageDetailHandler) that need to scope
+// a cluster_record read to the caller's grants. Delegates to the
+// unexported implementation.
+func ClusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
+	return clusterACLFilterCol(r, col)
 }
 
 // clusterACLFilterCol is the same ACL resolution as clusterACLFilter
@@ -30,6 +42,18 @@ func clusterACLFilter(r *http.Request) (string, []any, bool) {
 // by handlers that read from materialised views with a typed
 // cluster_id column (e.g. host_exposure.cluster_id) rather than the
 // JSONB-extracted cr.data->>'cluster_id'.
+//
+// Pattern identifiers may speak either of two identity domains:
+//   - LocalProvider stores admin-curated grants by cluster_id
+//     (kube-system Namespace UID), which is the join key used
+//     everywhere else in the schema.
+//   - RORProvider returns ROR-sourced grants identified by ROR slug.
+//
+// The subquery resolves both by joining through the `clusters` table,
+// so the caller never has to know which provider sourced a grant. Each
+// pattern that matches by cluster_id OR by ror_slug contributes the
+// row's cluster_id to the IN-clause; the outer column is filtered
+// against that authoritative set.
 func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin {
@@ -58,12 +82,33 @@ func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	if len(ids) == 0 {
 		return "", nil, true
 	}
-	return "(" + col + " IN (?))", []any{ids}, false
+	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (ror_slug <> '' AND ror_slug IN (?))))"
+	return frag, []any{ids, ids}, false
 }
 
 // canReadCluster is the per-cluster gate used by chain-style handlers
 // that take an explicit cluster_id query parameter.
-func canReadCluster(r *http.Request, clusterID string) (bool, error) {
+//
+// Patterns sourced from ROR identify the cluster by slug rather than
+// kube-system UID. When the direct equality check misses, fall through
+// to a binding lookup and re-check against the slug — the RORProvider
+// cache makes the second Grants call cheap.
+func canReadCluster(r *http.Request, db *gorm.DB, clusterID string) (bool, error) {
 	subj := acl.SubjectFromRequest(r)
-	return acl.CanReadCluster(r.Context(), acl.ProviderFromRequest(r), subj, clusterID)
+	if subj.IsAdmin {
+		return true, nil
+	}
+	p := acl.ProviderFromRequest(r)
+	if ok, err := acl.CanReadCluster(r.Context(), p, subj, clusterID); err != nil || ok {
+		return ok, err
+	}
+	var rorSlug string
+	_ = db.WithContext(r.Context()).Raw(
+		`SELECT ror_slug FROM clusters WHERE cluster_id = ? AND ror_slug <> ''`,
+		clusterID,
+	).Scan(&rorSlug).Error
+	if rorSlug == "" {
+		return false, nil
+	}
+	return acl.CanReadCluster(r.Context(), p, subj, rorSlug)
 }

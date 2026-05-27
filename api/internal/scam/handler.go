@@ -228,6 +228,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// drives the GREATEST advancement of cluster_sessions
 		// .last_seen_event_id and feeds the ACK in the push response.
 		maxEventIDByCluster := make(map[string]uint64, 1)
+		// Per-cluster ROR binding from the nested `ror_metadata` group.
+		// Last-wins within a batch — agents emit the same metadata on
+		// every line, so the per-record overwrite is cheap and the
+		// final value is whatever the agent reported last.
+		rorByCluster := make(map[string]*RorMetadata, 1)
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -237,6 +242,9 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if err := validate(incoming); err != nil {
 				rejected++
 				continue
+			}
+			if incoming.RorMetadata != nil && incoming.RorMetadata.ClusterID != "" && incoming.ClusterID != "" {
+				rorByCluster[incoming.ClusterID] = incoming.RorMetadata
 			}
 			if incoming.Kind == "Snapshot" {
 				snapshots = append(snapshots, incoming)
@@ -363,10 +371,16 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// Per-cluster maxEventID drives the GREATEST advancement of
 		// last_seen_event_id; snapshot-only batches pass 0 here, which
 		// is a no-op against the GREATEST.
+		//
+		// ROR binding lands after touchClusterSession so the clusters
+		// row is guaranteed to exist (first-push insert happens inside
+		// touchClusterSession). No-op when the batch carried no
+		// ror_metadata for this cluster.
 		for clusterID := range clusterIDs {
 			if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
 				log.Printf("callcenter: touch session %s: %v", clusterID, err)
 			}
+			upsertClusterRorBinding(r.Context(), db, clusterID, rorByCluster[clusterID])
 		}
 
 		if len(items) > 0 || len(snapshots) > 0 {
@@ -1668,13 +1682,14 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
 }
 
-// computeHostSummary reads the deduped host set the caller can see and
-// classifies each one. Dedup is by hostname (the same FQDN can appear
-// once per cluster/namespace via a shared *.apps wildcard). Facets
-// are computed by separate helpers because each dropdown wants its
-// own filter scope (e.g. cluster dropdown shows all clusters even
-// when one is already selected — see hostFacets below).
-func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
+// computeHostSummary aggregates the deduped host set the caller can see
+// into internal/external/pending counts. Classification comes from
+// host_resolution, which is kept up to date off the request path by
+// internal/hostresolve.Worker — so this function is pure SQL and
+// answers in milliseconds even on multi-thousand-host fleets. A host
+// that the worker hasn't reached yet shows up as "pending", same as a
+// host whose DNS lookup has failed and has no LB IP fallback.
+func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
 		livenessJoin = ""
@@ -1684,30 +1699,35 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, cs cache.Store, aclFra
 		aclWhere = "AND " + aclFrag
 	}
 
-	type row struct {
-		Host  string `gorm:"column:host"`
-		LBIPs string `gorm:"column:lb_ips"`
+	type aggRow struct {
+		Total    int `gorm:"column:total"`
+		Internal int `gorm:"column:internal"`
+		External int `gorm:"column:external"`
+		Pending  int `gorm:"column:pending"`
 	}
-	var rows []row
+	var agg aggRow
 	query := `
-		SELECT DISTINCT ON (he.host) he.host, he.lb_ips
+		SELECT
+		  COUNT(DISTINCT he.host)                                                                  AS total,
+		  COUNT(DISTINCT he.host) FILTER (WHERE hr.classification = 'internal')                    AS internal,
+		  COUNT(DISTINCT he.host) FILTER (WHERE hr.classification = 'external')                    AS external,
+		  COUNT(DISTINCT he.host) FILTER (WHERE COALESCE(hr.classification, 'pending')
+		                                          NOT IN ('internal', 'external'))                 AS pending
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
-		ORDER BY he.host
-	`
+		LEFT JOIN host_resolution hr ON hr.host = he.host
+		WHERE TRUE ` + aclWhere + ` ` + filterWhere
 	queryArgs := append([]any{}, aclArgs...)
 	queryArgs = append(queryArgs, filterArgs...)
-	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&agg).Error; err != nil {
 		return HostSummary{}, err
 	}
-
-	var summary HostSummary
-	summary.Total = len(rows)
-	for _, r := range rows {
-		summary = classifyHostInto(ctx, cs, r.Host, r.LBIPs, summary)
-	}
-	return summary, nil
+	return HostSummary{
+		Total:    agg.Total,
+		Internal: agg.Internal,
+		External: agg.External,
+		Pending:  agg.Pending,
+	}, nil
 }
 
 // hostFacets returns the dropdown options for cluster / namespace /
@@ -1792,38 +1812,6 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 	return clusters, namespaces, kinds, nil
 }
 
-func classifyHostInto(ctx context.Context, cs cache.Store, host, lbIPs string, s HostSummary) HostSummary {
-	// 1. Public-DNS perspective wins. The cluster may report a private
-	//    LoadBalancer address while split-horizon/public DNS points the
-	//    host at an external address. For exposure reporting, the DNS
-	//    result is the more useful operator signal.
-	if host != "" {
-		res := resolveHost(ctx, cs, host)
-		if res.Error == "" && len(res.IPs) > 0 {
-			if res.IsLocal {
-				s.Internal++
-			} else {
-				s.External++
-			}
-			return s
-		}
-	}
-	// 2. DNS missing/unresolvable. Fall back to cluster-reported LB IP:
-	//    status.loadBalancer.ingress[].ip for Ingress,
-	//    Gateway.status.addresses[] for Gateway API.
-	if first := strings.TrimSpace(strings.SplitN(lbIPs, ",", 2)[0]); first != "" {
-		if isPrivateIP(first) {
-			s.Internal++
-		} else {
-			s.External++
-		}
-		return s
-	}
-	// 3. No usable DNS and no LB IP — genuinely unknown.
-	s.Pending++
-	return s
-}
-
 // writeAndFilterHosts applies the activeOnly filter, inlines resolve +
 // meta from their per-host caches (nil on miss — frontend falls back),
 // and writes the response. Kept separate so cache-hit and cache-miss
@@ -1885,7 +1873,7 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "missing cluster_id", http.StatusBadRequest)
 			return
 		}
-		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+		if ok, err := canReadCluster(r, db, clusterID); err != nil || !ok {
 			// Return the same shape as a missing cluster — never leak
 			// existence via differential error messages.
 			http.Error(w, "not found", http.StatusNotFound)
@@ -2244,9 +2232,15 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			}
 		}
 
-		// Look up cluster name
+		// Resolve cluster name through clusters table — the per-record
+		// `data->>'cluster'` may carry the kube-system UID on agents
+		// emitting the new identity scheme, so go through the ROR
+		// binding written by upsertClusterRorBinding instead.
 		var clusterName string
-		db.Raw(liveCTEForCluster+`SELECT data->>'cluster' FROM live WHERE data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(`SELECT COALESCE(NULLIF(ror_cluster_name,''), NULLIF(ror_slug,''), cluster_id) FROM clusters WHERE cluster_id = ? LIMIT 1`, clusterID).Scan(&clusterName)
+		if clusterName == "" {
+			clusterName = clusterID
+		}
 
 		// Sort namespaces and build result
 		type result struct {
@@ -2279,7 +2273,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "missing host, cluster_id, or namespace", http.StatusBadRequest)
 			return
 		}
-		if ok, err := canReadCluster(r, clusterID); err != nil || !ok {
+		if ok, err := canReadCluster(r, db, clusterID); err != nil || !ok {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
@@ -2339,9 +2333,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			Pods      []chainPodGroup `json:"pods"`
 		}
 
-		// Look up cluster name from any record with this cluster_id.
+		// Resolve cluster name through clusters table — see the matching
+		// note in ClusterChainHandler. data->>'cluster' carries whatever
+		// SCAM stamped at ingest, which is the UID under the new
+		// identity scheme.
 		var clusterName string
-		db.Raw(liveCTE+`SELECT data->>'cluster' FROM live WHERE data->>'cluster_id' = ? AND data->>'cluster' IS NOT NULL AND data->>'cluster' != '' LIMIT 1`, clusterID).Scan(&clusterName)
+		db.Raw(`SELECT COALESCE(NULLIF(ror_cluster_name,''), NULLIF(ror_slug,''), cluster_id) FROM clusters WHERE cluster_id = ? LIMIT 1`, clusterID).Scan(&clusterName)
+		if clusterName == "" {
+			clusterName = clusterID
+		}
 
 		resp := chainResponse{Host: host, Cluster: clusterName, ClusterID: clusterID, Namespace: namespace}
 
@@ -2357,7 +2357,13 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 			PathsJSON    string `gorm:"column:paths_json"`
 		}
 		var ing ingressRow
-		err := db.Raw(liveCTE+`
+		// liveCTEForCluster narrows the dedup CTE to one cluster up
+		// front — at fleet scale the full-fleet liveCTE timed this
+		// endpoint out because DISTINCT ON had to scan every cluster's
+		// records before the trailing WHERE could filter by cluster_id.
+		// Per-cluster narrow turns sub-second; same change applies to
+		// the service and pod queries below.
+		err := db.Raw(liveCTEForCluster+`
 			SELECT * FROM (
 				-- Ingress
 				SELECT
@@ -2387,7 +2393,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						'[]') AS paths_json
 				FROM live
 				WHERE data->>'kind' = 'Ingress'
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'rules') = 'array'
 				  AND EXISTS (
@@ -2412,7 +2417,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM live
 				WHERE data->>'kind' IN ('IngressRoute', 'IngressRouteTCP')
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hosts') = 'array'
 				  AND ? = ANY(
@@ -2435,16 +2439,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					'[]' AS paths_json
 				FROM live
 				WHERE data->>'kind' IN ('HTTPRoute', 'GRPCRoute', 'TLSRoute')
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND jsonb_typeof(data->'hostnames') = 'array'
 				  AND ? = ANY(
 				    SELECT jsonb_array_elements_text(data->'hostnames')
 				  )
 			) sub LIMIT 1
-		`, host, host, clusterID, namespace, host,
-			clusterID, namespace, host,
-			clusterID, namespace, host,
+		`, clusterID, host, host, namespace, host,
+			namespace, host,
+			namespace, host,
 		).Scan(&ing).Error
 		if err != nil {
 			log.Printf("HostChainHandler ingress query error: %v", err)
@@ -2476,7 +2479,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var svcRows []svcRow
-			err = db.Raw(liveCTE+`
+			err = db.Raw(liveCTEForCluster+`
 				SELECT
 					data->>'name' AS name,
 					data->>'namespace' AS namespace,
@@ -2485,7 +2488,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(data->'selector'::text, '{}') AS selector_json
 				FROM live
 				WHERE data->>'kind' = 'Service'
-				  AND data->>'cluster_id' = ?
 				  AND data->>'namespace' = ?
 				  AND data->>'name' IN (?)
 			`, clusterID, namespace, backends).Scan(&svcRows).Error
@@ -2515,7 +2517,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						Containers string `gorm:"column:containers_json"`
 					}
 					var podRows []podRow
-					err = db.Raw(liveCTE+`
+					err = db.Raw(liveCTEForCluster+`
 						SELECT
 							data->>'owner' AS owner,
 							data->>'owner_kind' AS owner_kind,
@@ -2531,7 +2533,6 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 						FROM live
 						WHERE data->>'kind' = 'Container'
 						  AND data->>'pod_phase' = 'Running'
-						  AND data->>'cluster_id' = ?
 						  AND data->>'namespace' = ?
 						  AND (data->'pod_labels') @> ?::jsonb
 						GROUP BY data->>'owner', data->>'owner_kind'
@@ -2576,7 +2577,7 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 				SelectorJSON string `gorm:"column:selector_json"`
 			}
 			var extraSvcs []extraSvcRow
-			db.Raw(liveCTE+`
+			db.Raw(liveCTEForCluster+`
 				SELECT DISTINCT
 					s.data->>'name' AS name,
 					s.data->>'namespace' AS namespace,
@@ -2585,17 +2586,15 @@ func HostChainHandler(db *gorm.DB) http.HandlerFunc {
 					COALESCE(s.data->'selector'::text, '{}') AS selector_json
 				FROM live s, live c
 				WHERE s.data->>'kind' = 'Service'
-				  AND s.data->>'cluster_id' = ?
 				  AND s.data->>'namespace' = ?
 				  AND s.data->>'service_type' IN ('LoadBalancer', 'NodePort')
 				  AND c.data->>'kind' = 'Container'
 				  AND c.data->>'pod_phase' = 'Running'
-				  AND c.data->>'cluster_id' = ?
 				  AND c.data->>'namespace' = ?
 				  AND jsonb_typeof(s.data->'selector') = 'object'
 				  AND (c.data->'pod_labels') @> (s.data->'selector')
 				  AND c.data->>'owner' IN (?)
-			`, clusterID, namespace, clusterID, namespace,
+			`, clusterID, namespace, namespace,
 				func() []string {
 					owners := make([]string, 0)
 					seen := make(map[string]bool)

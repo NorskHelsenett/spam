@@ -145,6 +145,10 @@ func hasUnrestrictedRepos(r *http.Request) bool {
 	return false
 }
 
+// (hasAnyRepoGrant was removed — its callers now use
+// acl.ReadableRepoClauseStrict, which handles the "no grants, no
+// public fallback" case directly via Deny.)
+
 // dependencyACLFragments compiles the readable-repo set into three
 // WHERE fragments the dependency detail query needs:
 //
@@ -182,12 +186,34 @@ func dependencyACLFragments(unrestricted bool, readableIDs []string) (string, []
 // Note: public repos (is_private = false) are always readable, so they
 // are included in the returned set even for callers with no grants.
 func readableRepoIDSet(r *http.Request, db *gorm.DB) (map[string]struct{}, bool, error) {
-	clause, err := acl.ReadableRepoClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "repos")
+	return repoIDSetWith(r, db, false)
+}
+
+// readableRepoIDSetStrict is the strict counterpart: no public-repo
+// fallback, so a caller with no explicit repo grants and no
+// cluster-image bridge returns an empty set. Used by security /
+// dashboard handlers (VulnReposHandler) that must not leak public
+// repos to a cluster-only operator.
+func readableRepoIDSetStrict(r *http.Request, db *gorm.DB) (map[string]struct{}, bool, error) {
+	return repoIDSetWith(r, db, true)
+}
+
+func repoIDSetWith(r *http.Request, db *gorm.DB, strict bool) (map[string]struct{}, bool, error) {
+	var clause acl.Clause
+	var err error
+	if strict {
+		clause, err = acl.ReadableRepoClauseStrict(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "repos")
+	} else {
+		clause, err = acl.ReadableRepoClause(r.Context(), acl.ProviderFromRequest(r), acl.SubjectFromRequest(r), "repos")
+	}
 	if err != nil {
 		return nil, false, err
 	}
 	if clause.Unrestricted {
 		return nil, true, nil
+	}
+	if clause.Deny() {
+		return map[string]struct{}{}, false, nil
 	}
 	var ids []string
 	q := db.WithContext(r.Context()).Table("repos").Select("id")

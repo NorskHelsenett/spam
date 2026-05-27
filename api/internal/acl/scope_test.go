@@ -248,6 +248,15 @@ func TestReadableImageClause_ClusterOnlyInheritsViaInventory(t *testing.T) {
 	// Subject has only a cluster grant (typical ROR cluster-only
 	// user). Image clause must OR-in a cluster_image_inventory
 	// subquery so vulns/secrets for running images become visible.
+	//
+	// The clause now references the cluster IDs twice: once for the
+	// direct cluster-image inheritance branch, and once via the OCI
+	// cluster→repo bridge that ReadableRepoClause introduces (the
+	// repo-inheritance branch of ReadableImageClause picks it up).
+	// That widening is intended — a cluster operator gets transitive
+	// access to verified images sharing the same source_repo — so
+	// we just verify the cluster IDs appear in the bind args without
+	// pinning a specific count.
 	p := &stubProvider{grants: map[string][]ScopePattern{
 		ScopeCluster: {{ClusterID: "prod-eu-1"}},
 	}}
@@ -267,12 +276,16 @@ func TestReadableImageClause_ClusterOnlyInheritsViaInventory(t *testing.T) {
 	if !strings.Contains(c.SQL, "(d.registry, d.repository, d.digest)") {
 		t.Fatalf("expected tuple match against image_digests, got %q", c.SQL)
 	}
-	if len(c.Args) != 1 {
-		t.Fatalf("expected 1 arg (cluster id slice), got %#v", c.Args)
+	foundIDs := false
+	for _, arg := range c.Args {
+		ids, ok := arg.([]string)
+		if ok && len(ids) == 1 && ids[0] == "prod-eu-1" {
+			foundIDs = true
+			break
+		}
 	}
-	ids, ok := c.Args[0].([]string)
-	if !ok || len(ids) != 1 || ids[0] != "prod-eu-1" {
-		t.Fatalf("expected []string{\"prod-eu-1\"}, got %#v", c.Args[0])
+	if !foundIDs {
+		t.Fatalf("expected cluster ids in args, got %#v", c.Args)
 	}
 }
 
@@ -299,6 +312,66 @@ func TestReadableImageClause_ClusterAndImageGrantsOR(t *testing.T) {
 	}
 	if strings.Count(c.SQL, " OR ") < 1 {
 		t.Fatalf("image and cluster branches must OR, got %q", c.SQL)
+	}
+}
+
+func TestReadableRepoClauseStrict_ClusterOnlyBridges(t *testing.T) {
+	// Cluster-only subject: no admin role, no repo grants, just a
+	// cluster grant. The strict clause must drop the public-repo
+	// fallback but keep the OCI cluster→repo bridge so the source
+	// repos of verified images running in that cluster are
+	// reachable.
+	p := &stubProvider{grants: map[string][]ScopePattern{
+		ScopeCluster: {{ClusterID: "prod-eu-1"}},
+	}}
+	c, err := ReadableRepoClauseStrict(context.Background(), p, Subject{UserID: "u1"}, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Unrestricted || c.Deny() {
+		t.Fatalf("cluster-bridge should yield a scoped clause, got %#v", c)
+	}
+	if strings.Contains(c.SQL, "is_private = false") {
+		t.Fatalf("strict clause must drop public-repo fallback, got %q", c.SQL)
+	}
+	if !strings.Contains(c.SQL, "cluster_image_inventory") {
+		t.Fatalf("expected cluster_image_inventory bridge subquery, got %q", c.SQL)
+	}
+	if !strings.Contains(c.SQL, "verified_source = true") {
+		t.Fatalf("bridge must require verified images, got %q", c.SQL)
+	}
+}
+
+func TestReadableRepoClauseStrict_NoGrantsDenies(t *testing.T) {
+	// No grants at all = Deny. No public-repo fallback.
+	c, err := ReadableRepoClauseStrict(context.Background(), &stubProvider{}, Subject{UserID: "u1"}, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Deny() {
+		t.Fatalf("no grants must Deny in strict mode, got %#v", c)
+	}
+}
+
+func TestReadableRepoClause_ClusterBridgeOrPublic(t *testing.T) {
+	// Non-strict clause for a cluster-only subject keeps both the
+	// public-repo fallback (discovery surfaces want it) and the
+	// cluster bridge.
+	p := &stubProvider{grants: map[string][]ScopePattern{
+		ScopeCluster: {{ClusterID: "prod"}},
+	}}
+	c, err := ReadableRepoClause(context.Background(), p, Subject{UserID: "u1"}, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Unrestricted || c.Deny() {
+		t.Fatalf("expected scoped clause, got %#v", c)
+	}
+	if !strings.Contains(c.SQL, "r.is_private = false") {
+		t.Fatalf("non-strict clause must keep public-repo fallback, got %q", c.SQL)
+	}
+	if !strings.Contains(c.SQL, "cluster_image_inventory") {
+		t.Fatalf("non-strict clause must add cluster bridge, got %q", c.SQL)
 	}
 }
 

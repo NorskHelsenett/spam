@@ -103,7 +103,7 @@
 	};
 </script>
 
-<div class="rounded-2xl bg-[var(--card-bg)]/20">
+<div class="rounded-2xl">
 	<p class="mb-4 text-sm uppercase tracking-[0.22em] text-[var(--text-muted)]">{title}</p>
 
 	{#if data.length === 0}

@@ -368,16 +368,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				}
 			})
 
-			// /api/vuln/trend stays under APIGuard — its data source
-			// (vuln_dashboard_snapshots) is a fleet-global daily
-			// rollup with no per-asset breakdown, so there's no way
-			// to scope the series to a cluster-only user's image
-			// set. Frontend hides the chart for that persona.
-			priv.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
-			// Other /api/vuln/* endpoints + /api/vulnerabilities/{id}
-			// moved to the approved group below; each handler ACL-
-			// scopes its own rows so APIGuard's admin/global_reader
-			// gate is no longer needed.
+			// /api/vuln/* endpoints (and /api/vulnerabilities/{id}) are
+			// registered under the approved group below. Each handler
+			// ACL-scopes its own rows. /api/vuln/trend is the one
+			// exception data-shape-wise — it's a fleet-global daily
+			// severity roll-up with no per-asset breakdown — but it
+			// still goes through the approved group so cluster
+			// operators see the same chart admins do. No identifying
+			// info leaves the snapshot table.
 			// /api/secrets is split into two trust bands. Aggregate
 			// endpoints (counts + trends + per-asset tallies) carry
 			// no credential text and so are safe for global_readers.
@@ -439,6 +437,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Get("/api/vuln/list", uiapi.VulnListHandler(db, authService))
 			approved.Get("/api/vuln/facets", uiapi.VulnFacetsHandler(db, authService))
 			approved.Get("/api/vuln/repos", uiapi.VulnReposHandler(db, authService))
+			approved.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
 			approved.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
 
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))

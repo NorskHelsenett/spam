@@ -57,6 +57,25 @@
 -- internet_exposed EXISTS (exposed_digests is small), and the VEX
 -- NOT EXISTS inside repo_vuln_canonical / image_vuln_canonical (the
 -- canonical CTEs are GROUP BY-driven, not per-row).
+--
+-- Hash-bump note: 20260509_create_host_exposure_views.sql drops
+-- exposed_digests with CASCADE, which transitively drops asset_risk
+-- (it reads exposed_digests via the exposed_clusters CTE). Whenever
+-- the host_exposure migration's SHA changes, this file's SHA must
+-- also change. Otherwise the EnsureViews matview-existence recheck
+-- reapplies 20260509a (which creates an unoptimised asset_risk body)
+-- and stops there — this file is skipped on its hash match and the
+-- optimised pre-aggregated body never replaces the slow one.
+--
+-- The SQL body below is unchanged; bump this paragraph alongside any
+-- host_exposure edit so the optimised asset_risk body wins after
+-- the CASCADE round-trip.
+--
+-- Bumped 2026-05-27 for the host_exposure / exposed_digests cutover-
+-- merge change: those MVs now use a slug-preferred cluster_key for
+-- joins between Ingress / Service / Container records, but the
+-- CASCADE drop still propagates here and the asset_risk recreate
+-- must follow.
 
 -- Bootstrap deadlock avoidance.
 --

@@ -63,10 +63,18 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 				Email:       claims.Email,
 				Name:        preferredName(claims),
 				LastLoginAt: &now,
+				// New users land approved by default. The previous behaviour
+				// (auto-approve only the very first user, everyone else
+				// pending pending an admin click) added friction the
+				// deny-by-default ACL no longer needs — ROR + per-scope
+				// grants gate what an approved-but-ungranted user can
+				// actually see, so leaving them "pending" was a UX wall,
+				// not a security boundary. Admins can still demote / hide
+				// via UpdateUserRole if needed.
+				ApprovedAt: &now,
 			}
 
 			if count == 0 {
-				user.ApprovedAt = &now
 				result.firstUser = true
 			}
 
@@ -85,9 +93,9 @@ func (s *Service) ensureUser(ctx context.Context, claims userClaims) (ensureUser
 					Email:     user.Email,
 					Name:      user.Name,
 					Picture:   pictureOrGravatar("", user.Email),
-					Approved:  false,
+					Approved:  true,
 					Hidden:    false,
-					Role:      "pending",
+					Role:      GroupDefault,
 					Groups:    []string{GroupDefault},
 					CreatedAt: user.CreatedAt,
 				}); err != nil {

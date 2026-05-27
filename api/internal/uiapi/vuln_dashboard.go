@@ -40,7 +40,9 @@ func VulnSummaryHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 
 		subj := acl.SubjectFromRequest(r)
 		prov := acl.ProviderFromRequest(r)
-		repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+		// Strict repo clause: no public-repo leak, OCI cluster→repo
+		// bridge included. See acl.ReadableRepoClauseStrict.
+		repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
@@ -77,7 +79,11 @@ func VulnReposHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			return
 		}
 
-		readable, unrestricted, err := readableRepoIDSet(r, db)
+		// Use the strict-clause repo id set: explicit grants + OCI
+		// cluster→repo bridge, no public-repo fallback. Cluster-only
+		// callers see repos whose verified images run in their
+		// clusters and nothing else.
+		readable, unrestricted, err := readableRepoIDSetStrict(r, db)
 		if err != nil {
 			http.Error(w, "failed to scope results", http.StatusInternalServerError)
 			return
@@ -140,7 +146,7 @@ func VulnListHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			subj := acl.SubjectFromRequest(r)
 			prov := acl.ProviderFromRequest(r)
 
-			repoClause, err := acl.ReadableRepoClause(r.Context(), prov, subj, "r")
+			repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
 			if err != nil {
 				http.Error(w, "failed to scope results", http.StatusInternalServerError)
 				return
@@ -193,20 +199,15 @@ func VulnFacetsHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 //
 // GET /api/vuln/trend?days=30
 //
-// Stays admin / global_reader / wildcard-grant gated even after the
-// summary endpoint went scoped. vuln_dashboard_snapshots persists one
-// row per day across the whole fleet — no per-asset breakdown is
-// stored, so there's no way to recompute a 30-day series scoped to a
-// cluster-only user's image set without paying a per-request scan
-// over the unified vuln views per day in the window. The frontend
-// already hides the trend chart for cluster-only users; the 404 here
-// is the defense in depth for direct API hits.
-func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+// Two-tier dispatch matching VulnSummaryHandler: admins /
+// global_readers / wildcard-repo callers hit the cached snapshot
+// table (true historical backlog). Everyone else gets a per-request
+// recompute scoped through their ACL — so a cluster operator's
+// trend reflects only the vulns they actually have access to,
+// matching the summary and list views on the same page.
+func VulnTrendHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
-			return
-		}
-		if !requireUnrestrictedRepos(w, r) {
+		if !requireApproved(w, r) {
 			return
 		}
 
@@ -217,12 +218,36 @@ func VulnTrendHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 			}
 		}
 
-		rows, err := vulnmetrics.LoadTrend(r.Context(), db, days)
+		if hasUnrestrictedRepos(r) {
+			rows, err := vulnmetrics.LoadTrend(r.Context(), db, days)
+			if err != nil {
+				http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, http.StatusOK, rows)
+			return
+		}
+
+		subj := acl.SubjectFromRequest(r)
+		prov := acl.ProviderFromRequest(r)
+		repoClause, err := acl.ReadableRepoClauseStrict(r.Context(), prov, subj, "r")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		imageClause, err := acl.ReadableImageClause(r.Context(), prov, subj, "d")
+		if err != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		repoSQL, repoArgs := repoSubquery(repoClause)
+		imageSQL, imageArgs := imageSubquery(imageClause)
+
+		rows, err := vulnmetrics.LoadTrendScoped(r.Context(), db, days, repoSQL, repoArgs, imageSQL, imageArgs)
 		if err != nil {
 			http.Error(w, "failed to load vulnerability trend", http.StatusInternalServerError)
 			return
 		}
-
 		writeJSON(w, http.StatusOK, rows)
 	}
 }

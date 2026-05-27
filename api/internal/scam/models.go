@@ -40,28 +40,52 @@ func (Record) TableName() string { return "cluster_record" }
 // attach a friendly display name to an otherwise opaque id. Rows are
 // created on first-heartbeat by the SCAM handler; no grants are seeded
 // by default (clusters are deny-by-default).
+//
+// ClusterID is the kube-system Namespace UID — the Kubernetes-canonical
+// per-install fingerprint that SCAM extracts client-side. The Ror*
+// columns are an optional binding to ROR's identity domain: when an
+// agent reports `ror_metadata`, the slug/name/env land here so the ACL
+// filter can resolve ROR-sourced grants (which speak slug) back to the
+// cluster_id used as the join key everywhere else.
 type Cluster struct {
-	ID          string    `gorm:"primaryKey;size:36" json:"id"`
-	ClusterID   string    `gorm:"size:255;uniqueIndex;not null" json:"cluster_id"`
-	DisplayName string    `gorm:"size:255" json:"display_name,omitempty"`
-	FirstSeenAt time.Time `json:"first_seen_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID             string    `gorm:"primaryKey;size:36" json:"id"`
+	ClusterID      string    `gorm:"size:255;uniqueIndex;not null" json:"cluster_id"`
+	DisplayName    string    `gorm:"size:255" json:"display_name,omitempty"`
+	RorSlug        string    `gorm:"size:255;column:ror_slug" json:"ror_slug,omitempty"`
+	RorClusterName string    `gorm:"size:255;column:ror_cluster_name" json:"ror_cluster_name,omitempty"`
+	RorEnv         string    `gorm:"size:255;column:ror_env" json:"ror_env,omitempty"`
+	FirstSeenAt    time.Time `json:"first_seen_at"`
+	CreatedAt      time.Time `json:"created_at"`
 }
 
 func (Cluster) TableName() string { return "clusters" }
+
+// RorMetadata is the optional ROR-binding view that SCAM attaches to
+// every record once a cluster has resolved its ROR identity. It is
+// auxiliary — SPAM joins everything on the top-level `cluster_id`
+// (kube-system Namespace UID) — but it lets the ACL filter map a
+// ROR-sourced grant (which speaks slug) back onto the cluster_id used
+// throughout the rest of the schema. Field names mirror SCAM's slog
+// group: `ror_metadata.cluster_id` is the ROR slug, not a kube id.
+type RorMetadata struct {
+	ClusterID   string `json:"cluster_id,omitempty"`
+	ClusterName string `json:"cluster_name,omitempty"`
+	Env         string `json:"env,omitempty"`
+}
 
 // Incoming is the expected shape of each record POSTed by a SCAM agent.
 // Fields are validated on ingest; the full object is stored as JSONB in Data.
 // Agents are anonymous (no registration or shared secret), so data integrity
 // is enforced per-field before a row is persisted.
 type Incoming struct {
-	Time        string `json:"time"`
-	Level       string `json:"level"`
-	Msg         string `json:"msg"`  // event: INITIAL, ADD, UPDATE, DELETE, EXPOSURE
-	Kind        string `json:"kind"` // Container, Service, Ingress, ...
-	Cluster     string `json:"cluster,omitempty"`
-	ClusterID   string `json:"cluster_id,omitempty"`
-	Environment string `json:"environment,omitempty"`
+	Time        string       `json:"time"`
+	Level       string       `json:"level"`
+	Msg         string       `json:"msg"`  // event: INITIAL, ADD, UPDATE, DELETE, EXPOSURE
+	Kind        string       `json:"kind"` // Container, Service, Ingress, ...
+	Cluster     string       `json:"cluster,omitempty"`
+	ClusterID   string       `json:"cluster_id,omitempty"`
+	Environment string       `json:"environment,omitempty"`
+	RorMetadata *RorMetadata `json:"ror_metadata,omitempty"`
 	// Resource identity fields — used to compute the upsert key.
 	UID       string `json:"uid,omitempty"`
 	PodUID    string `json:"pod_uid,omitempty"`
