@@ -70,6 +70,12 @@
 -- The SQL body below is unchanged; bump this paragraph alongside any
 -- host_exposure edit so the optimised asset_risk body wins after
 -- the CASCADE round-trip.
+--
+-- Bumped 2026-05-27 for the host_exposure / exposed_digests cutover-
+-- merge change: those MVs now use a slug-preferred cluster_key for
+-- joins between Ingress / Service / Container records, but the
+-- CASCADE drop still propagates here and the asset_risk recreate
+-- must follow.
 
 -- Bootstrap deadlock avoidance.
 --

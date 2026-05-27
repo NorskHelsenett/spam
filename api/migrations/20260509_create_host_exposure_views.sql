@@ -19,6 +19,28 @@
 -- exposed_digests reads from host_exposure, so host_exposure must
 -- refresh first.
 --
+-- Identity-cutover dedup: SCAM's identity migration moved cluster_id
+-- from the ROR slug to the kube-system Namespace UID. During the
+-- rolling cutover the same Ingress / HTTPRoute / etc. posts records
+-- under both cluster_ids until the older slug-keyed rows TTL out, so
+-- /api/clusters/hosts saw the same host listed twice — one row keyed
+-- by UID, one by slug.
+--
+-- The fix mirrors cluster_summary: the per_rule_backend CTE projects
+-- a cluster_key derived from COALESCE(ror_metadata.cluster_id,
+-- cluster_id) — the ROR slug is constant across both record families,
+-- so pre- and post-cutover Ingress records collapse onto one
+-- host_exposure row. The exposed cluster_id is the kube-system UID
+-- whenever any merged record carries ror_metadata (the authoritative
+-- post-cutover stamp).
+--
+-- exposed_digests then joins Services and Containers using the same
+-- cluster_key — so a post-cutover Ingress is correctly chained to
+-- pre-cutover Service / Container records during the brief
+-- pre-TTL window. idx_cluster_record_cluster_key (created below)
+-- backs that join with an expression index so the JOIN doesn't
+-- regress to a seq scan.
+--
 -- Every jsonb_array_elements* call below uses
 --     CASE jsonb_typeof(...) WHEN 'array' THEN ... ELSE '[]'::jsonb END
 -- instead of plain COALESCE. COALESCE only handles SQL NULL, not jsonb
@@ -31,11 +53,21 @@
 -- CASCADE because asset_risk (created by 20260509a) holds a dependency
 -- on exposed_digests via its `exposed_clusters` CTE. Without CASCADE,
 -- DROP errors with SQLSTATE 2BP01 the moment anyone bumps this
--- migration's hash. asset_risk gets recreated by 20260509a in the same
--- EnsureViews pass — its hash is bumped alongside this change so the
--- recreate is guaranteed.
+-- migration's hash. asset_risk gets recreated by 20260509a + 20260510b
+-- in the same EnsureViews pass; both files carry hash-bump comments
+-- documenting the chained recreate.
 DROP MATERIALIZED VIEW IF EXISTS exposed_digests CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS host_exposure CASCADE;
+
+-- Expression index for the cluster_key join used in exposed_digests
+-- (and by host_exposure's per_rule_backend stage). Without it the
+-- Service / Container lookups regress to a seq scan over cluster_record
+-- because the existing idx_cluster_record_cluster_id covers only the
+-- raw column.
+CREATE INDEX IF NOT EXISTS idx_cluster_record_cluster_key
+    ON cluster_record ((
+        COALESCE(NULLIF(data->'ror_metadata'->>'cluster_id',''), data->>'cluster_id')
+    ));
 
 CREATE MATERIALIZED VIEW host_exposure AS
 WITH per_rule_backend AS (
@@ -45,6 +77,11 @@ WITH per_rule_backend AS (
     -- us dedupe individual backend names cleanly.
     SELECT
         cr.data->>'cluster_id'                AS cluster_id,
+        COALESCE(
+            NULLIF(cr.data->'ror_metadata'->>'cluster_id', ''),
+            cr.data->>'cluster_id'
+        )                                     AS cluster_key,
+        cr.data->'ror_metadata'->>'cluster_name' AS ror_cluster_name,
         COALESCE(cr.data->>'cluster','')      AS cluster,
         cr.data->>'namespace'                 AS namespace,
         COALESCE(cr.data->>'environment','')  AS environment,
@@ -74,6 +111,11 @@ WITH per_rule_backend AS (
     -- stored as data.backends[].name; hostnames live in data.hostnames[].
     SELECT
         cr.data->>'cluster_id',
+        COALESCE(
+            NULLIF(cr.data->'ror_metadata'->>'cluster_id', ''),
+            cr.data->>'cluster_id'
+        ),
+        cr.data->'ror_metadata'->>'cluster_name',
         COALESCE(cr.data->>'cluster',''),
         cr.data->>'namespace',
         COALESCE(cr.data->>'environment',''),
@@ -98,6 +140,11 @@ WITH per_rule_backend AS (
     -- non-empty tls_secret; backends are data.backends[].name.
     SELECT
         cr.data->>'cluster_id',
+        COALESCE(
+            NULLIF(cr.data->'ror_metadata'->>'cluster_id', ''),
+            cr.data->>'cluster_id'
+        ),
+        cr.data->'ror_metadata'->>'cluster_name',
         COALESCE(cr.data->>'cluster',''),
         cr.data->>'namespace',
         COALESCE(cr.data->>'environment',''),
@@ -117,26 +164,34 @@ WITH per_rule_backend AS (
       AND NULLIF(h,'') IS NOT NULL
 )
 SELECT
-    prb.cluster_id,
-    -- Cluster display name resolution order:
-    --   1. clusters.ror_cluster_name  — ROR-bound friendly name (best)
-    --   2. clusters.ror_slug          — ROR slug if name isn't set
-    --   3. prb.cluster (from cr.data->>'cluster'), but only when it
-    --      differs from cluster_id — SCAM stamps `cluster` to the
-    --      operator-configured env var on the agent. When that var
-    --      is unset SCAM falls back to writing the kube-system UID
-    --      into `cluster` too, which would be the same value we'd
-    --      surface in step 4, so we NULLIF that case away.
-    --   4. cluster_id as last resort.
-    --
-    -- Mirrors the resolution in cluster_summary so a cluster whose
-    -- ROR binding hasn't landed yet still renders a readable name
-    -- on /api/clusters/hosts instead of the raw kube-system UID.
+    -- Per-group canonical cluster_id. Prefer the UID-stamped variant
+    -- from records carrying ror_metadata; fall back to whatever raw
+    -- cluster_id we saw for clusters that never sent ror_metadata.
     COALESCE(
+        (array_agg(prb.cluster_id ORDER BY (prb.ror_cluster_name IS NOT NULL) DESC, prb.last_seen DESC))[1],
+        MAX(prb.cluster_id)
+    )                                                            AS cluster_id,
+    -- cluster_key is the merge axis — exposed_digests joins
+    -- Service / Container records against it via the expression index
+    -- so pre-cutover svc/cont records still chain into a post-cutover
+    -- Ingress (and vice versa).
+    prb.cluster_key                                              AS cluster_key,
+    -- Cluster display name resolution order:
+    --   1. ror_metadata.cluster_name on any merged record (post-
+    --      cutover agents stamp this directly).
+    --   2. clusters.ror_cluster_name — DB-stored ROR-bound name.
+    --   3. clusters.ror_slug         — slug fallback.
+    --   4. prb.cluster (env-var label) when distinct from the raw
+    --      cluster_id (SCAM stamps `cluster` to operator-configured
+    --      env var; absent that, it duplicates cluster_id which we
+    --      then NULLIF away to keep step 5 from being redundant).
+    --   5. cluster_id final fallback.
+    COALESCE(
+        NULLIF(MAX(prb.ror_cluster_name), ''),
         NULLIF(MAX(c.ror_cluster_name), ''),
         NULLIF(MAX(c.ror_slug), ''),
         NULLIF(MAX(NULLIF(prb.cluster, prb.cluster_id)), ''),
-        prb.cluster_id
+        MAX(prb.cluster_id)
     )                                                            AS cluster,
     prb.namespace,
     MAX(prb.environment)                                         AS environment,
@@ -153,12 +208,16 @@ SELECT
     )                                                            AS backends,
     MAX(prb.last_seen)                                           AS last_seen
 FROM per_rule_backend prb
+-- LEFT JOIN clusters on the raw per-record cluster_id so both slug-
+-- keyed (pre-cutover) and UID-keyed (post-cutover) clusters rows can
+-- contribute names; MAX() above coalesces whichever side carries the
+-- binding.
 LEFT JOIN clusters c ON c.cluster_id = prb.cluster_id
-GROUP BY prb.cluster_id, prb.namespace, prb.host, prb.kind, prb.name
+GROUP BY prb.cluster_key, prb.namespace, prb.host, prb.kind, prb.name
 WITH NO DATA;
 
--- Unique key for REFRESH ... CONCURRENTLY. Also the natural lookup
--- key from the chain drawer (host + cluster + namespace + kind + name).
+-- Unique key for REFRESH ... CONCURRENTLY. cluster_id is post-merge
+-- canonical per group, so still unique across rows.
 CREATE UNIQUE INDEX idx_host_exposure_unique
     ON host_exposure (cluster_id, namespace, host, kind, name);
 
@@ -167,6 +226,11 @@ CREATE INDEX idx_host_exposure_cluster
     ON host_exposure (cluster_id);
 CREATE INDEX idx_host_exposure_host
     ON host_exposure (host);
+-- cluster_key index supports exposed_digests' join below and any
+-- downstream readers that want to find host_exposure rows for a
+-- ROR slug directly.
+CREATE INDEX idx_host_exposure_cluster_key
+    ON host_exposure (cluster_key);
 
 
 CREATE MATERIALIZED VIEW exposed_digests AS
@@ -175,6 +239,12 @@ CREATE MATERIALIZED VIEW exposed_digests AS
 -- the chain that asset_risk's two UNIONed CTEs used to compute
 -- inline; consolidating it here means triage and the hosts list
 -- share one materialised projection.
+--
+-- The svc / cont joins match on cluster_key (the slug-preferred merge
+-- axis) so pre-cutover Service / Container records still chain into a
+-- post-cutover Ingress while both record families coexist during
+-- the identity rollout. idx_cluster_record_cluster_key backs the
+-- COALESCE expression as an index lookup.
 SELECT DISTINCT
     he.cluster_id,
     he.namespace,
@@ -187,13 +257,15 @@ CROSS JOIN LATERAL unnest(string_to_array(NULLIF(he.backends,''), ', ')) AS be(n
 JOIN cluster_record svc
   ON svc.data->>'kind'                   = 'Service'
  AND COALESCE(svc.data->>'msg','')       <> 'DELETE'
- AND svc.data->>'cluster_id'             = he.cluster_id
+ AND COALESCE(NULLIF(svc.data->'ror_metadata'->>'cluster_id',''), svc.data->>'cluster_id')
+                                         = he.cluster_key
  AND svc.data->>'namespace'              = he.namespace
  AND svc.data->>'name'                   = be.name
 JOIN cluster_record cont
   ON cont.data->>'kind'                  = 'Container'
  AND COALESCE(cont.data->>'msg','')      <> 'DELETE'
- AND cont.data->>'cluster_id'            = svc.data->>'cluster_id'
+ AND COALESCE(NULLIF(cont.data->'ror_metadata'->>'cluster_id',''), cont.data->>'cluster_id')
+                                         = COALESCE(NULLIF(svc.data->'ror_metadata'->>'cluster_id',''), svc.data->>'cluster_id')
  AND cont.data->>'namespace'             = svc.data->>'namespace'
  AND (cont.data->'pod_labels')           @> (svc.data->'selector')
  AND COALESCE(cont.data->>'digest','')   <> ''
