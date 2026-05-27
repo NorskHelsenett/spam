@@ -11,13 +11,25 @@
 -- depends on NOW() and is per-request. The handler joins
 -- cluster_sessions and applies ACL on top of this MV.
 --
--- Cluster display name is resolved through the `clusters` table rather
--- than the per-record `data->>'cluster'` field. SCAM's new identity
--- scheme stamps `cluster_id` as the kube-system Namespace UID and
--- carries the ROR-friendly name in `ror_metadata`; the binding lands
--- on clusters.ror_cluster_name via upsertClusterRorBinding. Reading
--- `data->>'cluster'` here would surface either the UID or stale
--- pre-cutover names depending on which record MAX() picked.
+-- Cluster display name resolution order:
+--   1. clusters.ror_cluster_name  — ROR-bound friendly name (best)
+--   2. clusters.ror_slug          — ROR slug if name isn't set
+--   3. data->>'cluster' from cluster_record, but only when it
+--      differs from cluster_id — SCAM stamps `cluster` to the
+--      operator-configured env var on the agent. When that var is
+--      unset SCAM falls back to writing the kube-system UID into
+--      `cluster` too, which is the same value we'd produce in step 4,
+--      so guarding on inequality avoids surfacing the UID twice.
+--   4. cluster_id as the last-resort fallback.
+--
+-- The env-var fallback at step 3 was missing in the original cut
+-- (commit 207e6da) — without it, any cluster the agent ingests
+-- before the ROR binding row lands shows the bare UID in the
+-- /api/clusters/summary table, which is unreadable. Duplicate rows
+-- can appear during the SCAM identity cutover (old slug-keyed rows
+-- and new UID-keyed rows coexist until cluster_record TTL clears
+-- the slug rows); they resolve themselves over time, but each
+-- visible row should still carry a human-readable name.
 --
 -- Refresh hooks:
 --   - CallcenterHandler triggers a debounced refresh on every ingest
@@ -35,6 +47,7 @@ SELECT
     COALESCE(
         NULLIF(MAX(c.ror_cluster_name), ''),
         NULLIF(MAX(c.ror_slug), ''),
+        NULLIF(MAX(NULLIF(cr.data->>'cluster', cr.data->>'cluster_id')), ''),
         cr.data->>'cluster_id'
     )                                                               AS cluster,
     MAX(cr.data->>'environment')                                    AS environment,

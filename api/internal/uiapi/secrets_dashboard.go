@@ -312,72 +312,158 @@ func SecretsDashboardTrendHandler(db *gorm.DB, authService *auth.Service, c cach
 }
 
 func computeSecretsTrend(ctx context.Context, db *gorm.DB) ([]SecretTrendRow, error) {
-	// Fetch individual deduplicated findings per day so we can exclude dismissed secrets in Go.
+	// Earlier revisions of this function forward-filled the latest
+	// scan's full findings array across every day in the 30-day
+	// window in SQL, then expanded the jsonb array per row. At fleet
+	// scale that became repos × days × findings_per_scan rows — the
+	// slow_query log showed ~19M rows per call and the handler 504'd
+	// in production.
+	//
+	// The rewrite expands findings once per actual scan (one row per
+	// repo×scan_day×finding, capped to the per-day DISTINCT-ON pick
+	// of the latest scan for that day) and forward-fills in Go. SQL
+	// stays O(scans × findings_per_scan); Go owns the date-axis
+	// projection across the visible window. The pre-window lookback
+	// keeps repos that haven't scanned in the current 30 days but
+	// scanned in the prior month — without it, the first days of
+	// the window flat-line at zero for slow-scanning repos.
+	const lookbackDays = 90
 	query := `
-WITH date_series AS (
-  SELECT generate_series(
-    date_trunc('day', NOW() - INTERVAL '30 days')::date,
-    date_trunc('day', NOW())::date,
-    '1 day'::interval
-  )::date AS day
-),
-all_repo_scans AS (
-  SELECT DISTINCT ON (rs.repo_id, date_trunc('day', rs.created_at)::date)
-    rs.repo_id,
-    rs.findings,
-    date_trunc('day', rs.created_at)::date AS scan_day
-  FROM run_secrets rs
-  JOIN repos r ON r.id = rs.repo_id
-  LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-  WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
-    AND (pi.id IS NULL OR pi.enabled = true)
-  ORDER BY rs.repo_id, date_trunc('day', rs.created_at)::date, rs.created_at DESC
-),
-repos AS (
-  SELECT DISTINCT repo_id FROM all_repo_scans
-  WHERE scan_day >= date_trunc('day', NOW()) - INTERVAL '30 days'
-),
-filled AS (
-  SELECT DISTINCT ON (r.repo_id, ds.day)
-    r.repo_id,
-    ds.day,
-    ars.findings
-  FROM repos r
-  CROSS JOIN date_series ds
-  JOIN all_repo_scans ars ON ars.repo_id = r.repo_id AND ars.scan_day <= ds.day
-  ORDER BY r.repo_id, ds.day, ars.scan_day DESC
-),
-deduped_findings AS (
-  SELECT DISTINCT
-    f.day,
+SELECT
+    lpd.repo_id AS repo_id,
+    lpd.scan_day::text AS scan_day,
     COALESCE(finding->>'RuleID', 'unknown') AS secret_type,
     COALESCE(finding->>'Match', '') AS match,
     COALESCE(finding->>'Secret', '') AS secret,
     COALESCE(
-      NULLIF(finding->>'Fingerprint', ''),
-      md5(concat_ws('|',
-        COALESCE(finding->>'RuleID', ''),
-        COALESCE(finding->>'Description', ''),
-        COALESCE(finding->>'File', ''),
-        COALESCE(finding->>'StartLine', ''),
-        COALESCE(finding->>'Match', ''),
-        COALESCE(finding->>'Secret', '')
-      ))
+        NULLIF(finding->>'Fingerprint', ''),
+        md5(concat_ws('|',
+            COALESCE(finding->>'RuleID', ''),
+            COALESCE(finding->>'Description', ''),
+            COALESCE(finding->>'File', ''),
+            COALESCE(finding->>'StartLine', ''),
+            COALESCE(finding->>'Match', ''),
+            COALESCE(finding->>'Secret', '')
+        ))
     ) AS dedupe_key
-  FROM filled f
-  CROSS JOIN LATERAL jsonb_array_elements(COALESCE(f.findings, '[]'::jsonb)) AS finding
-)
-SELECT day::text AS date, secret_type, match, secret FROM deduped_findings`
+FROM (
+    SELECT DISTINCT ON (rs.repo_id, date_trunc('day', rs.created_at)::date)
+        rs.repo_id,
+        rs.findings,
+        date_trunc('day', rs.created_at)::date AS scan_day
+    FROM run_secrets rs
+    JOIN repos r ON r.id = rs.repo_id
+    LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+    WHERE rs.repo_id IS NOT NULL AND rs.repo_id <> ''
+      AND (pi.id IS NULL OR pi.enabled = true)
+      AND rs.created_at >= NOW() - (?::int || ' days')::interval
+      -- Only include repos that have at least one scan in the
+      -- visible 30-day window so we don't surface inventory that's
+      -- effectively stale (matches the earlier repos CTE).
+      AND EXISTS (
+          SELECT 1 FROM run_secrets rs2
+          WHERE rs2.repo_id = rs.repo_id
+            AND rs2.created_at >= date_trunc('day', NOW()) - INTERVAL '30 days'
+      )
+    ORDER BY rs.repo_id, date_trunc('day', rs.created_at)::date, rs.created_at DESC
+) lpd
+CROSS JOIN LATERAL jsonb_array_elements(COALESCE(lpd.findings, '[]'::jsonb)) AS finding
+WHERE lpd.findings IS NOT NULL`
 
-	type finding struct {
-		Date       string `gorm:"column:date"`
+	type scanRow struct {
+		RepoID     string `gorm:"column:repo_id"`
+		ScanDay    string `gorm:"column:scan_day"`
 		SecretType string `gorm:"column:secret_type"`
 		Match      string `gorm:"column:match"`
 		Secret     string `gorm:"column:secret"`
+		DedupeKey  string `gorm:"column:dedupe_key"`
 	}
-	var findings []finding
-	if err := db.WithContext(ctx).Raw(query).Scan(&findings).Error; err != nil {
+	var scanRows []scanRow
+	if err := db.WithContext(ctx).Raw(query, lookbackDays).Scan(&scanRows).Error; err != nil {
 		return nil, err
+	}
+
+	type finding struct {
+		Date       string
+		SecretType string
+		Match      string
+		Secret     string
+	}
+
+	// Forward-fill in Go. For each repo, sort the scan days; for each
+	// day in the visible 30-day window, pick the latest scan_day ≤
+	// that day and project its findings onto that day. Dedup
+	// across repos within a day by dedupe_key so a secret leak that
+	// appears in multiple repos is counted once per day (mirrors the
+	// original SQL's DISTINCT on the deduped_findings CTE).
+	type scanFinding struct {
+		SecretType string
+		Match      string
+		Secret     string
+		DedupeKey  string
+	}
+	type scanKey struct {
+		RepoID  string
+		ScanDay time.Time
+	}
+	perScan := make(map[scanKey][]scanFinding, len(scanRows))
+	repoDays := make(map[string][]time.Time, 256)
+	seenScanKey := make(map[scanKey]struct{}, len(scanRows))
+	for _, sr := range scanRows {
+		day, err := time.Parse("2006-01-02", sr.ScanDay)
+		if err != nil {
+			continue
+		}
+		key := scanKey{RepoID: sr.RepoID, ScanDay: day}
+		perScan[key] = append(perScan[key], scanFinding{
+			SecretType: sr.SecretType,
+			Match:      sr.Match,
+			Secret:     sr.Secret,
+			DedupeKey:  sr.DedupeKey,
+		})
+		if _, dup := seenScanKey[key]; !dup {
+			seenScanKey[key] = struct{}{}
+			repoDays[sr.RepoID] = append(repoDays[sr.RepoID], day)
+		}
+	}
+	for repo := range repoDays {
+		days := repoDays[repo]
+		sort.Slice(days, func(i, j int) bool { return days[i].Before(days[j]) })
+		repoDays[repo] = days
+	}
+
+	// Build the 30-day window inclusive of today, matching the
+	// original generate_series(NOW() - 30 days, NOW(), 1 day) shape.
+	today := time.Now().UTC().Truncate(24 * time.Hour)
+	const windowDays = 31
+	window := make([]time.Time, windowDays)
+	for i := 0; i < windowDays; i++ {
+		window[i] = today.AddDate(0, 0, -(windowDays - 1 - i))
+	}
+
+	findings := make([]finding, 0, len(scanRows))
+	for _, day := range window {
+		dateStr := day.Format("2006-01-02")
+		seen := make(map[string]struct{}, 128)
+		for repo, scans := range repoDays {
+			// Latest scan_day ≤ day via binary search.
+			idx := sort.Search(len(scans), func(i int) bool { return scans[i].After(day) }) - 1
+			if idx < 0 {
+				continue
+			}
+			for _, sf := range perScan[scanKey{RepoID: repo, ScanDay: scans[idx]}] {
+				if _, dup := seen[sf.DedupeKey]; dup {
+					continue
+				}
+				seen[sf.DedupeKey] = struct{}{}
+				findings = append(findings, finding{
+					Date:       dateStr,
+					SecretType: sf.SecretType,
+					Match:      sf.Match,
+					Secret:     sf.Secret,
+				})
+			}
+		}
 	}
 
 	// Compute hashes and look up dismissed secrets (with timestamps).

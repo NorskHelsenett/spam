@@ -406,15 +406,16 @@ func LoadTrend(ctx context.Context, db *gorm.DB, days int) ([]TrendPoint, error)
 // LoadTrendScoped is the narrow-grant counterpart to LoadTrend. The
 // daily snapshot table is fleet-global with no per-asset breakdown,
 // so for callers with narrower visibility we recompute the series on
-// the fly by binning the unified vuln views' scanned_at column.
+// the fly from the unified vuln views.
 //
-// Semantics differ subtly from LoadTrend: the snapshot path returns
-// "total open severity at end-of-day X" (a true historical backlog);
-// the scoped path returns "of vulns currently in the caller's scope,
-// how many were last scanned on day X" — a scan-recency view of the
-// caller's accessible findings. It's the best we can do without
-// per-asset history, and the numbers match the rest of the dashboard
-// (summary, list) since they come from the same MV.
+// Semantics: for each day in the window, count the caller's open
+// canonical vulns whose last-scan date is on or before that day. The
+// curve grows monotonically toward today, where today's value equals
+// the scoped summary card's open count (every canonical with any
+// scanned_at <= today is counted). The cumulative form replaces an
+// earlier scan-day binning that left "today = 0" whenever no scan
+// happened to finish on the current day — the chart looked broken
+// next to a summary card showing thousands of open findings.
 //
 // repoSQL / imageSQL are the same ACL predicates LoadSummaryScoped
 // and VulnListHandler pass — predicates against the `v` alias on the
@@ -436,6 +437,14 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 		imageSQL = "FALSE"
 	}
 
+	// scoped → canonical_per_asset collapses (asset, vuln) findings
+	// onto canonical_id and worst severity. per_canonical further
+	// dedupes across assets so each canonical contributes exactly
+	// once to a given day, with its earliest observed scan date as
+	// the activation day. The final SELECT cross-joins the date axis
+	// against per_canonical and counts whatever has activated by
+	// each day — today picks up everything, so it lines up with the
+	// summary card.
 	query := fmt.Sprintf(`
 		WITH dates AS (
 			SELECT (CURRENT_DATE - g)::date AS d
@@ -450,8 +459,8 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 			FROM view_unified_image_vulnerabilities v
 			WHERE %s AND v.scanned_at IS NOT NULL
 		),
-		canonical AS (
-			SELECT s.day, s.asset_type, s.asset_id,
+		canonical_per_asset AS (
+			SELECT s.asset_type, s.asset_id,
 			       COALESCE(vm.canonical_id, s.vuln_id) AS canonical_id,
 			       MIN(CASE s.severity
 			           WHEN 'CRITICAL' THEN 1
@@ -459,20 +468,28 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 			           WHEN 'MEDIUM'   THEN 3
 			           WHEN 'LOW'      THEN 4
 			           ELSE 5
-			       END) AS sev_rank
+			       END) AS sev_rank,
+			       MIN(s.day) AS first_day
 			FROM scoped s
 			LEFT JOIN vuln_metadata vm ON vm.vuln_id = s.vuln_id
-			GROUP BY s.day, s.asset_type, s.asset_id, COALESCE(vm.canonical_id, s.vuln_id)
+			GROUP BY s.asset_type, s.asset_id, COALESCE(vm.canonical_id, s.vuln_id)
+		),
+		per_canonical AS (
+			SELECT canonical_id,
+			       MIN(sev_rank) AS sev_rank,
+			       MIN(first_day) AS first_day
+			FROM canonical_per_asset
+			GROUP BY canonical_id
 		)
 		SELECT
 			TO_CHAR(d.d, 'YYYY-MM-DD') AS date,
-			COALESCE(SUM(CASE WHEN c.sev_rank = 1 THEN 1 ELSE 0 END), 0)::int AS critical,
-			COALESCE(SUM(CASE WHEN c.sev_rank = 2 THEN 1 ELSE 0 END), 0)::int AS high,
-			COALESCE(SUM(CASE WHEN c.sev_rank = 3 THEN 1 ELSE 0 END), 0)::int AS medium,
-			COALESCE(SUM(CASE WHEN c.sev_rank = 4 THEN 1 ELSE 0 END), 0)::int AS low,
-			COALESCE(SUM(CASE WHEN c.sev_rank = 5 THEN 1 ELSE 0 END), 0)::int AS unknown
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 1 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS critical,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 2 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS high,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 3 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS medium,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 4 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS low,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 5 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS unknown
 		FROM dates d
-		LEFT JOIN canonical c ON c.day = d.d
+		LEFT JOIN per_canonical pc ON TRUE
 		GROUP BY d.d
 		ORDER BY d.d ASC
 	`, repoSQL, imageSQL)
