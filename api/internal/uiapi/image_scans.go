@@ -460,7 +460,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		// that lets ROR cluster-only users land on an image profile
 		// for one of their cluster's containers). 404 hides
 		// existence — same convention as repos.
-		if ok, err := canReadImageByID(r, db, id); err != nil || !ok {
+		if ok, err := canReadImageByID(r, db, img.ID); err != nil || !ok {
 			notFoundOrForbidden(w)
 			return
 		}
