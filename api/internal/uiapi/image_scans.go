@@ -500,7 +500,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			  AND j.payload->>'image_digest_id' = ?
 			ORDER BY j.created_at DESC
 			LIMIT 50
-		`, id).Scan(&history).Error
+		`, img.ID).Scan(&history).Error
 		resp.ScanHistory = make([]ImageScanHistoryRow, 0, len(history))
 		for _, h := range history {
 			resp.ScanHistory = append(resp.ScanHistory, ImageScanHistoryRow{
@@ -550,7 +550,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			  COUNT(*) FILTER (WHERE UPPER(severity) NOT IN ('CRITICAL','HIGH','MEDIUM','LOW','NEGLIGIBLE')) AS unknown
 			FROM image_vuln_findings f
 			JOIN latest_scan ls ON ls.id = f.scan_run_id
-		`, id).Scan(&sev).Error
+		`, img.ID).Scan(&sev).Error
 		{
 			total := sev.Critical + sev.High + sev.Medium + sev.Low + sev.Unknown
 			if total > 0 {
@@ -582,7 +582,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				WHERE octet_length(l.content) > 2
 				  AND jsonb_typeof(convert_from(l.content, 'utf8')::jsonb) = 'array'
 			), 0)
-		`, id).Scan(&resp.SecretCount).Error
+		`, img.ID).Scan(&resp.SecretCount).Error
 
 		// Cluster usage from the live cluster_record feed. Resolve the
 		// cluster name via the clusters table so we don't leak the
