@@ -430,6 +430,12 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 		// per cluster_id with denormalized name/environment/last_seen,
 		// so the search becomes an index-friendly N-cluster scan instead
 		// of an O(events) JSONB extraction over the operational store.
+		//
+		// Title resolution prefers the ROR friendly name when the
+		// cluster has a binding (matches the dashboard's display);
+		// falls back through env-var label → ROR slug → cluster_id.
+		// Search hits any of the four name surfaces plus environment so
+		// an operator can find a cluster by whichever string they know.
 		// Empty repo_* fields — clusters are not repo-scoped.
 		err := db.WithContext(r.Context()).Raw(`
 			SELECT
@@ -442,19 +448,26 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 				'' AS owner_path,
 				'' AS org,
 				'' AS slug,
-				COALESCE(NULLIF(cluster, ''), cluster_id) AS title,
+				COALESCE(
+					NULLIF(ror_cluster_name, ''),
+					NULLIF(cluster_name, ''),
+					NULLIF(ror_slug, ''),
+					cluster_id
+				) AS title,
 				COALESCE(environment, '') AS value,
 				'' AS source_text,
 				last_seen AS created_at,
 				cluster_id AS cluster_id,
 				'' AS image_id
 			FROM cluster_summary
-			WHERE cluster     ILIKE ?
-			   OR cluster_id  ILIKE ?
-			   OR environment ILIKE ?
+			WHERE cluster_id        ILIKE ?
+			   OR cluster_name      ILIKE ?
+			   OR ror_slug          ILIKE ?
+			   OR ror_cluster_name  ILIKE ?
+			   OR environment       ILIKE ?
 			ORDER BY last_seen DESC
 			LIMIT ?
-		`, like, like, like, perTargetLimit).Scan(&rows).Error
+		`, like, like, like, like, like, perTargetLimit).Scan(&rows).Error
 		return rows, err
 	case "image":
 		// Image digest search. Matches on registry, repository, or the

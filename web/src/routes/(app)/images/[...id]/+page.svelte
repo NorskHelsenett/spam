@@ -40,12 +40,34 @@
 	};
 
 	type ClusterUsageRow = {
-		cluster: string;
+		cluster_id: string;
+		// Env-var label from SCAM's SPAM_CLUSTER. Absent when unset.
+		cluster_name?: string;
+		// ROR binding, absent when the cluster has no ror_metadata in
+		// any of its cluster_record entries (helm chart not wired or
+		// cluster not registered in ROR).
+		ror_metadata?: {
+			slug?: string;
+			cluster_name?: string;
+			env?: string;
+		};
 		namespace: string;
 		pod_count: number;
 		first_seen: string;
 		last_seen: string;
 	};
+
+	// displayClusterName picks the best human-readable label, in the
+	// order ROR friendly name → env-var label → ROR slug → bare
+	// cluster_id. Mirrors the helper on the clusters list page so the
+	// image profile renders the same name an operator sees there.
+	function displayClusterName(c: {
+		cluster_id: string;
+		cluster_name?: string;
+		ror_metadata?: { slug?: string; cluster_name?: string };
+	}): string {
+		return c.ror_metadata?.cluster_name || c.cluster_name || c.ror_metadata?.slug || c.cluster_id;
+	}
 
 	type VulnSeverity = {
 		critical: number;
@@ -287,7 +309,7 @@
 	};
 
 	const clusterCount = $derived(
-		new Set((image?.cluster_usage ?? []).map((c) => c.cluster)).size
+		new Set((image?.cluster_usage ?? []).map((c) => c.cluster_id)).size
 	);
 	const namespaceCount = $derived((image?.cluster_usage ?? []).length);
 	const podCount = $derived(
@@ -951,7 +973,20 @@
 									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
 										{#each image.cluster_usage ?? [] as u}
 											<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
-												<td class="px-4 py-2 font-mono text-[var(--text-bright)]">{u.cluster || '—'}</td>
+												<td class="px-4 py-2 text-[var(--text-bright)]">
+													<div class="flex flex-col gap-0.5">
+														<span class="font-medium">{displayClusterName(u)}</span>
+														{#if u.ror_metadata}
+															<span class="font-mono text-[10px] text-[var(--text-muted)]" title="ROR slug">
+																{u.ror_metadata.slug}{#if u.ror_metadata.env}&nbsp;·&nbsp;{u.ror_metadata.env}{/if}
+															</span>
+														{:else}
+															<span class="font-mono text-[10px] text-[var(--text-muted)]" title="env-var label only — no ROR metadata">
+																no ror metadata
+															</span>
+														{/if}
+													</div>
+												</td>
 												<td class="px-4 py-2 font-mono">{u.namespace || '—'}</td>
 												<td class="px-4 py-2 text-right font-semibold">{u.pod_count}</td>
 												<td class="px-4 py-2 text-xs text-[var(--text-tertiary)]">{formatDate(u.first_seen)}</td>

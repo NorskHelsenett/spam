@@ -15,32 +15,43 @@
 -- from the ROR slug (e.g. "p-mot-001-ho87") to the kube-system
 -- Namespace UID. During the rolling cutover the same cluster posts
 -- records under BOTH cluster_ids until the older slug-keyed rows TTL
--- out — and that surfaced as two rows in /api/clusters/summary for
--- one cluster. The MV now groups on a synthesized cluster_key that
--- prefers the ROR slug (which is constant across both pre- and
--- post-cutover records: pre-cutover it sits in data->>'cluster_id',
--- post-cutover it sits in data->'ror_metadata'->>'cluster_id') so
--- both record families collapse onto one row. Per-group cluster_id is
--- the kube-system UID when any merged record carries ror_metadata
--- (the authoritative post-cutover identity), else the original
--- cluster_id — keeps downstream consumers (ACL, sessions) on the
--- UUID identity once the new agent is live.
+-- out — that surfaced as two rows in /api/clusters/summary for one
+-- physical cluster. The MV now groups on a synthesized cluster_key
+-- that prefers the ROR slug — constant across both record families
+-- (pre-cutover it sits in data->>'cluster_id', post-cutover in
+-- data->'ror_metadata'->>'cluster_id') — so both families collapse
+-- onto one row.
+--
+-- Identity surfaces (clean separation, replaces the previous combined
+-- `cluster` column whose value depended on which records existed):
+--
+--   cluster_id        Per-group canonical identifier. Prefers the
+--                     kube-system UID when any merged record carries
+--                     ror_metadata (the authoritative post-cutover
+--                     stamp); else the original raw cluster_id (slug
+--                     for clusters that have never cut over).
+--
+--   cluster_name      The agent's env-var-configured display label
+--                     (SCAM stamps it into `data->>'cluster'`). NULL
+--                     when the env var is unset and SCAM falls back to
+--                     duplicating cluster_id into `cluster` — the
+--                     NULLIF on the inequality keeps the field
+--                     meaningful instead of repeating cluster_id.
+--
+--   ror_slug          ROR slug (data->'ror_metadata'->>'cluster_id').
+--                     NULL when no merged record carried ror_metadata.
+--   ror_cluster_name  ROR-side friendly name. NULL when missing.
+--   ror_env           ROR-side environment string. NULL when missing.
+--
+-- The handler nests {slug, cluster_name, env} into a `ror_metadata`
+-- object on the wire — its presence/absence is the single source of
+-- truth for "did this cluster send ROR metadata, or is it on env-var
+-- fallback?" The frontend chooses display name as
+-- ror_metadata.cluster_name → cluster_name → cluster_id.
 --
 -- Counts use COUNT(DISTINCT resource_identity) instead of COUNT(*) so
 -- pods present under both cluster_ids during the cutover window count
 -- once, not twice.
---
--- Cluster display name resolution order:
---   1. ror_metadata.cluster_name in any merged record (post-cutover
---      agents stamp this directly).
---   2. clusters.ror_cluster_name  — DB-stored ROR-bound friendly name.
---   3. clusters.ror_slug          — slug if the name isn't set.
---   4. data->>'cluster' from cluster_record, but only when it differs
---      from cluster_id — SCAM stamps `cluster` to the operator-
---      configured env var on the agent. When that var is unset SCAM
---      falls back to writing the kube-system UID into `cluster` too,
---      so the inequality guard keeps step 5 from being redundant.
---   5. cluster_id as the last-resort fallback.
 --
 -- Refresh hooks:
 --   - CallcenterHandler triggers a debounced refresh on every ingest
@@ -57,9 +68,9 @@ WITH merged AS (
     SELECT
         -- Slug-preferred grouping key. Pre-cutover records had the slug
         -- as cluster_id; post-cutover records have the slug nested under
-        -- ror_metadata. Either way this resolves to the same string
-        -- across both record families for one logical cluster. Clusters
-        -- that have never had ROR binding fall through to data->>'cluster_id'
+        -- ror_metadata. Either path resolves to the same string across
+        -- both record families for one logical cluster. Clusters that
+        -- have never had ROR binding fall through to data->>'cluster_id'
         -- (UUID for new agents, slug for old).
         COALESCE(
             NULLIF(cr.data->'ror_metadata'->>'cluster_id', ''),
@@ -79,13 +90,18 @@ SELECT
         (array_agg(m.data->>'cluster_id' ORDER BY (m.data->'ror_metadata' IS NOT NULL) DESC, m.received_at DESC))[1],
         MAX(m.data->>'cluster_id')
     )                                                                AS cluster_id,
-    COALESCE(
-        NULLIF(MAX(m.data->'ror_metadata'->>'cluster_name'), ''),
-        NULLIF(MAX(c.ror_cluster_name), ''),
-        NULLIF(MAX(c.ror_slug), ''),
-        NULLIF(MAX(NULLIF(m.data->>'cluster', m.data->>'cluster_id')), ''),
-        MAX(m.data->>'cluster_id')
-    )                                                                AS cluster,
+    -- Env-var label only; NULLIF strips the case where SCAM stamped
+    -- cluster_id into `cluster` too. NULL when no record has a distinct
+    -- env-var value.
+    NULLIF(MAX(NULLIF(m.data->>'cluster', m.data->>'cluster_id')), '')
+                                                                     AS cluster_name,
+    -- ROR triple. All-or-nothing per logical cluster: if any record
+    -- has ror_metadata, every column has its piece; otherwise all
+    -- three are NULL. MAX(...) collapses across records — they
+    -- should agree for the same cluster, so picking any is safe.
+    NULLIF(MAX(m.data->'ror_metadata'->>'cluster_id'), '')           AS ror_slug,
+    NULLIF(MAX(m.data->'ror_metadata'->>'cluster_name'), '')         AS ror_cluster_name,
+    NULLIF(MAX(m.data->'ror_metadata'->>'env'), '')                  AS ror_env,
     MAX(m.data->>'environment')                                      AS environment,
     -- Container count deduped across cluster_ids — (pod_uid, container)
     -- is stable across the cutover, so the same pod under two
@@ -112,11 +128,6 @@ SELECT
     )                                                                AS ingress_count,
     MAX(m.received_at)                                               AS last_seen
 FROM merged m
--- LEFT JOIN clusters on each record's raw cluster_id so both the
--- slug-keyed (pre-cutover) and UUID-keyed (post-cutover) clusters
--- rows can contribute names. MAX() above coalesces whichever side
--- carries the binding.
-LEFT JOIN clusters c ON c.cluster_id = m.data->>'cluster_id'
 GROUP BY m.cluster_key
 WITH NO DATA;
 
@@ -125,8 +136,16 @@ WITH NO DATA;
 CREATE UNIQUE INDEX idx_cluster_summary_cluster_id
     ON cluster_summary (cluster_id);
 
--- The handler ORDER BYs by last_seen DESC; without an index the planner
--- still uses the unique key + sort, but for fleets with hundreds of
--- clusters the sorted index is a measurable win.
+-- The handler ORDER BYs by last_seen DESC; the sorted index is a
+-- measurable win on fleets with hundreds of clusters.
 CREATE INDEX idx_cluster_summary_last_seen
     ON cluster_summary (last_seen DESC);
+
+-- Search hits on the env-var name and ROR fields; partial indexes skip
+-- rows where the column is NULL (common for cluster_name on small
+-- fleets that don't set SPAM_CLUSTER, and for the ROR columns until
+-- the binding lands).
+CREATE INDEX idx_cluster_summary_cluster_name
+    ON cluster_summary (cluster_name) WHERE cluster_name IS NOT NULL;
+CREATE INDEX idx_cluster_summary_ror_slug
+    ON cluster_summary (ror_slug) WHERE ror_slug IS NOT NULL;
