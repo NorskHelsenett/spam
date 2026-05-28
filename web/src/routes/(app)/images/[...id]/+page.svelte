@@ -173,7 +173,8 @@
 	let expandedVuln = $state<string>('');
 	let vulnDetails = $state<Record<string, VulnDetailState>>({});
 
-	const shortDigest = (digest: string) => {
+	const shortDigest = (digest: string | undefined | null) => {
+		if (!digest) return '';
 		const i = digest.indexOf(':');
 		if (i < 0) return digest.slice(0, 12);
 		return digest.slice(0, i + 13);
@@ -825,8 +826,15 @@
 																	{/if}
 																</div>
 
-																<!-- Right: signal cards -->
+																<!-- Right: in-SPAM advisory CTA + signal cards -->
 																<div class="space-y-2">
+																	<button
+																		type="button"
+																		class="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:opacity-90"
+																		onclick={(e) => { e.stopPropagation(); openAdvisoryDialog(v.vuln_id); }}
+																	>
+																		Open {v.vuln_id} in SPAM
+																	</button>
 																	{#if kev}
 																		<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
 																			<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
@@ -883,22 +891,15 @@
 																		</div>
 																	{/if}
 
-																	<div class="rounded-xl border border-[var(--accent)]/30 bg-[var(--accent)]/5 px-3 py-2.5">
-																		<div class="text-xs font-semibold uppercase tracking-wider text-[var(--accent)]">
-																			Advisory
+																	<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
+																		<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+																			Canonical source
 																		</div>
 																		<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-																			Inline advisory view with every place this CVE shows up across your repos & images.
+																			<strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
 																		</p>
-																		<button
-																			type="button"
-																			class="mt-2 inline-flex w-full items-center justify-center gap-1 rounded-lg bg-[var(--accent)]/15 px-2.5 py-1.5 text-xs font-medium text-[var(--accent)] transition hover:bg-[var(--accent)]/25"
-																			onclick={(e) => { e.stopPropagation(); openAdvisoryDialog(v.vuln_id); }}
-																		>
-																			View {v.vuln_id} details
-																		</button>
 																		<a
-																			class="mt-2 inline-flex items-center gap-1 text-[11px] text-[var(--text-tertiary)] hover:text-[var(--accent)]"
+																			class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
 																			href={adv.href}
 																			target="_blank"
 																			rel="noopener noreferrer"
