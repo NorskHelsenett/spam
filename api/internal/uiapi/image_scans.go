@@ -612,26 +612,39 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			resp.LatestScanAt = latestScan.FinishedAt
 		}
 
-		// Inline the labels / signature / secrets artifacts from the
-		// latest scan run so the page renders without a separate
-		// /api/runs/{id} fetch. parseBetterleaksArtifact caps at 500
-		// rows; SecretCount below is the canonical total.
-		if latestScan.ID != "" {
-			var blobs []imagescan.ImageScanArtifact
-			_ = db.WithContext(ctx).
-				Select("category, scanner, content").
-				Where("scan_run_id = ?", latestScan.ID).
-				Find(&blobs).Error
-			for _, b := range blobs {
-				switch b.Category {
-				case "labels":
-					resp.ImageLabels, resp.ImageLabelsMetadata = parseLabelsArtifact(b.Content)
-				case "signature":
-					resp.ImageSignature = parseSignatureArtifact(b.Content)
-				case "secrets":
-					if b.Scanner == "betterleaks" {
-						resp.ImageSecrets = parseBetterleaksArtifact(b.Content, 500)
-					}
+		// Inline the labels / signature / secrets artifacts so the
+		// page renders without a separate /api/runs/{id} fetch. Pick
+		// the most recent artifact PER CATEGORY rather than every
+		// artifact off the most recent scan_run — the nightly
+		// sbom-scanner revuln writes new image_scan_runs rows that
+		// carry findings but no labels/signature/secrets artifacts,
+		// so a query keyed on latest_scan.id would silently return
+		// empty even when older runs hold them. DISTINCT ON keeps the
+		// newest per category. Capped at 500 secret rows.
+		var blobs []struct {
+			Category string `gorm:"column:category"`
+			Scanner  string `gorm:"column:scanner"`
+			Content  []byte `gorm:"column:content"`
+		}
+		_ = db.WithContext(ctx).Raw(`
+			SELECT DISTINCT ON (isa.category)
+			       isa.category, isa.scanner, isa.content
+			FROM image_scan_artifacts isa
+			JOIN image_scan_runs isr ON isr.id = isa.scan_run_id
+			WHERE isr.image_digest_id = ?
+			  AND isa.category IN ('labels', 'signature', 'secrets')
+			  AND isr.finished_at IS NOT NULL
+			ORDER BY isa.category, isr.finished_at DESC NULLS LAST
+		`, img.ID).Scan(&blobs).Error
+		for _, b := range blobs {
+			switch b.Category {
+			case "labels":
+				resp.ImageLabels, resp.ImageLabelsMetadata = parseLabelsArtifact(b.Content)
+			case "signature":
+				resp.ImageSignature = parseSignatureArtifact(b.Content)
+			case "secrets":
+				if b.Scanner == "betterleaks" {
+					resp.ImageSecrets = parseBetterleaksArtifact(b.Content, 500)
 				}
 			}
 		}
