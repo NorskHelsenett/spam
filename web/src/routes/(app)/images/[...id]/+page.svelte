@@ -1168,9 +1168,10 @@
 											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_repos.length} of {d.repo_count}</span>
 										{/if}
 									</h3>
-									<ul class="divide-y divide-[var(--border-color)]/30 overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										{#each d.affected_repos.slice(0, 8) as r}
-											<li class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+										{#each d.affected_repos.slice(0, 8) as r, idx (r.repo_id)}
+											{@const isLast = idx === Math.min(d.affected_repos.length, 8) - 1}
+											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
 												<span class="min-w-0 truncate font-mono text-[var(--text-bright)]" title={r.repo_slug}>
 													{r.repo_slug || r.repo_id}
 												</span>
@@ -1195,9 +1196,10 @@
 											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_images.length} of {d.image_count}</span>
 										{/if}
 									</h3>
-									<ul class="divide-y divide-[var(--border-color)]/30 overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										{#each d.affected_images.slice(0, 8) as i}
-											<li class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+										{#each d.affected_images.slice(0, 8) as i, idx (i.image_id)}
+											{@const isLast = idx === Math.min(d.affected_images.length, 8) - 1}
+											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
 												<div class="min-w-0 flex-1">
 													<p class="truncate font-mono text-[var(--text-bright)]" title={i.image_slug}>{i.image_slug}</p>
 													{#if i.image_digest}
