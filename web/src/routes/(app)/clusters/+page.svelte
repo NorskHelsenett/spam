@@ -50,8 +50,22 @@
 	import Loading from '$lib/components/Loading.svelte';
 
 	type ClusterRow = {
-		cluster: string;
 		cluster_id: string;
+		// Env-var-derived display label from the SCAM agent's
+		// SPAM_CLUSTER. Absent when the operator didn't set it (SCAM
+		// then stamps cluster_id into the same field, which the API
+		// strips so this stays a meaningful signal).
+		cluster_name?: string;
+		// ROR binding. Present once the cluster has resolved its ROR
+		// identity; absent for clusters running pre-cutover SCAM
+		// agents or clusters not registered in ROR. Operators use
+		// presence/absence here to debug "did this cluster's helm
+		// chart wire up ROR yet?"
+		ror_metadata?: {
+			slug?: string;
+			cluster_name?: string;
+			env?: string;
+		};
 		environment: string;
 		containers: number;
 		images: number;
@@ -59,6 +73,18 @@
 		ingress_count: number;
 		last_seen: string;
 	};
+
+	// displayClusterName picks the best human-readable label for a
+	// cluster row, in the order: ROR friendly name → env-var label →
+	// ROR slug → bare cluster_id. Returns cluster_id as a final fallback
+	// so the UI never shows an empty cell.
+	function displayClusterName(c: {
+		cluster_id: string;
+		cluster_name?: string;
+		ror_metadata?: { slug?: string; cluster_name?: string };
+	}): string {
+		return c.ror_metadata?.cluster_name || c.cluster_name || c.ror_metadata?.slug || c.cluster_id;
+	}
 
 	type RegistryDist = {
 		registry: string;
@@ -962,8 +988,8 @@
 	// cluster_id so the URL param carries the stable identifier.
 	const imageClusterOptions: MultiSelectOption[] = $derived(
 		[...clustersAll]
-			.sort((a, b) => (a.cluster || a.cluster_id).localeCompare(b.cluster || b.cluster_id))
-			.map((c) => ({ value: c.cluster_id, label: c.cluster || c.cluster_id }))
+			.sort((a, b) => displayClusterName(a).localeCompare(displayClusterName(b)))
+			.map((c) => ({ value: c.cluster_id, label: displayClusterName(c) }))
 	);
 
 	const imageActiveFilterCount = $derived(
@@ -1029,7 +1055,12 @@
 
 	// --- Sorting ---
 	type SortDir = 'asc' | 'desc';
-	let clusterSortKey = $state<keyof ClusterRow>('cluster');
+	// 'display_name' is synthetic — sorts by displayClusterName(c)
+	// (ROR name → env-var label → ROR slug → cluster_id) so the
+	// "Cluster" column header sorts on what the user actually sees,
+	// even though no single column on ClusterRow carries that value.
+	type ClusterSortKey = keyof ClusterRow | 'display_name';
+	let clusterSortKey = $state<ClusterSortKey>('display_name');
 	let clusterSortDir = $state<SortDir>('asc');
 	// 'vulns' is synthetic — sorted via vulnSortKey rather than a
 	// direct column access (keyof ImageDetail).
@@ -1047,7 +1078,7 @@
 		return dir === 'asc' ? result : -result;
 	};
 
-	const sc = (k: keyof ClusterRow) => () => {
+	const sc = (k: ClusterSortKey) => () => {
 		if (clusterSortKey === k) { clusterSortDir = clusterSortDir === 'asc' ? 'desc' : 'asc'; }
 		else { clusterSortKey = k; clusterSortDir = 'desc'; }
 	};
@@ -1063,7 +1094,12 @@
 	};
 
 	const sortedClusters = $derived(
-		[...filteredClusters].sort((a, b) => cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir))
+		[...filteredClusters].sort((a, b) => {
+			if (clusterSortKey === 'display_name') {
+				return cmp(displayClusterName(a), displayClusterName(b), clusterSortDir);
+			}
+			return cmp(a[clusterSortKey], b[clusterSortKey], clusterSortDir);
+		})
 	);
 
 	// Image sort is applied server-side via the sort+order query params
@@ -1298,7 +1334,7 @@
 					<table class="min-w-full table-fixed divide-y divide-[var(--border-color)]/30 text-sm">
 						<thead class="sticky top-0 z-[1] bg-[var(--card-bg)] text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
 							<tr>
-								<th class="sortable-th w-[28%] px-5 py-3 text-left" onclick={sc('cluster')}>Cluster <ChevronDown class="sort-icon {clusterSortKey === 'cluster' ? 'active' : ''} {clusterSortKey === 'cluster' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
+								<th class="sortable-th w-[28%] px-5 py-3 text-left" onclick={sc('display_name')}>Cluster <ChevronDown class="sort-icon {clusterSortKey === 'display_name' ? 'active' : ''} {clusterSortKey === 'display_name' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								<th class="sortable-th w-[15%] px-5 py-3 text-left" onclick={sc('environment')}>Environment <ChevronDown class="sort-icon {clusterSortKey === 'environment' ? 'active' : ''} {clusterSortKey === 'environment' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								<th class="sortable-th w-[10%] px-5 py-3 text-right" onclick={sc('images')}>Images <ChevronDown class="sort-icon {clusterSortKey === 'images' ? 'active' : ''} {clusterSortKey === 'images' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
 								<th class="sortable-th w-[12%] px-5 py-3 text-right" onclick={sc('containers')}>Containers <ChevronDown class="sort-icon {clusterSortKey === 'containers' ? 'active' : ''} {clusterSortKey === 'containers' && clusterSortDir === 'asc' ? 'flipped' : ''}" /></th>
@@ -1311,7 +1347,7 @@
 							{#if clusterVirt.topPad > 0}<tr style="height:{clusterVirt.topPad}px"><td colspan="7"></td></tr>{/if}
 							{#each sortedClusters.slice(clusterVirt.start, clusterVirt.end) as c}
 								<tr class="cursor-pointer border-b border-[var(--border-color)]/15 transition hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)] {clusterDrawerOpen && clusterDrawerRow?.cluster_id === c.cluster_id ? 'bg-[var(--hover-bg-subtle)]' : ''}" style="height:{ROW_HEIGHT}px;max-height:{ROW_HEIGHT}px" onclick={() => openClusterDrawer(c)}>
-									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{c.cluster || c.cluster_id}</td>
+									<td class="px-5 py-3 font-semibold text-[var(--text-bright)]">{displayClusterName(c)}</td>
 									<td class="px-5 py-3">
 										{#if c.environment}
 											<span class="rounded-full border border-[var(--border-color)] px-2 py-0.5 text-xs">{c.environment}</span>
@@ -1338,7 +1374,7 @@
 						transition:slide={{ duration: 220, easing: cubicOut, axis: 'x' }}
 					>
 						<ClusterChainDrawer
-							cluster={clusterDrawerRow.cluster}
+							cluster={displayClusterName(clusterDrawerRow)}
 							clusterId={clusterDrawerRow.cluster_id}
 							onClose={() => { clusterDrawerOpen = false; clusterDrawerRow = null; }}
 						/>

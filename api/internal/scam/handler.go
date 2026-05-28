@@ -769,22 +769,50 @@ func validate(r Incoming) error {
 // cluster_sessions here when ?include_inactive isn't truthy.
 func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		type row struct {
-			Cluster      string    `json:"cluster"`
-			ClusterID    string    `json:"cluster_id"`
-			Environment  string    `json:"environment"`
-			Containers   int64     `json:"containers"`
-			Images       int64     `json:"images"`
-			Namespaces   int64     `json:"namespaces"`
-			IngressCount int64     `json:"ingress_count"`
-			LastSeen     time.Time `json:"last_seen"`
+		// scanRow matches cluster_summary MV columns. ROR fields are
+		// nullable so an absent binding marshals to a missing
+		// ror_metadata object on the wire rather than a triple of empty
+		// strings — the frontend uses presence/absence of ror_metadata
+		// as the signal for "ROR was sent" vs "env-var fallback only,"
+		// which is what an operator wants to see when debugging a
+		// helm-configured cluster that hasn't bound to ROR yet.
+		type scanRow struct {
+			ClusterID      string    `gorm:"column:cluster_id"`
+			ClusterName    *string   `gorm:"column:cluster_name"`
+			RorSlug        *string   `gorm:"column:ror_slug"`
+			RorClusterName *string   `gorm:"column:ror_cluster_name"`
+			RorEnv         *string   `gorm:"column:ror_env"`
+			Environment    string    `gorm:"column:environment"`
+			Containers     int64     `gorm:"column:containers"`
+			Images         int64     `gorm:"column:images"`
+			Namespaces     int64     `gorm:"column:namespaces"`
+			IngressCount   int64     `gorm:"column:ingress_count"`
+			LastSeen       time.Time `gorm:"column:last_seen"`
 		}
-		rows := []row{}
+		// rorMetadata is the nested object on the wire; omitempty so
+		// it disappears entirely for clusters without a ROR binding.
+		type rorMetadata struct {
+			Slug        string `json:"slug,omitempty"`
+			ClusterName string `json:"cluster_name,omitempty"`
+			Env         string `json:"env,omitempty"`
+		}
+		type outRow struct {
+			ClusterID    string       `json:"cluster_id"`
+			ClusterName  string       `json:"cluster_name,omitempty"`
+			RorMetadata  *rorMetadata `json:"ror_metadata,omitempty"`
+			Environment  string       `json:"environment,omitempty"`
+			Containers   int64        `json:"containers"`
+			Images       int64        `json:"images"`
+			Namespaces   int64        `json:"namespaces"`
+			IngressCount int64        `json:"ingress_count"`
+			LastSeen     time.Time    `json:"last_seen"`
+		}
+		out := []outRow{}
 		ctx := r.Context()
 
 		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cs.cluster_id")
 		if deny {
-			writeJSON(w, http.StatusOK, rows)
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 
@@ -795,7 +823,7 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 		// SQLSTATE 55000 a bare SELECT would raise.
 		if ready, err := spamdb.ClusterSummaryViewPopulated(ctx, db); err != nil || !ready {
 			clustersummary.TriggerRefresh(db)
-			writeJSON(w, http.StatusOK, rows)
+			writeJSON(w, http.StatusOK, out)
 			return
 		}
 
@@ -810,21 +838,31 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
-		// Free-text search across the fields the frontend table search
-		// covered client-side. Cluster list is small (handful to a few
-		// dozen rows) so this stays as a single query without pagination.
+		// Free-text search hits all four name surfaces (cluster_id,
+		// env-var label, ROR slug, ROR friendly name) plus environment.
+		// An operator can find a cluster by whichever string they know;
+		// cluster list is small enough that scanning all four with ILIKE
+		// stays cheap.
 		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
 		searchWhere := ""
 		var searchArgs []any
 		if searchQuery != "" {
 			pattern := "%" + searchQuery + "%"
-			searchWhere = `AND (cs.cluster ILIKE ? OR cs.cluster_id ILIKE ? OR cs.environment ILIKE ?)`
-			searchArgs = []any{pattern, pattern, pattern}
+			searchWhere = `AND (
+				cs.cluster_id        ILIKE ? OR
+				cs.cluster_name      ILIKE ? OR
+				cs.ror_slug          ILIKE ? OR
+				cs.ror_cluster_name  ILIKE ? OR
+				cs.environment       ILIKE ?
+			)`
+			searchArgs = []any{pattern, pattern, pattern, pattern, pattern}
 		}
 
 		query := `
 			SELECT
-			    cs.cluster, cs.cluster_id, cs.environment,
+			    cs.cluster_id, cs.cluster_name,
+			    cs.ror_slug, cs.ror_cluster_name, cs.ror_env,
+			    cs.environment,
 			    cs.containers, cs.images, cs.namespaces, cs.ingress_count,
 			    cs.last_seen
 			FROM cluster_summary cs
@@ -834,12 +872,45 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 		`
 		queryArgs := append([]any{}, aclArgs...)
 		queryArgs = append(queryArgs, searchArgs...)
+		var rows []scanRow
 		if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
 			log.Printf("ClusterSummaryHandler query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, rows)
+		out = make([]outRow, 0, len(rows))
+		for _, r := range rows {
+			row := outRow{
+				ClusterID:    r.ClusterID,
+				Environment:  r.Environment,
+				Containers:   r.Containers,
+				Images:       r.Images,
+				Namespaces:   r.Namespaces,
+				IngressCount: r.IngressCount,
+				LastSeen:     r.LastSeen,
+			}
+			if r.ClusterName != nil {
+				row.ClusterName = *r.ClusterName
+			}
+			// ROR triple is all-or-nothing: when no record carried
+			// ror_metadata, every ROR column is NULL and the nested
+			// object is omitted entirely. Gate the object on slug
+			// presence because slug is the load-bearing identifier
+			// (name/env can be empty strings even when a binding
+			// exists; slug is always present when ror_metadata is).
+			if r.RorSlug != nil {
+				meta := &rorMetadata{Slug: *r.RorSlug}
+				if r.RorClusterName != nil {
+					meta.ClusterName = *r.RorClusterName
+				}
+				if r.RorEnv != nil {
+					meta.Env = *r.RorEnv
+				}
+				row.RorMetadata = meta
+			}
+			out = append(out, row)
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 

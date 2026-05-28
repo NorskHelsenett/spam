@@ -8,8 +8,17 @@
 	import Loading from '$lib/components/Loading.svelte';
 
 	type ClusterRow = {
-		cluster: string;
 		cluster_id: string;
+		// Env-var label from the SCAM agent (SPAM_CLUSTER). Absent when
+		// the operator didn't set it.
+		cluster_name?: string;
+		// ROR binding, present when the cluster has resolved its ROR
+		// identity. Absent for clusters not registered in ROR yet.
+		ror_metadata?: {
+			slug?: string;
+			cluster_name?: string;
+			env?: string;
+		};
 		environment: string;
 		containers: number;
 		images: number;
@@ -17,6 +26,14 @@
 		ingress_count: number;
 		last_seen: string;
 	};
+
+	function displayClusterName(c: {
+		cluster_id: string;
+		cluster_name?: string;
+		ror_metadata?: { slug?: string; cluster_name?: string };
+	}): string {
+		return c.ror_metadata?.cluster_name || c.cluster_name || c.ror_metadata?.slug || c.cluster_id;
+	}
 
 	type NsChain = {
 		namespace: string;
@@ -129,7 +146,9 @@
 		return `${Math.floor(hours / 24)}d ago`;
 	};
 
-	const clusterName = $derived(summary?.cluster || chain?.cluster || $page.params.id);
+	const clusterName = $derived(
+		(summary ? displayClusterName(summary) : null) || chain?.cluster || $page.params.id
+	);
 	const namespaceCount = $derived(chain?.namespaces?.length ?? summary?.namespaces ?? 0);
 </script>
 
