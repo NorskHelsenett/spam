@@ -287,6 +287,21 @@
 
 	const vulnUrl = (id: string) => `/vuln/${encodeURIComponent(id)}`;
 
+	// Canonical external advisory link for the given vuln id. CVE-* → NVD
+	// gets users the CVSS vector + CWE; GHSA / BIT / GO / PYSEC / OSV-* go
+	// to the authority that publishes them. Anything we don't recognise
+	// falls back to OSV.dev which aggregates most ecosystems.
+	const advisoryLink = (id: string): { href: string; label: string } => {
+		const u = id.toUpperCase();
+		if (u.startsWith('CVE-')) return { href: `https://nvd.nist.gov/vuln/detail/${id}`, label: 'NVD' };
+		if (u.startsWith('GHSA-')) return { href: `https://github.com/advisories/${id}`, label: 'GitHub Advisory' };
+		if (u.startsWith('GO-')) return { href: `https://pkg.go.dev/vuln/${id}`, label: 'Go vuln DB' };
+		if (u.startsWith('PYSEC-')) return { href: `https://osv.dev/vulnerability/${id}`, label: 'OSV.dev' };
+		if (u.startsWith('RUSTSEC-')) return { href: `https://rustsec.org/advisories/${id}`, label: 'RustSec' };
+		if (u.startsWith('BIT-')) return { href: `https://github.com/bitnami/vulndb`, label: 'Bitnami VulnDB' };
+		return { href: `https://osv.dev/vulnerability/${id}`, label: 'OSV.dev' };
+	};
+
 	const fetchVulnDetail = async (id: string) => {
 		// Hit the same endpoint /vulnerabilities uses. Backend enqueues a
 		// VULN_META_FETCH on miss; we re-poll once on enrichment_loading
@@ -341,6 +356,41 @@
 			fetchVulnDetail(id);
 		}
 	};
+
+	// Warm /api/vulnerabilities/{id} in the background for every visible
+	// row right after the list loads. The backend enqueues a
+	// VULN_META_FETCH on miss, so this also kicks off enrichment for
+	// CVEs we haven't seen yet — by the time the user expands a row the
+	// description / CVSS / EPSS / KEV are already cached client-side.
+	// Concurrency=4 keeps the request fan-out reasonable on big images.
+	const prefetchAll = async (ids: string[]) => {
+		const queue = ids.filter((id) => !vulnDetails[id]);
+		if (queue.length === 0) return;
+		for (const id of queue) {
+			if (!vulnDetails[id]) vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
+		}
+		const concurrency = 4;
+		const next = () => queue.shift();
+		const worker = async () => {
+			let id: string | undefined;
+			while ((id = next())) {
+				await fetchVulnDetail(id);
+			}
+		};
+		await Promise.all(Array.from({ length: concurrency }, worker));
+	};
+
+	let prefetchedFor = $state<string>('');
+	$effect(() => {
+		// Fire whenever the vulns list changes (new severity filter, fresh
+		// load). Skip retriggering for the same set of ids we already
+		// prefetched for.
+		if (!browser || vulns.length === 0) return;
+		const key = vulns.map((v) => v.vuln_id).join(',');
+		if (key === prefetchedFor) return;
+		prefetchedFor = key;
+		prefetchAll(vulns.map((v) => v.vuln_id));
+	});
 </script>
 
 <svelte:head>
@@ -688,6 +738,7 @@
 												{@const kevAdded = ready?.kev_date_added}
 												{@const epss = ready?.epss_score ?? v.epss_score}
 												{@const epssPct = ready?.epss_percentile}
+												{@const adv = advisoryLink(v.vuln_id)}
 												<tr class="bg-[var(--bg-soft)]/40">
 													<td colspan="7" class="px-4 py-4">
 														{#if det?.status === 'loading'}
@@ -696,63 +747,126 @@
 																Loading advisory details…
 															</div>
 														{:else}
-															{#if title}
-																<p class="mb-2 text-sm font-semibold text-[var(--text-bright)]">{title}</p>
-															{/if}
-															{#if description}
-																<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{description}</p>
-															{:else if enriching}
-																<div class="flex items-center gap-2 text-xs italic text-[var(--text-muted)]">
-																	<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-																	Enriching from upstream feeds — re-open in a moment.
-																</div>
-															{:else if det?.status === 'error'}
-																<p class="text-xs italic text-[var(--error)]">Failed to load advisory: {det.message}</p>
-															{:else}
-																<p class="text-xs italic text-[var(--text-muted)]">No description available — see the advisory link above.</p>
-															{/if}
+															<div class="grid gap-4 lg:grid-cols-3">
+																<!-- Left: description + aliases -->
+																<div class="lg:col-span-2 space-y-3">
+																	{#if title}
+																		<p class="text-sm font-semibold text-[var(--text-bright)]">{title}</p>
+																	{/if}
+																	{#if description}
+																		<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{description}</p>
+																	{:else if enriching}
+																		<div class="flex items-center gap-2 text-xs italic text-[var(--text-muted)]">
+																			<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+																			Enriching from upstream feeds — re-open in a moment.
+																		</div>
+																	{:else if det?.status === 'error'}
+																		<p class="text-xs italic text-[var(--error)]">Failed to load advisory: {det.message}</p>
+																	{:else}
+																		<p class="text-xs italic text-[var(--text-muted)]">No description available — open the advisory link for full details.</p>
+																	{/if}
 
-															{#if kev || (epss !== undefined && epss !== null && epss > 0) || (sources && sources.length > 0)}
-																<div class="mt-3 flex flex-wrap items-center gap-2">
+																	{#if v.aliases && v.aliases.length > 0}
+																		<div class="flex flex-wrap items-center gap-1">
+																			<span class="text-xs text-[var(--text-tertiary)]">Aliases:</span>
+																			{#each v.aliases as a}
+																				<a
+																					class="font-mono text-xs text-[var(--accent)] hover:underline"
+																					href={vulnUrl(a)}
+																				>
+																					{a}
+																				</a>
+																			{/each}
+																		</div>
+																	{/if}
+
+																	{#if sources && sources.length > 0}
+																		<div class="flex flex-wrap items-center gap-1">
+																			<span class="text-xs text-[var(--text-tertiary)]">Sources:</span>
+																			{#each sources as src}
+																				<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-xs text-[var(--text-tertiary)]">{src}</span>
+																			{/each}
+																		</div>
+																	{/if}
+																</div>
+
+																<!-- Right: signal cards -->
+																<div class="space-y-2">
 																	{#if kev}
-																		<span
-																			class="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400"
-																			title={kevAdded ? `Added to CISA KEV ${formatShortDate(kevAdded)}` : 'In CISA KEV — actively exploited'}
-																		>
-																			<ShieldX class="h-3 w-3" />
-																			CISA KEV{#if kevRansom} · ransomware{/if}
-																		</span>
+																		<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
+																			<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
+																				<ShieldX class="h-3.5 w-3.5" /> CISA KEV
+																			</div>
+																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																				Listed in CISA's <strong>Known Exploited Vulnerabilities</strong> catalog — confirmed in-the-wild exploitation. Patch on KEV-mandated timelines.
+																			</p>
+																			<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+																				{#if kevAdded}
+																					<span class="text-[var(--text-tertiary)]">Added {formatShortDate(kevAdded)}</span>
+																				{/if}
+																				{#if kevRansom}
+																					<span class="rounded-full bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">ransomware</span>
+																				{/if}
+																			</div>
+																			<a
+																				class="mt-1.5 inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"
+																				href={`https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(v.vuln_id)}`}
+																				target="_blank"
+																				rel="noopener noreferrer"
+																			>
+																				CISA catalog entry
+																				<ExternalLink class="h-3 w-3" />
+																			</a>
+																		</div>
 																	{/if}
-																	{#if epss !== undefined && epss !== null && epss > 0}
-																		<span
-																			class="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-0.5 text-xs font-semibold text-orange-400"
-																			title={epssPct !== undefined ? `EPSS percentile ${(epssPct * 100).toFixed(1)}%` : 'EPSS exploit-prediction score'}
-																		>
-																			EPSS {(epss * 100).toFixed(1)}%
-																			{#if epssPct !== undefined}
-																				<span class="text-[10px] opacity-70">(p{(epssPct * 100).toFixed(0)})</span>
-																			{/if}
-																		</span>
-																	{/if}
-																	{#each sources ?? [] as src}
-																		<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-xs text-[var(--text-tertiary)]">{src}</span>
-																	{/each}
-																</div>
-															{/if}
 
-															{#if v.aliases && v.aliases.length > 0}
-																<div class="mt-3 flex flex-wrap items-center gap-1">
-																	<span class="text-xs text-[var(--text-tertiary)]">Aliases:</span>
-																	{#each v.aliases as a}
+																	{#if epss !== undefined && epss !== null && epss > 0}
+																		<div class="rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2.5">
+																			<div class="flex items-center justify-between gap-2">
+																				<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-orange-400">
+																					EPSS
+																				</div>
+																				<span class="text-lg font-bold text-orange-300">
+																					{(epss * 100).toFixed(1)}%
+																				</span>
+																			</div>
+																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																				FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
+																				{#if epssPct !== undefined}
+																					Higher than {(epssPct * 100).toFixed(0)}% of all scored CVEs.
+																				{/if}
+																			</p>
+																			<a
+																				class="mt-1.5 inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"
+																				href={`https://www.first.org/epss/`}
+																				target="_blank"
+																				rel="noopener noreferrer"
+																			>
+																				About EPSS
+																				<ExternalLink class="h-3 w-3" />
+																			</a>
+																		</div>
+																	{/if}
+
+																	<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
+																		<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+																			Advisory
+																		</div>
+																		<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																			Canonical entry on <strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
+																		</p>
 																		<a
-																			class="font-mono text-xs text-[var(--accent)] hover:underline"
-																			href={vulnUrl(a)}
+																			class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
+																			href={adv.href}
+																			target="_blank"
+																			rel="noopener noreferrer"
 																		>
-																			{a}
+																			Open {v.vuln_id} on {adv.label}
+																			<ExternalLink class="h-3 w-3" />
 																		</a>
-																	{/each}
+																	</div>
 																</div>
-															{/if}
+															</div>
 														{/if}
 													</td>
 												</tr>
