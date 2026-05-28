@@ -976,6 +976,55 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
+// ImageNamespacesHandler returns the distinct list of namespaces that
+// appear in cluster_image_inventory after ACL + liveness filtering.
+// Feeds the Images-tab namespace filter dropdown so the options reflect
+// every namespace the caller can see, not just the ones on the currently
+// loaded image page.
+func ImageNamespacesHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		namespaces := []string{}
+		ctx := r.Context()
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
+		if deny {
+			writeJSON(w, http.StatusOK, namespaces)
+			return
+		}
+
+		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
+			clustersummary.TriggerRefresh(db)
+			writeJSON(w, http.StatusOK, namespaces)
+			return
+		}
+
+		includeInactive := isTruthy(r.URL.Query().Get("include_inactive"))
+		livenessJoin := ""
+		if !includeInactive {
+			livenessJoin = "JOIN cluster_sessions sess ON sess.cluster_id = cii.cluster_id AND sess.last_push_at >= NOW() - " + liveWindowInterval()
+		}
+
+		aclWhere := ""
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+		}
+
+		query := `
+			SELECT DISTINCT cii.namespace
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` AND cii.namespace <> ''
+			ORDER BY cii.namespace
+		`
+		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&namespaces).Error; err != nil {
+			log.Printf("ImageNamespacesHandler query error: %v", err)
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, namespaces)
+	}
+}
+
 // ExposureHandler returns internet vs internal resource counts.
 func ExposureHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1128,6 +1177,22 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 			if len(values) > 0 {
 				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
 				preGroupWhere += `AND cii.cluster_id IN (` + placeholders + `) `
+				preGroupArgs = append(preGroupArgs, values...)
+			}
+		}
+		// Namespace multi-select. Same shape as registries/cluster_ids —
+		// applied pre-GROUP BY so cluster_count / container_count reflect
+		// only the rows in the selected namespaces.
+		if rawNs := r.URL.Query().Get("namespaces"); rawNs != "" {
+			values := []any{}
+			for _, v := range strings.Split(rawNs, ",") {
+				if v = strings.TrimSpace(v); v != "" {
+					values = append(values, v)
+				}
+			}
+			if len(values) > 0 {
+				placeholders := strings.TrimRight(strings.Repeat("?,", len(values)), ",")
+				preGroupWhere += `AND cii.namespace IN (` + placeholders + `) `
 				preGroupArgs = append(preGroupArgs, values...)
 			}
 		}

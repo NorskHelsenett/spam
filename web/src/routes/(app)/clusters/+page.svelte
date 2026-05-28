@@ -254,6 +254,7 @@
 			imageSearch,
 			imageSelectedRegistries,
 			imageSelectedClusters,
+			imageSelectedNamespaces,
 			hostSearch,
 			hostSelectedClusters,
 			hostSelectedNamespaces,
@@ -272,6 +273,7 @@
 			imageSearch?: string;
 			imageSelectedRegistries?: string[];
 			imageSelectedClusters?: string[];
+			imageSelectedNamespaces?: string[];
 			hostSearch?: string;
 			hostSelectedClusters?: string[];
 			hostSelectedNamespaces?: string[];
@@ -285,6 +287,7 @@
 			if (v.imageSearch !== undefined) imageSearch = v.imageSearch;
 			if (v.imageSelectedRegistries) imageSelectedRegistries = v.imageSelectedRegistries;
 			if (v.imageSelectedClusters) imageSelectedClusters = v.imageSelectedClusters;
+			if (v.imageSelectedNamespaces) imageSelectedNamespaces = v.imageSelectedNamespaces;
 			if (v.hostSearch !== undefined) hostSearch = v.hostSearch;
 			if (v.hostSelectedClusters) hostSelectedClusters = v.hostSelectedClusters;
 			if (v.hostSelectedNamespaces) hostSelectedNamespaces = v.hostSelectedNamespaces;
@@ -436,6 +439,7 @@
 		if (q) params.set('q', q);
 		if (imageSelectedRegistries.length > 0) params.set('registries', imageSelectedRegistries.join(','));
 		if (imageSelectedClusters.length > 0) params.set('cluster_ids', imageSelectedClusters.join(','));
+		if (imageSelectedNamespaces.length > 0) params.set('namespaces', imageSelectedNamespaces.join(','));
 		params.set('sort', String(imageSortKey));
 		params.set('order', imageSortDir);
 		return `/api/clusters/images/detail?${params}`;
@@ -676,8 +680,30 @@
 		// Same untrack guard as the hosts tab-open effect: prevents
 		// loadImages's internal reads from becoming tracked deps and
 		// causing a state-write-driven reload loop.
-		if (activeTab === 'images') untrack(() => loadImages());
+		if (activeTab === 'images') {
+			untrack(() => {
+				loadImages();
+				loadImageNamespaces();
+			});
+		}
 	});
+
+	// Distinct namespaces for the Images filter dropdown. Lightweight —
+	// one row per namespace — so we fetch it fresh whenever the Images
+	// tab opens or include_inactive flips. Mirrors how the hosts summary
+	// powers the host filter dropdowns.
+	const loadImageNamespaces = async () => {
+		try {
+			const params = new URLSearchParams();
+			if (includeInactive) params.set('include_inactive', 'true');
+			const qs = params.toString() ? `?${params}` : '';
+			const res = await fetch(`/api/clusters/images/namespaces${qs}`, { credentials: 'include' });
+			if (res.ok) {
+				const body = await res.json().catch(() => null);
+				imageNamespaceFacet = Array.isArray(body) ? body : [];
+			}
+		} catch { /* silent — dropdown just stays empty */ }
+	};
 
 	// Debounced reload whenever any image filter or sort changes. Same
 	// pattern as the hosts side — server-side pagination means client
@@ -690,6 +716,7 @@
 			imageSearch,
 			imageSelectedRegistries.join(' '),
 			imageSelectedClusters.join(' '),
+			imageSelectedNamespaces.join(' '),
 			imageSortKey,
 			imageSortDir
 		];
@@ -813,7 +840,10 @@
 		// Unfiltered snapshot has to refresh too — the activity scope
 		// changed so the totals shown on the page-level cards are stale.
 		loadUnfiltered();
-		if (activeTab === 'images') loadImages();
+		if (activeTab === 'images') {
+			loadImages();
+			loadImageNamespaces();
+		}
 	});
 
 	// Page-level metric cards bind to the unfiltered set so they don't
@@ -970,6 +1000,11 @@
 	let imageSearch = $state('');
 	let imageSelectedRegistries: string[] = $state([]);
 	let imageSelectedClusters: string[] = $state([]);
+	let imageSelectedNamespaces: string[] = $state([]);
+	// Namespace facet for the Images filter. Loaded from
+	// /api/clusters/images/namespaces so the dropdown shows every
+	// namespace the caller can see, not only those on the loaded page.
+	let imageNamespaceFacet: string[] = $state([]);
 
 	// Registry options come from /api/clusters/registry-distribution
 	// (registryDist), which already aggregates every registry across
@@ -992,10 +1027,15 @@
 			.map((c) => ({ value: c.cluster_id, label: displayClusterName(c) }))
 	);
 
+	const imageNamespaceOptions: MultiSelectOption[] = $derived(
+		imageNamespaceFacet.map((n) => ({ value: n, label: n }))
+	);
+
 	const imageActiveFilterCount = $derived(
 		(imageSearch.trim() ? 1 : 0) +
 		(imageSelectedRegistries.length > 0 ? 1 : 0) +
-		(imageSelectedClusters.length > 0 ? 1 : 0)
+		(imageSelectedClusters.length > 0 ? 1 : 0) +
+		(imageSelectedNamespaces.length > 0 ? 1 : 0)
 	);
 
 	// Image search + registry + cluster filters are server-side via
@@ -1007,6 +1047,7 @@
 		imageSearch = '';
 		imageSelectedRegistries = [];
 		imageSelectedClusters = [];
+		imageSelectedNamespaces = [];
 	};
 
 	// --- Host filters ---
@@ -1434,6 +1475,11 @@
 								<div class="flex flex-col gap-1">
 									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Cluster</span>
 									<MultiSelect bind:selected={imageSelectedClusters} options={imageClusterOptions} placeholder="All clusters" size="sm" />
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Namespace</span>
+									<MultiSelect bind:selected={imageSelectedNamespaces} options={imageNamespaceOptions} placeholder="All namespaces" size="sm" />
 								</div>
 
 								{#if imageActiveFilterCount > 0}
