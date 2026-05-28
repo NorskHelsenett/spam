@@ -7,22 +7,26 @@
 		ArrowLeft,
 		Container,
 		ExternalLink,
-		CheckCircle,
 		Clock,
 		Server,
-		History,
 		GitBranch,
 		Shield,
+		ShieldCheck,
 		ShieldAlert,
 		ShieldX,
 		Package,
 		Copy,
-		AlertCircle
+		AlertCircle,
+		KeyRound,
+		Tag,
+		FileBox,
+		ChevronDown,
+		ChevronRight,
+		Eye
 	} from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
-	import ImageScanDetail from '$lib/components/ImageScanDetail.svelte';
-	import RunTable, { type RunTableItem } from '$lib/components/RunTable.svelte';
-	import VulnerabilitiesDialog, { type VulnerabilityDialogItem } from '$lib/components/VulnerabilitiesDialog.svelte';
+	import Dialog from '$lib/components/Dialog.svelte';
+	import Loading from '$lib/components/Loading.svelte';
 
 	type LinkedRepo = {
 		repo_id: string;
@@ -33,14 +37,6 @@
 		provider_id?: string;
 		source?: string;
 		revision?: string;
-	};
-
-	type ScanHistoryRow = {
-		job_id: string;
-		status: string;
-		created_at: string;
-		finished_at?: string;
-		vuln_count: number;
 	};
 
 	type ClusterUsageRow = {
@@ -60,6 +56,27 @@
 		total: number;
 	};
 
+	type OCIMetadata = {
+		created?: string;
+		architecture?: string;
+		os?: string;
+		author?: string;
+	};
+
+	type SignatureInfo = {
+		signed: boolean;
+		verified: boolean;
+		error?: string;
+	};
+
+	type SecretRow = {
+		rule_id: string;
+		description?: string;
+		file?: string;
+		start_line?: number;
+		match?: string;
+	};
+
 	type ImageDetail = {
 		id: string;
 		registry: string;
@@ -67,23 +84,100 @@
 		digest: string;
 		created_at: string;
 		linked_repo?: LinkedRepo;
-		scan_history?: ScanHistoryRow[];
-		latest_scan_id?: string;
+		latest_scan_at?: string;
 		cluster_usage?: ClusterUsageRow[];
 		vuln_severity?: VulnSeverity;
+		secret_count: number;
+		image_secrets?: SecretRow[];
+		image_labels?: Record<string, string>;
+		image_oci_metadata?: OCIMetadata;
+		image_signature?: SignatureInfo;
+		sbom_id?: string;
+		sbom_component_count?: number;
 	};
 
+	type VulnGroup = {
+		vuln_id: string;
+		severity: string;
+		pkg_name: string;
+		installed_version: string;
+		fixed_version: string;
+		title: string;
+		description: string;
+		sources: string[];
+		aliases?: string[];
+		kev_known?: boolean;
+		epss_score?: number;
+	};
+
+	type VulnListResponse = {
+		total: number;
+		limit: number;
+		offset: number;
+		items: VulnGroup[];
+	};
+
+	type VulnAffectedRepo = {
+		repo_id: string;
+		repo_slug: string;
+		provider?: string;
+		provider_instance_id?: string;
+		org?: string;
+		slug?: string;
+	};
+	type VulnAffectedImage = {
+		image_id: string;
+		image_slug: string;
+		image_digest: string;
+	};
+	type VulnAuthority = {
+		vuln_id: string;
+		prefix: string;
+		severity?: string;
+		cvss_score?: number;
+		cvss_vector?: string;
+		is_primary: boolean;
+	};
+	type VulnDetail = {
+		vuln_id: string;
+		title: string;
+		description: string;
+		severity: string;
+		sources: string[];
+		enrichment_loading?: boolean;
+		kev_known?: boolean;
+		kev_known_ransomware?: boolean;
+		kev_date_added?: string;
+		epss_score?: number;
+		epss_percentile?: number;
+		affected_repos?: VulnAffectedRepo[];
+		affected_images?: VulnAffectedImage[];
+		repo_count?: number;
+		image_count?: number;
+		authorities?: VulnAuthority[];
+	};
+
+	type VulnDetailState =
+		| { status: 'loading' }
+		| { status: 'ready'; data: VulnDetail }
+		| { status: 'error'; message: string };
+
 	let image = $state<ImageDetail | null>(null);
-	let latestScan = $state<any>(null);
 	let loading = $state(true);
 	let error = $state('');
-	let activeTab = $state('scans');
+	let activeTab = $state('vulnerabilities');
 	let copied = $state(false);
-	let vulnDialogOpen = $state(false);
-	let vulnDialogLoading = $state(false);
-	let vulnDialogData = $state<VulnerabilityDialogItem[]>([]);
 
-	const shortDigest = (digest: string) => {
+	let vulns = $state<VulnGroup[]>([]);
+	let vulnTotal = $state(0);
+	let vulnLoading = $state(false);
+	let vulnError = $state('');
+	let vulnSeverityFilter = $state<string>('ALL');
+	let expandedVuln = $state<string>('');
+	let vulnDetails = $state<Record<string, VulnDetailState>>({});
+
+	const shortDigest = (digest: string | undefined | null) => {
+		if (!digest) return '';
 		const i = digest.indexOf(':');
 		if (i < 0) return digest.slice(0, 12);
 		return digest.slice(0, i + 13);
@@ -112,12 +206,6 @@
 				return;
 			}
 			image = await res.json();
-			latestScan = null;
-			vulnDialogData = [];
-			if (image?.latest_scan_id) {
-				const scanRes = await fetch(`/api/runs/${image.latest_scan_id}`, { credentials: 'include' });
-				if (scanRes.ok) latestScan = await scanRes.json();
-			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load image';
 		} finally {
@@ -125,31 +213,79 @@
 		}
 	};
 
-	onMount(() => {
-		if (browser) loadImage();
-	});
-
-	// Prefer history.back() so the referring page's scroll + state
-	// restores; fall back to /app when this page was loaded directly
-	// (image-detail routes are reached from several places — search,
-	// secrets, providers/repo — so there's no single canonical parent).
-	const goBack = () => {
-		if (!browser) return;
-		if (window.history.length > 1) {
-			history.back();
-		} else {
-			goto('/');
+	const loadVulns = async () => {
+		const id = $page.params.id;
+		if (!id) return;
+		vulnLoading = true;
+		vulnError = '';
+		try {
+			const params = new URLSearchParams({ limit: '100', offset: '0' });
+			if (vulnSeverityFilter !== 'ALL') params.set('severity', vulnSeverityFilter);
+			const res = await fetch(
+				`/api/images/${encodeURIComponent(id)}/vulnerabilities?${params.toString()}`,
+				{ credentials: 'include' }
+			);
+			if (!res.ok) {
+				vulnError = res.status === 404 ? 'No vulnerability data' : 'Failed to load vulnerabilities';
+				vulns = [];
+				vulnTotal = 0;
+				return;
+			}
+			const data: VulnListResponse = await res.json();
+			vulns = data.items ?? [];
+			vulnTotal = data.total ?? 0;
+		} catch (e) {
+			vulnError = e instanceof Error ? e.message : 'Failed to load vulnerabilities';
+			vulns = [];
+			vulnTotal = 0;
+		} finally {
+			vulnLoading = false;
 		}
 	};
 
-	const formatDate = (iso: string) => {
+	onMount(() => {
+		if (browser) {
+			loadImage();
+			loadVulns();
+		}
+	});
+
+	$effect(() => {
+		// Re-fetch when severity filter changes.
+		vulnSeverityFilter;
+		if (browser && image) loadVulns();
+	});
+
+	// Prefer history.back() so the referring page's scroll + state
+	// restores; fall back to /app when this page was loaded directly.
+	const goBack = () => {
+		if (!browser) return;
+		if (window.history.length > 1) history.back();
+		else goto('/');
+	};
+
+	const formatDate = (iso: string | undefined) => {
 		if (!iso) return '—';
 		return new Date(iso).toLocaleString();
 	};
-	const formatShortDate = (iso: string) => {
+	const formatShortDate = (iso: string | undefined) => {
 		if (!iso) return '—';
 		return new Date(iso).toLocaleDateString();
 	};
+	const relativeTime = (iso: string | undefined) => {
+		if (!iso) return '—';
+		const diff = Date.now() - new Date(iso).getTime();
+		const m = Math.floor(diff / 60000);
+		if (m < 1) return 'just now';
+		if (m < 60) return `${m}m ago`;
+		const h = Math.floor(m / 60);
+		if (h < 24) return `${h}h ago`;
+		const d = Math.floor(h / 24);
+		if (d < 30) return `${d}d ago`;
+		const mo = Math.floor(d / 30);
+		return `${mo}mo ago`;
+	};
+
 	const clusterCount = $derived(
 		new Set((image?.cluster_usage ?? []).map((c) => c.cluster)).size
 	);
@@ -157,51 +293,149 @@
 	const podCount = $derived(
 		(image?.cluster_usage ?? []).reduce((sum, c) => sum + c.pod_count, 0)
 	);
-	const scanCount = $derived(image?.scan_history?.length ?? 0);
-	const lastScanAt = $derived(image?.scan_history?.[0]?.created_at);
 	const severity = $derived(
 		image?.vuln_severity ?? { critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 }
 	);
-	const scanRunTableItems = $derived<RunTableItem[]>(
-		(image?.scan_history ?? []).map((scan) => ({
-			id: scan.job_id,
-			href: `/runs/${scan.job_id}`,
-			status: scan.status,
-			started_at: scan.created_at,
-			finished_at: scan.finished_at,
-			badges: scan.vuln_count > 0
-				? [{ label: `${scan.vuln_count} vuln${scan.vuln_count === 1 ? '' : 's'}`, tone: 'warning' }]
-				: scan.status === 'SUCCEEDED'
-					? [{ label: 'clean', tone: 'success' }]
-					: []
-		}))
+	const componentCount = $derived(image?.sbom_component_count ?? 0);
+	const secretCount = $derived(image?.secret_count ?? 0);
+	const ociMeta = $derived(image?.image_oci_metadata);
+	const sig = $derived(image?.image_signature);
+	const labels = $derived(image?.image_labels ?? {});
+	const labelEntries = $derived(
+		Object.entries(labels).sort(([a], [b]) => a.localeCompare(b))
 	);
 
-	const openVulnDialog = async () => {
-		vulnDialogOpen = true;
-		if (vulnDialogData.length > 0) return;
-		vulnDialogLoading = true;
-		try {
-			const rows = latestScan?.image_vulns ?? [];
-			const byID = new Map<string, VulnerabilityDialogItem>();
-			for (const row of rows) {
-				if (!row?.vuln_id || byID.has(row.vuln_id)) continue;
-				byID.set(row.vuln_id, {
-					vuln_id: row.vuln_id,
-					severity: row.severity || 'UNKNOWN',
-					pkg_name: row.pkg_name || '',
-					installed_version: row.installed_version || '',
-					fixed_version: row.fixed_version || '',
-					title: row.title || '',
-					description: '',
-					sources: row.scanner ? [row.scanner] : []
-				});
-			}
-			vulnDialogData = Array.from(byID.values());
-		} finally {
-			vulnDialogLoading = false;
+	const severityClass = (s: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return 'text-red-400 border-red-500/40 bg-red-500/10';
+			case 'HIGH':     return 'text-orange-400 border-orange-500/40 bg-orange-500/10';
+			case 'MEDIUM':   return 'text-yellow-400 border-yellow-500/40 bg-yellow-500/10';
+			case 'LOW':      return 'text-blue-400 border-blue-500/40 bg-blue-500/10';
+			default:         return 'text-[var(--text-muted)] border-[var(--border-color)] bg-transparent';
 		}
 	};
+
+	const vulnUrl = (id: string) => `/vuln/${encodeURIComponent(id)}`;
+
+	// Canonical external advisory link for the given vuln id. CVE-* → NVD
+	// gets users the CVSS vector + CWE; GHSA / BIT / GO / PYSEC / OSV-* go
+	// to the authority that publishes them. Anything we don't recognise
+	// falls back to OSV.dev which aggregates most ecosystems.
+	const advisoryLink = (id: string): { href: string; label: string } => {
+		const u = id.toUpperCase();
+		if (u.startsWith('CVE-')) return { href: `https://nvd.nist.gov/vuln/detail/${id}`, label: 'NVD' };
+		if (u.startsWith('GHSA-')) return { href: `https://github.com/advisories/${id}`, label: 'GitHub Advisory' };
+		if (u.startsWith('GO-')) return { href: `https://pkg.go.dev/vuln/${id}`, label: 'Go vuln DB' };
+		if (u.startsWith('PYSEC-')) return { href: `https://osv.dev/vulnerability/${id}`, label: 'OSV.dev' };
+		if (u.startsWith('RUSTSEC-')) return { href: `https://rustsec.org/advisories/${id}`, label: 'RustSec' };
+		if (u.startsWith('BIT-')) return { href: `https://github.com/bitnami/vulndb`, label: 'Bitnami VulnDB' };
+		return { href: `https://osv.dev/vulnerability/${id}`, label: 'OSV.dev' };
+	};
+
+	const fetchVulnDetail = async (id: string) => {
+		// Hit the same endpoint /vulnerabilities uses. Backend enqueues a
+		// VULN_META_FETCH on miss; we re-poll once on enrichment_loading
+		// to pick up the freshly fetched description without forcing the
+		// user to click again.
+		try {
+			const res = await fetch(`/api/vulnerabilities/${encodeURIComponent(id)}`, {
+				credentials: 'include'
+			});
+			if (!res.ok) {
+				vulnDetails = {
+					...vulnDetails,
+					[id]: { status: 'error', message: `Failed (${res.status})` }
+				};
+				return;
+			}
+			const data: VulnDetail = await res.json();
+			vulnDetails = { ...vulnDetails, [id]: { status: 'ready', data } };
+			if (data.enrichment_loading) {
+				// Best-effort: give the worker ~3s to populate vuln_metadata,
+				// then refetch once. Avoid a tight poll loop — the user can
+				// always click again.
+				setTimeout(async () => {
+					try {
+						const r2 = await fetch(`/api/vulnerabilities/${encodeURIComponent(id)}`, {
+							credentials: 'include'
+						});
+						if (r2.ok) {
+							const d2: VulnDetail = await r2.json();
+							if (!d2.enrichment_loading || d2.description) {
+								vulnDetails = { ...vulnDetails, [id]: { status: 'ready', data: d2 } };
+							}
+						}
+					} catch {
+						/* ignore re-poll errors */
+					}
+				}, 3000);
+			}
+		} catch (e) {
+			vulnDetails = {
+				...vulnDetails,
+				[id]: { status: 'error', message: e instanceof Error ? e.message : 'Failed' }
+			};
+		}
+	};
+
+	const toggleVuln = (id: string) => {
+		const opening = expandedVuln !== id;
+		expandedVuln = opening ? id : '';
+		if (opening && !vulnDetails[id]) {
+			vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
+			fetchVulnDetail(id);
+		}
+	};
+
+	// Warm /api/vulnerabilities/{id} in the background for every visible
+	// row right after the list loads. The backend enqueues a
+	// VULN_META_FETCH on miss, so this also kicks off enrichment for
+	// CVEs we haven't seen yet — by the time the user expands a row the
+	// description / CVSS / EPSS / KEV are already cached client-side.
+	// Concurrency=4 keeps the request fan-out reasonable on big images.
+	const prefetchAll = async (ids: string[]) => {
+		const queue = ids.filter((id) => !vulnDetails[id]);
+		if (queue.length === 0) return;
+		for (const id of queue) {
+			if (!vulnDetails[id]) vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
+		}
+		const concurrency = 4;
+		const next = () => queue.shift();
+		const worker = async () => {
+			let id: string | undefined;
+			while ((id = next())) {
+				await fetchVulnDetail(id);
+			}
+		};
+		await Promise.all(Array.from({ length: concurrency }, worker));
+	};
+
+	let advisoryDialogOpen = $state(false);
+	let advisoryDialogId = $state('');
+	const openAdvisoryDialog = (id: string) => {
+		advisoryDialogId = id;
+		advisoryDialogOpen = true;
+		if (!vulnDetails[id]) {
+			vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
+			fetchVulnDetail(id);
+		}
+	};
+	const advisoryDialogDetail = $derived.by((): VulnDetail | null => {
+		const s = vulnDetails[advisoryDialogId];
+		return s && s.status === 'ready' ? s.data : null;
+	});
+
+	let prefetchedFor = $state<string>('');
+	$effect(() => {
+		// Fire whenever the vulns list changes (new severity filter, fresh
+		// load). Skip retriggering for the same set of ids we already
+		// prefetched for.
+		if (!browser || vulns.length === 0) return;
+		const key = vulns.map((v) => v.vuln_id).join(',');
+		if (key === prefetchedFor) return;
+		prefetchedFor = key;
+		prefetchAll(vulns.map((v) => v.vuln_id));
+	});
 </script>
 
 <svelte:head>
@@ -233,9 +467,7 @@
 	</div>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-20">
-			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-		</div>
+		<Loading message="Loading image profile" variant="bar" size="md" />
 	{:else if error}
 		<div class="panel-surface flex flex-col items-center gap-3 px-6 py-12 text-center">
 			<AlertCircle class="h-10 w-10 text-[var(--error)]" />
@@ -246,7 +478,7 @@
 		<article class="panel-surface space-y-4 px-6 py-6 sm:px-10">
 			<div class="flex items-start justify-between gap-4">
 				<div class="min-w-0 flex-1">
-					<div class="flex items-center gap-3">
+					<div class="flex flex-wrap items-center gap-3">
 						<Container class="h-6 w-6 flex-shrink-0 text-[var(--warning)]" />
 						<h1 class="truncate text-2xl font-semibold text-[var(--text-bright)]">
 							{image.repository}
@@ -254,6 +486,15 @@
 						<span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-xs text-[var(--accent)]">
 							<Package class="h-3 w-3" /> Container image
 						</span>
+						{#if sig?.verified}
+							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]" title={sig.error || 'cosign verification succeeded'}>
+								<ShieldCheck class="h-3 w-3" /> Signed & verified
+							</span>
+						{:else if sig?.signed}
+							<span class="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-400" title={sig.error || 'signature present but not verified'}>
+								<Shield class="h-3 w-3" /> Signed (unverified)
+							</span>
+						{/if}
 						{#if image.linked_repo}
 							<span class="inline-flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
 								<GitBranch class="h-3 w-3" /> Source linked
@@ -276,24 +517,21 @@
 						</button>
 					</div>
 				</div>
-				{#if image.latest_scan_id}
-					<a
-						class="btn btn-primary"
-						href={`/runs/${image.latest_scan_id}`}
-					>
-						View latest scan
-					</a>
-				{/if}
 			</div>
 
 			<!-- Quick stats row -->
 			<div class="flex flex-wrap gap-4 pt-4 text-sm text-[var(--text-secondary)]">
 				<span class="flex items-center gap-1.5">
-					<Clock class="h-4 w-4" /> First seen {formatDate(image.created_at)}
+					<Clock class="h-4 w-4" /> First seen {formatShortDate(image.created_at)}
 				</span>
-				{#if lastScanAt}
+				{#if image.latest_scan_at}
+					<span class="flex items-center gap-1.5" title={formatDate(image.latest_scan_at)}>
+						<Shield class="h-4 w-4" /> Scanned {relativeTime(image.latest_scan_at)}
+					</span>
+				{/if}
+				{#if ociMeta?.architecture || ociMeta?.os}
 					<span class="flex items-center gap-1.5">
-						<History class="h-4 w-4" /> Last scan {formatShortDate(lastScanAt)}
+						<FileBox class="h-4 w-4" /> {[ociMeta?.os, ociMeta?.architecture].filter(Boolean).join('/')}
 					</span>
 				{/if}
 				{#if clusterCount > 0}
@@ -312,33 +550,8 @@
 
 			<!-- Stats grid -->
 			<div class="grid gap-3 pt-4 sm:grid-cols-2 lg:grid-cols-4">
-				<!-- Image -->
-				<div class="space-y-3 metric-card rounded-2xl p-4">
-					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Image</h3>
-					<div class="grid grid-cols-2 gap-3">
-						<div>
-							<p class="text-2xl font-bold text-[var(--text-bright)]">{scanCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-								<History class="h-3 w-3" /> Scans
-							</p>
-						</div>
-						<div>
-							<p class="text-2xl font-bold text-[var(--text-bright)]">
-								{image.scan_history?.filter((s) => s.status === 'SUCCEEDED').length ?? 0}
-							</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
-								<CheckCircle class="h-3 w-3" /> Succeeded
-							</p>
-						</div>
-					</div>
-				</div>
-
 				<!-- Vulnerabilities -->
-				<button
-					type="button"
-					class="space-y-3 metric-card w-full rounded-2xl p-4 text-left transition-colors hover:border-[var(--accent)]/50"
-					onclick={openVulnDialog}
-				>
+				<div class="space-y-3 metric-card rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Vulnerabilities</h3>
 					<div class="grid grid-cols-2 gap-3">
 						<div>
@@ -366,9 +579,9 @@
 							</p>
 						</div>
 					</div>
-				</button>
+				</div>
 
-				<!-- Clusters -->
+				<!-- Workloads -->
 				<div class="space-y-3 metric-card rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Workloads</h3>
 					<div class="grid grid-cols-2 gap-3">
@@ -393,31 +606,58 @@
 					</div>
 				</div>
 
-				<!-- Source / Registry -->
+				<!-- Components / SBOM -->
 				<div class="space-y-3 metric-card rounded-2xl p-4">
-					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Registry</h3>
-					<div class="space-y-2">
-						<div>
-							<p class="truncate text-sm font-semibold text-[var(--text-bright)]" title={image.registry}>
-								{image.registry}
-							</p>
-							<p class="text-xs text-[var(--text-muted)]">Host</p>
-						</div>
-						<div>
-							<p class="truncate text-sm font-semibold text-[var(--text-bright)]" title={image.repository}>
-								{image.repository}
-							</p>
-							<p class="text-xs text-[var(--text-muted)]">Repository</p>
-						</div>
-						{#if image.linked_repo}
-							<a
-								class="block truncate text-xs text-[var(--accent)] hover:underline"
-								href={`/providers/repo?repo_id=${image.linked_repo.repo_id}${image.linked_repo.provider_id ? `&provider_id=${image.linked_repo.provider_id}` : ''}`}
-							>
-								{image.linked_repo.org}/{image.linked_repo.slug}
-							</a>
-						{/if}
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Components</h3>
+					<div>
+						<p class="text-2xl font-bold text-[var(--text-bright)]">{componentCount.toLocaleString()}</p>
+						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<FileBox class="h-3 w-3" /> Packages in SBOM
+						</p>
 					</div>
+					{#if image.sbom_id}
+						<a
+							class="block truncate text-xs text-[var(--accent)] hover:underline"
+							href={`/sboms/${encodeURIComponent(image.sbom_id)}`}
+						>
+							View SBOM →
+						</a>
+					{/if}
+					<div>
+						<p class="text-lg font-bold {secretCount > 0 ? 'text-orange-400' : 'text-[var(--text-secondary)]'}">
+							{secretCount.toLocaleString()}
+						</p>
+						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<KeyRound class="h-3 w-3" /> Secrets found
+						</p>
+					</div>
+				</div>
+
+				<!-- Image meta -->
+				<div class="space-y-2 metric-card rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Image</h3>
+					<div>
+						<p class="truncate text-sm font-semibold text-[var(--text-bright)]" title={image.registry}>
+							{image.registry}
+						</p>
+						<p class="text-xs text-[var(--text-muted)]">Registry</p>
+					</div>
+					{#if ociMeta?.architecture || ociMeta?.os}
+						<div>
+							<p class="text-sm font-semibold text-[var(--text-bright)]">
+								{[ociMeta?.os, ociMeta?.architecture].filter(Boolean).join('/')}
+							</p>
+							<p class="text-xs text-[var(--text-muted)]">Platform</p>
+						</div>
+					{/if}
+					{#if ociMeta?.created}
+						<div>
+							<p class="text-sm font-semibold text-[var(--text-bright)]">
+								{formatShortDate(ociMeta.created)}
+							</p>
+							<p class="text-xs text-[var(--text-muted)]">Built</p>
+						</div>
+					{/if}
 				</div>
 			</div>
 
@@ -425,25 +665,265 @@
 			<div class="pt-4">
 				<TabSelector
 					options={[
-						{ value: 'scans', label: 'Scans' },
-						{ value: 'clusters', label: 'Clusters' },
-						{ value: 'findings', label: 'Latest findings' }
+						{ value: 'vulnerabilities', label: `Vulnerabilities${vulnTotal ? ` (${vulnTotal})` : ''}` },
+						{ value: 'clusters', label: `Clusters${clusterCount ? ` (${clusterCount})` : ''}` },
+						{ value: 'secrets', label: `Secrets${secretCount ? ` (${secretCount})` : ''}` },
+						{ value: 'labels', label: 'Labels' }
 					]}
 					bind:value={activeTab}
 				/>
 
 				<div class="mt-[2em]">
-					{#if activeTab === 'scans'}
-						{#if (image.scan_history?.length ?? 0) === 0}
+					{#if activeTab === 'vulnerabilities'}
+						<div class="mb-3 flex flex-wrap items-center gap-2">
+							{#each ['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as sev}
+								<button
+									type="button"
+									class="rounded-full border px-3 py-1 text-xs font-medium transition {vulnSeverityFilter === sev ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)]'}"
+									onclick={() => (vulnSeverityFilter = sev)}
+								>
+									{sev === 'ALL' ? 'All' : sev.charAt(0) + sev.slice(1).toLowerCase()}
+								</button>
+							{/each}
+							<span class="ml-auto text-xs text-[var(--text-tertiary)]">
+								Sourced from latest SBOM revuln
+							</span>
+						</div>
+						{#if vulnLoading}
+							<Loading message="Loading vulnerabilities" variant="bar" size="sm" />
+						{:else if vulnError}
 							<div class="flex flex-col items-center justify-center py-8 text-center">
-								<History class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
-								<p class="text-sm font-medium text-[var(--text-secondary)]">No scans yet</p>
+								<AlertCircle class="mb-3 h-8 w-8 text-[var(--error)]" />
+								<p class="text-sm text-[var(--text-secondary)]">{vulnError}</p>
+							</div>
+						{:else if vulns.length === 0}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<ShieldCheck class="mb-3 h-8 w-8 text-[var(--success)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No vulnerabilities found</p>
 								<p class="mt-1 text-xs text-[var(--text-muted)]">
-									Scans will appear here once the reconciler picks up this digest.
+									This image is clean against the current advisory feeds.
 								</p>
 							</div>
 						{:else}
-							<RunTable runs={scanRunTableItems} />
+							<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+								<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-sm">
+									<thead class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+										<tr>
+											<th class="w-8 px-2 py-2.5"></th>
+											<th class="px-4 py-2.5 text-left">CVE</th>
+											<th class="px-4 py-2.5 text-left">Severity</th>
+											<th class="px-4 py-2.5 text-left">Package</th>
+											<th class="px-4 py-2.5 text-left">Installed</th>
+											<th class="px-4 py-2.5 text-left">Fixed in</th>
+											<th class="px-4 py-2.5 text-left">Signals</th>
+										</tr>
+									</thead>
+									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
+										{#each vulns as v (v.vuln_id)}
+											{@const isOpen = expandedVuln === v.vuln_id}
+											<tr
+												class="cursor-pointer transition hover:bg-[var(--hover-bg-subtle)]"
+												onclick={() => toggleVuln(v.vuln_id)}
+											>
+												<td class="px-2 py-2 text-[var(--text-tertiary)]">
+													{#if isOpen}
+														<ChevronDown class="h-4 w-4" />
+													{:else}
+														<ChevronRight class="h-4 w-4" />
+													{/if}
+												</td>
+												<td class="px-4 py-2 font-mono text-xs text-[var(--text-bright)]">
+													{v.vuln_id}
+												</td>
+												<td class="px-4 py-2">
+													<span class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(v.severity)}">
+														{v.severity || 'UNKNOWN'}
+													</span>
+												</td>
+												<td class="px-4 py-2 font-mono text-xs text-[var(--text-bright)]">{v.pkg_name || '—'}</td>
+												<td class="px-4 py-2 font-mono text-xs">{v.installed_version || '—'}</td>
+												<td class="px-4 py-2 font-mono text-xs {v.fixed_version ? 'text-[var(--success)]' : ''}">
+													{v.fixed_version || '—'}
+												</td>
+												<td class="px-4 py-2">
+													<div class="flex flex-wrap gap-1">
+														{#if v.kev_known}
+															<span class="rounded-full bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-400" title="In CISA KEV — actively exploited">KEV</span>
+														{/if}
+														{#if v.epss_score && v.epss_score >= 0.5}
+															<span class="rounded-full bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-orange-400" title="EPSS exploit-prediction score">
+																EPSS {(v.epss_score * 100).toFixed(0)}%
+															</span>
+														{/if}
+														{#each v.sources ?? [] as src}
+															<span class="rounded-full bg-[var(--hover-bg-subtle)] px-1.5 py-0.5 text-[10px] text-[var(--text-tertiary)]">{src}</span>
+														{/each}
+													</div>
+												</td>
+											</tr>
+											{#if isOpen}
+												{@const det = vulnDetails[v.vuln_id]}
+												{@const ready = det && det.status === 'ready' ? det.data : null}
+												{@const title = ready?.title || v.title}
+												{@const description = ready?.description || v.description}
+												{@const sources = ready?.sources ?? v.sources}
+												{@const enriching = ready?.enrichment_loading}
+												{@const kev = ready?.kev_known ?? v.kev_known}
+												{@const kevRansom = ready?.kev_known_ransomware ?? false}
+												{@const kevAdded = ready?.kev_date_added}
+												{@const epss = ready?.epss_score ?? v.epss_score}
+												{@const epssPct = ready?.epss_percentile}
+												{@const adv = advisoryLink(v.vuln_id)}
+												<tr class="bg-[var(--bg-soft)]/40">
+													<td colspan="7" class="px-4 py-4">
+														{#if det?.status === 'loading'}
+															<div class="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+																<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+																Loading advisory details…
+															</div>
+														{:else}
+															<div class="grid gap-4 lg:grid-cols-3">
+																<!-- Left: description + aliases -->
+																<div class="lg:col-span-2 space-y-3">
+																	{#if title}
+																		<p class="text-sm font-semibold text-[var(--text-bright)]">{title}</p>
+																	{/if}
+																	{#if description}
+																		<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{description}</p>
+																	{:else if enriching}
+																		<div class="flex items-center gap-2 text-xs italic text-[var(--text-muted)]">
+																			<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+																			Enriching from upstream feeds — re-open in a moment.
+																		</div>
+																	{:else if det?.status === 'error'}
+																		<p class="text-xs italic text-[var(--error)]">Failed to load advisory: {det.message}</p>
+																	{:else}
+																		<p class="text-xs italic text-[var(--text-muted)]">No description available — open the advisory link for full details.</p>
+																	{/if}
+
+																	{#if v.aliases && v.aliases.length > 0}
+																		<div class="flex flex-wrap items-center gap-1">
+																			<span class="text-xs text-[var(--text-tertiary)]">Aliases:</span>
+																			{#each v.aliases as a}
+																				<a
+																					class="font-mono text-xs text-[var(--accent)] hover:underline"
+																					href={vulnUrl(a)}
+																				>
+																					{a}
+																				</a>
+																			{/each}
+																		</div>
+																	{/if}
+
+																	{#if sources && sources.length > 0}
+																		<div class="flex flex-wrap items-center gap-1">
+																			<span class="text-xs text-[var(--text-tertiary)]">Sources:</span>
+																			{#each sources as src}
+																				<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-xs text-[var(--text-tertiary)]">{src}</span>
+																			{/each}
+																		</div>
+																	{/if}
+																</div>
+
+																<!-- Right: in-SPAM advisory CTA + signal cards -->
+																<div class="space-y-2">
+																	<button
+																		type="button"
+																		class="btn btn-primary w-full justify-center"
+																		onclick={(e) => { e.stopPropagation(); openAdvisoryDialog(v.vuln_id); }}
+																	>
+																		<Eye class="h-4 w-4" />
+																		View {v.vuln_id}
+																	</button>
+																	{#if kev}
+																		<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
+																			<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
+																				<ShieldX class="h-3.5 w-3.5" /> CISA KEV
+																			</div>
+																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																				Listed in CISA's <strong>Known Exploited Vulnerabilities</strong> catalog — confirmed in-the-wild exploitation. Patch on KEV-mandated timelines.
+																			</p>
+																			<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+																				{#if kevAdded}
+																					<span class="text-[var(--text-tertiary)]">Added {formatShortDate(kevAdded)}</span>
+																				{/if}
+																				{#if kevRansom}
+																					<span class="rounded-full bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">ransomware</span>
+																				{/if}
+																			</div>
+																			<a
+																				class="mt-1.5 inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"
+																				href={`https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search_api_fulltext=${encodeURIComponent(v.vuln_id)}`}
+																				target="_blank"
+																				rel="noopener noreferrer"
+																			>
+																				CISA catalog entry
+																				<ExternalLink class="h-3 w-3" />
+																			</a>
+																		</div>
+																	{/if}
+
+																	{#if epss !== undefined && epss !== null && epss > 0}
+																		<div class="rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2.5">
+																			<div class="flex items-center justify-between gap-2">
+																				<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-orange-400">
+																					EPSS
+																				</div>
+																				<span class="text-lg font-bold text-orange-300">
+																					{(epss * 100).toFixed(1)}%
+																				</span>
+																			</div>
+																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																				FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
+																				{#if epssPct !== undefined}
+																					Ranks above {(epssPct * 100).toFixed(0)}% of every CVE in the global EPSS feed.
+																				{/if}
+																			</p>
+																			<a
+																				class="mt-1.5 inline-flex items-center gap-1 text-[11px] text-[var(--accent)] hover:underline"
+																				href={`https://www.first.org/epss/`}
+																				target="_blank"
+																				rel="noopener noreferrer"
+																			>
+																				About EPSS
+																				<ExternalLink class="h-3 w-3" />
+																			</a>
+																		</div>
+																	{/if}
+
+																	<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
+																		<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+																			Canonical source
+																		</div>
+																		<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																			<strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
+																		</p>
+																		<a
+																			class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
+																			href={adv.href}
+																			target="_blank"
+																			rel="noopener noreferrer"
+																			onclick={(e) => e.stopPropagation()}
+																		>
+																			Open on {adv.label}
+																			<ExternalLink class="h-3 w-3" />
+																		</a>
+																	</div>
+																</div>
+															</div>
+														{/if}
+													</td>
+												</tr>
+											{/if}
+										{/each}
+									</tbody>
+								</table>
+							</div>
+							{#if vulnTotal > vulns.length}
+								<p class="mt-2 text-xs text-[var(--text-tertiary)]">
+									Showing {vulns.length} of {vulnTotal}.
+								</p>
+							{/if}
 						{/if}
 					{:else if activeTab === 'clusters'}
 						{#if (image.cluster_usage?.length ?? 0) === 0}
@@ -482,24 +962,108 @@
 								</table>
 							</div>
 						{/if}
-					{:else if activeTab === 'findings'}
-						{#if latestScan}
-							<div class="space-y-3">
-								<p class="text-xs text-[var(--text-muted)]">
-									Latest scan · <a
-										class="text-[var(--accent)] hover:underline"
-										href={`/runs/${latestScan.id}`}>open run</a
-									>
+					{:else if activeTab === 'secrets'}
+						{#if (image.image_secrets?.length ?? 0) === 0}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<ShieldCheck class="mb-3 h-8 w-8 text-[var(--success)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No secrets detected</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">
+									betterleaks found no leaked credentials in the latest scan.
 								</p>
-								<ImageScanDetail run={latestScan} />
 							</div>
 						{:else}
-							<div class="flex flex-col items-center justify-center py-8 text-center">
-								<Shield class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
-								<p class="text-sm font-medium text-[var(--text-secondary)]">No successful scan yet</p>
-								<p class="mt-1 text-xs text-[var(--text-muted)]">
-									Findings will appear here once a scan completes.
+							<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+								<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-sm">
+									<thead class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+										<tr>
+											<th class="px-4 py-2.5 text-left">Rule</th>
+											<th class="px-4 py-2.5 text-left">File</th>
+											<th class="px-4 py-2.5 text-left">Match</th>
+										</tr>
+									</thead>
+									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
+										{#each image.image_secrets ?? [] as s, i (s.rule_id + '@' + (s.file ?? '') + ':' + (s.start_line ?? i))}
+											<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+												<td class="px-4 py-2">
+													<p class="font-mono text-xs text-[var(--text-bright)]">{s.rule_id}</p>
+													{#if s.description}
+														<p class="text-xs text-[var(--text-muted)]">{s.description}</p>
+													{/if}
+												</td>
+												<td class="px-4 py-2 font-mono text-xs">
+													{s.file ?? '—'}{s.start_line ? `:${s.start_line}` : ''}
+												</td>
+												<td class="px-4 py-2 font-mono text-xs text-[var(--text-tertiary)]">{s.match ?? '—'}</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+							{#if secretCount > (image.image_secrets?.length ?? 0)}
+								<p class="mt-2 text-xs text-[var(--text-tertiary)]">
+									Showing first {(image.image_secrets ?? []).length} of {secretCount}; download the artifact for the full report.
 								</p>
+							{/if}
+						{/if}
+					{:else if activeTab === 'labels'}
+						{#if labelEntries.length === 0 && !ociMeta}
+							<div class="flex flex-col items-center justify-center py-8 text-center">
+								<Tag class="mb-3 h-8 w-8 text-[var(--text-muted)]" />
+								<p class="text-sm font-medium text-[var(--text-secondary)]">No labels found</p>
+								<p class="mt-1 text-xs text-[var(--text-muted)]">
+									The image config did not declare any OCI labels.
+								</p>
+							</div>
+						{:else}
+							<div class="space-y-4">
+								{#if ociMeta}
+									<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+										{#if ociMeta.created}
+											<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+												<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Created</p>
+												<p class="mt-1 text-sm font-semibold text-[var(--text-bright)]">{formatDate(ociMeta.created)}</p>
+											</div>
+										{/if}
+										{#if ociMeta.architecture}
+											<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+												<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Architecture</p>
+												<p class="mt-1 text-sm font-semibold text-[var(--text-bright)]">{ociMeta.architecture}</p>
+											</div>
+										{/if}
+										{#if ociMeta.os}
+											<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+												<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">OS</p>
+												<p class="mt-1 text-sm font-semibold text-[var(--text-bright)]">{ociMeta.os}</p>
+											</div>
+										{/if}
+										{#if ociMeta.author}
+											<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-4 py-3">
+												<p class="text-xs uppercase tracking-wider text-[var(--text-tertiary)]">Author</p>
+												<p class="mt-1 text-sm font-semibold text-[var(--text-bright)]">{ociMeta.author}</p>
+											</div>
+										{/if}
+									</div>
+								{/if}
+								{#if labelEntries.length > 0}
+									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+										<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-sm">
+											<thead class="text-xs uppercase tracking-[0.2em] text-[var(--text-tertiary)]">
+												<tr>
+													<th class="px-4 py-2.5 text-left">Label</th>
+													<th class="px-4 py-2.5 text-left">Value</th>
+												</tr>
+											</thead>
+											<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
+												{#each labelEntries as [k, val]}
+													<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
+														<td class="px-4 py-2 font-mono text-xs text-[var(--text-bright)]">{k}</td>
+														<td class="px-4 py-2 font-mono text-xs break-all">{val}</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								{/if}
 							</div>
 						{/if}
 					{/if}
@@ -509,4 +1073,217 @@
 	{/if}
 </div>
 
-<VulnerabilitiesDialog bind:open={vulnDialogOpen} loading={vulnDialogLoading} data={vulnDialogData} />
+<Dialog bind:open={advisoryDialogOpen} maxWidth="max-w-4xl">
+	{#snippet children()}
+		{@const d = advisoryDialogDetail}
+		{@const isLoading = vulnDetails[advisoryDialogId]?.status === 'loading'}
+		{@const adv = advisoryDialogId ? advisoryLink(advisoryDialogId) : { href: '', label: '' }}
+		<div class="flex h-full min-h-0 flex-col">
+			<header class="flex items-start justify-between gap-4 border-b border-[var(--border-color)]/40 px-6 py-4">
+				<div class="min-w-0 flex-1">
+					<p class="font-mono text-xs text-[var(--text-tertiary)]">Advisory</p>
+					<h2 class="mt-0.5 truncate text-lg font-semibold text-[var(--text-bright)]">{advisoryDialogId}</h2>
+					{#if d?.title}
+						<p class="mt-0.5 truncate text-sm text-[var(--text-secondary)]">{d.title}</p>
+					{/if}
+				</div>
+				<div class="flex shrink-0 items-center gap-2">
+					<a
+						class="inline-flex items-center gap-1 rounded-lg border border-[var(--border-color)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover-bg)]"
+						href={vulnUrl(advisoryDialogId)}
+					>
+						Open full page
+						<ExternalLink class="h-3 w-3" />
+					</a>
+				</div>
+			</header>
+			<div class="flex-1 overflow-y-auto px-6 py-4">
+				{#if isLoading || !d}
+					<div class="flex items-center gap-2 py-12 text-sm text-[var(--text-tertiary)]">
+						<div class="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+						Loading advisory…
+					</div>
+				{:else}
+					<div class="grid gap-5 lg:grid-cols-3">
+						<div class="lg:col-span-2 space-y-4">
+							{#if d.description}
+								<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{d.description}</p>
+							{:else if d.enrichment_loading}
+								<p class="text-xs italic text-[var(--text-muted)]">Enriching from upstream feeds — re-open in a moment.</p>
+							{:else}
+								<p class="text-xs italic text-[var(--text-muted)]">No description available. Use the canonical link on the right.</p>
+							{/if}
+
+							{#if d.authorities && d.authorities.length > 0}
+								<div>
+									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CVSS / severity by authority</h3>
+									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+										<table class="min-w-full border-separate border-spacing-0 text-sm">
+											<thead class="bg-[var(--hover-bg-subtle)] text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
+												<tr>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
+												</tr>
+											</thead>
+											<tbody class="text-[var(--text-secondary)]">
+												{#each d.authorities as a, idx (a.vuln_id)}
+													{@const isLast = idx === d.authorities.length - 1}
+													<tr>
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
+															{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
+														</td>
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
+															{#if a.severity}
+																<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
+																	{a.severity}
+																</span>
+															{:else}
+																<span class="text-xs text-[var(--text-muted)]">—</span>
+															{/if}
+														</td>
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
+															{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
+														</td>
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
+															{a.cvss_vector || '—'}
+														</td>
+													</tr>
+												{/each}
+											</tbody>
+										</table>
+									</div>
+								</div>
+							{/if}
+
+							{#if d.affected_repos && d.affected_repos.length > 0}
+								<div>
+									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+										Affected repos
+										{#if d.repo_count !== undefined && d.repo_count > d.affected_repos.length}
+											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_repos.length} of {d.repo_count}</span>
+										{/if}
+									</h3>
+									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+										{#each d.affected_repos.slice(0, 8) as r, idx (r.repo_id)}
+											{@const isLast = idx === Math.min(d.affected_repos.length, 8) - 1}
+											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
+												<span class="min-w-0 truncate font-mono text-[var(--text-bright)]" title={r.repo_slug}>
+													{r.repo_slug || r.repo_id}
+												</span>
+												<a
+													class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_instance_id ? `&provider_id=${r.provider_instance_id}` : ''}`}
+												>
+													<Eye class="h-3.5 w-3.5" />
+													View
+												</a>
+											</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+
+							{#if d.affected_images && d.affected_images.length > 0}
+								<div>
+									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+										Affected images
+										{#if d.image_count !== undefined && d.image_count > d.affected_images.length}
+											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_images.length} of {d.image_count}</span>
+										{/if}
+									</h3>
+									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+										{#each d.affected_images.slice(0, 8) as i, idx (i.image_id)}
+											{@const isLast = idx === Math.min(d.affected_images.length, 8) - 1}
+											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
+												<div class="min-w-0 flex-1">
+													<p class="truncate font-mono text-[var(--text-bright)]" title={i.image_slug}>{i.image_slug}</p>
+													{#if i.image_digest}
+														<p class="truncate font-mono text-[10px] text-[var(--text-tertiary)]">@{shortDigest(i.image_digest)}</p>
+													{/if}
+												</div>
+												{#if i.image_digest}
+													<a
+														class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+														href={`/images/${encodeURIComponent(i.image_digest)}`}
+													>
+														<Eye class="h-3.5 w-3.5" />
+														View
+													</a>
+												{/if}
+											</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+						</div>
+
+						<aside class="space-y-2">
+							{#if d.kev_known}
+								<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
+									<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
+										<ShieldX class="h-3.5 w-3.5" /> CISA KEV
+									</div>
+									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+										Listed in CISA's <strong>Known Exploited Vulnerabilities</strong> catalog — confirmed in-the-wild use. Patch on KEV-mandated timelines.
+									</p>
+									<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+										{#if d.kev_date_added}
+											<span class="text-[var(--text-tertiary)]">Added {formatShortDate(d.kev_date_added)}</span>
+										{/if}
+										{#if d.kev_known_ransomware}
+											<span class="rounded-full bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">ransomware</span>
+										{/if}
+									</div>
+								</div>
+							{/if}
+
+							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
+								<div class="rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2.5">
+									<div class="flex items-center justify-between gap-2">
+										<div class="text-xs font-semibold uppercase tracking-wider text-orange-400">EPSS</div>
+										<span class="text-lg font-bold text-orange-300">{(d.epss_score * 100).toFixed(1)}%</span>
+									</div>
+									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+										FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
+										{#if d.epss_percentile !== undefined && d.epss_percentile !== null}
+											Ranks above {(d.epss_percentile * 100).toFixed(0)}% of every CVE in the global EPSS feed.
+										{/if}
+									</p>
+								</div>
+							{/if}
+
+							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
+								<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Canonical source</div>
+								<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+									<strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
+								</p>
+								<a
+									class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
+									href={adv.href}
+									target="_blank"
+									rel="noopener noreferrer"
+								>
+									Open on {adv.label}
+									<ExternalLink class="h-3 w-3" />
+								</a>
+							</div>
+
+							{#if d.sources && d.sources.length > 0}
+								<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
+									<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Sources</div>
+									<div class="mt-1.5 flex flex-wrap gap-1">
+										{#each d.sources as s}
+											<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">{s}</span>
+										{/each}
+									</div>
+								</div>
+							{/if}
+						</aside>
+					</div>
+				{/if}
+			</div>
+		</div>
+	{/snippet}
+</Dialog>

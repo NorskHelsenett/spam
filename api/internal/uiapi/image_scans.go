@@ -6,15 +6,18 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/scam"
 	"github.com/NorskHelsenett/spam/internal/vulnmeta"
+	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
 	"gorm.io/gorm"
 )
 
@@ -350,12 +353,10 @@ func parseBetterleaksArtifact(raw []byte, maxRows int) []ImageSecretListRow {
 }
 
 // ImageDetailResponse aggregates everything the /app/images/{digest} page
-// needs in one round-trip: image identity, the claimed source repo,
-// where the image is running in your clusters, and a scan-history
-// list. The latest successful scan's full findings live under its
-// dedicated run_id — the client follows that with a separate
-// /api/runs/{id} fetch so the existing RunResponse decoding (and
-// ImageScanDetail component) is reused as-is.
+// needs in one round-trip. The page is SBOM/artifact-sourced and does
+// not follow up with /api/runs/{id} — vuln data comes from a separate
+// /api/images/{id}/vulnerabilities call so the table is the same
+// nightly-revunned canonical view as /vulnerabilities.
 type ImageDetailResponse struct {
 	ID         string    `json:"id"`
 	Registry   string    `json:"registry"`
@@ -363,11 +364,15 @@ type ImageDetailResponse struct {
 	Digest     string    `json:"digest"`
 	CreatedAt  time.Time `json:"created_at"`
 
-	LinkedRepo             *LinkedRepoSummary       `json:"linked_repo,omitempty"`
-	LinkedRepoContributors []ImageRepoContributor   `json:"linked_repo_contributors,omitempty"`
+	LinkedRepo             *LinkedRepoSummary     `json:"linked_repo,omitempty"`
+	LinkedRepoContributors []ImageRepoContributor `json:"linked_repo_contributors,omitempty"`
 
 	ScanHistory  []ImageScanHistoryRow `json:"scan_history,omitempty"`
 	LatestScanID string                `json:"latest_scan_id,omitempty"`
+	// LatestScanAt is the finished_at of the most recent successful
+	// image_scan_runs row. Independent of LatestScanID so callers can
+	// show "Last scanned 2h ago" without owning the run record.
+	LatestScanAt *time.Time `json:"latest_scan_at,omitempty"`
 
 	// Severity breakdown for the latest successful scan's findings. Lets the
 	// drawer show a quick "critical / high / medium / low" badge row without
@@ -378,6 +383,21 @@ type ImageDetailResponse struct {
 	// artifact for this digest. Drives the "secrets" chip on the image
 	// drawer + cmd+k preview without pulling the full JSON blob.
 	SecretCount int64 `json:"secret_count"`
+	// ImageSecrets is the parsed betterleaks list (capped at 500). Inlined
+	// so the page renders without a follow-up artifact download.
+	ImageSecrets []ImageSecretListRow `json:"image_secrets,omitempty"`
+
+	// OCI metadata + labels parsed from the latest scan's labels artifact.
+	ImageLabels         map[string]string `json:"image_labels,omitempty"`
+	ImageLabelsMetadata *ImageOCIMetadata `json:"image_oci_metadata,omitempty"`
+
+	// Cosign signature verdict from the latest scan's signature artifact.
+	ImageSignature *ImageSignatureInfo `json:"image_signature,omitempty"`
+
+	// SBOMID + component count, so the page can both deep-link to the SBOM
+	// and surface "N components" without the client fetching the SBOM blob.
+	SBOMID             string `json:"sbom_id,omitempty"`
+	SBOMComponentCount int    `json:"sbom_component_count,omitempty"`
 
 	ClusterUsage []ImageClusterUsageRow `json:"cluster_usage,omitempty"`
 }
@@ -428,6 +448,19 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			http.Error(w, "image reference required", http.StatusBadRequest)
 			return
 		}
+		// Chi routes on r.URL.RawPath when present, so a percent-encoded
+		// colon ("sha256%3A...") arrives un-decoded in PathValue. Unescape
+		// before lookup so encodeURIComponent'd links from the UI resolve.
+		if decoded, err := url.PathUnescape(id); err == nil {
+			id = decoded
+		}
+		// Stored digests are always "sha256:<hex>". Accept the bare
+		// hex form too so cluster-surface links that drop the prefix
+		// still resolve.
+		digest := id
+		if !strings.Contains(digest, ":") {
+			digest = "sha256:" + digest
+		}
 
 		var img struct {
 			ID             string
@@ -442,7 +475,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		if err := db.WithContext(ctx).
 			Table("image_digests").
 			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
-			Where("digest = ?", id).
+			Where("digest = ?", digest).
 			Order("created_at DESC, id DESC").
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -561,6 +594,94 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			}
 		}
 
+		// Most recent finished image_scan_runs row. Drives both the
+		// "Last scanned at" timestamp and the artifact look-ups below
+		// (labels, signature, secrets list) — all from the same scan
+		// so the page is internally consistent.
+		var latestScan struct {
+			ID         string     `gorm:"column:id"`
+			FinishedAt *time.Time `gorm:"column:finished_at"`
+		}
+		_ = db.WithContext(ctx).Table("image_scan_runs").
+			Select("id, finished_at").
+			Where("image_digest_id = ? AND finished_at IS NOT NULL", img.ID).
+			Order("finished_at DESC").
+			Limit(1).
+			Scan(&latestScan).Error
+		if latestScan.FinishedAt != nil {
+			resp.LatestScanAt = latestScan.FinishedAt
+		}
+
+		// Inline the labels / signature / secrets artifacts so the
+		// page renders without a separate /api/runs/{id} fetch. Pick
+		// the most recent artifact PER CATEGORY rather than every
+		// artifact off the most recent scan_run — the nightly
+		// sbom-scanner revuln writes new image_scan_runs rows that
+		// carry findings but no labels/signature/secrets artifacts,
+		// so a query keyed on latest_scan.id would silently return
+		// empty even when older runs hold them. DISTINCT ON keeps the
+		// newest per category. Capped at 500 secret rows.
+		var blobs []struct {
+			Category string `gorm:"column:category"`
+			Scanner  string `gorm:"column:scanner"`
+			Content  []byte `gorm:"column:content"`
+		}
+		_ = db.WithContext(ctx).Raw(`
+			SELECT DISTINCT ON (isa.category)
+			       isa.category, isa.scanner, isa.content
+			FROM image_scan_artifacts isa
+			JOIN image_scan_runs isr ON isr.id = isa.scan_run_id
+			WHERE isr.image_digest_id = ?
+			  AND isa.category IN ('labels', 'signature', 'secrets')
+			  AND isr.finished_at IS NOT NULL
+			ORDER BY isa.category, isr.finished_at DESC NULLS LAST
+		`, img.ID).Scan(&blobs).Error
+		for _, b := range blobs {
+			switch b.Category {
+			case "labels":
+				resp.ImageLabels, resp.ImageLabelsMetadata = parseLabelsArtifact(b.Content)
+			case "signature":
+				resp.ImageSignature = parseSignatureArtifact(b.Content)
+			case "secrets":
+				if b.Scanner == "betterleaks" {
+					resp.ImageSecrets = parseBetterleaksArtifact(b.Content, 500)
+				}
+			}
+		}
+
+		// Audit any read that surfaces secret content — mirrors the
+		// audit hook on /runs/{id}/secrets so non-admin reads via the
+		// image-scoped path still leave a "who looked at what" trail.
+		// Records the image_digest_id as the resource so the audit
+		// query can pivot back to the image without parsing URLs.
+		if len(resp.ImageSecrets) > 0 {
+			audit.RecordRequest(db, r, acl.SubjectFromRequest(r).UserID,
+				"images.secrets.read", img.ID, http.StatusOK)
+		}
+
+		// Latest SBOM bound to this image_digest_id, plus a component
+		// count. sbomComponentCount falls back to parsing raw content
+		// when the materialized view hasn't refreshed yet.
+		var binding struct {
+			SBOMID string `gorm:"column:sbom_id"`
+		}
+		if err := db.WithContext(ctx).Table("sbom_bindings").
+			Where("asset_type = ? AND asset_ref_id = ?", "IMAGE_DIGEST", img.ID).
+			Order("created_at DESC").
+			Select("sbom_id").First(&binding).Error; err == nil && binding.SBOMID != "" {
+			resp.SBOMID = binding.SBOMID
+			var sbom struct {
+				Format       string
+				ContentBytes []byte
+			}
+			if err := db.WithContext(ctx).Table("sboms").
+				Select("format, content_bytes").
+				Where("id = ?", binding.SBOMID).
+				First(&sbom).Error; err == nil {
+				resp.SBOMComponentCount = int(sbomComponentCount(ctx, db, binding.SBOMID, sbom.Format, sbom.ContentBytes))
+			}
+		}
+
 		// Secret-finding count from the most recent betterleaks artifact
 		// for this digest. Same query shape as /api/secrets/images but
 		// scoped to one image_digest_id. Non-fatal if the artifact JSON
@@ -638,6 +759,79 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			resp.ClusterUsage = []ImageClusterUsageRow{}
 		}
 
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// ImageVulnerabilitiesHandler returns the paginated, SBOM-derived vuln
+// list for a single image_digest. Same canonical view + caching as
+// /api/vuln/list, scoped to one image_id — so the image profile shows
+// the nightly-revunned current state instead of a point-in-time scan
+// snapshot. Gated by canReadImageByID so cluster-only callers who can
+// reach the image via cluster-image inheritance can read its findings.
+// GET /api/images/{id}/vulnerabilities?limit=&offset=&severity=&q=&source=&fix=&kev=&epss_min=&year=
+func ImageVulnerabilitiesHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !requireApproved(w, r) {
+			return
+		}
+		id := r.PathValue("id")
+		if id == "" {
+			http.Error(w, "image reference required", http.StatusBadRequest)
+			return
+		}
+		if decoded, err := url.PathUnescape(id); err == nil {
+			id = decoded
+		}
+		digest := id
+		if !strings.Contains(digest, ":") {
+			digest = "sha256:" + digest
+		}
+
+		var img struct{ ID string }
+		ctx := r.Context()
+		if err := db.WithContext(ctx).
+			Table("image_digests").
+			Select("id").
+			Where("digest = ?", digest).
+			Order("created_at DESC, id DESC").
+			First(&img).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				notFoundOrForbidden(w)
+				return
+			}
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if ok, err := canReadImageByID(r, db, img.ID); err != nil || !ok {
+			notFoundOrForbidden(w)
+			return
+		}
+
+		q := r.URL.Query()
+		params := vulnmetrics.VulnListParams{
+			Limit:      parseIntDefault(q.Get("limit"), 50),
+			Offset:     parseIntDefault(q.Get("offset"), 0),
+			Severities: splitUpper(q.Get("severity")),
+			Query:      q.Get("q"),
+			Sources:    splitLower(q.Get("source")),
+			FixOnly:    q.Get("fix") == "1" || strings.EqualFold(q.Get("fix"), "true"),
+			KEVOnly:    q.Get("kev") == "1" || strings.EqualFold(q.Get("kev"), "true"),
+			EPSSMin:    parseFloatClamped(q.Get("epss_min"), 0, 1),
+			Years:      splitCSV(q.Get("year")),
+			// Pin the image branch to this digest; suppress the repo
+			// branch so we never blend in repo-side findings even if
+			// the image has a linked source_repo_id.
+			RepoSQL:   "FALSE",
+			ImageSQL:  "v.image_id = ?",
+			ImageArgs: []any{img.ID},
+		}
+
+		resp, err := vulnmetrics.LoadListPage(ctx, db, params)
+		if err != nil {
+			http.Error(w, "failed to load image vulnerabilities", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusOK, resp)
 	}
 }

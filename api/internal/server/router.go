@@ -433,6 +433,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// new endpoint here without ACL filtering would leak data.
 			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
 			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
+			approved.Get("/api/images/{id}/vulnerabilities", uiapi.ImageVulnerabilitiesHandler(db, authService))
 			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))
 			approved.Get("/api/vuln/list", uiapi.VulnListHandler(db, authService))
 			approved.Get("/api/vuln/facets", uiapi.VulnFacetsHandler(db, authService))
