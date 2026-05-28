@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -427,6 +428,12 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		if id == "" {
 			http.Error(w, "image reference required", http.StatusBadRequest)
 			return
+		}
+		// Chi routes on r.URL.RawPath when present, so a percent-encoded
+		// colon ("sha256%3A...") arrives un-decoded in PathValue. Unescape
+		// before lookup so encodeURIComponent'd links from the UI resolve.
+		if decoded, err := url.PathUnescape(id); err == nil {
+			id = decoded
 		}
 		// Stored digests are always "sha256:<hex>". Accept the bare
 		// hex form too so cluster-surface links that drop the prefix
