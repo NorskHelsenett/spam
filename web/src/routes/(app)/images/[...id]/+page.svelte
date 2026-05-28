@@ -833,7 +833,7 @@
 																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
 																				FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
 																				{#if epssPct !== undefined}
-																					Higher than {(epssPct * 100).toFixed(0)}% of all scored CVEs.
+																					Ranks above {(epssPct * 100).toFixed(0)}% of every CVE in the global EPSS feed.
 																				{/if}
 																			</p>
 																			<a
