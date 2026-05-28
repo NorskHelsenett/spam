@@ -114,6 +114,25 @@
 		items: VulnGroup[];
 	};
 
+	type VulnDetail = {
+		vuln_id: string;
+		title: string;
+		description: string;
+		severity: string;
+		sources: string[];
+		enrichment_loading?: boolean;
+		kev_known?: boolean;
+		kev_known_ransomware?: boolean;
+		kev_date_added?: string;
+		epss_score?: number;
+		epss_percentile?: number;
+	};
+
+	type VulnDetailState =
+		| { status: 'loading' }
+		| { status: 'ready'; data: VulnDetail }
+		| { status: 'error'; message: string };
+
 	let image = $state<ImageDetail | null>(null);
 	let loading = $state(true);
 	let error = $state('');
@@ -126,6 +145,7 @@
 	let vulnError = $state('');
 	let vulnSeverityFilter = $state<string>('ALL');
 	let expandedVuln = $state<string>('');
+	let vulnDetails = $state<Record<string, VulnDetailState>>({});
 
 	const shortDigest = (digest: string) => {
 		const i = digest.indexOf(':');
@@ -267,8 +287,59 @@
 
 	const vulnUrl = (id: string) => `/vuln/${encodeURIComponent(id)}`;
 
+	const fetchVulnDetail = async (id: string) => {
+		// Hit the same endpoint /vulnerabilities uses. Backend enqueues a
+		// VULN_META_FETCH on miss; we re-poll once on enrichment_loading
+		// to pick up the freshly fetched description without forcing the
+		// user to click again.
+		try {
+			const res = await fetch(`/api/vulnerabilities/${encodeURIComponent(id)}`, {
+				credentials: 'include'
+			});
+			if (!res.ok) {
+				vulnDetails = {
+					...vulnDetails,
+					[id]: { status: 'error', message: `Failed (${res.status})` }
+				};
+				return;
+			}
+			const data: VulnDetail = await res.json();
+			vulnDetails = { ...vulnDetails, [id]: { status: 'ready', data } };
+			if (data.enrichment_loading) {
+				// Best-effort: give the worker ~3s to populate vuln_metadata,
+				// then refetch once. Avoid a tight poll loop — the user can
+				// always click again.
+				setTimeout(async () => {
+					try {
+						const r2 = await fetch(`/api/vulnerabilities/${encodeURIComponent(id)}`, {
+							credentials: 'include'
+						});
+						if (r2.ok) {
+							const d2: VulnDetail = await r2.json();
+							if (!d2.enrichment_loading || d2.description) {
+								vulnDetails = { ...vulnDetails, [id]: { status: 'ready', data: d2 } };
+							}
+						}
+					} catch {
+						/* ignore re-poll errors */
+					}
+				}, 3000);
+			}
+		} catch (e) {
+			vulnDetails = {
+				...vulnDetails,
+				[id]: { status: 'error', message: e instanceof Error ? e.message : 'Failed' }
+			};
+		}
+	};
+
 	const toggleVuln = (id: string) => {
-		expandedVuln = expandedVuln === id ? '' : id;
+		const opening = expandedVuln !== id;
+		expandedVuln = opening ? id : '';
+		if (opening && !vulnDetails[id]) {
+			vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
+			fetchVulnDetail(id);
+		}
 	};
 </script>
 
@@ -606,28 +677,82 @@
 												</td>
 											</tr>
 											{#if isOpen}
+												{@const det = vulnDetails[v.vuln_id]}
+												{@const ready = det && det.status === 'ready' ? det.data : null}
+												{@const title = ready?.title || v.title}
+												{@const description = ready?.description || v.description}
+												{@const sources = ready?.sources ?? v.sources}
+												{@const enriching = ready?.enrichment_loading}
+												{@const kev = ready?.kev_known ?? v.kev_known}
+												{@const kevRansom = ready?.kev_known_ransomware ?? false}
+												{@const kevAdded = ready?.kev_date_added}
+												{@const epss = ready?.epss_score ?? v.epss_score}
+												{@const epssPct = ready?.epss_percentile}
 												<tr class="bg-[var(--bg-soft)]/40">
 													<td colspan="7" class="px-4 py-4">
-														{#if v.title}
-															<p class="mb-2 text-sm font-semibold text-[var(--text-bright)]">{v.title}</p>
-														{/if}
-														{#if v.description}
-															<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{v.description}</p>
-														{:else}
-															<p class="text-xs italic text-[var(--text-muted)]">No description available — see the advisory link above.</p>
-														{/if}
-														{#if v.aliases && v.aliases.length > 0}
-															<div class="mt-3 flex flex-wrap gap-1">
-																<span class="text-xs text-[var(--text-tertiary)]">Aliases:</span>
-																{#each v.aliases as a}
-																	<a
-																		class="font-mono text-xs text-[var(--accent)] hover:underline"
-																		href={vulnUrl(a)}
-																	>
-																		{a}
-																	</a>
-																{/each}
+														{#if det?.status === 'loading'}
+															<div class="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
+																<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+																Loading advisory details…
 															</div>
+														{:else}
+															{#if title}
+																<p class="mb-2 text-sm font-semibold text-[var(--text-bright)]">{title}</p>
+															{/if}
+															{#if description}
+																<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{description}</p>
+															{:else if enriching}
+																<div class="flex items-center gap-2 text-xs italic text-[var(--text-muted)]">
+																	<div class="h-3 w-3 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
+																	Enriching from upstream feeds — re-open in a moment.
+																</div>
+															{:else if det?.status === 'error'}
+																<p class="text-xs italic text-[var(--error)]">Failed to load advisory: {det.message}</p>
+															{:else}
+																<p class="text-xs italic text-[var(--text-muted)]">No description available — see the advisory link above.</p>
+															{/if}
+
+															{#if kev || (epss !== undefined && epss !== null && epss > 0) || (sources && sources.length > 0)}
+																<div class="mt-3 flex flex-wrap items-center gap-2">
+																	{#if kev}
+																		<span
+																			class="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400"
+																			title={kevAdded ? `Added to CISA KEV ${formatShortDate(kevAdded)}` : 'In CISA KEV — actively exploited'}
+																		>
+																			<ShieldX class="h-3 w-3" />
+																			CISA KEV{#if kevRansom} · ransomware{/if}
+																		</span>
+																	{/if}
+																	{#if epss !== undefined && epss !== null && epss > 0}
+																		<span
+																			class="inline-flex items-center gap-1 rounded-full bg-orange-500/10 px-2 py-0.5 text-xs font-semibold text-orange-400"
+																			title={epssPct !== undefined ? `EPSS percentile ${(epssPct * 100).toFixed(1)}%` : 'EPSS exploit-prediction score'}
+																		>
+																			EPSS {(epss * 100).toFixed(1)}%
+																			{#if epssPct !== undefined}
+																				<span class="text-[10px] opacity-70">(p{(epssPct * 100).toFixed(0)})</span>
+																			{/if}
+																		</span>
+																	{/if}
+																	{#each sources ?? [] as src}
+																		<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-xs text-[var(--text-tertiary)]">{src}</span>
+																	{/each}
+																</div>
+															{/if}
+
+															{#if v.aliases && v.aliases.length > 0}
+																<div class="mt-3 flex flex-wrap items-center gap-1">
+																	<span class="text-xs text-[var(--text-tertiary)]">Aliases:</span>
+																	{#each v.aliases as a}
+																		<a
+																			class="font-mono text-xs text-[var(--accent)] hover:underline"
+																			href={vulnUrl(a)}
+																		>
+																			{a}
+																		</a>
+																	{/each}
+																</div>
+															{/if}
 														{/if}
 													</td>
 												</tr>
