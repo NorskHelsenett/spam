@@ -428,12 +428,34 @@ type ImageScanHistoryRow struct {
 // (cluster, namespace). Pulled from cluster_record so the page shows
 // *where* an image is actually deployed without needing a fresh K8s
 // query.
+//
+// Identity surfaces mirror the /api/clusters/summary shape: cluster_id
+// is the canonical kube-system UID, cluster_name is the env-var label
+// from the SCAM agent (when set), and ror_metadata is nested so the
+// frontend can tell at a glance whether the cluster has resolved its
+// ROR identity. Same operator-debugging affordance as the cluster
+// list — "did this cluster send ROR metadata, or is it on env-var
+// fallback?"
 type ImageClusterUsageRow struct {
-	Cluster   string    `json:"cluster"`
-	Namespace string    `json:"namespace"`
-	PodCount  int       `json:"pod_count"`
-	FirstSeen time.Time `json:"first_seen"`
-	LastSeen  time.Time `json:"last_seen"`
+	ClusterID   string             `json:"cluster_id"`
+	ClusterName string             `json:"cluster_name,omitempty"`
+	RorMetadata *ImageRorMetadata  `json:"ror_metadata,omitempty"`
+	Namespace   string             `json:"namespace"`
+	PodCount    int                `json:"pod_count"`
+	FirstSeen   time.Time          `json:"first_seen"`
+	LastSeen    time.Time          `json:"last_seen"`
+}
+
+// ImageRorMetadata is the nested ROR-binding object on cluster-usage
+// rows. Same field semantics as the ror_metadata object on
+// /api/clusters/summary; mirrored here so the frontend can share a
+// single render function across both surfaces. Omitted entirely from
+// the parent row when the cluster has no ROR binding (i.e. no
+// cluster_record carries `ror_metadata`).
+type ImageRorMetadata struct {
+	Slug        string `json:"slug,omitempty"`
+	ClusterName string `json:"cluster_name,omitempty"`
+	Env         string `json:"env,omitempty"`
 }
 
 // ImageDetailHandler returns the image-profile payload.
@@ -705,10 +727,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			), 0)
 		`, img.ID).Scan(&resp.SecretCount).Error
 
-		// Cluster usage from the live cluster_record feed. Resolve the
-		// cluster name via the clusters table so we don't leak the
-		// kube-system UID that the new SCAM identity scheme stamps into
-		// data->>'cluster'.
+		// Cluster usage from the live cluster_record feed.
 		//
 		// The image-read gate above (canReadImageByID) admits callers
 		// that reach the image via a verified-source repo grant or via
@@ -720,6 +739,16 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		// the workload roster is scoped to the caller's clusters. Deny
 		// → empty ClusterUsage (the image profile is still readable
 		// via its non-cluster path).
+		//
+		// Identity surfaces match /api/clusters/summary: per-group
+		// cluster_id is the canonical kube-system UID (UID-preferred
+		// when any merged record carries ror_metadata), cluster_name
+		// is the env-var label, and the ROR triple becomes a nested
+		// ror_metadata object on the response. Grouping on a slug-
+		// preferred cluster_key collapses pre/post-cutover record
+		// families for the same physical cluster onto one row (mirrors
+		// the cluster_summary MV — the dedup logic lives at every read
+		// surface that aggregates cluster_record).
 		aclFrag, aclArgs, deny := scam.ClusterACLFilterCol(r, "cr.data->>'cluster_id'")
 		if !deny {
 			aclWhere := ""
@@ -729,31 +758,74 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				queryArgs = append(queryArgs, aclArgs...)
 			}
 			type usageRow struct {
-				Cluster   string    `gorm:"column:cluster"`
-				Namespace string    `gorm:"column:namespace"`
-				PodCount  int       `gorm:"column:pod_count"`
-				FirstSeen time.Time `gorm:"column:first_seen"`
-				LastSeen  time.Time `gorm:"column:last_seen"`
+				ClusterID      string    `gorm:"column:cluster_id"`
+				ClusterName    *string   `gorm:"column:cluster_name"`
+				RorSlug        *string   `gorm:"column:ror_slug"`
+				RorClusterName *string   `gorm:"column:ror_cluster_name"`
+				RorEnv         *string   `gorm:"column:ror_env"`
+				Namespace      string    `gorm:"column:namespace"`
+				PodCount       int       `gorm:"column:pod_count"`
+				FirstSeen      time.Time `gorm:"column:first_seen"`
+				LastSeen       time.Time `gorm:"column:last_seen"`
 			}
 			var usage []usageRow
 			_ = db.WithContext(ctx).Raw(`
+				WITH merged AS (
+				  SELECT
+				    COALESCE(NULLIF(cr.data->'ror_metadata'->>'cluster_id',''), cr.data->>'cluster_id') AS cluster_key,
+				    cr.data,
+				    cr.received_at
+				  FROM cluster_record cr
+				  WHERE cr.data->>'kind' = 'Container'
+				    AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilterAlias("cr")+`
+				    AND cr.data->>'digest' = ?`+aclWhere+`
+				)
 				SELECT
-				  COALESCE(NULLIF(c.ror_cluster_name,''), NULLIF(c.ror_slug,''), cr.data->>'cluster_id') AS cluster,
-				  COALESCE(cr.data->>'namespace', '') AS namespace,
-				  COUNT(DISTINCT cr.data->>'pod_uid') AS pod_count,
-				  MIN(cr.received_at) AS first_seen,
-				  MAX(cr.received_at) AS last_seen
-				FROM cluster_record cr
-				LEFT JOIN clusters c ON c.cluster_id = cr.data->>'cluster_id'
-				WHERE cr.data->>'kind' = 'Container'
-				  AND cr.data->>'msg' != 'DELETE'`+scam.LiveRecordFilter+`
-				  AND cr.data->>'digest' = ?`+aclWhere+`
-				GROUP BY c.ror_cluster_name, c.ror_slug, cr.data->>'cluster_id', cr.data->>'namespace'
+				  COALESCE(
+				    (array_agg(m.data->>'cluster_id' ORDER BY (m.data->'ror_metadata' IS NOT NULL) DESC, m.received_at DESC))[1],
+				    MAX(m.data->>'cluster_id')
+				  )                                                              AS cluster_id,
+				  NULLIF(MAX(NULLIF(m.data->>'cluster', m.data->>'cluster_id')), '')
+				                                                                 AS cluster_name,
+				  NULLIF(MAX(m.data->'ror_metadata'->>'cluster_id'), '')         AS ror_slug,
+				  NULLIF(MAX(m.data->'ror_metadata'->>'cluster_name'), '')       AS ror_cluster_name,
+				  NULLIF(MAX(m.data->'ror_metadata'->>'env'), '')                AS ror_env,
+				  COALESCE(m.data->>'namespace', '')                             AS namespace,
+				  COUNT(DISTINCT m.data->>'pod_uid')                             AS pod_count,
+				  MIN(m.received_at)                                             AS first_seen,
+				  MAX(m.received_at)                                             AS last_seen
+				FROM merged m
+				GROUP BY m.cluster_key, COALESCE(m.data->>'namespace', '')
 				ORDER BY last_seen DESC
 			`, queryArgs...).Scan(&usage).Error
 			resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
 			for _, u := range usage {
-				resp.ClusterUsage = append(resp.ClusterUsage, ImageClusterUsageRow(u))
+				row := ImageClusterUsageRow{
+					ClusterID: u.ClusterID,
+					Namespace: u.Namespace,
+					PodCount:  u.PodCount,
+					FirstSeen: u.FirstSeen,
+					LastSeen:  u.LastSeen,
+				}
+				if u.ClusterName != nil {
+					row.ClusterName = *u.ClusterName
+				}
+				// ROR is all-or-nothing: when no merged record carried
+				// ror_metadata, every triple field is NULL and the
+				// nested object stays omitted. Gate on slug presence
+				// since slug is load-bearing (name/env can be empty
+				// strings even when a binding exists; slug isn't).
+				if u.RorSlug != nil {
+					meta := &ImageRorMetadata{Slug: *u.RorSlug}
+					if u.RorClusterName != nil {
+						meta.ClusterName = *u.RorClusterName
+					}
+					if u.RorEnv != nil {
+						meta.Env = *u.RorEnv
+					}
+					row.RorMetadata = meta
+				}
+				resp.ClusterUsage = append(resp.ClusterUsage, row)
 			}
 		} else {
 			resp.ClusterUsage = []ImageClusterUsageRow{}
