@@ -1121,22 +1121,23 @@
 								<section>
 									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CVSS / severity by authority</h3>
 									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										<table class="min-w-full divide-y divide-[var(--border-color)]/40 text-sm">
-											<thead class="text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
+										<table class="min-w-full border-separate border-spacing-0 text-sm">
+											<thead class="bg-[var(--hover-bg-subtle)] text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
 												<tr>
-													<th class="px-3 py-2 text-left">ID</th>
-													<th class="px-3 py-2 text-left">Severity</th>
-													<th class="px-3 py-2 text-left">CVSS</th>
-													<th class="px-3 py-2 text-left">Vector</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
+													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
 												</tr>
 											</thead>
-											<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
-												{#each d.authorities as a}
+											<tbody class="text-[var(--text-secondary)]">
+												{#each d.authorities as a, idx (a.vuln_id)}
+													{@const isLast = idx === d.authorities.length - 1}
 													<tr>
-														<td class="px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
 															{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
 														</td>
-														<td class="px-3 py-1.5">
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
 															{#if a.severity}
 																<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
 																	{a.severity}
@@ -1145,10 +1146,10 @@
 																<span class="text-xs text-[var(--text-muted)]">—</span>
 															{/if}
 														</td>
-														<td class="px-3 py-1.5 font-mono text-xs">
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
 															{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
 														</td>
-														<td class="px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
+														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
 															{a.cvss_vector || '—'}
 														</td>
 													</tr>
