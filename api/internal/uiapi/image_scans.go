@@ -428,6 +428,13 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			http.Error(w, "image reference required", http.StatusBadRequest)
 			return
 		}
+		// Stored digests are always "sha256:<hex>". Accept the bare
+		// hex form too so cluster-surface links that drop the prefix
+		// still resolve.
+		digest := id
+		if !strings.Contains(digest, ":") {
+			digest = "sha256:" + digest
+		}
 
 		var img struct {
 			ID             string
@@ -442,7 +449,7 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		if err := db.WithContext(ctx).
 			Table("image_digests").
 			Select("id, registry, repository, digest, created_at, source_repo_id, verified_source").
-			Where("digest = ?", id).
+			Where("digest = ?", digest).
 			Order("created_at DESC, id DESC").
 			First(&img).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
