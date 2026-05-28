@@ -256,6 +256,15 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/db/live-queries", uiapi.AdminDBLiveQueriesHandler(db, authService))
 				api.Get("/admin/db/slow-queries", uiapi.AdminDBSlowQueriesHandler(db, authService))
 
+				// Cluster identity diagnostic — surfaces the SCAM
+				// identity-cutover merge math (raw cluster_ids vs
+				// post-merge cluster_keys), the list of clusters that
+				// collapsed (so an operator can sanity-check that each
+				// merge pairs records from the same physical cluster),
+				// and clusters with no ror_metadata on any record (agents
+				// still running pre-cutover SCAM releases). Read-only.
+				api.Get("/admin/clusters/identity", uiapi.AdminClusterIdentityHandler(db, authService))
+
 				// Bulk vuln-feed refresh (CISA KEV, FIRST.org EPSS).
 				// Manual trigger jumps the auto-schedule queue; status is
 				// poll-friendly for the admin UI's progress bar.
