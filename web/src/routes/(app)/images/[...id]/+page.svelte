@@ -21,7 +21,8 @@
 		Tag,
 		FileBox,
 		ChevronDown,
-		ChevronRight
+		ChevronRight,
+		Eye
 	} from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
@@ -117,15 +118,16 @@
 
 	type VulnAffectedRepo = {
 		repo_id: string;
-		slug: string;
+		repo_slug: string;
 		provider?: string;
-		provider_id?: string;
+		provider_instance_id?: string;
+		org?: string;
+		slug?: string;
 	};
 	type VulnAffectedImage = {
 		image_id: string;
-		registry?: string;
-		repository: string;
-		digest: string;
+		image_slug: string;
+		image_digest: string;
 	};
 	type VulnAuthority = {
 		vuln_id: string;
@@ -830,10 +832,11 @@
 																<div class="space-y-2">
 																	<button
 																		type="button"
-																		class="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:opacity-90"
+																		class="btn btn-primary w-full justify-center"
 																		onclick={(e) => { e.stopPropagation(); openAdvisoryDialog(v.vuln_id); }}
 																	>
-																		Open {v.vuln_id} in SPAM
+																		<Eye class="h-4 w-4" />
+																		View {v.vuln_id}
 																	</button>
 																	{#if kev}
 																		<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
@@ -1164,14 +1167,18 @@
 											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_repos.length} of {d.repo_count}</span>
 										{/if}
 									</h3>
-									<ul class="space-y-1 text-xs">
+									<ul class="divide-y divide-[var(--border-color)]/30 overflow-hidden rounded-xl border border-[var(--border-color)]/60">
 										{#each d.affected_repos.slice(0, 8) as r}
-											<li>
+											<li class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+												<span class="min-w-0 truncate font-mono text-[var(--text-bright)]" title={r.repo_slug}>
+													{r.repo_slug || r.repo_id}
+												</span>
 												<a
-													class="font-mono text-[var(--accent)] hover:underline"
-													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_id ? `&provider_id=${r.provider_id}` : ''}`}
+													class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_instance_id ? `&provider_id=${r.provider_instance_id}` : ''}`}
 												>
-													{r.slug || r.repo_id}
+													<Eye class="h-3.5 w-3.5" />
+													View
 												</a>
 											</li>
 										{/each}
@@ -1187,16 +1194,24 @@
 											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_images.length} of {d.image_count}</span>
 										{/if}
 									</h3>
-									<ul class="space-y-1 text-xs">
+									<ul class="divide-y divide-[var(--border-color)]/30 overflow-hidden rounded-xl border border-[var(--border-color)]/60">
 										{#each d.affected_images.slice(0, 8) as i}
-											<li>
-												<a
-													class="font-mono text-[var(--accent)] hover:underline"
-													href={`/images/${encodeURIComponent(i.digest)}`}
-												>
-													{i.registry ? `${i.registry}/` : ''}{i.repository}
-													<span class="ml-1 text-[var(--text-tertiary)]">@{shortDigest(i.digest)}</span>
-												</a>
+											<li class="flex items-center justify-between gap-3 px-3 py-2 text-xs">
+												<div class="min-w-0 flex-1">
+													<p class="truncate font-mono text-[var(--text-bright)]" title={i.image_slug}>{i.image_slug}</p>
+													{#if i.image_digest}
+														<p class="truncate font-mono text-[10px] text-[var(--text-tertiary)]">@{shortDigest(i.image_digest)}</p>
+													{/if}
+												</div>
+												{#if i.image_digest}
+													<a
+														class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+														href={`/images/${encodeURIComponent(i.image_digest)}`}
+													>
+														<Eye class="h-3.5 w-3.5" />
+														View
+													</a>
+												{/if}
 											</li>
 										{/each}
 									</ul>
