@@ -29,6 +29,23 @@ type Log struct {
 
 func (Log) TableName() string { return "audit_log" }
 
+// RecordRequest is a convenience wrapper for handlers that want to
+// audit a specific read after-the-fact (e.g. conditional on the
+// response containing sensitive data). Pulls IP / UA / method off the
+// request the same way Middleware does, so single audit entries match
+// the shape produced by the middleware-wrapped routes.
+func RecordRequest(db *gorm.DB, r *http.Request, userID, action, resource string, status int) {
+	Record(db, Log{
+		UserID:    userID,
+		Action:    action,
+		Resource:  resource,
+		Method:    r.Method,
+		Status:    status,
+		IP:        clientIP(r),
+		UserAgent: truncate(r.UserAgent(), 255),
+	})
+}
+
 // Record writes an audit entry asynchronously. Failures are logged but
 // never propagated — audit must not fail the user-facing request.
 func Record(db *gorm.DB, entry Log) {

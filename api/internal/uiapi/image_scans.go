@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
@@ -633,6 +634,16 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 					}
 				}
 			}
+		}
+
+		// Audit any read that surfaces secret content — mirrors the
+		// audit hook on /runs/{id}/secrets so non-admin reads via the
+		// image-scoped path still leave a "who looked at what" trail.
+		// Records the image_digest_id as the resource so the audit
+		// query can pivot back to the image without parsing URLs.
+		if len(resp.ImageSecrets) > 0 {
+			audit.RecordRequest(db, r, acl.SubjectFromRequest(r).UserID,
+				"images.secrets.read", img.ID, http.StatusOK)
 		}
 
 		// Latest SBOM bound to this image_digest_id, plus a component
