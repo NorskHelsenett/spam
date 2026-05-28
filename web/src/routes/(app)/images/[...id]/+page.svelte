@@ -26,6 +26,7 @@
 	} from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
+	import Loading from '$lib/components/Loading.svelte';
 
 	type LinkedRepo = {
 		repo_id: string;
@@ -466,9 +467,7 @@
 	</div>
 
 	{#if loading}
-		<div class="flex items-center justify-center py-20">
-			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-		</div>
+		<Loading message="Loading image profile" variant="bar" size="md" />
 	{:else if error}
 		<div class="panel-surface flex flex-col items-center gap-3 px-6 py-12 text-center">
 			<AlertCircle class="h-10 w-10 text-[var(--error)]" />
@@ -691,9 +690,7 @@
 							</span>
 						</div>
 						{#if vulnLoading}
-							<div class="flex items-center justify-center py-12">
-								<div class="h-5 w-5 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-							</div>
+							<Loading message="Loading vulnerabilities" variant="bar" size="sm" />
 						{:else if vulnError}
 							<div class="flex flex-col items-center justify-center py-8 text-center">
 								<AlertCircle class="mb-3 h-8 w-8 text-[var(--error)]" />
