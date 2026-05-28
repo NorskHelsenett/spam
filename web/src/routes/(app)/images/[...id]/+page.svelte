@@ -1118,7 +1118,7 @@
 							{/if}
 
 							{#if d.authorities && d.authorities.length > 0}
-								<section>
+								<div>
 									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CVSS / severity by authority</h3>
 									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
 										<table class="min-w-full border-separate border-spacing-0 text-sm">
@@ -1157,11 +1157,11 @@
 											</tbody>
 										</table>
 									</div>
-								</section>
+								</div>
 							{/if}
 
 							{#if d.affected_repos && d.affected_repos.length > 0}
-								<section>
+								<div>
 									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
 										Affected repos
 										{#if d.repo_count !== undefined && d.repo_count > d.affected_repos.length}
@@ -1185,11 +1185,11 @@
 											</li>
 										{/each}
 									</ul>
-								</section>
+								</div>
 							{/if}
 
 							{#if d.affected_images && d.affected_images.length > 0}
-								<section>
+								<div>
 									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
 										Affected images
 										{#if d.image_count !== undefined && d.image_count > d.affected_images.length}
@@ -1218,7 +1218,7 @@
 											</li>
 										{/each}
 									</ul>
-								</section>
+								</div>
 							{/if}
 						</div>
 
