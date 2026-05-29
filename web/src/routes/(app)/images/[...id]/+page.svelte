@@ -851,7 +851,7 @@
 																<div class="space-y-2">
 																	<button
 																		type="button"
-																		class="btn btn-primary w-full justify-center"
+																		class="btn btn-primary mb-1 w-full justify-center shadow-none!"
 																		onclick={(e) => { e.stopPropagation(); openAdvisoryDialog(v.vuln_id); }}
 																	>
 																		<Eye class="h-4 w-4" />
