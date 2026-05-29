@@ -268,7 +268,7 @@
 			</button>
 			{#if !readOnly}
 				<button type="button" class="btn btn-primary" onclick={submit} disabled={submitting}>
-					{submitting ? 'Saving…' : 'Hide this finding'}
+					{submitting ? 'Saving…' : 'Acknowledge'}
 				</button>
 			{/if}
 		</footer>

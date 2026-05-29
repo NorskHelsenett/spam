@@ -10,10 +10,7 @@
 		GitBranch,
 		ShieldCheck,
 		Target,
-		ChevronDown,
 		ArrowUpRight,
-		BellOff,
-		Wrench,
 		KeyRound
 	} from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
@@ -22,6 +19,7 @@
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import BucketAckDialog from '$lib/components/BucketAckDialog.svelte';
+	import TriageFinding from '$lib/components/TriageFinding.svelte';
 	import { session } from '$lib/stores/session';
 
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
@@ -672,170 +670,119 @@
 					</div>
 				</div>
 			{:else}
-				{#snippet triageRow(row: TriageRow, level: 'critical' | 'warning' | 'info')}
-					{@const Icon = rowIcon(row.asset_type)}
+				{#snippet triageRow(row: TriageRow)}
 					{@const key = rowKey(row)}
 					{@const isOpen = expanded.has(key)}
-					<div class="finding" data-level={level} class:open={isOpen}>
-						<div
-							role="button"
-							tabindex="0"
-							class="finding-main"
-							aria-expanded={isOpen}
-							onclick={() => toggleExpanded(key, row)}
-							onkeydown={(e) => {
-								if (e.key === 'Enter' || e.key === ' ') {
-									e.preventDefault();
-									toggleExpanded(key, row);
-								}
-							}}
-						>
-							<span class="finding-bar" aria-hidden="true"></span>
-							<div class="finding-body">
-								<div class="finding-top">
-									<Icon size={15} class="shrink-0 text-[var(--text-muted)]" />
-									<span class="finding-slug">{row.asset_slug}</span>
-									<span class="badge">{row.asset_type}</span>
-									<span class="finding-trust" style="color: {trustColor(row.trust_grade)}" title="Trust grade">Trust {row.trust_grade}</span>
-								</div>
-								<p class="finding-action">
-									<Wrench size={13} class="shrink-0" />
-									<span>{primaryAction(row)}</span>
-								</p>
-								<div class="finding-pills">
-									{#each row.reasons.slice(0, 3) as reason}
-										<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-									{/each}
-									{#if row.reasons.length > 3}
-										<span class="pill pill-neutral">+{row.reasons.length - 3} more</span>
-									{/if}
-								</div>
-							</div>
-							<div class="finding-actions">
-								<button
-									type="button"
-									class="finding-btn"
-									disabled={isGlobalReader}
-									title={isGlobalReader ? 'Read-only role' : 'Hide this finding'}
-									onclick={(e) => {
-										e.stopPropagation();
-										if (!isGlobalReader) openAckDialog(row);
-									}}
-								>
-									<BellOff size={12} /> Acknowledge
-								</button>
-								<a
-									class="finding-btn finding-btn-open"
-									href={rowHref(row)}
-									title="Open {row.asset_type} detail"
-									onclick={(e) => e.stopPropagation()}
-								>
-									Open <ArrowUpRight size={12} />
-								</a>
-								<ChevronDown size={16} class="finding-chevron {isOpen ? 'open' : ''}" />
-							</div>
-						</div>
-
-						{#if isOpen}
+					<TriageFinding
+						assetType={row.asset_type}
+						assetSlug={row.asset_slug}
+						trustGrade={row.trust_grade}
+						href={rowHref(row)}
+						primaryAction={primaryAction(row)}
+						reasons={row.reasons.map((r) => ({ label: renderReason(r), cls: reasonPillClass(r.id) }))}
+						open={isOpen}
+						readOnly={isGlobalReader}
+						onToggle={() => toggleExpanded(key, row)}
+						onAcknowledge={() => openAckDialog(row)}
+					>
+						{#snippet detail()}
 							{@const bd = breakdownByKey.get(key)}
 							{@const bdLoading = breakdownLoadingByKey.has(key)}
-							<div class="finding-detail">
-								{#if bdLoading && !bd}
-									<div class="text-xs text-[var(--text-tertiary)]">Loading details…</div>
-								{/if}
+							{#if bdLoading && !bd}
+								<div class="text-xs text-[var(--text-tertiary)]">Loading details…</div>
+							{/if}
 
-								{#if bd}
-									<!-- Concrete drivers: the vulnerable components to act on. -->
-									{#if row.asset_type === 'cluster' && bd.contributing_images && bd.contributing_images.length > 0}
-										<div class="drivers">
-											<p class="drivers-head"><Container size={13} /> Vulnerable images driving this ({bd.contributing_images.length})</p>
-											<ul class="drivers-list">
-												{#each bd.contributing_images as img}
-													<li class="driver">
-														<div class="driver-head">
-															<a class="font-semibold text-[var(--text-bright)] hover:underline" href={`/images/${encodeURIComponent(img.digest)}`}>{img.slug}</a>
-															{#if img.namespace}<span class="badge">{img.namespace}</span>{/if}
-														</div>
-														<p class="driver-fix">
-															<span class="pill pill-error">{img.kev_count} KEV</span>
-															<span class="pill pill-warning">{img.critical_count} Critical</span>
-															— fix the image to clear it from this cluster.
-														</p>
-													</li>
-												{/each}
-											</ul>
-										</div>
-									{/if}
-
-									{#if bd.secrets && bd.secrets.length > 0}
-										<div class="drivers">
-											<p class="drivers-head"><KeyRound size={13} /> Leaked secrets to rotate ({bd.secrets.length})</p>
-											<ul class="drivers-list">
-												{#each bd.secrets.slice(0, 10) as s}
-													<li class="driver">
-														<div class="driver-head">
-															<span class="pill pill-error">{s.rule_id ?? 'secret'}</span>
-															<span class="font-mono text-xs text-[var(--text-tertiary)]">…{s.secret_hash.slice(-12)}</span>
-														</div>
-														<p class="driver-fix">
-															<span class="driver-key">Fix.</span> Rotate at the provider, then purge from git history.{#if s.source} <span class="text-[var(--text-tertiary)]">({s.source})</span>{/if}
-														</p>
-													</li>
-												{/each}
-											</ul>
-										</div>
-									{/if}
-
-									{#if bd.cves && bd.cves.length > 0}
-										<div class="drivers">
-											<p class="drivers-head"><AlertTriangle size={13} /> Vulnerabilities to patch ({bd.cves.length})</p>
-											<ul class="drivers-list">
-												{#each bd.cves.slice(0, 12) as c}
-													<li class="driver">
-														<div class="driver-head">
-															<span class={c.severity === 'CRITICAL' ? 'pill pill-error' : c.severity === 'HIGH' ? 'pill pill-warning' : 'pill pill-neutral'}>{c.severity}</span>
-															<a class="font-mono text-[var(--text-bright)] hover:underline" href={`/vulnerabilities/${encodeURIComponent(c.vuln_id)}`}>{c.vuln_id}</a>
-															{#if c.is_kev}<span class="pill pill-error">KEV</span>{/if}
-															{#if c.epss && c.epss >= 0.1}<span class="pill pill-warning">EPSS {(c.epss * 100).toFixed(0)}%</span>{/if}
-														</div>
-														<p class="driver-fix">
-															{#if c.fixed_version}
-																<span class="driver-key">Fix.</span> Upgrade to {c.fixed_version} or later.
-															{:else}
-																<span class="driver-key">Fix.</span> No upstream fix yet — pin the version and monitor.
-															{/if}
-														</p>
-													</li>
-												{/each}
-											</ul>
-										</div>
-									{/if}
-								{/if}
-
-								<!-- Why each finding matters + what to do, in plain English. -->
-								{#if row.reasons.length > 0}
+							{#if bd}
+								<!-- Concrete drivers: the vulnerable components to act on. -->
+								{#if row.asset_type === 'cluster' && bd.contributing_images && bd.contributing_images.length > 0}
 									<div class="drivers">
-										<p class="drivers-head">Why it's here, and what to do</p>
+										<p class="drivers-head"><Container size={13} /> Vulnerable images driving this ({bd.contributing_images.length})</p>
 										<ul class="drivers-list">
-											{#each row.reasons as reason}
-												{@const ex = reasonExplain(reason)}
+											{#each bd.contributing_images as img}
 												<li class="driver">
 													<div class="driver-head">
-														<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+														<a class="font-semibold text-[var(--text-bright)] hover:underline" href={`/images/${encodeURIComponent(img.digest)}`}>{img.slug}</a>
+														{#if img.namespace}<span class="badge">{img.namespace}</span>{/if}
 													</div>
-													<p class="driver-what">{ex.what}</p>
-													<p class="driver-why"><span class="driver-key">Why it matters.</span> {ex.why}</p>
-													{#if ex.action}
-														<p class="driver-fix"><span class="driver-key">Action.</span> {ex.action}</p>
-													{/if}
+													<p class="driver-fix">
+														<span class="pill pill-error">{img.kev_count} KEV</span>
+														<span class="pill pill-warning">{img.critical_count} Critical</span>
+														— fix the image to clear it from this cluster.
+													</p>
 												</li>
 											{/each}
 										</ul>
 									</div>
 								{/if}
-							</div>
-						{/if}
-					</div>
+
+								{#if bd.secrets && bd.secrets.length > 0}
+									<div class="drivers">
+										<p class="drivers-head"><KeyRound size={13} /> Leaked secrets to rotate ({bd.secrets.length})</p>
+										<ul class="drivers-list">
+											{#each bd.secrets.slice(0, 10) as s}
+												<li class="driver">
+													<div class="driver-head">
+														<span class="pill pill-error">{s.rule_id ?? 'secret'}</span>
+														<span class="font-mono text-xs text-[var(--text-tertiary)]">…{s.secret_hash.slice(-12)}</span>
+													</div>
+													<p class="driver-fix">
+														<span class="driver-key">Fix.</span> Rotate at the provider, then purge from git history.{#if s.source} <span class="text-[var(--text-tertiary)]">({s.source})</span>{/if}
+													</p>
+												</li>
+											{/each}
+										</ul>
+									</div>
+								{/if}
+
+								{#if bd.cves && bd.cves.length > 0}
+									<div class="drivers">
+										<p class="drivers-head"><AlertTriangle size={13} /> Vulnerabilities to patch ({bd.cves.length})</p>
+										<ul class="drivers-list">
+											{#each bd.cves.slice(0, 12) as c}
+												<li class="driver">
+													<div class="driver-head">
+														<span class={c.severity === 'CRITICAL' ? 'pill pill-error' : c.severity === 'HIGH' ? 'pill pill-warning' : 'pill pill-neutral'}>{c.severity}</span>
+														<a class="font-mono text-[var(--text-bright)] hover:underline" href={`/vulnerabilities/${encodeURIComponent(c.vuln_id)}`}>{c.vuln_id}</a>
+														{#if c.is_kev}<span class="pill pill-error">KEV</span>{/if}
+														{#if c.epss && c.epss >= 0.1}<span class="pill pill-warning">EPSS {(c.epss * 100).toFixed(0)}%</span>{/if}
+													</div>
+													<p class="driver-fix">
+														{#if c.fixed_version}
+															<span class="driver-key">Fix.</span> Upgrade to {c.fixed_version} or later.
+														{:else}
+															<span class="driver-key">Fix.</span> No upstream fix yet — pin the version and monitor.
+														{/if}
+													</p>
+												</li>
+											{/each}
+										</ul>
+									</div>
+								{/if}
+							{/if}
+
+							<!-- Why each finding matters + what to do, in plain English. -->
+							{#if row.reasons.length > 0}
+								<div class="drivers">
+									<p class="drivers-head">Why it's here, and what to do</p>
+									<ul class="drivers-list">
+										{#each row.reasons as reason}
+											{@const ex = reasonExplain(reason)}
+											<li class="driver">
+												<div class="driver-head">
+													<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+												</div>
+												<p class="driver-what">{ex.what}</p>
+												<p class="driver-why"><span class="driver-key">Why it matters.</span> {ex.why}</p>
+												{#if ex.action}
+													<p class="driver-fix"><span class="driver-key">Action.</span> {ex.action}</p>
+												{/if}
+											</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+						{/snippet}
+					</TriageFinding>
 				{/snippet}
 
 				<!-- Fix now -->
@@ -849,7 +796,7 @@
 						</div>
 						<div class="tier-rows">
 							{#each fixNowFiltered() as row (rowKey(row))}
-								{@render triageRow(row, 'critical')}
+								{@render triageRow(row)}
 							{/each}
 						</div>
 					</div>
@@ -866,7 +813,7 @@
 						</div>
 						<div class="tier-rows">
 							{#each thisWeekFiltered() as row (rowKey(row))}
-								{@render triageRow(row, 'warning')}
+								{@render triageRow(row)}
 							{/each}
 						</div>
 					</div>
@@ -903,7 +850,7 @@
 					{:else}
 						<div class="tier-rows">
 							{#each watchFiltered() as row (rowKey(row))}
-								{@render triageRow(row, 'info')}
+								{@render triageRow(row)}
 							{/each}
 						</div>
 
@@ -935,46 +882,43 @@
 				<div class="tier-rows">
 					{#each triage.suppressed as srow (rowKey(srow))}
 						{@const SIcon = rowIcon(srow.asset_type)}
-						<div class="finding finding-muted">
-							<div class="finding-main finding-main-static">
-								<span class="finding-bar" aria-hidden="true"></span>
-								<div class="finding-body">
-									<div class="finding-top">
-										<SIcon size={15} class="shrink-0 text-[var(--text-muted)]" />
-										<span class="finding-slug">{srow.asset_slug}</span>
-										<span class="badge">{srow.asset_type}</span>
-										<span class="pill pill-neutral">{ackSummary(srow.ack)}</span>
-									</div>
-									{#if srow.ack.reason_text}
-										<p class="finding-action finding-action-quiet">
-											<span class="italic">"{srow.ack.reason_text}"</span>
-											<span class="text-[var(--text-muted)]">— {srow.ack.created_by}</span>
-										</p>
-									{:else}
-										<p class="finding-action finding-action-quiet text-[var(--text-muted)]">Hidden by {srow.ack.created_by}</p>
-									{/if}
+						<div class="hf">
+							<div class="hf-body">
+								<div class="hf-top">
+									<SIcon size={15} class="shrink-0 text-[var(--text-muted)]" />
+									<span class="hf-slug">{srow.asset_slug}</span>
+									<span class="badge">{srow.asset_type}</span>
+									<span class="pill pill-neutral">{ackSummary(srow.ack)}</span>
 								</div>
-								<div class="finding-actions">
-									<a class="finding-btn finding-btn-open" href={rowHref(srow)} title="Open detail">Open <ArrowUpRight size={12} /></a>
-									<button
-										type="button"
-										class="finding-btn"
-										disabled={isGlobalReader}
-										title={isGlobalReader ? 'Read-only role' : 'Bring this finding back'}
-										onclick={async () => {
-											if (isGlobalReader) return;
-											const ok = window.confirm(`Bring "${srow.asset_slug}" back into the active queue?`);
-											if (!ok) return;
-											const res = await fetch(`/api/triage/acknowledge/${encodeURIComponent(srow.ack.id)}/revoke`, {
-												method: 'POST',
-												credentials: 'include'
-											});
-											if (res.ok) void reload();
-										}}
-									>
-										Revoke
-									</button>
-								</div>
+								{#if srow.ack.reason_text}
+									<p class="hf-reason">
+										<span class="italic">"{srow.ack.reason_text}"</span>
+										<span class="text-[var(--text-muted)]">— {srow.ack.created_by}</span>
+									</p>
+								{:else}
+									<p class="hf-reason text-[var(--text-muted)]">Hidden by {srow.ack.created_by}</p>
+								{/if}
+							</div>
+							<div class="hf-actions">
+								<a class="hf-btn" href={rowHref(srow)} title="Open detail">Open <ArrowUpRight size={12} /></a>
+								<button
+									type="button"
+									class="hf-btn"
+									disabled={isGlobalReader}
+									title={isGlobalReader ? 'Read-only role' : 'Bring this finding back'}
+									onclick={async () => {
+										if (isGlobalReader) return;
+										const ok = window.confirm(`Bring "${srow.asset_slug}" back into the active queue?`);
+										if (!ok) return;
+										const res = await fetch(`/api/triage/acknowledge/${encodeURIComponent(srow.ack.id)}/revoke`, {
+											method: 'POST',
+											credentials: 'include'
+										});
+										if (res.ok) void reload();
+									}}
+								>
+									Revoke
+								</button>
 							</div>
 						</div>
 					{/each}
@@ -1026,80 +970,38 @@
 		gap: 0.5rem;
 	}
 
-	/* A finding is a flat bordered card (playground language: subtle
-	   border, no drop shadow). A coloured left bar encodes urgency. */
-	.finding {
-		border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
-		border-radius: 1rem;
-		background: color-mix(in srgb, var(--card-bg) 40%, transparent);
-		overflow: hidden;
-		transition: border-color 120ms ease, background 120ms ease;
-	}
-	.finding:hover {
-		border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
-		background: var(--card-bg);
-	}
-	.finding.open {
-		border-color: color-mix(in srgb, var(--accent) 45%, var(--border-color));
-		background: var(--card-bg);
-	}
-	.finding-muted {
-		opacity: 0.85;
-	}
-
-	.finding-main {
-		position: relative;
+	/* Hidden-finding rows: a quieter single-line variant of the finding
+	   card (the active row lives in TriageFinding.svelte). Flat border,
+	   no coloured edge. */
+	.hf {
 		display: flex;
 		align-items: flex-start;
 		gap: 1rem;
-		width: 100%;
-		padding: 0.85rem 1rem 0.85rem 1.4rem;
-		border: 0;
-		background: transparent;
-		color: inherit;
-		text-align: left;
-		font: inherit;
-		cursor: pointer;
+		padding: 0.7rem 1rem;
+		border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+		border-radius: 1rem;
+		background: color-mix(in srgb, var(--card-bg) 40%, transparent);
+		opacity: 0.85;
+		transition: opacity 120ms ease, border-color 120ms ease;
 	}
-	.finding-main-static {
-		cursor: default;
+	.hf:hover {
+		opacity: 1;
+		border-color: color-mix(in srgb, var(--accent) 35%, var(--border-color));
 	}
-
-	/* Urgency bar down the left edge. */
-	.finding-bar {
-		position: absolute;
-		left: 0;
-		top: 0;
-		bottom: 0;
-		width: 4px;
-	}
-	.finding[data-level='critical'] .finding-bar {
-		background: var(--error);
-	}
-	.finding[data-level='warning'] .finding-bar {
-		background: var(--warning);
-	}
-	.finding[data-level='info'] .finding-bar {
-		background: var(--text-muted);
-	}
-	.finding-muted .finding-bar {
-		background: color-mix(in srgb, var(--text-muted) 50%, transparent);
-	}
-
-	.finding-body {
+	.hf-body {
 		flex: 1;
 		min-width: 0;
 		display: flex;
 		flex-direction: column;
-		gap: 0.4rem;
+		gap: 0.3rem;
 	}
-	.finding-top {
+	.hf-top {
 		display: flex;
 		align-items: center;
 		gap: 0.5rem;
 		flex-wrap: wrap;
 	}
-	.finding-slug {
+	.hf-slug {
 		font-weight: 600;
 		color: var(--text-bright);
 		overflow: hidden;
@@ -1107,46 +1009,18 @@
 		white-space: nowrap;
 		max-width: 60vw;
 	}
-	.finding-trust {
-		margin-left: auto;
-		font-size: 0.72rem;
-		font-weight: 600;
-		white-space: nowrap;
-	}
-
-	/* The at-a-glance "do this" line — the whole point of the row. */
-	.finding-action {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
+	.hf-reason {
 		margin: 0;
-		font-size: 0.92rem;
-		font-weight: 600;
-		color: var(--text-bright);
-	}
-	.finding-action :global(svg) {
-		color: var(--accent);
-	}
-	.finding-action-quiet {
-		font-weight: 400;
-		font-size: 0.85rem;
+		font-size: 0.82rem;
 		color: var(--text-secondary);
 	}
-
-	.finding-pills {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.35rem;
-	}
-
-	.finding-actions {
+	.hf-actions {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
 		flex-shrink: 0;
-		color: var(--text-muted);
 	}
-	.finding-btn {
+	.hf-btn {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.3rem;
@@ -1162,32 +1036,14 @@
 		white-space: nowrap;
 		transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
 	}
-	.finding-btn:hover {
+	.hf-btn:hover {
 		color: var(--text-bright);
 		border-color: color-mix(in srgb, var(--accent) 55%, transparent);
 		background: color-mix(in srgb, var(--accent) 8%, var(--card-bg));
 	}
-	.finding-btn:disabled {
+	.hf-btn:disabled {
 		opacity: 0.4;
 		cursor: not-allowed;
-	}
-	.finding-btn-open:hover {
-		color: var(--accent);
-	}
-	.finding-chevron {
-		transition: transform 120ms ease, color 120ms ease;
-	}
-	:global(.finding-chevron.open) {
-		transform: rotate(180deg);
-		color: var(--accent);
-	}
-
-	.finding-detail {
-		display: flex;
-		flex-direction: column;
-		gap: 1rem;
-		padding: 0.5rem 1rem 1rem 1.4rem;
-		border-top: 1px solid color-mix(in srgb, var(--border-color) 50%, transparent);
 	}
 
 	/* Driver groups: the concrete things to fix (CVEs, secrets, images)

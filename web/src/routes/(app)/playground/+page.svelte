@@ -16,6 +16,7 @@
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
 	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 	import UserHoverCard from '$lib/components/UserHoverCard.svelte';
+	import TriageFinding from '$lib/components/TriageFinding.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -105,6 +106,42 @@
 		{ login: 'alice', name: 'Alice Smith', email: 'alice@example.com', contributions: 34 },
 		{ login: 'bob', name: 'Bob', contributions: 12 },
 	];
+	// Triage finding rows — mock data so the row design can be previewed
+	// in isolation (it's driven live on the home dashboard).
+	const mockFindings = [
+		{
+			assetType: 'repo',
+			assetSlug: 'platform/auth-service',
+			trustGrade: 'D',
+			href: '#',
+			primaryAction: 'Rotate 2 leaked secrets now',
+			reasons: [
+				{ label: '2 active secrets', cls: 'pill pill-error' },
+				{ label: '3 KEV CVEs', cls: 'pill pill-error' },
+				{ label: 'EPSS 71%', cls: 'pill pill-warning' }
+			]
+		},
+		{
+			assetType: 'image',
+			assetSlug: 'registry.acme.io/api-gateway:1.4.2',
+			trustGrade: 'C',
+			href: '#',
+			primaryAction: 'Upgrade to clear 4 critical CVEs',
+			reasons: [
+				{ label: '4 Critical (fix avail.)', cls: 'pill pill-warning' },
+				{ label: 'Unsigned image', cls: 'pill pill-neutral' }
+			]
+		},
+		{
+			assetType: 'cluster',
+			assetSlug: 'prod-eu-north-1',
+			trustGrade: 'B',
+			href: '#',
+			primaryAction: 'Re-scan — results are 41 days stale',
+			reasons: [{ label: 'Scan 41d old', cls: 'pill pill-warning' }]
+		}
+	];
+	let triageDemoOpen = $state(true);
 	let buttonGroupValue = $state('3600');
 	let fileList = $state<FileList | null>(null);
 	let refreshing = $state(false);
@@ -688,6 +725,71 @@
 			</div>
 		</div>
 		{/if}
+	</section>
+
+	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
+		<header>
+			<h2 class="text-xl font-semibold text-[var(--text-bright)]">Triage Finding Row</h2>
+			<p class="text-sm text-[var(--text-tertiary)]">
+				The row used on the home triage dashboard. Leads with the action to take; click a row to expand its drivers. No coloured edges — urgency reads from the reason pills.
+			</p>
+		</header>
+		<div class="flex flex-col gap-2">
+			<!-- Expanded example with a mock drivers panel. -->
+			<TriageFinding
+				assetType={mockFindings[0].assetType}
+				assetSlug={mockFindings[0].assetSlug}
+				trustGrade={mockFindings[0].trustGrade}
+				href={mockFindings[0].href}
+				primaryAction={mockFindings[0].primaryAction}
+				reasons={mockFindings[0].reasons}
+				open={triageDemoOpen}
+				onToggle={() => (triageDemoOpen = !triageDemoOpen)}
+				onAcknowledge={() => {}}
+			>
+				{#snippet detail()}
+					<div class="space-y-2">
+						<p class="text-[0.7rem] font-semibold uppercase tracking-[0.1em] text-[var(--text-tertiary)]">Leaked secrets to rotate (2)</p>
+						<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)] p-3">
+							<div class="flex flex-wrap items-center gap-2">
+								<span class="pill pill-error">aws-access-key</span>
+								<span class="font-mono text-xs text-[var(--text-tertiary)]">…a91f3c0d2e</span>
+							</div>
+							<p class="mt-1 text-sm text-[var(--text-secondary)]">
+								<span class="font-semibold text-[var(--text-tertiary)]">Fix.</span> Rotate at the provider, then purge from git history.
+							</p>
+						</div>
+					</div>
+				{/snippet}
+			</TriageFinding>
+
+			<!-- Collapsed examples across asset types. -->
+			{#each mockFindings.slice(1) as f (f.assetSlug)}
+				<TriageFinding
+					assetType={f.assetType}
+					assetSlug={f.assetSlug}
+					trustGrade={f.trustGrade}
+					href={f.href}
+					primaryAction={f.primaryAction}
+					reasons={f.reasons}
+					onToggle={() => {}}
+					onAcknowledge={() => {}}
+				/>
+			{/each}
+
+			<!-- Read-only (Acknowledge disabled). -->
+			<TriageFinding
+				assetType="repo"
+				assetSlug="platform/legacy-cron"
+				trustGrade="A"
+				href="#"
+				primaryAction="Generate an SBOM so it can be scanned"
+				reasons={[{ label: 'No SBOM', cls: 'pill pill-neutral' }]}
+				readOnly
+				onToggle={() => {}}
+				onAcknowledge={() => {}}
+			/>
+		</div>
 	</section>
 
 	<section class="panel-surface space-y-8 px-6 py-8 sm:px-10 sm:py-10">
