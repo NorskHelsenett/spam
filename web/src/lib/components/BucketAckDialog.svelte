@@ -1,6 +1,6 @@
 <script lang="ts">
 	import Dialog from './Dialog.svelte';
-	import { AlertTriangle, ClockAlert, ShieldOff } from 'lucide-svelte';
+	import { BellOff, ClockAlert, RefreshCw, ShieldOff } from 'lucide-svelte';
 
 	// Acknowledgment dialog for a single triage bucket (asset). Lets the
 	// operator pick one of three suppressions, write a free-text reason,
@@ -69,6 +69,39 @@
 		}
 	});
 
+	// Each action card: icon, title, the one-line consequence, and an
+	// "effect" tag the operator reads at a glance to know how long the
+	// finding stays hidden.
+	const options: {
+		value: Action;
+		icon: typeof ClockAlert;
+		title: string;
+		desc: string;
+		effect: string;
+	}[] = [
+		{
+			value: 'snooze',
+			icon: ClockAlert,
+			title: 'Snooze until a date',
+			desc: 'Hides this finding now and brings it back automatically when the date passes.',
+			effect: 'Temporary'
+		},
+		{
+			value: 'suppress_until_change',
+			icon: RefreshCw,
+			title: 'Suppress until something changes',
+			desc: 'Stays hidden while the signals stay the same. The next scan that detects any change re-surfaces it on its own.',
+			effect: 'Self-clearing'
+		},
+		{
+			value: 'accept_risk',
+			icon: ShieldOff,
+			title: 'Accept the risk',
+			desc: 'Hides this finding permanently. It only comes back if someone revokes it by hand.',
+			effect: 'Permanent'
+		}
+	];
+
 	const fmtAction = (a: string) => {
 		switch (a) {
 			case 'snooze':
@@ -84,7 +117,7 @@
 	const submit = async () => {
 		if (readOnly) return;
 		if (!reasonText.trim()) {
-			error = 'Reason is required';
+			error = 'Add a short reason so the next person knows why this is hidden.';
 			return;
 		}
 		submitting = true;
@@ -123,115 +156,117 @@
 </script>
 
 <Dialog bind:open maxWidth="max-w-2xl">
-	<div class="space-y-5 p-6">
-		<header class="space-y-1">
-			<div class="flex items-center gap-2 text-xs uppercase tracking-widest text-[var(--text-tertiary)]">
+	<div class="flex max-h-[95vh] flex-col">
+		<header class="border-b border-[var(--border-color)]/60 px-6 py-5 sm:px-8">
+			<div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">
+				<BellOff size={13} class="text-[var(--accent)]" />
+				<span>Acknowledge finding</span>
 				<span class="badge">{assetType}</span>
-				<span>Acknowledge</span>
 			</div>
-			<h2 class="text-xl font-semibold text-[var(--text-bright)]">{assetSlug}</h2>
-			{#if headlineReasons.length > 0}
-				<div class="rounded-lg border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-2 text-sm text-[var(--text-secondary)]">
-					<div class="text-xs uppercase tracking-widest text-[var(--text-tertiary)]">In the queue because</div>
-					<ul class="mt-1 list-disc pl-5">
-						{#each headlineReasons as r}
-							<li>{r}</li>
-						{/each}
-					</ul>
-				</div>
-			{/if}
+			<h2 class="mt-2 text-xl font-semibold text-[var(--text-bright)]">{assetSlug}</h2>
+			<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+				Hiding a finding doesn't fix it — it just removes it from the active queue. Pick how long it stays hidden.
+			</p>
 		</header>
 
-		{#if readOnly}
-			<div class="rounded-lg border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-3 py-2 text-sm text-[var(--warning)]">
-				Read-only role — you can view the history but not record acknowledgments.
-			</div>
-		{:else}
-			<fieldset class="space-y-3">
-				<legend class="text-xs uppercase tracking-widest text-[var(--text-tertiary)]">Action</legend>
-
-				<label class="ack-option" class:active={action === 'snooze'}>
-					<input type="radio" bind:group={action} value="snooze" />
-					<div class="ack-option-body">
-						<div class="ack-option-head"><ClockAlert size={14} /> <span>Snooze until…</span></div>
-						<p class="ack-option-desc">Re-surfaces automatically when the date passes.</p>
-						{#if action === 'snooze'}
-							<input
-								type="date"
-								class="input mt-2"
-								bind:value={snoozeDate}
-								min={new Date().toISOString().slice(0, 10)}
-							/>
-						{/if}
+		<div class="space-y-6 overflow-y-auto px-6 py-6 sm:px-8">
+			{#if headlineReasons.length > 0}
+				<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+					<p class="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">Why it's in the queue</p>
+					<div class="mt-2 flex flex-wrap gap-1.5">
+						{#each headlineReasons as r}
+							<span class="pill pill-warning">{r}</span>
+						{/each}
 					</div>
-				</label>
-
-				<label class="ack-option" class:active={action === 'suppress_until_change'}>
-					<input type="radio" bind:group={action} value="suppress_until_change" />
-					<div class="ack-option-body">
-						<div class="ack-option-head"><AlertTriangle size={14} /> <span>Suppress unless infrastructure changes</span></div>
-						<p class="ack-option-desc">
-							Captures the current threat & trust signals. The next refresh that detects
-							any signal change automatically clears this acknowledgment.
-						</p>
-					</div>
-				</label>
-
-				<label class="ack-option" class:active={action === 'accept_risk'}>
-					<input type="radio" bind:group={action} value="accept_risk" />
-					<div class="ack-option-body">
-						<div class="ack-option-head"><ShieldOff size={14} /> <span>Accept risk (permanent)</span></div>
-						<p class="ack-option-desc">Stays suppressed until someone manually revokes it.</p>
-					</div>
-				</label>
-			</fieldset>
-
-			<label class="block space-y-1">
-				<span class="text-xs uppercase tracking-widest text-[var(--text-tertiary)]">Reason (required)</span>
-				<textarea
-					bind:value={reasonText}
-					rows="3"
-					class="input w-full font-mono"
-					placeholder="e.g. mitigated by WAF rule X, pending vendor patch ETA 2026-06-30…"
-				></textarea>
-			</label>
-
-			{#if error}
-				<div class="rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--error)]">{error}</div>
+				</div>
 			{/if}
-		{/if}
 
-		{#if history.length > 0}
-			<section class="space-y-2">
-				<div class="text-xs uppercase tracking-widest text-[var(--text-tertiary)]">History</div>
-				<ul class="space-y-1 text-sm">
-					{#each history as h}
-						<li class="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded border border-[var(--border-color)] bg-[var(--card-bg)] px-2 py-1">
-							<span class="text-[var(--text-muted)]">{new Date(h.created_at).toISOString().slice(0, 10)}</span>
-							<span class="text-[var(--text-bright)]">{h.created_by}</span>
-							<span class="text-[var(--text-secondary)]">{fmtAction(h.action)}</span>
-							{#if h.revoked_at}
-								<span class="text-[var(--text-muted)]">
-									→ revoked {new Date(h.revoked_at).toISOString().slice(0, 10)}
-									{#if h.revoked_reason}({h.revoked_reason}){/if}
-								</span>
-							{/if}
-							{#if h.reason_text}
-								<div class="w-full pl-1 text-xs text-[var(--text-tertiary)]">"{h.reason_text}"</div>
-							{/if}
-						</li>
+			{#if readOnly}
+				<div class="rounded-2xl border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-sm text-[var(--warning)]">
+					Your role is read-only — you can review the history below, but not hide findings.
+				</div>
+			{:else}
+				<fieldset class="space-y-3">
+					<legend class="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">What should happen?</legend>
+
+					{#each options as opt}
+						{@const Icon = opt.icon}
+						<label class="ack-option" class:active={action === opt.value}>
+							<input type="radio" bind:group={action} value={opt.value} />
+							<div class="min-w-0 flex-1">
+								<div class="flex items-center gap-2">
+									<Icon size={15} class="shrink-0 text-[var(--accent)]" />
+									<span class="font-semibold text-[var(--text-bright)]">{opt.title}</span>
+									<span class="ack-effect">{opt.effect}</span>
+								</div>
+								<p class="mt-1 text-sm text-[var(--text-secondary)]">{opt.desc}</p>
+								{#if opt.value === 'snooze' && action === 'snooze'}
+									<div class="mt-3 flex items-center gap-2">
+										<span class="text-xs text-[var(--text-tertiary)]">Bring back on</span>
+										<input
+											type="date"
+											class="input ack-date"
+											bind:value={snoozeDate}
+											min={new Date().toISOString().slice(0, 10)}
+										/>
+									</div>
+								{/if}
+							</div>
+						</label>
 					{/each}
-				</ul>
-			</section>
-		{/if}
+				</fieldset>
 
-		<footer class="flex justify-end gap-2 pt-2">
+				<div class="space-y-2">
+					<label for="ack-reason" class="block text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">
+						Reason <span class="text-[var(--accent)]">(required)</span>
+					</label>
+					<textarea
+						id="ack-reason"
+						bind:value={reasonText}
+						rows="3"
+						class="input"
+						placeholder="e.g. mitigated by WAF rule X — vendor patch expected 2026-06-30"
+					></textarea>
+				</div>
+
+				{#if error}
+					<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3 text-sm text-[var(--error)]">{error}</div>
+				{/if}
+			{/if}
+
+			{#if history.length > 0}
+				<section class="space-y-2">
+					<p class="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">Previously acknowledged</p>
+					<ul class="space-y-1.5">
+						{#each history as h}
+							<li class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2 text-sm">
+								<div class="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+									<span class="text-[var(--text-muted)]">{new Date(h.created_at).toISOString().slice(0, 10)}</span>
+									<span class="font-medium text-[var(--text-bright)]">{h.created_by}</span>
+									<span class="text-[var(--text-secondary)]">{fmtAction(h.action)}</span>
+									{#if h.revoked_at}
+										<span class="pill pill-neutral">
+											revoked {new Date(h.revoked_at).toISOString().slice(0, 10)}{#if h.revoked_reason} · {h.revoked_reason}{/if}
+										</span>
+									{/if}
+								</div>
+								{#if h.reason_text}
+									<p class="mt-1 text-xs italic text-[var(--text-tertiary)]">"{h.reason_text}"</p>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				</section>
+			{/if}
+		</div>
+
+		<footer class="flex justify-end gap-2 border-t border-[var(--border-color)]/60 px-6 py-4 sm:px-8">
 			<button type="button" class="btn btn-ghost" onclick={() => (open = false)} disabled={submitting}>
 				Cancel
 			</button>
 			{#if !readOnly}
 				<button type="button" class="btn btn-primary" onclick={submit} disabled={submitting}>
-					{submitting ? 'Saving…' : 'Acknowledge'}
+					{submitting ? 'Saving…' : 'Hide this finding'}
 				</button>
 			{/if}
 		</footer>
@@ -239,42 +274,92 @@
 </Dialog>
 
 <style>
+	/* Action cards: flat bordered surface, accent ring when picked —
+	   matches the playground card language (no drop shadows). */
 	.ack-option {
 		display: flex;
-		gap: 0.6rem;
+		gap: 0.7rem;
 		align-items: flex-start;
-		padding: 0.6rem 0.7rem;
-		border: 1px solid var(--border-color);
-		border-radius: 0.6rem;
+		padding: 0.8rem 0.9rem;
+		border: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+		border-radius: 1rem;
 		cursor: pointer;
-		background: var(--card-bg);
+		background: color-mix(in srgb, var(--card-bg) 40%, transparent);
 		transition: border-color 120ms ease, background 120ms ease;
 	}
 	.ack-option:hover {
 		border-color: color-mix(in srgb, var(--accent) 40%, var(--border-color));
 	}
 	.ack-option.active {
-		border-color: color-mix(in srgb, var(--accent) 60%, var(--border-color));
-		background: color-mix(in srgb, var(--accent) 6%, var(--card-bg));
+		border-color: var(--accent);
+		background: color-mix(in srgb, var(--accent) 8%, transparent);
 	}
-	.ack-option input[type='radio'] {
-		margin-top: 0.4rem;
-	}
-	.ack-option-body {
-		flex: 1;
-	}
-	.ack-option-head {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.4rem;
+
+	.ack-effect {
+		margin-left: auto;
+		flex-shrink: 0;
+		font-size: 0.65rem;
 		font-weight: 600;
-		color: var(--text-bright);
-		font-size: 0.92rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-muted);
 	}
-	.ack-option-desc {
-		margin: 0.15rem 0 0;
-		font-size: 0.8rem;
-		color: var(--text-secondary);
-		line-height: 1.4;
+
+	.ack-date {
+		width: auto;
+		padding: 0.4rem 0.75rem;
+		font-size: 0.85rem;
+		border-radius: 0.75rem;
+	}
+
+	/* Radio dot lifted from the shared Radio component so the dialog
+	   matches the playground's animated accent dot rather than the raw
+	   browser control. */
+	.ack-option input[type='radio'] {
+		appearance: none;
+		margin-top: 0.15rem;
+		width: 18px;
+		height: 18px;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		display: inline-grid;
+		place-items: center;
+		cursor: pointer;
+		flex-shrink: 0;
+		transition: border-color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+	}
+	.ack-option input[type='radio']::after {
+		content: '';
+		width: 8px;
+		height: 8px;
+		border-radius: 999px;
+		background: var(--accent);
+		transform: scale(0);
+		transition: transform 120ms ease;
+	}
+	.ack-option input[type='radio']:checked {
+		background: color-mix(in srgb, var(--accent) 18%, transparent);
+		border-color: var(--accent);
+	}
+	.ack-option input[type='radio']:checked::after {
+		transform: scale(1);
+		animation: radio-pop 180ms ease-out;
+	}
+	.ack-option input[type='radio']:focus-visible {
+		outline: none;
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+	}
+
+	@keyframes radio-pop {
+		0% {
+			transform: scale(0.3);
+		}
+		70% {
+			transform: scale(1.2);
+		}
+		100% {
+			transform: scale(1);
+		}
 	}
 </style>
