@@ -261,6 +261,12 @@ func revokeDriftedAcks(ctx context.Context, db *gorm.DB) error {
 		types = append(types, a.AssetType)
 		ids = append(ids, a.AssetID)
 	}
+	// JSON-bind the parallel key arrays — see marshalKeyArrays /
+	// LiveAckForAssets for why a raw []string can't feed UNNEST(?::text[]).
+	typesJSON, idsJSON, err := marshalKeyArrays(types, ids)
+	if err != nil {
+		return err
+	}
 	var current []Signals
 	err = db.WithContext(ctx).Raw(`
 		SELECT
@@ -273,8 +279,13 @@ func revokeDriftedAcks(ctx context.Context, db *gorm.DB) error {
 			max_major_behind, major_behind_dep_count
 		FROM asset_risk ar
 		LEFT JOIN image_digests d ON ar.asset_type = 'image' AND ar.asset_id = d.id::text
-		WHERE (ar.asset_type, ar.asset_id) IN (SELECT * FROM UNNEST(?::text[], ?::text[]))
-	`, types, ids).Scan(&current).Error
+		WHERE (ar.asset_type, ar.asset_id) IN (
+		    SELECT * FROM UNNEST(
+		      ARRAY(SELECT jsonb_array_elements_text(?::jsonb)),
+		      ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+		    )
+		  )
+	`, typesJSON, idsJSON).Scan(&current).Error
 	if err != nil {
 		return err
 	}

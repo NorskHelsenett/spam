@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -12,6 +13,28 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// marshalKeyArrays JSON-encodes two parallel string slices for binding
+// into queries that reconstruct text[] arrays via
+// jsonb_array_elements_text. See LiveAckForAssets for why we can't pass
+// []string directly to a UNNEST(?::text[], ...) placeholder.
+func marshalKeyArrays(types, ids []string) (string, string, error) {
+	if types == nil {
+		types = []string{}
+	}
+	if ids == nil {
+		ids = []string{}
+	}
+	tj, err := json.Marshal(types)
+	if err != nil {
+		return "", "", err
+	}
+	ij, err := json.Marshal(ids)
+	if err != nil {
+		return "", "", err
+	}
+	return string(tj), string(ij), nil
+}
 
 // Ack action enum values. Stored as plain TEXT in the DB; the column
 // has a CHECK constraint so a typo here fails at write time, not read.
@@ -99,8 +122,19 @@ func LiveAckForAssets(ctx context.Context, db *gorm.DB, keys []AssetKey) (map[As
 		ids = append(ids, k.ID)
 	}
 
+	// Bind the two parallel key arrays as JSON: GORM expands a Go
+	// []string into a comma-separated list of `?` placeholders (the
+	// usual IN-clause trick), which mangles UNNEST(?::text[], ?::text[])
+	// into ambiguous-function and syntax errors. Round-tripping each
+	// slice through jsonb_array_elements_text keeps every parameter a
+	// single string and reconstructs the text[] arrays server-side.
+	typesJSON, idsJSON, err := marshalKeyArrays(types, ids)
+	if err != nil {
+		return nil, err
+	}
+
 	var rows []Acknowledgment
-	err := db.WithContext(ctx).Raw(`
+	err = db.WithContext(ctx).Raw(`
 		SELECT DISTINCT ON (asset_type, asset_id)
 		       id, asset_type, asset_id, action, reason_text, snooze_until,
 		       signals_fingerprint, created_by, created_at,
@@ -108,9 +142,14 @@ func LiveAckForAssets(ctx context.Context, db *gorm.DB, keys []AssetKey) (map[As
 		FROM triage_acknowledgments
 		WHERE revoked_at IS NULL
 		  AND (snooze_until IS NULL OR snooze_until > NOW())
-		  AND (asset_type, asset_id) IN (SELECT * FROM UNNEST(?::text[], ?::text[]))
+		  AND (asset_type, asset_id) IN (
+		    SELECT * FROM UNNEST(
+		      ARRAY(SELECT jsonb_array_elements_text(?::jsonb)),
+		      ARRAY(SELECT jsonb_array_elements_text(?::jsonb))
+		    )
+		  )
 		ORDER BY asset_type, asset_id, created_at DESC
-	`, types, ids).Scan(&rows).Error
+	`, typesJSON, idsJSON).Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
