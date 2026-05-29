@@ -1017,7 +1017,7 @@
 										</tr>
 									</thead>
 									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
-										{#each image.image_secrets ?? [] as s, i (s.rule_id + '@' + (s.file ?? '') + ':' + (s.start_line ?? i))}
+										{#each image.image_secrets ?? [] as s, i (s.rule_id + '@' + (s.file ?? '') + ':' + (s.start_line ?? '') + '#' + i)}
 											<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
 												<td class="px-4 py-2">
 													<p class="font-mono text-xs text-[var(--text-bright)]">{s.rule_id}</p>
