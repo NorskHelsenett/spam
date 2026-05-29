@@ -445,6 +445,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
 			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))
 			approved.Get("/api/clusters/images/detail", scam.ImageDetailHandler(db))
+			approved.Get("/api/clusters/images/facets", scam.ImageFacetsHandler(db))
 			approved.Get("/api/clusters/chain", scam.ClusterChainHandler(db))
 			approved.Get("/api/clusters/hosts", scam.HostsHandler(db, appCache))
 			approved.Get("/api/clusters/hosts/summary", scam.HostSummaryHandler(db, appCache))
