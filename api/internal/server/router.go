@@ -296,7 +296,9 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/dependencies/detail", uiapi.DependencyDetailHandler(db, authService))
 				api.Get("/dependencies/assets", uiapi.DependencyAssetsHandler(db, authService))
 				api.Get("/dependencies/vulnerabilities", uiapi.DependencyVulnerabilitiesHandler(db, authService))
-				api.Post("/dependencies/vex", uiapi.DependencyVEXHandler(db, authService))
+				// /api/dependencies/vex is now in the approved group below
+				// so default users can suppress findings on their own
+				// assets. The handler enforces approved + non-global_reader.
 				api.Get("/search/advanced", uiapi.AdvancedSearchHandler(db, authService))
 				api.Get("/search/preview", uiapi.AdvancedSearchPreviewHandler(db, authService))
 				api.Get("/repos/search", uiapi.RepoSearchHandler(db, authService))
@@ -432,6 +434,13 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// gate is intentionally not in this group, so adding a
 			// new endpoint here without ACL filtering would leak data.
 			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
+			approved.Get("/api/triage/{asset_type}/{asset_id}/breakdown", uiapi.TriageBreakdownHandler(db, authService))
+			approved.Post("/api/triage/acknowledge", uiapi.TriageAcknowledgeHandler(db, authService))
+			approved.Post("/api/triage/acknowledge/{id}/revoke", uiapi.TriageRevokeAckHandler(db, authService))
+			// VEX writes live here (not in the admin api group) so default
+			// users can suppress findings on assets they read. The handler
+			// enforces approved + non-global_reader internally.
+			approved.Post("/api/dependencies/vex", uiapi.DependencyVEXHandler(db, authService))
 			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
 			approved.Get("/api/images/{id}/vulnerabilities", uiapi.ImageVulnerabilitiesHandler(db, authService))
 			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))

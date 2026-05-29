@@ -3,7 +3,10 @@ package uiapi
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/NorskHelsenett/spam/internal/acl"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"github.com/NorskHelsenett/spam/internal/vulnmetrics"
@@ -40,20 +43,41 @@ func DependencyVulnerabilitiesHandler(db *gorm.DB, authService *auth.Service) ht
 }
 
 // VEXSetRequest is the request body for POST /api/dependencies/vex.
+//
+// SnoozeUntil/ReasonText/AssetScope are optional and were added
+// 2026-05-28 alongside the triage-ack work. AssetScope narrows the
+// suppression to one image ("image:<digest>") or one cluster
+// ("cluster:<id>"); empty means global (legacy behaviour). SnoozeUntil
+// is RFC3339; when set, the VEX expires automatically on the next
+// asset_risk refresh after the timestamp.
 type VEXSetRequest struct {
-	PURL          string `json:"purl"`
-	VulnID        string `json:"vuln_id"`
-	Status        string `json:"status"`        // affected | not_affected | fixed | under_investigation
-	Justification string `json:"justification"` // optional
-	Detail        string `json:"detail"`        // optional
+	PURL          string  `json:"purl"`
+	VulnID        string  `json:"vuln_id"`
+	Status        string  `json:"status"`        // affected | not_affected | fixed | under_investigation
+	Justification string  `json:"justification"` // optional
+	Detail        string  `json:"detail"`        // optional
+	ReasonText    string  `json:"reason_text"`   // optional, free text
+	AssetScope    string  `json:"asset_scope"`   // optional, "image:<digest>" | "cluster:<id>"
+	SnoozeUntil   *string `json:"snooze_until"`  // optional, RFC3339
 }
 
 // DependencyVEXHandler upserts a VEX override for a PURL+vuln pair.
 //
 // POST /api/dependencies/vex
+//
+// Write authorisation: any approved user passes (we want default users
+// to be able to suppress findings on assets they read). global_reader
+// is blocked since their role is read-only. ACL on the asset itself is
+// out of scope for v1 — VEX is per-(purl, vuln) and the underlying
+// asset relationship is implicit. Tighten if abuse shows up.
 func DependencyVEXHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if requireAuth(w, r, authService) == nil {
+		if !requireApproved(w, r) {
+			return
+		}
+		subj := acl.SubjectFromRequest(r)
+		if subj.IsGlobalReader && !subj.IsAdmin {
+			http.Error(w, "global_reader is read-only", http.StatusForbidden)
 			return
 		}
 
@@ -77,7 +101,30 @@ func DependencyVEXHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			return
 		}
 
-		if err := vulnerabilities.SetVEX(r.Context(), db, req.PURL, req.VulnID, req.Status, req.Justification, req.Detail); err != nil {
+		scope := strings.TrimSpace(req.AssetScope)
+		if scope != "" && !strings.HasPrefix(scope, "image:") && !strings.HasPrefix(scope, "cluster:") {
+			http.Error(w, "asset_scope must be empty or prefixed with image: / cluster:", http.StatusBadRequest)
+			return
+		}
+
+		input := vulnerabilities.VEXInput{
+			ReasonText: strings.TrimSpace(req.ReasonText),
+			AssetScope: scope,
+		}
+		if req.SnoozeUntil != nil && *req.SnoozeUntil != "" {
+			t, err := time.Parse(time.RFC3339, *req.SnoozeUntil)
+			if err != nil {
+				http.Error(w, "invalid snooze_until (RFC3339)", http.StatusBadRequest)
+				return
+			}
+			tt := t.UTC()
+			input.SnoozeUntil = &tt
+		}
+		if session, _ := authService.LoadSession(r); session != nil {
+			input.CreatedBy = session.Email
+		}
+
+		if err := vulnerabilities.SetVEX(r.Context(), db, req.PURL, req.VulnID, req.Status, req.Justification, req.Detail, input); err != nil {
 			http.Error(w, "failed to set VEX: "+err.Error(), http.StatusInternalServerError)
 			return
 		}

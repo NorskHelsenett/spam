@@ -5,18 +5,22 @@
 		ShieldAlert,
 		AlertTriangle,
 		Eye,
+		EyeOff,
 		Container,
 		GitBranch,
 		ShieldCheck,
 		Target,
 		ChevronDown,
-		ArrowUpRight
+		ArrowUpRight,
+		BellOff
 	} from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import EmptyVulns from '$lib/components/icons/EmptyVulns.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import BucketAckDialog from '$lib/components/BucketAckDialog.svelte';
+	import { session } from '$lib/stores/session';
 
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy export-let
@@ -65,11 +69,83 @@
 	};
 	type WatchCounts = { total: number; repo: number; image: number; cluster: number };
 	type WatchSection = { counts: WatchCounts; limit: number; offset: number; rows: TriageRow[] };
+	type Ack = {
+		id: string;
+		asset_type: string;
+		asset_id: string;
+		action: string;
+		reason_text: string;
+		snooze_until?: string | null;
+		signals_fingerprint?: string;
+		created_by: string;
+		created_at: string;
+		revoked_at?: string | null;
+		revoked_by?: string | null;
+		revoked_reason?: string | null;
+	};
+	type AckedRow = TriageRow & { ack: Ack };
 	type TriageResponse = {
 		scope: Scope;
 		fix_now: TriageRow[];
 		this_week: TriageRow[];
 		watch: WatchSection;
+		suppressed: AckedRow[];
+	};
+
+	// Per-asset breakdown shape — fetched lazily on row expansion.
+	// Mirrors api/internal/uiapi BreakdownResponse; field naming is
+	// snake_case to match the wire.
+	type BreakdownCVE = {
+		vuln_id: string;
+		severity: string;
+		fixed_version?: string;
+		purl?: string;
+		is_kev: boolean;
+		epss?: number;
+	};
+	type BreakdownSecret = { secret_hash: string; rule_id?: string; source?: string };
+	type BreakdownImage = {
+		image_id: string;
+		digest: string;
+		slug: string;
+		critical_count: number;
+		kev_count: number;
+		namespace?: string;
+	};
+	type BreakdownEndpoint = {
+		host: string;
+		namespace?: string;
+		exposure_kind?: string;
+		exposure_name?: string;
+	};
+	type BreakdownVEX = {
+		id: string;
+		vuln_id: string;
+		purl: string;
+		status: string;
+		justification?: string;
+		reason_text?: string;
+		asset_scope?: string;
+		created_by?: string;
+		created_at: string;
+		snooze_until?: string;
+	};
+	type Breakdown = {
+		asset_type: string;
+		asset_id: string;
+		asset_slug: string;
+		tier: string;
+		threat_score: number;
+		trust_score: number;
+		trust_grade: string;
+		reasons: Reason[];
+		cves?: BreakdownCVE[];
+		secrets?: BreakdownSecret[];
+		contributing_images?: BreakdownImage[];
+		exposed_endpoints?: BreakdownEndpoint[];
+		suppressed_cves?: BreakdownVEX[];
+		live_ack?: Ack | null;
+		history: Ack[];
 	};
 
 	let triage: TriageResponse | null = $state(null);
@@ -85,12 +161,75 @@
 	let expanded = $state(new Set<string>());
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Lazy-fetched per-asset breakdown for the expanded panel. Keyed
+	// by rowKey. We cache the response after first load so the user
+	// can collapse/expand without re-fetching.
+	let breakdownByKey = $state(new Map<string, Breakdown>());
+	let breakdownLoadingByKey = $state(new Set<string>());
+
+	// Ack dialog state. Only one bucket can be acknowledged at a time;
+	// reusing the same component for every row.
+	let ackDialogOpen = $state(false);
+	let ackDialogRow = $state<TriageRow | null>(null);
+	let ackDialogHistory = $state<Ack[]>([]);
+
+	let isGlobalReader = $derived($session.role === 'global_reader');
+
 	const rowKey = (r: TriageRow) => `${r.asset_type}:${r.asset_id}`;
-	const toggleExpanded = (key: string) => {
+	const toggleExpanded = (key: string, row?: TriageRow) => {
 		const next = new Set(expanded);
-		if (next.has(key)) next.delete(key);
-		else next.add(key);
+		if (next.has(key)) {
+			next.delete(key);
+		} else {
+			next.add(key);
+			if (row && !breakdownByKey.has(key) && !breakdownLoadingByKey.has(key)) {
+				void loadBreakdown(row);
+			}
+		}
 		expanded = next;
+	};
+
+	const loadBreakdown = async (row: TriageRow) => {
+		const key = rowKey(row);
+		const nextLoading = new Set(breakdownLoadingByKey);
+		nextLoading.add(key);
+		breakdownLoadingByKey = nextLoading;
+		try {
+			const url = `/api/triage/${encodeURIComponent(row.asset_type)}/${encodeURIComponent(row.asset_id)}/breakdown`;
+			const res = await fetch(url, { credentials: 'include' });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const data = (await res.json()) as Breakdown;
+			const nextBreakdown = new Map(breakdownByKey);
+			nextBreakdown.set(key, data);
+			breakdownByKey = nextBreakdown;
+		} catch {
+			// Quietly fall back to the inline reason summary if the
+			// breakdown 404s (cluster-only user lost grants between
+			// list fetch and detail fetch, etc.).
+		} finally {
+			const next = new Set(breakdownLoadingByKey);
+			next.delete(key);
+			breakdownLoadingByKey = next;
+		}
+	};
+
+	const openAckDialog = (row: TriageRow) => {
+		ackDialogRow = row;
+		// Seed history from cached breakdown if available; otherwise
+		// fetch fresh so the modal shows audit context immediately.
+		const cached = breakdownByKey.get(rowKey(row));
+		ackDialogHistory = cached?.history ?? [];
+		ackDialogOpen = true;
+		if (!cached) {
+			void loadBreakdown(row).then(() => {
+				const fresh = breakdownByKey.get(rowKey(row));
+				if (fresh) ackDialogHistory = fresh.history;
+			});
+		}
+	};
+
+	const headlineReasonsFor = (row: TriageRow): string[] => {
+		return row.reasons.slice(0, 3).map((r) => renderReason(r));
 	};
 
 	const fetchTriage = async (search: string, offset: number) => {
@@ -585,12 +724,19 @@
 					{@const key = rowKey(row)}
 					{@const isOpen = expanded.has(key)}
 					<div class="row-wrapper" class:open={isOpen}>
-						<button
-							type="button"
+						<div
+							role="button"
+							tabindex="0"
 							class="row"
 							class:compact
 							aria-expanded={isOpen}
-							onclick={() => toggleExpanded(key)}
+							onclick={() => toggleExpanded(key, row)}
+							onkeydown={(e) => {
+								if (e.key === 'Enter' || e.key === ' ') {
+									e.preventDefault();
+									toggleExpanded(key, row);
+								}
+							}}
 						>
 							<div class="row-asset">
 								<Icon size={compact ? 14 : 16} class="text-[var(--text-muted)]" />
@@ -607,6 +753,17 @@
 								{/each}
 							</div>
 							<div class="row-actions">
+								<button
+									type="button"
+									class="row-ack"
+									title={isGlobalReader ? 'global_reader is read-only' : 'Acknowledge this finding'}
+									onclick={(e) => {
+										e.stopPropagation();
+										openAckDialog(row);
+									}}
+								>
+									<BellOff size={11} /> Acknowledge
+								</button>
 								<a
 									class="row-open"
 									href={rowHref(row)}
@@ -617,9 +774,114 @@
 								</a>
 								<ChevronDown size={14} class="row-chevron {isOpen ? 'open' : ''}" />
 							</div>
-						</button>
+						</div>
 						{#if isOpen}
+							{@const bd = breakdownByKey.get(key)}
+							{@const bdLoading = breakdownLoadingByKey.has(key)}
 							<div class="row-detail">
+								{#if bdLoading && !bd}
+									<div class="text-xs text-[var(--text-tertiary)]">Loading breakdown…</div>
+								{/if}
+								{#if bd}
+									{#if row.asset_type === 'cluster' && bd.contributing_images && bd.contributing_images.length > 0}
+										<div class="detail-recos">
+											<div class="detail-head">Driving images ({bd.contributing_images.length})</div>
+											<ul class="reco-list">
+												{#each bd.contributing_images as img}
+													<li class="reco-card">
+														<header class="reco-head">
+															<Container size={12} />
+															<a class="text-[var(--text-bright)] font-semibold" href={`/images/${encodeURIComponent(img.digest)}`}>{img.slug}</a>
+															{#if img.namespace}<span class="badge">{img.namespace}</span>{/if}
+														</header>
+														<p class="reco-what">
+															<span class="text-[var(--error)]">{img.kev_count} KEV</span>,
+															<span class="text-[var(--warning)]">{img.critical_count} Critical</span>
+															— this image's CVEs roll up into the cluster's bucket placement.
+														</p>
+													</li>
+												{/each}
+											</ul>
+										</div>
+									{/if}
+									{#if row.asset_type === 'cluster' && bd.exposed_endpoints && bd.exposed_endpoints.length > 0}
+										<div class="detail-recos">
+											<div class="detail-head">Internet-reachable endpoints ({bd.exposed_endpoints.length})</div>
+											<ul class="reco-list">
+												{#each bd.exposed_endpoints.slice(0, 10) as ep}
+													<li class="reco-card">
+														<header class="reco-head">
+															<span class="badge">{ep.exposure_kind ?? 'Ingress'}</span>
+															<span class="font-mono text-[var(--text-bright)]">{ep.host}</span>
+														</header>
+														<p class="reco-why text-xs">
+															{ep.namespace ?? ''} · {ep.exposure_name ?? ''}
+														</p>
+													</li>
+												{/each}
+											</ul>
+										</div>
+									{/if}
+									{#if bd.cves && bd.cves.length > 0}
+										<div class="detail-recos">
+											<div class="detail-head">Top CVEs ({bd.cves.length})</div>
+											<ul class="reco-list">
+												{#each bd.cves.slice(0, 12) as c}
+													<li class="reco-card">
+														<header class="reco-head">
+															<span class={c.severity === 'CRITICAL' ? 'pill pill-error' : c.severity === 'HIGH' ? 'pill pill-warning' : 'pill pill-neutral'}>{c.severity}</span>
+															<a class="font-mono text-[var(--text-bright)]" href={`/vulnerabilities/${encodeURIComponent(c.vuln_id)}`}>{c.vuln_id}</a>
+															{#if c.is_kev}<span class="pill pill-error">KEV</span>{/if}
+															{#if c.epss && c.epss >= 0.1}<span class="pill pill-warning">EPSS {(c.epss * 100).toFixed(0)}%</span>{/if}
+														</header>
+														{#if c.fixed_version}
+															<p class="reco-action"><span class="reco-key">Fix.</span> upgrade to {c.fixed_version} or later.</p>
+														{:else}
+															<p class="reco-action"><span class="reco-key">Fix.</span> no upstream fix yet — pin + monitor.</p>
+														{/if}
+													</li>
+												{/each}
+											</ul>
+										</div>
+									{/if}
+									{#if bd.secrets && bd.secrets.length > 0}
+										<div class="detail-recos">
+											<div class="detail-head">Active leaked secrets ({bd.secrets.length})</div>
+											<ul class="reco-list">
+												{#each bd.secrets.slice(0, 10) as s}
+													<li class="reco-card">
+														<header class="reco-head">
+															<span class="pill pill-error">{s.rule_id ?? 'secret'}</span>
+															<span class="font-mono text-xs text-[var(--text-tertiary)]">…{s.secret_hash.slice(-12)}</span>
+														</header>
+														{#if s.source}
+															<p class="reco-why text-xs">{s.source}</p>
+														{/if}
+													</li>
+												{/each}
+											</ul>
+										</div>
+									{/if}
+									{#if bd.suppressed_cves && bd.suppressed_cves.length > 0}
+										<div class="detail-recos">
+											<div class="detail-head">Already suppressed ({bd.suppressed_cves.length})</div>
+											<ul class="reco-list">
+												{#each bd.suppressed_cves as v}
+													<li class="reco-card">
+														<header class="reco-head">
+															<span class="badge">{v.status}</span>
+															<span class="font-mono text-[var(--text-bright)]">{v.vuln_id}</span>
+															{#if v.created_by}<span class="text-xs text-[var(--text-tertiary)]">— {v.created_by}</span>{/if}
+														</header>
+														{#if v.reason_text}
+															<p class="reco-why text-xs">"{v.reason_text}"</p>
+														{/if}
+													</li>
+												{/each}
+											</ul>
+										</div>
+									{/if}
+								{/if}
 								<div class="detail-signals">
 									<div class="detail-col">
 										<div class="detail-head">Threat inputs</div>
@@ -746,8 +1008,84 @@
 				</div>
 			{/if}
 		</section>
+
+		<!-- Suppressed: assets whose live ack hides them from the active
+		     tiers. Always shown so operators can audit and revoke. -->
+		{#if triage && triage.suppressed && triage.suppressed.length > 0}
+			<section class="panel-surface flex flex-col gap-3 px-6 py-6 sm:px-10 sm:py-8">
+				<header class="flex items-center gap-2">
+					<EyeOff size={18} class="text-[var(--text-muted)]" />
+					<h2 class="text-lg font-semibold text-[var(--text-bright)]">Acknowledged ({triage.suppressed.length})</h2>
+					<p class="text-xs text-[var(--text-tertiary)]">Hidden from active tiers per operator decision.</p>
+				</header>
+				<div class="tier-rows compact">
+					{#each triage.suppressed as srow}
+						{@const sk = rowKey(srow)}
+						{@const SIcon = rowIcon(srow.asset_type)}
+						<div class="row-wrapper">
+							<div class="row compact">
+								<div class="row-asset">
+									<SIcon size={14} class="text-[var(--text-muted)]" />
+									<span class="asset-slug">{srow.asset_slug}</span>
+									<span class="badge">{srow.asset_type}</span>
+									<span class="text-xs text-[var(--text-tertiary)]">
+										{srow.ack.action === 'snooze' ? `snoozed until ${(srow.ack.snooze_until ?? '').slice(0, 10)}` : srow.ack.action === 'accept_risk' ? 'accepted risk' : 'suppressed until change'}
+										· {srow.ack.created_by}
+									</span>
+								</div>
+								<div class="row-scores">
+									<span class="threat" data-level="info">Threat {srow.threat_score}</span>
+									<span class="trust" style="color: {trustColor(srow.trust_grade)}">Trust {srow.trust_grade}</span>
+								</div>
+								<div class="row-reasons">
+									{#if srow.ack.reason_text}
+										<span class="pill pill-neutral truncate max-w-xs" title={srow.ack.reason_text}>"{srow.ack.reason_text}"</span>
+									{/if}
+								</div>
+								<div class="row-actions">
+									<a class="row-open" href={rowHref(srow)} title="Open detail">Open <ArrowUpRight size={12} /></a>
+									<button
+										type="button"
+										class="row-ack"
+										disabled={isGlobalReader}
+										title={isGlobalReader ? 'global_reader is read-only' : 'Revoke this acknowledgment'}
+										onclick={async () => {
+											if (isGlobalReader) return;
+											const ok = window.confirm(`Revoke ${srow.ack.action} on ${srow.asset_slug}?`);
+											if (!ok) return;
+											const res = await fetch(`/api/triage/acknowledge/${encodeURIComponent(srow.ack.id)}/revoke`, {
+												method: 'POST',
+												credentials: 'include'
+											});
+											if (res.ok) void reload();
+										}}
+									>
+										Revoke
+									</button>
+								</div>
+							</div>
+						</div>
+					{/each}
+				</div>
+			</section>
+		{/if}
 	{/if}
 </div>
+
+<BucketAckDialog
+	bind:open={ackDialogOpen}
+	assetType={ackDialogRow?.asset_type ?? ''}
+	assetSlug={ackDialogRow?.asset_slug ?? ''}
+	assetId={ackDialogRow?.asset_id ?? ''}
+	headlineReasons={ackDialogRow ? headlineReasonsFor(ackDialogRow) : []}
+	history={ackDialogHistory}
+	readOnly={isGlobalReader}
+	onAcknowledged={() => {
+		ackDialogOpen = false;
+		ackDialogRow = null;
+		void reload();
+	}}
+/>
 
 <style>
 	.tier {
@@ -858,6 +1196,29 @@
 		color: var(--text-bright);
 		border-color: color-mix(in srgb, var(--accent) 60%, transparent);
 		background: color-mix(in srgb, var(--accent) 8%, var(--card-bg));
+	}
+	.row-ack {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.25rem;
+		padding: 0.3rem 0.6rem;
+		border: 1px solid var(--border-color);
+		border-radius: 0.4rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		background: var(--card-bg);
+		cursor: pointer;
+		transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+	}
+	.row-ack:hover {
+		color: var(--text-bright);
+		border-color: color-mix(in srgb, var(--warning) 60%, transparent);
+		background: color-mix(in srgb, var(--warning) 8%, var(--card-bg));
+	}
+	.row-ack:disabled {
+		opacity: 0.4;
+		cursor: not-allowed;
 	}
 	.row-chevron {
 		transition: transform 120ms ease, color 120ms ease;

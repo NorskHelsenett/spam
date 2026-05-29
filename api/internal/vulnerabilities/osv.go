@@ -135,30 +135,56 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 	return applyVEX(ctx, db, purl, fresh)
 }
 
-// SetVEX upserts a VEX override for a PURL+vulnID pair. When the
-// given vulnID is an alias of a known advisory, the row is stored
-// under the canonical id so future scanner reports under any alias
-// find the suppression via the same canonical route used by
-// applyVEX's lookup. Unknown ids (no enrichment yet) store verbatim
-// — re-enrichment later doesn't retroactively migrate these rows,
-// so long-lived installations may accumulate some alias-keyed rows
-// that applyVEX still honours via its expansion logic.
-func SetVEX(ctx context.Context, db *gorm.DB, purl, vulnID, status, justification, detail string) error {
+// VEXInput is the optional surface for SetVEX. Callers that only care
+// about the legacy purl+vuln pair can pass a zero VEXInput; the new
+// fields (CreatedBy, SnoozeUntil, ReasonText, AssetScope) flow in for
+// the triage-ack write path.
+type VEXInput struct {
+	CreatedBy   string
+	SnoozeUntil *time.Time
+	ReasonText  string
+	AssetScope  string // "", "image:<digest>", "cluster:<id>"
+}
+
+// SetVEX records a VEX override for a PURL+vulnID pair, optionally
+// scoped to an asset. Append-only since 2026-05-28: any live row for
+// the same (purl, vuln_id, asset_scope) tuple is revoked first, then a
+// new row is inserted. History is preserved so the operator can see
+// who suppressed what when.
+//
+// When vulnID is an alias of a known advisory, the row is stored under
+// the canonical id so future scanner reports under any alias find the
+// suppression via applyVEX's expansion route.
+func SetVEX(ctx context.Context, db *gorm.DB, purl, vulnID, status, justification, detail string, in VEXInput) error {
 	canonical := vulnmeta.ResolveCanonical(ctx, db, vulnID)
-	vex := ComponentVEX{
-		PURL:          purl,
-		VulnID:        canonical,
-		Status:        status,
-		Justification: justification,
-		Detail:        detail,
-		CreatedAt:     time.Now().UTC(),
-	}
-	return db.WithContext(ctx).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "purl"}, {Name: "vuln_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"status", "justification", "detail", "created_at"}),
-		}).
-		Create(&vex).Error
+	now := time.Now().UTC()
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// Tombstone any in-effect row for the same scope so the partial
+		// unique index doesn't collide and history reflects the
+		// supersession.
+		if err := tx.Model(&ComponentVEX{}).
+			Where("purl = ? AND vuln_id = ? AND COALESCE(asset_scope,'') = ? AND revoked_at IS NULL",
+				purl, canonical, in.AssetScope).
+			Updates(map[string]any{
+				"revoked_at": now,
+				"revoked_by": in.CreatedBy,
+			}).Error; err != nil {
+			return err
+		}
+		vex := ComponentVEX{
+			PURL:          purl,
+			VulnID:        canonical,
+			Status:        status,
+			Justification: justification,
+			Detail:        detail,
+			CreatedAt:     now,
+			CreatedBy:     in.CreatedBy,
+			SnoozeUntil:   in.SnoozeUntil,
+			ReasonText:    in.ReasonText,
+			AssetScope:    in.AssetScope,
+		}
+		return tx.Create(&vex).Error
+	})
 }
 
 func queryOSV(ctx context.Context, purl string) ([]Result, error) {

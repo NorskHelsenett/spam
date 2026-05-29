@@ -35,6 +35,12 @@ const (
 	// items something else is on fire — paginate later.
 	fixNowCap   = 100
 	thisWeekCap = 200
+
+	// suppressedCap bounds the "currently acknowledged" section so a
+	// fleet with thousands of long-lived snoozes doesn't bloat the
+	// dashboard payload. Users hunting older acks query the breakdown
+	// endpoint per asset.
+	suppressedCap = 100
 )
 
 // Scope is the header strip on /app — operator's inventory + count of
@@ -71,6 +77,20 @@ type TriageRow struct {
 	Reasons     []Reason `json:"reasons"`
 }
 
+// AckedRow surfaces an asset whose live ack hides it from the main
+// tiers. The frontend renders these in a separate "Suppressed" section
+// so operators can see what's been muted and revoke if needed —
+// without polluting the active queue.
+type AckedRow struct {
+	Signals
+	ThreatScore int             `json:"threat_score"`
+	TrustScore  int             `json:"trust_score"`
+	TrustGrade  string          `json:"trust_grade"`
+	Tier        string          `json:"tier"`
+	Reasons     []Reason        `json:"reasons"`
+	Ack         Acknowledgment  `json:"ack"`
+}
+
 // WatchSection paginates the long tail of "warnings, but not urgent"
 // assets. Counts are unfiltered; rows is the page slice.
 type WatchSection struct {
@@ -94,6 +114,11 @@ type TriageResponse struct {
 	FixNow   []TriageRow  `json:"fix_now"`
 	ThisWeek []TriageRow  `json:"this_week"`
 	Watch    WatchSection `json:"watch"`
+	// Suppressed lists assets whose live ack hides them from the
+	// active tiers. Empty when there are no live acks in the
+	// caller's scope. Capped at suppressedCap to keep the wire size
+	// bounded; the order is newest ack first.
+	Suppressed []AckedRow `json:"suppressed"`
 }
 
 // TriageParams is what the handler passes in: ACL fragments per asset
@@ -189,6 +214,17 @@ func TriggerRefresh(db *gorm.DB) {
 			if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
 				log.Printf("assetrisk: background refresh: %v", err)
 			}
+			// Drift check: re-fingerprint live "suppress_until_change"
+			// acks against the freshly refreshed asset_risk rows and
+			// revoke any whose inputs moved. Skipped on a held lock
+			// (another replica did the refresh and will handle drift
+			// on its side). Bounded to a separate, shorter timeout so
+			// a slow drift sweep can't pin the refresh goroutine.
+			driftCtx, driftCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			if err := revokeDriftedAcks(driftCtx, db); err != nil {
+				log.Printf("assetrisk: revokeDrift: %v", err)
+			}
+			driftCancel()
 			cancel()
 
 			refreshGate.mu.Lock()
@@ -203,6 +239,49 @@ func TriggerRefresh(db *gorm.DB) {
 	}()
 }
 
+// revokeDriftedAcks reads the post-refresh signals for every asset that
+// has a live suppress_until_change ack, fingerprints them, and revokes
+// the ones whose fingerprint moved. Restricting the scan to assets
+// that have an active ack avoids a full pass over asset_risk on every
+// refresh — there are typically a few hundred acks at most.
+func revokeDriftedAcks(ctx context.Context, db *gorm.DB) error {
+	var acks []Acknowledgment
+	err := db.WithContext(ctx).
+		Where("revoked_at IS NULL AND action = ?", AckActionSuppress).
+		Find(&acks).Error
+	if err != nil {
+		return err
+	}
+	if len(acks) == 0 {
+		return nil
+	}
+	types := make([]string, 0, len(acks))
+	ids := make([]string, 0, len(acks))
+	for _, a := range acks {
+		types = append(types, a.AssetType)
+		ids = append(ids, a.AssetID)
+	}
+	var current []Signals
+	err = db.WithContext(ctx).Raw(`
+		SELECT
+			ar.asset_type, ar.asset_id, ar.asset_slug,
+			COALESCE(d.digest, '') AS image_digest,
+			critical_count, high_count, kev_count, epss_max,
+			has_fix_for_critical, active_secret_count, internet_exposed,
+			signed_commits_pct, image_signed, scan_age_days, last_scan_at, has_sbom,
+			worst_dep_health_score, archived_dep_count, deprecated_dep_count,
+			max_major_behind, major_behind_dep_count
+		FROM asset_risk ar
+		LEFT JOIN image_digests d ON ar.asset_type = 'image' AND ar.asset_id = d.id::text
+		WHERE (ar.asset_type, ar.asset_id) IN (SELECT * FROM UNNEST(?::text[], ?::text[]))
+	`, types, ids).Scan(&current).Error
+	if err != nil {
+		return err
+	}
+	_, err = RevokeOnDrift(ctx, db, current)
+	return err
+}
+
 // LoadTriage reads the asset_risk MV through the caller's ACL filter,
 // computes scores in Go, and partitions into tiers. The MV is small
 // (one row per asset) so we fetch all post-ACL rows and rank them in
@@ -210,9 +289,10 @@ func TriggerRefresh(db *gorm.DB) {
 // formula in one place and trivially testable.
 func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageResponse, error) {
 	resp := TriageResponse{
-		FixNow:   []TriageRow{},
-		ThisWeek: []TriageRow{},
-		Watch:    WatchSection{Rows: []TriageRow{}, Limit: p.watchLimitOrDefault(), Offset: p.WatchOffset},
+		FixNow:     []TriageRow{},
+		ThisWeek:   []TriageRow{},
+		Watch:      WatchSection{Rows: []TriageRow{}, Limit: p.watchLimitOrDefault(), Offset: p.WatchOffset},
+		Suppressed: []AckedRow{},
 	}
 
 	if !assetRiskReady(ctx, db) {
@@ -239,8 +319,27 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 		}
 	}
 
-	// Score every row, partition by tier.
+	// Fetch live acks for every visible asset in one round-trip so the
+	// tier loop can route suppressed rows into resp.Suppressed instead
+	// of fix_now/this_week/watch. Snooze expiry is enforced server-side
+	// in LiveAckForAssets — a snooze that lapsed mid-day re-surfaces
+	// immediately on the next /api/triage call without waiting for the
+	// MV refresh.
+	keys := make([]AssetKey, 0, len(rows))
+	for _, r := range rows {
+		keys = append(keys, AssetKey{Type: r.AssetType, ID: r.AssetID})
+	}
+	acks, err := LiveAckForAssets(ctx, db, keys)
+	if err != nil {
+		return resp, err
+	}
+
+	// Score every row, partition by tier. Suppressed rows skip the
+	// active tiers but still get scored — the frontend renders their
+	// would-be tier alongside the ack badge so the operator can judge
+	// the suppression's cost.
 	var watchAll []TriageRow
+	var suppressedAll []AckedRow
 	for _, sig := range rows {
 		row := TriageRow{
 			Signals:     sig,
@@ -250,6 +349,18 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 			Reasons:     Reasons(sig),
 		}
 		row.TrustGrade = TrustGrade(row.TrustScore)
+		if ack, ok := acks[AssetKey{Type: sig.AssetType, ID: sig.AssetID}]; ok {
+			suppressedAll = append(suppressedAll, AckedRow{
+				Signals:     row.Signals,
+				ThreatScore: row.ThreatScore,
+				TrustScore:  row.TrustScore,
+				TrustGrade:  row.TrustGrade,
+				Tier:        row.Tier,
+				Reasons:     row.Reasons,
+				Ack:         ack,
+			})
+			continue
+		}
 		switch row.Tier {
 		case TierFixNow:
 			resp.FixNow = append(resp.FixNow, row)
@@ -259,6 +370,14 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 			watchAll = append(watchAll, row)
 		}
 	}
+
+	sort.SliceStable(suppressedAll, func(i, j int) bool {
+		return suppressedAll[i].Ack.CreatedAt.After(suppressedAll[j].Ack.CreatedAt)
+	})
+	if len(suppressedAll) > suppressedCap {
+		suppressedAll = suppressedAll[:suppressedCap]
+	}
+	resp.Suppressed = suppressedAll
 
 	rankTriage(resp.FixNow)
 	rankTriage(resp.ThisWeek)
