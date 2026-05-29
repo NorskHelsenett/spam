@@ -1,18 +1,19 @@
 <script lang="ts">
 	import Dialog from './Dialog.svelte';
-	import { BellOff, ClockAlert, RefreshCw, ShieldOff } from 'lucide-svelte';
+	import { BellOff, ClockAlert, RefreshCw, X } from 'lucide-svelte';
 
-	// Acknowledgment dialog for a single triage bucket (asset). Lets the
-	// operator pick one of three suppressions, write a free-text reason,
-	// and (for snooze) set a date. Mirrors the API: POST
-	// /api/triage/acknowledge with {asset_type, asset_id, action,
-	// reason_text, snooze_until?}.
-	//
-	// The "Suppress unless infra changes" path captures the current
-	// signals fingerprint server-side; the dashboard's next refresh
-	// revokes the ack automatically if anything material changes
-	// (KEV/critical/exposure/scan freshness/etc).
-	type Action = 'snooze' | 'suppress_until_change' | 'accept_risk';
+	// Acknowledgment dialog for a single triage bucket (asset). The
+	// scoring engine captures a *snapshot* (signals fingerprint) at ack
+	// time, so there are only two coherent choices:
+	//   1. Snooze   — postpone this snapshot to a date.
+	//   2. Accept   — accept this snapshot's risk; the next refresh that
+	//                 detects ANY signal change re-surfaces it, because a
+	//                 changed snapshot is no longer the one we accepted.
+	// "Accept" maps to the backend's suppress_until_change action (which
+	// records the fingerprint and is auto-revoked on drift). There is no
+	// permanent-through-changes option — that would accept a snapshot we
+	// can no longer see.
+	type Action = 'snooze' | 'suppress_until_change';
 
 	type HistoryRow = {
 		id: string;
@@ -69,9 +70,7 @@
 		}
 	});
 
-	// Each action card: icon, title, the one-line consequence, and an
-	// "effect" tag the operator reads at a glance to know how long the
-	// finding stays hidden.
+	// Two snapshot choices. "effect" is the at-a-glance consequence tag.
 	const options: {
 		value: Action;
 		icon: typeof ClockAlert;
@@ -83,22 +82,15 @@
 			value: 'snooze',
 			icon: ClockAlert,
 			title: 'Snooze until a date',
-			desc: 'Hides this finding now and brings it back automatically when the date passes.',
+			desc: 'Postpone this snapshot. Hides it now and brings it back automatically on the date you pick.',
 			effect: 'Temporary'
 		},
 		{
 			value: 'suppress_until_change',
 			icon: RefreshCw,
-			title: 'Suppress until something changes',
-			desc: 'Stays hidden while the signals stay the same. The next scan that detects any change re-surfaces it on its own.',
-			effect: 'Self-clearing'
-		},
-		{
-			value: 'accept_risk',
-			icon: ShieldOff,
 			title: 'Accept the risk',
-			desc: 'Hides this finding permanently. It only comes back if someone revokes it by hand.',
-			effect: 'Permanent'
+			desc: "Accept this asset's current threat snapshot. If a CVE, exposure, or any scored signal changes, it's a new snapshot — so it comes back on its own.",
+			effect: 'Until signals change'
 		}
 	];
 
@@ -107,9 +99,9 @@
 			case 'snooze':
 				return 'snoozed';
 			case 'suppress_until_change':
-				return 'suppressed until change';
+				return 'accepted the risk';
 			case 'accept_risk':
-				return 'accepted risk';
+				return 'accepted the risk (permanent)';
 		}
 		return a;
 	};
@@ -155,18 +147,28 @@
 	};
 </script>
 
-<Dialog bind:open maxWidth="max-w-2xl">
+<Dialog bind:open maxWidth="max-w-2xl" showCloseButton={false}>
 	<div class="flex max-h-[95vh] flex-col">
-		<header class="border-b border-[var(--border-color)]/60 px-6 py-5 sm:px-8">
-			<div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">
-				<BellOff size={13} class="text-[var(--accent)]" />
-				<span>Acknowledge finding</span>
-				<span class="badge">{assetType}</span>
+		<header class="flex items-start gap-3 border-b border-[var(--border-color)]/60 px-6 py-5 sm:px-8">
+			<div class="min-w-0 flex-1">
+				<div class="flex items-center gap-2 text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">
+					<BellOff size={13} class="text-[var(--accent)]" />
+					<span>Acknowledge finding</span>
+					<span class="badge">{assetType}</span>
+				</div>
+				<h2 class="mt-2 truncate text-xl font-semibold text-[var(--text-bright)]">{assetSlug}</h2>
+				<p class="mt-1 text-sm text-[var(--text-tertiary)]">
+					Acknowledging hides a finding from the active queue — it doesn't fix it. Pick what should happen to it.
+				</p>
 			</div>
-			<h2 class="mt-2 text-xl font-semibold text-[var(--text-bright)]">{assetSlug}</h2>
-			<p class="mt-1 text-sm text-[var(--text-tertiary)]">
-				Hiding a finding doesn't fix it — it just removes it from the active queue. Pick how long it stays hidden.
-			</p>
+			<button
+				type="button"
+				class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-transparent text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
+				aria-label="Close"
+				onclick={() => (open = false)}
+			>
+				<X size={20} />
+			</button>
 		</header>
 
 		<div class="space-y-6 overflow-y-auto px-6 py-6 sm:px-8">

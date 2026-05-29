@@ -550,8 +550,10 @@
 
 	const ackSummary = (ack: Ack): string => {
 		if (ack.action === 'snooze') return `snoozed until ${(ack.snooze_until ?? '').slice(0, 10)}`;
-		if (ack.action === 'accept_risk') return 'risk accepted';
-		return 'hidden until signals change';
+		// Legacy permanent acks predate the snapshot model; flag them so
+		// they read differently from the change-aware "accept the risk".
+		if (ack.action === 'accept_risk') return 'risk accepted (permanent)';
+		return 'risk accepted · back if signals change';
 	};
 </script>
 
