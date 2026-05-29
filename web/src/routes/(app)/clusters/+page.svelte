@@ -683,26 +683,42 @@
 		if (activeTab === 'images') {
 			untrack(() => {
 				loadImages();
-				loadImageNamespaces();
+				loadImageFacets();
 			});
 		}
 	});
 
-	// Distinct namespaces for the Images filter dropdown. Lightweight —
-	// one row per namespace — so we fetch it fresh whenever the Images
-	// tab opens or include_inactive flips. Mirrors how the hosts summary
-	// powers the host filter dropdowns.
-	const loadImageNamespaces = async () => {
+	// Refresh the three Images filter dropdowns in lockstep with the
+	// list. Same query params as imagesPath() minus pagination + sort,
+	// so server-side facet computation sees the same scope the table
+	// is about to render. Endpoint excludes each dimension from its
+	// own facet, which is what keeps the registry dropdown from
+	// collapsing to a single entry once the user selects one registry.
+	let imageFacetsAbort: AbortController | null = null;
+	const loadImageFacets = async () => {
 		try {
 			const params = new URLSearchParams();
 			if (includeInactive) params.set('include_inactive', 'true');
-			const qs = params.toString() ? `?${params}` : '';
-			const res = await fetch(`/api/clusters/images/namespaces${qs}`, { credentials: 'include' });
+			const q = imageSearch.trim();
+			if (q) params.set('q', q);
+			if (imageSelectedRegistries.length > 0) params.set('registries', imageSelectedRegistries.join(','));
+			if (imageSelectedClusters.length > 0) params.set('cluster_ids', imageSelectedClusters.join(','));
+			if (imageSelectedNamespaces.length > 0) params.set('namespaces', imageSelectedNamespaces.join(','));
+			imageFacetsAbort?.abort();
+			const ctrl = new AbortController();
+			imageFacetsAbort = ctrl;
+			const res = await fetch(`/api/clusters/images/facets?${params}`, { credentials: 'include', signal: ctrl.signal });
 			if (res.ok) {
-				const body = await res.json().catch(() => null);
-				imageNamespaceFacet = Array.isArray(body) ? body : [];
+				const body = (await res.json().catch(() => null)) as ImageFacets | null;
+				if (body && typeof body === 'object') {
+					imageFacets = {
+						registries: Array.isArray(body.registries) ? body.registries : [],
+						clusters: Array.isArray(body.clusters) ? body.clusters : [],
+						namespaces: Array.isArray(body.namespaces) ? body.namespaces : []
+					};
+				}
 			}
-		} catch { /* silent — dropdown just stays empty */ }
+		} catch { /* silent (includes aborts) */ }
 	};
 
 	// Debounced reload whenever any image filter or sort changes. Same
@@ -738,7 +754,13 @@
 			// the user manually scrolls back up.
 			imageScrollTop = 0;
 			if (imageScrollEl) imageScrollEl.scrollTop = 0;
-			untrack(() => loadImages());
+			untrack(() => {
+				loadImages();
+				// Facets re-aggregate against the new scope — each
+				// dropdown narrows to values still reachable given
+				// the OTHER filters + search.
+				loadImageFacets();
+			});
 		}, 200);
 		void _;
 	});
@@ -842,7 +864,7 @@
 		loadUnfiltered();
 		if (activeTab === 'images') {
 			loadImages();
-			loadImageNamespaces();
+			loadImageFacets();
 		}
 	});
 
@@ -1001,34 +1023,34 @@
 	let imageSelectedRegistries: string[] = $state([]);
 	let imageSelectedClusters: string[] = $state([]);
 	let imageSelectedNamespaces: string[] = $state([]);
-	// Namespace facet for the Images filter. Loaded from
-	// /api/clusters/images/namespaces so the dropdown shows every
-	// namespace the caller can see, not only those on the loaded page.
-	let imageNamespaceFacet: string[] = $state([]);
+	// Dropdown options for the Images filter row. Loaded from
+	// /api/clusters/images/facets and refreshed on every filter change
+	// so each dropdown reflects the values that are still reachable
+	// given the OTHER active filters + search. Each dimension's own
+	// filter is excluded from its facet computation so the user can
+	// always deselect / add more within that dimension.
+	type ImageFacets = {
+		registries: { registry: string; image_count: number }[];
+		clusters: { id: string; label: string }[];
+		namespaces: string[];
+	};
+	let imageFacets: ImageFacets = $state({ registries: [], clusters: [], namespaces: [] });
 
-	// Registry options come from /api/clusters/registry-distribution
-	// (registryDist), which already aggregates every registry across
-	// the fleet — not from the loaded image page, which would miss
-	// registries on unloaded pages. Sorted by name so the dropdown
-	// order is stable; the registry-distribution endpoint sorts by
-	// count for the donut chart.
+	// Dropdown options come from /api/clusters/images/facets. The
+	// endpoint computes each facet against ACL + the search + the
+	// OTHER two filter dimensions, so a selection in (say) Cluster
+	// instantly narrows the Registry and Namespace dropdowns to values
+	// that still match — but the Cluster dropdown itself stays full so
+	// the user can add or remove cluster selections. Sorted server-side
+	// (registries by count desc, the rest alphabetically); rendered as-is.
 	const imageRegistryOptions: MultiSelectOption[] = $derived(
-		[...registryDist].sort((a, b) => a.registry.localeCompare(b.registry)).map((r) => ({ value: r.registry, label: r.registry }))
+		imageFacets.registries.map((r) => ({ value: r.registry, label: r.registry }))
 	);
-
-	// Cluster options come from clustersAll (the unfiltered cluster
-	// summary loaded for the page-level metric cards) so the dropdown
-	// shows every cluster the user can see, not just the ones with
-	// loaded image-page rows. Sorted by display name; the value is
-	// cluster_id so the URL param carries the stable identifier.
 	const imageClusterOptions: MultiSelectOption[] = $derived(
-		[...clustersAll]
-			.sort((a, b) => displayClusterName(a).localeCompare(displayClusterName(b)))
-			.map((c) => ({ value: c.cluster_id, label: displayClusterName(c) }))
+		imageFacets.clusters.map((c) => ({ value: c.id, label: c.label }))
 	);
-
 	const imageNamespaceOptions: MultiSelectOption[] = $derived(
-		imageNamespaceFacet.map((n) => ({ value: n, label: n }))
+		imageFacets.namespaces.map((n) => ({ value: n, label: n }))
 	);
 
 	const imageActiveFilterCount = $derived(

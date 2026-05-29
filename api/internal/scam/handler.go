@@ -976,25 +976,43 @@ func RegistryDistributionHandler(db *gorm.DB) http.HandlerFunc {
 	}
 }
 
-// ImageNamespacesHandler returns the distinct list of namespaces that
-// appear in cluster_image_inventory after ACL + liveness filtering.
-// Feeds the Images-tab namespace filter dropdown so the options reflect
-// every namespace the caller can see, not just the ones on the currently
-// loaded image page.
-func ImageNamespacesHandler(db *gorm.DB) http.HandlerFunc {
+// ImageFacetsHandler returns the dropdown option sets for the Images
+// tab — registries, clusters, namespaces — each one computed against
+// the current search + the OTHER two filter dimensions. Mirrors the
+// hostFacets pattern: a selection in dimension X doesn't shrink the X
+// dropdown (so the user can deselect / add more values), but does
+// shrink the others so cross-filtering converges quickly.
+//
+// One round-trip serves all three lists so the frontend stays in sync
+// with itself — three separate endpoints would risk a race where, say,
+// the namespace list narrows before the cluster list catches up.
+func ImageFacetsHandler(db *gorm.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		namespaces := []string{}
+		type registryFacet struct {
+			Registry   string `json:"registry"`
+			ImageCount int64  `json:"image_count"`
+		}
+		type clusterFacet struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+		}
+		type response struct {
+			Registries []registryFacet `json:"registries"`
+			Clusters   []clusterFacet  `json:"clusters"`
+			Namespaces []string        `json:"namespaces"`
+		}
 		ctx := r.Context()
+		resp := response{Registries: []registryFacet{}, Clusters: []clusterFacet{}, Namespaces: []string{}}
 
 		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cii.cluster_id")
 		if deny {
-			writeJSON(w, http.StatusOK, namespaces)
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 
 		if ready, err := spamdb.ClusterImageInventoryPopulated(ctx, db); err != nil || !ready {
 			clustersummary.TriggerRefresh(db)
-			writeJSON(w, http.StatusOK, namespaces)
+			writeJSON(w, http.StatusOK, resp)
 			return
 		}
 
@@ -1009,20 +1027,128 @@ func ImageNamespacesHandler(db *gorm.DB) http.HandlerFunc {
 			aclWhere = "AND " + aclFrag
 		}
 
-		query := `
-			SELECT DISTINCT cii.namespace
+		searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+		registries := parseImageFilterCSV(r.URL.Query().Get("registries"))
+		clusterIDs := parseImageFilterCSV(r.URL.Query().Get("cluster_ids"))
+		namespaces := parseImageFilterCSV(r.URL.Query().Get("namespaces"))
+
+		// buildWhere assembles the pre-GROUP-BY filter fragment for a
+		// facet query. The three include* flags let each facet skip its
+		// own dimension — that's the bit that keeps the registry dropdown
+		// from collapsing to a single row when the user selects one
+		// registry, etc.
+		buildWhere := func(includeReg, includeCl, includeNs bool) (string, []any) {
+			var where string
+			var args []any
+			if searchQuery != "" {
+				pattern := "%" + searchQuery + "%"
+				where += `AND (cii.registry ILIKE ? OR cii.image ILIKE ? OR cii.digest ILIKE ? OR cii.tag ILIKE ?) `
+				args = append(args, pattern, pattern, pattern, pattern)
+			}
+			if includeReg && len(registries) > 0 {
+				ph := strings.TrimRight(strings.Repeat("?,", len(registries)), ",")
+				where += `AND cii.registry IN (` + ph + `) `
+				for _, v := range registries {
+					args = append(args, v)
+				}
+			}
+			if includeCl && len(clusterIDs) > 0 {
+				ph := strings.TrimRight(strings.Repeat("?,", len(clusterIDs)), ",")
+				where += `AND cii.cluster_id IN (` + ph + `) `
+				for _, v := range clusterIDs {
+					args = append(args, v)
+				}
+			}
+			if includeNs && len(namespaces) > 0 {
+				ph := strings.TrimRight(strings.Repeat("?,", len(namespaces)), ",")
+				where += `AND cii.namespace IN (` + ph + `) `
+				for _, v := range namespaces {
+					args = append(args, v)
+				}
+			}
+			return where, args
+		}
+
+		// Registry facet — skip the registry dimension, keep cluster + ns.
+		regWhere, regArgs := buildWhere(false, true, true)
+		regQuery := `
+			SELECT cii.registry,
+			       COUNT(DISTINCT (cii.raw_registry || '/' || cii.image || '@' || cii.digest))::bigint AS image_count
 			FROM cluster_image_inventory cii
 			` + livenessJoin + `
-			WHERE TRUE ` + aclWhere + ` AND cii.namespace <> ''
-			ORDER BY cii.namespace
+			WHERE TRUE ` + aclWhere + ` ` + regWhere + `
+			GROUP BY cii.registry
+			ORDER BY image_count DESC
 		`
-		if err := db.WithContext(ctx).Raw(query, aclArgs...).Scan(&namespaces).Error; err != nil {
-			log.Printf("ImageNamespacesHandler query error: %v", err)
+		regFullArgs := append([]any{}, aclArgs...)
+		regFullArgs = append(regFullArgs, regArgs...)
+		if err := db.WithContext(ctx).Raw(regQuery, regFullArgs...).Scan(&resp.Registries).Error; err != nil {
+			log.Printf("ImageFacetsHandler registry query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, http.StatusOK, namespaces)
+
+		// Cluster facet — skip the cluster dimension. Label COALESCE
+		// matches displayClusterName on the frontend (ROR friendly →
+		// env-var label → ROR slug → cluster_id) so the dropdown text
+		// lines up with what the cluster table shows.
+		clWhere, clArgs := buildWhere(true, false, true)
+		clQuery := `
+			SELECT DISTINCT cii.cluster_id AS id,
+			       COALESCE(NULLIF(cs.ror_cluster_name, ''),
+			                NULLIF(cs.cluster_name, ''),
+			                NULLIF(cs.ror_slug, ''),
+			                cii.cluster_id) AS label
+			FROM cluster_image_inventory cii
+			LEFT JOIN cluster_summary cs ON cs.cluster_id = cii.cluster_id
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + clWhere + `
+			ORDER BY label
+		`
+		clFullArgs := append([]any{}, aclArgs...)
+		clFullArgs = append(clFullArgs, clArgs...)
+		if err := db.WithContext(ctx).Raw(clQuery, clFullArgs...).Scan(&resp.Clusters).Error; err != nil {
+			log.Printf("ImageFacetsHandler cluster query error: %v", err)
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		// Namespace facet — skip the namespace dimension.
+		nsWhere, nsArgs := buildWhere(true, true, false)
+		nsQuery := `
+			SELECT DISTINCT cii.namespace
+			FROM cluster_image_inventory cii
+			` + livenessJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` AND cii.namespace <> ''
+			ORDER BY cii.namespace
+		`
+		nsFullArgs := append([]any{}, aclArgs...)
+		nsFullArgs = append(nsFullArgs, nsArgs...)
+		if err := db.WithContext(ctx).Raw(nsQuery, nsFullArgs...).Scan(&resp.Namespaces).Error; err != nil {
+			log.Printf("ImageFacetsHandler namespace query error: %v", err)
+			http.Error(w, "query failed", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// parseImageFilterCSV splits a comma-separated query param into trimmed
+// non-empty values. Shared between ImageDetailHandler's filter args and
+// ImageFacetsHandler so both parse identically.
+func parseImageFilterCSV(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // ExposureHandler returns internet vs internal resource counts.
