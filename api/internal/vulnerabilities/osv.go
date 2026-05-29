@@ -163,7 +163,7 @@ func SetVEX(ctx context.Context, db *gorm.DB, purl, vulnID, status, justificatio
 		// unique index doesn't collide and history reflects the
 		// supersession.
 		if err := tx.Model(&ComponentVEX{}).
-			Where("purl = ? AND vuln_id = ? AND COALESCE(asset_scope,'') = ? AND revoked_at IS NULL",
+			Where("p_url = ? AND vuln_id = ? AND COALESCE(asset_scope,'') = ? AND revoked_at IS NULL",
 				purl, canonical, in.AssetScope).
 			Updates(map[string]any{
 				"revoked_at": now,

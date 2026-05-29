@@ -60,9 +60,14 @@ ALTER TABLE component_vex
 -- coexist with a global one and a revoked row can be superseded.
 DROP INDEX IF EXISTS idx_component_vex_purl_vuln;
 
+-- Column is p_url in this table (GORM auto-mapped from the PURL field
+-- without an explicit column tag). component_vulnerabilities uses
+-- "purl" because that model carries the explicit gorm:"column:purl"
+-- override. Easy footgun — leaving the note in case a future model
+-- edit changes either side.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_component_vex_purl_vuln_scope_active
-    ON component_vex (purl, vuln_id, COALESCE(asset_scope, ''))
+    ON component_vex (p_url, vuln_id, COALESCE(asset_scope, ''))
     WHERE revoked_at IS NULL;
 
 CREATE INDEX IF NOT EXISTS idx_component_vex_history
-    ON component_vex (purl, vuln_id, created_at DESC);
+    ON component_vex (p_url, vuln_id, created_at DESC);
