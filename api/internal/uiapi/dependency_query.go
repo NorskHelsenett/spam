@@ -257,8 +257,16 @@ func buildStructuredDependencyPredicate(nameCol, versionCol string, groups [][]d
 	for _, group := range groups {
 		andParts := make([]string, 0, len(group))
 		for _, clause := range group {
-			nameMatch := fmt.Sprintf("(LOWER(COALESCE(%s, '')) = LOWER(?) OR COALESCE(%s, '') ILIKE ?)", nameCol, nameCol)
-			args = append(args, clause.Name, "%"+clause.Name+"%")
+			// Match on the bare column expression (no COALESCE wrapper, no
+			// LOWER(col)=? branch) so the pg_trgm functional indexes defined on
+			// exactly COALESCE(package_name, normalized_name, name) and md.name
+			// stay eligible. Wrapping the column or OR-ing in a case-folded
+			// equality forces a full materialized-view seq scan, which 504s once
+			// a multi-package `a || b || c ...` search fans out across clauses.
+			// ILIKE '%name%' is already case-insensitive and subsumes the exact
+			// match, so the result set is unchanged.
+			nameMatch := fmt.Sprintf("(%s ILIKE ?)", nameCol)
+			args = append(args, "%"+clause.Name+"%")
 
 			if clause.Comparator == "" || clause.RawVersion == "" {
 				andParts = append(andParts, "("+nameMatch+")")
