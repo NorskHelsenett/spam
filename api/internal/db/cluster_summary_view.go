@@ -61,7 +61,7 @@ func ClusterImageInventoryPopulated(ctx context.Context, db *gorm.DB) (bool, err
 // that handles "view not yet populated" gracefully. Returns
 // ErrRefreshLockHeld when another process holds the lock.
 func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
-	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, clusterViewRefreshInterval) {
 		return nil
 	}
 
@@ -90,7 +90,7 @@ func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", clusterSummaryViewRefreshLockID)
 	}()
 
-	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, clusterViewRefreshInterval) {
 		return nil
 	}
 

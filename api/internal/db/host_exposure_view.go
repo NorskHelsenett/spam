@@ -45,7 +45,7 @@ func HostExposureViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) 
 // lock.
 func RefreshHostExposureViews(ctx context.Context, db *gorm.DB) error {
 	names := []string{hostExposureViewName, exposedDigestsViewName}
-	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, names, hostExposureViewRefreshInterval) {
 		return nil
 	}
 
@@ -75,7 +75,7 @@ func RefreshHostExposureViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", hostExposureViewRefreshLockID)
 	}()
 
-	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, names, hostExposureViewRefreshInterval) {
 		return nil
 	}
 

@@ -33,13 +33,36 @@ const sbomViewRefreshLockID = 8_742_635_912
 // vuln refresh and vice versa — the two view families are independent.
 const vulnUnifiedViewRefreshLockID = 8_742_635_913
 
-// minMaterializedViewRefreshInterval is a cross-replica debounce for
-// background MV refresh triggers. The in-process gates coalesce bursts
-// inside one pod, but daytime ingest can hit API + worker replicas at
-// the same time. The materialized_view_refreshes table gives all
-// replicas a shared "fresh enough" signal so they do not rebuild the
-// same expensive MV family multiple times per short burst.
-const minMaterializedViewRefreshInterval = 30 * time.Second
+// Cross-replica debounce windows for background MV refresh triggers. The
+// in-process gates coalesce bursts inside one pod, but daytime ingest can
+// hit API + worker replicas at the same time; the materialized_view_refreshes
+// table gives all replicas a shared "fresh enough" signal so they do not
+// rebuild the same expensive MV family multiple times per short burst.
+//
+// The window is per-family and scaled to rebuild cost. A flat 30s was
+// previously shared by every family, which pinned the DB rebuilding the
+// expensive MVs almost continuously: sbom_metadata_view (~204s to rebuild)
+// has no meaningful freshness to gain from a 30s cadence, it just spills to
+// temp files and burns CPU. Cheap, interactively-read families stay tight;
+// expensive families back off. These are dashboard views that tolerate
+// minute-scale staleness.
+const (
+	// cluster_summary (~4.5s) + cluster_image_inventory (~2.5s) — cheap,
+	// backs interactive cluster dashboards, so kept tight.
+	clusterViewRefreshInterval = 60 * time.Second
+	// host_exposure (~0.2s) + exposed_digests (~11s) share one lock/window;
+	// follows the expensive member, not the cheap one.
+	hostExposureViewRefreshInterval = 5 * time.Minute
+	// asset_risk (~15s), cascaded from the vuln + host-exposure + dep-health
+	// + secret-probe paths, so it is the most-triggered family.
+	assetRiskViewRefreshInterval = 5 * time.Minute
+	// Four unified/canonical vuln MVs; view_unified_image_vulnerabilities
+	// alone is ~33s to rebuild.
+	vulnUnifiedViewRefreshInterval = 5 * time.Minute
+	// sbom_metadata_view (~204s) + sbom_component_view — by far the most
+	// expensive family; SBOM metadata changes slowly so a long window is fine.
+	sbomViewRefreshInterval = 15 * time.Minute
+)
 
 // vulnUnifiedViewNames are the materialized views that hold the unified
 // per-asset vulnerability rows the API filters and groups against, plus
@@ -373,6 +396,22 @@ func refreshView(ctx context.Context, db *gorm.DB, view string) error {
 		log.Printf("disable JIT for %s refresh: %v", view, err)
 	}
 
+	// These MV bodies sort/hash hundreds of millions of rows and spill far
+	// past the default work_mem to temp files (observed in the TB range of
+	// temp_bytes across refreshes). Raise work_mem for just this refresh so
+	// the big sort/hash nodes stay in memory, then RESET before the conn
+	// returns to the pool — unlike jit=off, a fat work_mem left on a pooled
+	// conn would inflate every subsequent query's per-node memory budget.
+	if _, err := conn.ExecContext(ctx, "SET work_mem = '256MB'"); err != nil {
+		log.Printf("raise work_mem for %s refresh: %v", view, err)
+	} else {
+		defer func() {
+			resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = conn.ExecContext(resetCtx, "RESET work_mem")
+		}()
+	}
+
 	var populated bool
 	_ = conn.QueryRowContext(ctx,
 		"SELECT COALESCE(ispopulated, false) FROM pg_matviews WHERE matviewname = $1", view,
@@ -502,7 +541,7 @@ func VulnCanonicalViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error)
 // another process holds the lock so the caller can decide whether to
 // retry or treat the in-flight refresh as good enough.
 func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
-	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, vulnUnifiedViewRefreshInterval) {
 		return nil
 	}
 
@@ -532,7 +571,7 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", vulnUnifiedViewRefreshLockID)
 	}()
 
-	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, vulnUnifiedViewNames, vulnUnifiedViewRefreshInterval) {
 		return nil
 	}
 
@@ -553,7 +592,7 @@ func RefreshVulnUnifiedViews(ctx context.Context, db *gorm.DB) error {
 // outside a transaction block, so a session-level advisory lock is used instead.
 func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 	sbomViewNames := []string{"sbom_metadata_view", "sbom_component_view"}
-	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, sbomViewRefreshInterval) {
 		return nil
 	}
 
@@ -585,7 +624,7 @@ func RefreshMaterializedViews(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", sbomViewRefreshLockID)
 	}()
 
-	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, sbomViewNames, sbomViewRefreshInterval) {
 		return nil
 	}
 

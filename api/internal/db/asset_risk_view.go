@@ -39,7 +39,7 @@ func AssetRiskViewPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // the in-flight refresh as good enough.
 func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
 	names := []string{assetRiskViewName}
-	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, names, assetRiskViewRefreshInterval) {
 		return nil
 	}
 
@@ -72,7 +72,7 @@ func RefreshAssetRiskView(ctx context.Context, db *gorm.DB) error {
 		_, _ = conn.ExecContext(releaseCtx, "SELECT pg_advisory_unlock($1)", assetRiskViewRefreshLockID)
 	}()
 
-	if materializedViewsRecentlyRefreshed(ctx, db, names, minMaterializedViewRefreshInterval) {
+	if materializedViewsRecentlyRefreshed(ctx, db, names, assetRiskViewRefreshInterval) {
 		return nil
 	}
 
