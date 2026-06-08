@@ -22,7 +22,7 @@
 
 	let dependencies: UnifiedDependency[] = $state([]);
 	let ecosystems: string[] = $state([]);
-	let loading = $state(true);
+	let loading = $state(false);
 	let error = $state('');
 	let searchQuery = $state('');
 	let selectedEcosystem = $state('');
@@ -254,10 +254,13 @@
 	const hasActiveSearch = $derived(Boolean(searchQuery.trim() || selectedEcosystem || selectedSource));
 
 	onMount(() => {
-		if (browser) {
-			loadEcosystems();
-			loadComponents();
-		}
+		if (!browser) return;
+		loadEcosystems();
+		// Don't eagerly load the full inventory — it's large enough to time
+		// out. Show the idle prompt and wait for a search/filter. Only
+		// auto-load when a filter is already active (e.g. restored via
+		// snapshot on back-navigation), which scopes the query down.
+		if (hasActiveSearch) loadComponents();
 	});
 </script>
 
@@ -361,43 +364,37 @@
 					</div>
 				</div>
 			</div>
-		{:else if dependencies.length === 0 && !loading}
+		{:else if dependencies.length === 0 && !loading && hasActiveSearch}
 			<div class="flex flex-1 items-center justify-center">
 				<div class="flex flex-col items-center gap-3 text-center">
-					{#if hasActiveSearch}
-						<svg
-							viewBox="0 0 24 24"
-							fill="none"
-							xmlns="http://www.w3.org/2000/svg"
-							class="h-10 w-10 text-[var(--text-secondary)]"
-							aria-hidden="true"
-						>
-							<path
-								d="M11 6C13.7614 6 16 8.23858 16 11M16.6588 16.6549L21 21M19 11C19 15.4183 15.4183 19 11 19C6.58172 19 3 15.4183 3 11C3 6.58172 6.58172 3 11 3C15.4183 3 19 6.58172 19 11Z"
-								stroke="currentColor"
-								stroke-width="2"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							></path>
-						</svg>
-					{:else}
-						<svg
-							viewBox="0 0 24 24"
-							xmlns="http://www.w3.org/2000/svg"
-							class="h-10 w-10 text-[var(--text-secondary)]"
-							aria-hidden="true"
-						>
-							<path
-								d="M20.49,6.63l-8-4.5a1,1,0,0,0-1,0l-8,4.5A1,1,0,0,0,3,7.5v9a1,1,0,0,0,.51.87l8,4.5a1,1,0,0,0,1,0l8-4.5A1,1,0,0,0,21,16.5v-9A1,1,0,0,0,20.49,6.63Z"
-								fill="currentColor"
-							></path>
-							<path
-								d="M16,15a1,1,0,0,1-1-1V10.12L11.55,8.39a1,1,0,0,1,.9-1.78l4,2A1,1,0,0,1,17,9.5V14A1,1,0,0,1,16,15Z"
-								fill="transparent"
-							></path>
-						</svg>
-					{/if}
+					<svg
+						viewBox="0 0 24 24"
+						fill="none"
+						xmlns="http://www.w3.org/2000/svg"
+						class="h-10 w-10 text-[var(--text-secondary)]"
+						aria-hidden="true"
+					>
+						<path
+							d="M11 6C13.7614 6 16 8.23858 16 11M16.6588 16.6549L21 21M19 11C19 15.4183 15.4183 19 11 19C6.58172 19 3 15.4183 3 11C3 6.58172 6.58172 3 11 3C15.4183 3 19 6.58172 19 11Z"
+							stroke="currentColor"
+							stroke-width="2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						></path>
+					</svg>
 					<p class="text-sm text-[var(--text-muted)]">No dependencies found.</p>
+				</div>
+			</div>
+		{:else if dependencies.length === 0 && !loading}
+			<div class="flex flex-1 items-center justify-center">
+				<div class="flex max-w-md flex-col items-center gap-4 text-center">
+					<div class="flex h-16 w-16 items-center justify-center rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+						<Search class="h-7 w-7 text-[var(--accent)]" aria-hidden="true" />
+					</div>
+					<div>
+						<p class="text-base font-semibold text-[var(--text-bright)]">Search the dependency inventory</p>
+						<p class="mt-1.5 text-sm text-[var(--text-muted)]">Enter a package name or query above to begin — the full inventory is large, so results load on demand. Try <code>react@19.0.1..19.2.0</code> or pick an ecosystem.</p>
+					</div>
 				</div>
 			</div>
 		{:else if dependencies.length > 0}
