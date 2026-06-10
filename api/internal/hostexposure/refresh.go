@@ -49,7 +49,7 @@ func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
 		if populated {
 			return nil
 		}
-		if err := spamdb.RefreshHostExposureViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+		if _, err := spamdb.RefreshHostExposureViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
 			log.Printf("hostexposure: first populate refresh: %v", err)
 		}
 		select {
@@ -85,22 +85,32 @@ func TriggerRefresh(db *gorm.DB) {
 	go func() {
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
-			if err := spamdb.RefreshHostExposureViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			refreshed, err := spamdb.RefreshHostExposureViews(ctx, db)
+			if err != nil && err != spamdb.ErrRefreshLockHeld {
 				log.Printf("hostexposure: background refresh: %v", err)
 			}
 			cancel()
 
-			// asset_risk's internet_exposed flag joins exposed_digests,
-			// so any change we just materialized should roll forward
-			// into triage. The asset_risk gate coalesces this with any
-			// concurrent vuln/scan triggers, so we never over-refresh.
-			assetrisk.TriggerRefresh(db)
+			// Cascade only when a REFRESH actually executed. A skipped
+			// refresh (debounce window, unchanged cluster_record
+			// fingerprint, or another replica mid-refresh) means
+			// exposed_digests didn't change, so re-deriving asset_risk
+			// from it would rebuild identical rows — that unconditional
+			// cascade is what used to keep asset_risk rebuilding at its
+			// debounce floor around the clock.
+			if refreshed {
+				// asset_risk's internet_exposed flag joins exposed_digests,
+				// so any change we just materialized should roll forward
+				// into triage. The asset_risk gate coalesces this with any
+				// concurrent vuln/scan triggers, so we never over-refresh.
+				assetrisk.TriggerRefresh(db)
 
-			// Newly-ingested hosts only appear in host_exposure after
-			// this refresh; nudge the hostresolve worker so the
-			// summary endpoint sees them classified within seconds
-			// instead of waiting for the next periodic tick.
-			hostresolve.Wake()
+				// Newly-ingested hosts only appear in host_exposure after
+				// this refresh; nudge the hostresolve worker so the
+				// summary endpoint sees them classified within seconds
+				// instead of waiting for the next periodic tick.
+				hostresolve.Wake()
+			}
 
 			refreshGate.mu.Lock()
 			if !refreshGate.pending {

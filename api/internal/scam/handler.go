@@ -303,8 +303,20 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 					}
 					args = append(args, u.data, now, isPresent, now, now, tombstonedAt, eventIDArg)
 				}
-				// On conflict: data/received_at/last_change_at always
-				// move forward. is_present flips both directions (DELETE
+				// On conflict: data/received_at always move forward.
+				// last_change_at moves forward ONLY when the record's
+				// state actually changed (data content or presence) —
+				// that's the column's documented contract from
+				// 20260512_cluster_record_lifecycle_columns.sql, and the
+				// MV refresh skip relies on it: max(last_change_at) is
+				// the source fingerprint for cluster_summary /
+				// cluster_image_inventory / host_exposure /
+				// exposed_digests, so a no-op heartbeat must not bump it
+				// or every snapshot forces a full MV rebuild. Same-batch
+				// race protection in applySnapshot is unaffected: brand
+				// new rows take the INSERT path (last_change_at = now),
+				// and unchanged existing rows are in the snapshot's
+				// keep-list. is_present flips both directions (DELETE
 				// → false; resource reappearing → true). tombstoned_at
 				// preserves the first-tombstone time when staying
 				// tombstoned, and clears when the resource comes back.
@@ -319,7 +331,12 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 						data = EXCLUDED.data,
 						received_at = EXCLUDED.received_at,
 						is_present = EXCLUDED.is_present,
-						last_change_at = EXCLUDED.last_change_at,
+						last_change_at = CASE
+							WHEN cluster_record.data IS DISTINCT FROM EXCLUDED.data
+							  OR cluster_record.is_present IS DISTINCT FROM EXCLUDED.is_present
+							THEN EXCLUDED.last_change_at
+							ELSE cluster_record.last_change_at
+						END,
 						tombstoned_at = CASE
 							WHEN EXCLUDED.is_present THEN NULL
 							ELSE COALESCE(cluster_record.tombstoned_at, EXCLUDED.tombstoned_at)

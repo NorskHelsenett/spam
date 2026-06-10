@@ -175,7 +175,7 @@ func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
 		if assetRiskReady(ctx, db) {
 			return nil
 		}
-		if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+		if _, err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
 			log.Printf("assetrisk: first populate refresh: %v", err)
 		}
 		select {
@@ -205,12 +205,31 @@ func TriggerRefresh(db *gorm.DB) {
 	refreshGate.mu.Unlock()
 
 	go func() {
+		// Trailing-edge retry budget: a trigger that lands inside the
+		// debounce window is skipped (refreshed == false), and now
+		// that upstream cascades only fire on actual change, no
+		// follow-up trigger is guaranteed to come — the change would
+		// sit invisible until the next genuine upstream refresh,
+		// possibly hours later. Sleep out the window (inflight stays
+		// true, so concurrent triggers coalesce into the pending bit)
+		// and try once more. Budgeted so the worker can't nap-loop
+		// forever when sibling replicas keep winning the window; a
+		// second consecutive skip means another replica refreshed
+		// after our trigger arrived, which covers it.
+		retries := 2
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
-			if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			refreshed, err := spamdb.RefreshAssetRiskView(ctx, db)
+			if err != nil && err != spamdb.ErrRefreshLockHeld {
 				log.Printf("assetrisk: background refresh: %v", err)
 			}
 			cancel()
+
+			if err == nil && !refreshed && retries > 0 {
+				retries--
+				time.Sleep(spamdb.AssetRiskRefreshDebounce() + 5*time.Second)
+				continue
+			}
 
 			refreshGate.mu.Lock()
 			if !refreshGate.pending {
@@ -220,6 +239,7 @@ func TriggerRefresh(db *gorm.DB) {
 			}
 			refreshGate.pending = false
 			refreshGate.mu.Unlock()
+			retries = 2
 		}
 	}()
 }
