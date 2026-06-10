@@ -48,8 +48,8 @@ type Settings struct {
 	// by ListSettings clearing it (belt) + omitempty (suspenders).
 	APIKey string `json:"api_key,omitempty" gorm:"-"`
 	// ClearAPIKey removes the stored key on save.
-	ClearAPIKey bool   `json:"clear_api_key,omitempty" gorm:"-"`
-	Model       string `json:"model"     gorm:"column:model"`
+	ClearAPIKey  bool      `json:"clear_api_key,omitempty" gorm:"-"`
+	Model        string    `json:"model"     gorm:"column:model"`
 	SystemPrompt string    `json:"system_prompt" gorm:"column:system_prompt"`
 	Temperature  float32   `json:"temperature"   gorm:"column:temperature"`
 	TopK         int       `json:"top_k"         gorm:"column:top_k"`
