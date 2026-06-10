@@ -37,7 +37,7 @@ func listWork(ctx context.Context, db *gorm.DB, staleAfter time.Duration, limit 
 		FROM known k
 		LEFT JOIN host_resolution hr ON hr.host = k.host
 		WHERE hr.host IS NULL
-		   OR hr.resolved_at < NOW() - (? || ' seconds')::interval
+		   OR hr.resolved_at < NOW() - make_interval(secs => ?)
 		ORDER BY hr.resolved_at NULLS FIRST
 		LIMIT ?
 	`, int(staleAfter.Seconds()), limit).Scan(&rows).Error
