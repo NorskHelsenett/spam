@@ -200,11 +200,11 @@
 					</div>
 				</div>
 				<div class="flex shrink-0 items-center gap-1.5">
-					<a class="btn btn-primary px-3 py-1.5 text-xs" href={vulnUrl(vulnId)}>
+					<a class="btn btn-primary px-3 py-1.5 text-xs !shadow-none" href={vulnUrl(vulnId)}>
 						Full page
 						<ExternalLink class="h-3 w-3" />
 					</a>
-					<a class="btn btn-primary px-3 py-1.5 text-xs" href={adv.href} target="_blank" rel="noopener noreferrer">
+					<a class="btn btn-primary px-3 py-1.5 text-xs !shadow-none" href={adv.href} target="_blank" rel="noopener noreferrer">
 						{adv.label}
 						<ExternalLink class="h-3 w-3" />
 					</a>
