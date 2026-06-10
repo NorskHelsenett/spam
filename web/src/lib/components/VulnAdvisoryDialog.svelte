@@ -149,11 +149,6 @@
 		}
 	};
 
-	// Actions that navigate away from the dialog get the warning tone
-	// so "this leaves the modal" is visible before clicking.
-	const leaveBtn =
-		'inline-flex items-center gap-1 rounded-lg border border-[var(--warning)]/40 text-[var(--warning)] transition hover:bg-[var(--warning)]/10';
-
 	const vulnUrl = (id: string) => `/vuln/${encodeURIComponent(id)}`;
 
 	// Canonical external advisory link for the given vuln id. CVE-* → NVD
@@ -205,11 +200,11 @@
 					</div>
 				</div>
 				<div class="flex shrink-0 items-center gap-1.5">
-					<a class="{leaveBtn} px-2.5 py-1.5 text-xs font-medium" href={vulnUrl(vulnId)}>
+					<a class="btn btn-primary px-3 py-1.5 text-xs" href={vulnUrl(vulnId)}>
 						Full page
 						<ExternalLink class="h-3 w-3" />
 					</a>
-					<a class="{leaveBtn} px-2.5 py-1.5 text-xs font-medium" href={adv.href} target="_blank" rel="noopener noreferrer">
+					<a class="btn btn-primary px-3 py-1.5 text-xs" href={adv.href} target="_blank" rel="noopener noreferrer">
 						{adv.label}
 						<ExternalLink class="h-3 w-3" />
 					</a>
@@ -347,7 +342,7 @@
 													{r.repo_slug || r.repo_id}
 												</span>
 												<a
-													class="{leaveBtn} shrink-0 py-1 px-2 text-[11px] font-medium"
+													class="btn btn-warning shrink-0 py-1 px-2.5 text-[11px]"
 													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_instance_id ? `&provider_id=${r.provider_instance_id}` : ''}`}
 												>
 													Open
@@ -379,7 +374,7 @@
 												</div>
 												{#if i.image_digest}
 													<a
-														class="{leaveBtn} shrink-0 py-1 px-2 text-[11px] font-medium"
+														class="btn btn-warning shrink-0 py-1 px-2.5 text-[11px]"
 														href={`/images/${encodeURIComponent(i.image_digest)}`}
 													>
 														Open

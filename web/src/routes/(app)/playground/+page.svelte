@@ -276,6 +276,9 @@
 			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
+			<!-- Warning outline: actions that leave the current context
+			     (modal-exiting links, external advisories) -->
+			<button type="button" class="btn btn-warning">Warning</button>
 			<!-- Split button: single pill, left = primary action, right = darker dropdown trigger -->
 			<div class="relative" bind:this={splitBtnEl}>
 				<div class="flex overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)]">
