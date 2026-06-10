@@ -23,6 +23,12 @@ type TriageImageVuln struct {
 	KEV              bool       `json:"kev"                gorm:"column:kev"`
 	KEVDueDate       *time.Time `json:"kev_due_date,omitempty" gorm:"column:kev_due_date"`
 	KEVRansomware    bool       `json:"kev_ransomware"     gorm:"column:kev_ransomware"`
+
+	// OnPath marks vulns that participate in the attack path the tier
+	// rules weigh: in KEV, elevated EPSS, or critical on an
+	// internet-exposed digest. The UI hides everything else behind a
+	// toggle so the card stays threat-model-sized.
+	OnPath bool `json:"on_path" gorm:"column:on_path"`
 }
 
 // TriageImageHost is one exposed domain serving the image's digest.
@@ -108,10 +114,22 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			Hosts: []TriageImageHost{},
 		}
 
+		// Whether the digest is internet-reachable — feeds the on_path
+		// projection below (an exposed critical is on the path even
+		// without KEV/EPSS signal, mirroring the F4/W4 tier rules).
+		var imgExposed bool
+		if err := db.WithContext(ctx).Raw(
+			"SELECT EXISTS (SELECT 1 FROM exposed_digests WHERE digest = ?)", img.Digest,
+		).Scan(&imgExposed).Error; err != nil {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+
 		// One row per canonical vuln (a CVE hitting several packages
 		// collapses to one panel row; prefer the occurrence that shows
-		// a fix), ranked KEV-first then EPSS descending — the same
-		// order the tier rules weigh them.
+		// a fix), on-path first, then KEV, then EPSS descending — the
+		// same order the tier rules weigh them. The 0.1 EPSS cutoff is
+		// assetrisk.EPSSElevated.
 		vulnQ := `
 			WITH canonical AS (
 				SELECT DISTINCT ON (COALESCE(vm.canonical_id, v.vuln_id))
@@ -140,11 +158,17 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				COALESCE(e.percentile, 0)::real AS epss_percentile,
 				(k.cve_id IS NOT NULL)          AS kev,
 				k.due_date                      AS kev_due_date,
-				COALESCE(k.known_ransomware, false) AS kev_ransomware
+				COALESCE(k.known_ransomware, false) AS kev_ransomware,
+				(k.cve_id IS NOT NULL
+				 OR COALESCE(e.score, 0) >= 0.1
+				 OR (c.severity = 'CRITICAL' AND ?)) AS on_path
 			FROM canonical c
 			LEFT JOIN epss_entries e    ON e.cve_id = c.canonical_id
 			LEFT JOIN cisa_kev_entries k ON k.cve_id = c.canonical_id
-			ORDER BY (k.cve_id IS NOT NULL) DESC,
+			ORDER BY (k.cve_id IS NOT NULL
+			          OR COALESCE(e.score, 0) >= 0.1
+			          OR (c.severity = 'CRITICAL' AND ?)) DESC,
+			         (k.cve_id IS NOT NULL) DESC,
 			         e.score DESC NULLS LAST,
 			         CASE c.severity
 			             WHEN 'CRITICAL' THEN 1
@@ -156,7 +180,7 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			         c.canonical_id
 			LIMIT ?
 		`
-		if err := db.WithContext(ctx).Raw(vulnQ, img.ID, triageImageVulnLimit).
+		if err := db.WithContext(ctx).Raw(vulnQ, img.ID, imgExposed, imgExposed, triageImageVulnLimit).
 			Scan(&resp.Vulns).Error; err != nil {
 			http.Error(w, "failed to load image vulnerabilities", http.StatusInternalServerError)
 			return

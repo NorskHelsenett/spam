@@ -104,6 +104,7 @@
 		kev: boolean;
 		kev_due_date?: string | null;
 		kev_ransomware: boolean;
+		on_path: boolean;
 	};
 	type ImageTriageHost = {
 		host: string;
@@ -485,43 +486,98 @@
 		return 'var(--error)';
 	};
 
-	// Threat-side raw inputs for the expansion panel. Returned as
-	// {label, value, dim} so the renderer doesn't need its own
-	// formatting logic and can grey out zero rows.
-	const threatBreakdown = (r: TriageRow) => {
-		const epssPct = r.epss_max > 0 ? `${(r.epss_max * 100).toFixed(1)}%` : '—';
-		return [
-			{ label: 'Critical CVEs', value: r.critical_count, dim: r.critical_count === 0 },
-			{ label: 'High CVEs', value: r.high_count, dim: r.high_count === 0 },
-			{ label: 'Medium / Low CVEs', value: `${r.medium_count} / ${r.low_count}`, dim: r.medium_count + r.low_count === 0 },
-			{ label: 'KEV CVEs', value: r.kev_count, dim: r.kev_count === 0 },
-			{ label: 'KEV with fix', value: r.kev_fixable_count, dim: r.kev_fixable_count === 0 },
-			{ label: 'KEV on exposed workload', value: r.exposed_kev_count, dim: r.exposed_kev_count === 0 },
-			{ label: 'EPSS max', value: epssPct, dim: r.epss_max === 0 },
-			{ label: 'Active secrets', value: r.active_secret_count, dim: r.active_secret_count === 0 },
-			{ label: 'Internet exposed', value: r.internet_exposed ? 'Yes' : 'No', dim: !r.internet_exposed },
-			{ label: 'Critical w/ fix', value: r.has_fix_for_critical ? 'Yes' : 'No', dim: !r.has_fix_for_critical }
-		];
+	// --- Attack-path rendering ------------------------------------
+	// The card head renders an abstract path from signals alone (no
+	// lazy fetch): entry → blast surface → weakness → fix. The
+	// expansion replaces it with the concrete trace (domains, CVEs,
+	// packages) once the per-image detail loads.
+	type ChipTone = 'error' | 'warning' | 'ok' | 'muted';
+	type PathChip = { label: string; tone: ChipTone };
+
+	const pathChips = (r: TriageRow): PathChip[] => {
+		const chips: PathChip[] = [];
+		if (r.active_secret_count > 0) {
+			chips.push({
+				label: `${r.active_secret_count} live credential${r.active_secret_count === 1 ? '' : 's'}`,
+				tone: 'error'
+			});
+		}
+		chips.push(
+			r.internet_exposed ? { label: 'internet', tone: 'warning' } : { label: 'internal only', tone: 'muted' }
+		);
+		if (r.asset_type === 'image' && r.cluster_count > 0) {
+			chips.push(
+				r.exposed_cluster_count > 0
+					? {
+							label: `exposed in ${r.exposed_cluster_count}/${r.cluster_count} cluster${r.cluster_count === 1 ? '' : 's'}`,
+							tone: 'warning'
+						}
+					: { label: `${r.cluster_count} cluster${r.cluster_count === 1 ? '' : 's'}`, tone: 'muted' }
+			);
+		}
+		// One weakness chip — the strongest signal, not an inventory.
+		if (r.exposed_kev_count > 0) {
+			chips.push({ label: `${r.exposed_kev_count} KEV on path`, tone: 'error' });
+		} else if (r.kev_count > 0) {
+			chips.push({ label: `${r.kev_count} KEV`, tone: 'error' });
+		} else if (r.exposed_critical_count > 0) {
+			chips.push({ label: `${r.exposed_critical_count} critical on path`, tone: 'warning' });
+		} else if (r.critical_count > 0) {
+			chips.push({ label: `${r.critical_count} critical`, tone: 'warning' });
+		} else if (r.high_count > 0) {
+			chips.push({ label: `${r.high_count} high`, tone: 'muted' });
+		} else if (r.medium_count + r.low_count > 0) {
+			chips.push({ label: 'medium/low only', tone: 'muted' });
+		}
+		if (r.epss_max >= 0.1) {
+			chips.push({
+				label: `EPSS ${(r.epss_max * 100).toFixed(0)}%`,
+				tone: r.epss_max >= 0.5 ? 'error' : 'warning'
+			});
+		}
+		if (r.kev_count > 0 || r.critical_count > 0 || r.high_count > 0) {
+			const fixable = r.kev_fixable_count > 0 || r.has_fix_for_critical || r.has_fix_for_high;
+			chips.push(fixable ? { label: 'fix available', tone: 'ok' } : { label: 'no fix yet', tone: 'muted' });
+		}
+		return chips;
 	};
 
-	const trustBreakdown = (r: TriageRow) => {
-		const scanLabel = r.scan_age_days >= 999 ? 'Never' : `${r.scan_age_days}d ago`;
-		const out: { label: string; value: string | number; dim: boolean }[] = [];
-		if (r.asset_type === 'repo') {
-			out.push({ label: 'Signed commits (90d)', value: `${Math.round(r.signed_commits_pct)}%`, dim: r.signed_commits_pct === 0 });
+	// One concrete next step per card, derived from the same signals
+	// the tier rules read.
+	const actionLine = (r: TriageRow): string => {
+		if (r.active_secret_count > 0) {
+			return 'Rotate the leaked credentials at the issuing provider now, then scrub them from git history.';
 		}
-		if (r.asset_type === 'image') {
-			out.push({ label: 'Image signed', value: r.image_signed ? 'Yes' : 'No', dim: !r.image_signed });
+		const fixable = r.kev_fixable_count > 0 || r.has_fix_for_critical || r.has_fix_for_high;
+		const redeploy =
+			r.asset_type === 'image' && r.cluster_count > 0
+				? ` and redeploy to ${r.cluster_count} cluster${r.cluster_count === 1 ? '' : 's'}`
+				: '';
+		if (fixable) {
+			if (r.asset_type === 'image') return `Rebuild the image with the patched versions below${redeploy}.`;
+			if (r.asset_type === 'repo') return 'Bump the affected dependencies to their fixed versions.';
+			return 'Rebuild and redeploy the affected images listed in the tiers above.';
 		}
-		out.push(
-			{ label: 'Last scan', value: scanLabel, dim: r.scan_age_days >= 999 },
-			{ label: 'Has SBOM', value: r.has_sbom ? 'Yes' : 'No', dim: !r.has_sbom },
-			{ label: 'Worst dep health', value: Math.round(r.worst_dep_health_score), dim: r.worst_dep_health_score >= 100 },
-			{ label: 'Archived deps', value: r.archived_dep_count, dim: r.archived_dep_count === 0 },
-			{ label: 'Deprecated deps', value: r.deprecated_dep_count, dim: r.deprecated_dep_count === 0 },
-			{ label: 'Major-behind deps', value: r.major_behind_dep_count, dim: r.major_behind_dep_count === 0 }
-		);
-		return out;
+		if (r.kev_count > 0 || r.critical_count > 0 || r.high_count > 0) {
+			return r.internet_exposed
+				? 'No fix released — reduce exposure (auth, WAF, or take it off the internet) and watch for a patch.'
+				: 'No fix released — nothing actionable yet; the tier escalates automatically when a patch ships.';
+		}
+		if (!r.has_sbom || r.last_scan_at === null) {
+			return 'Trigger a scan so this asset gets a real tier.';
+		}
+		return 'No action needed — resolves as a side effect of routine rebuilds.';
+	};
+
+	// Off-path CVE visibility per card. Hidden by default: if a vuln
+	// is not on the attack path it is noise for threat modelling, even
+	// at high CVSS.
+	let offPathShown = $state(new Set<string>());
+	const toggleOffPath = (key: string) => {
+		const next = new Set(offPathShown);
+		if (next.has(key)) next.delete(key);
+		else next.add(key);
+		offPathShown = next;
 	};
 
 	// Server-computed average trust across every actionable asset
@@ -754,154 +810,183 @@
 				{@const Icon = rowIcon(row.asset_type)}
 				{@const key = rowKey(row)}
 				{@const isOpen = expanded.has(key)}
-				<div class="row-wrapper" class:open={isOpen}>
+				<div class="card" class:open={isOpen} class:compact>
 					<button
 						type="button"
-						class="row"
-						class:compact
+						class="card-head"
 						aria-expanded={isOpen}
 						onclick={() => toggleExpanded(key, row)}
 					>
-						<div class="row-asset">
-							<Icon size={compact ? 14 : 16} class="text-[var(--text-muted)]" />
+						<div class="card-id">
+							<span class="sev-dot" data-level={threatLevel}></span>
+							<Icon size={compact ? 13 : 15} class="text-[var(--text-muted)]" />
 							<span class="asset-slug">{row.asset_slug}</span>
-							<span class="badge">{row.asset_type}</span>
-							{#if row.asset_type === 'image' && row.cluster_count > 0}
-								<span class="spread" class:exposed={row.exposed_cluster_count > 0}>
-									{row.cluster_count} cluster{row.cluster_count === 1 ? '' : 's'}{row.exposed_cluster_count > 0 ? ` · ${row.exposed_cluster_count} exposed` : ''}
-								</span>
-							{/if}
+							<span class="asset-kind">{row.asset_type}</span>
 						</div>
-						<div class="row-scores">
-							<span class="threat" data-level={threatLevel}>Threat {row.threat_score}</span>
-							<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
-						</div>
-						<div class="row-reasons">
-							{#each row.reasons.slice(0, compact ? 1 : 2) as reason}
-								<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+						<div class="path-strip">
+							{#each pathChips(row) as chip, i}
+								{#if i > 0}<span class="path-sep" aria-hidden="true">▸</span>{/if}
+								<span class="chip chip-{chip.tone}">{chip.label}</span>
 							{/each}
 						</div>
-						<div class="row-actions">
+						<div class="card-side">
 							<a
-								class="row-open"
+								class="card-open"
 								href={rowHref(row)}
 								title="Open {row.asset_type} detail"
 								onclick={(e) => e.stopPropagation()}
 							>
-								Open <ArrowUpRight size={12} />
+								<ArrowUpRight size={13} />
 							</a>
 							<ChevronDown size={14} class="row-chevron {isOpen ? 'open' : ''}" />
 						</div>
 					</button>
 					{#if isOpen}
-						<div class="row-detail">
+						<div class="card-body">
 							{#if row.asset_type === 'image'}
 								{@const detail = imageDetails.get(row.asset_id)}
 								{#if detail === 'loading' || detail === undefined}
-									<div class="detail-loading">Loading image details…</div>
+									<div class="detail-loading">Tracing attack path…</div>
 								{:else if detail === null}
-									<div class="detail-loading">Could not load image details.</div>
+									<div class="detail-loading">Could not load attack-path details.</div>
 								{:else}
-									<div class="detail-image">
-										<div class="detail-head">
-											Exposed domains
-										</div>
-										{#if detail.hosts.length > 0}
-											<div class="host-chips">
-												{#each detail.hosts as h}
-													<span class="host-chip" title="{h.cluster || h.cluster_id} / {h.namespace}">
-														{#if h.tls}<Lock size={11} />{:else}<Globe size={11} />{/if}
-														{h.host}
-													</span>
-												{/each}
-											</div>
-										{:else}
-											<p class="detail-empty">Not internet-exposed.</p>
-										{/if}
-
-										<div class="detail-head" style="margin-top: 0.75rem;">
-											Top vulnerabilities — KEV first, then EPSS
-										</div>
-										{#if detail.vulns.length > 0}
-											<div class="vuln-table" role="table">
-												{#each detail.vulns as v}
-													<div class="vuln-row" role="row">
-														<a
-															class="vuln-id"
-															href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
-															onclick={(e) => e.stopPropagation()}
-														>{v.canonical_id}</a>
-														<span class={severityClass(v.severity)}>{v.severity}</span>
-														<span class="vuln-epss" class:dim={v.epss === 0}>EPSS {(v.epss * 100).toFixed(1)}%</span>
-														{#if v.kev}
-															<span class="pill pill-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
-														{/if}
-														<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}</span>
-														<span class="vuln-fix" class:dim={!v.fixed_version}>
-															{v.fixed_version ? `fix: ${v.fixed_version}` : 'no fix'}
+									{@const onPath = detail.vulns.filter((v) => v.on_path)}
+									{@const offPath = detail.vulns.filter((v) => !v.on_path)}
+									{@const offTotal = detail.vuln_total - onPath.length}
+									<div class="stage">
+										<span class="stage-label">Entry</span>
+										<div class="stage-body">
+											{#if detail.hosts.length > 0}
+												<div class="host-chips">
+													{#each detail.hosts as h}
+														<span class="host-chip" title="{h.cluster || h.cluster_id} / {h.namespace}">
+															{#if h.tls}<Lock size={11} />{:else}<Globe size={11} />{/if}
+															{h.host}
 														</span>
-													</div>
-												{/each}
-											</div>
-											{#if detail.vuln_total > detail.vulns.length}
-												<p class="detail-empty">
-													Showing top {detail.vulns.length} of {detail.vuln_total} —
-													<a href={rowHref(row)} onclick={(e) => e.stopPropagation()}>open image for the full list</a>
-												</p>
+													{/each}
+												</div>
+											{:else}
+												<span class="stage-muted">No internet path — reachable only from inside the cluster.</span>
 											{/if}
-										{:else}
-											<p class="detail-empty">No open vulnerabilities counted for this image.</p>
-										{/if}
+										</div>
+									</div>
+									<div class="stage">
+										<span class="stage-label">Runs in</span>
+										<div class="stage-body">
+											<span class="stage-text">
+												{row.cluster_count} cluster{row.cluster_count === 1 ? '' : 's'}{row.exposed_cluster_count > 0
+													? ` — internet-facing in ${row.exposed_cluster_count}`
+													: ''}
+											</span>
+										</div>
+									</div>
+									<div class="stage">
+										<span class="stage-label">Weakness</span>
+										<div class="stage-body">
+											{#if onPath.length > 0}
+												<div class="vuln-lines">
+													{#each onPath as v}
+														<div class="vuln-line">
+															<a
+																class="vuln-id"
+																href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
+																onclick={(e) => e.stopPropagation()}
+															>{v.canonical_id}</a>
+															<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
+															{#if v.kev}
+																<span class="chip chip-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
+															{/if}
+															{#if v.epss > 0}
+																<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}">EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
+															{/if}
+															<span class={severityClass(v.severity)}>{v.severity}</span>
+															<span class="vuln-fix" class:none={!v.fixed_version}>{v.fixed_version ? `→ ${v.fixed_version}` : 'no fix'}</span>
+														</div>
+													{/each}
+												</div>
+											{:else if row.reasons.length > 0}
+												<span class="stage-muted">{reasonExplain(row.reasons[0]).what}</span>
+											{:else}
+												<span class="stage-muted">No vulnerability on the attack path.</span>
+											{/if}
+											{#if offTotal > 0}
+												<button
+													type="button"
+													class="offpath-toggle"
+													onclick={(e) => {
+														e.stopPropagation();
+														toggleOffPath(key);
+													}}
+												>
+													{offPathShown.has(key) ? 'Hide' : 'Show'} {offTotal} CVE{offTotal === 1 ? '' : 's'} not on this attack path
+												</button>
+												{#if offPathShown.has(key)}
+													<div class="vuln-lines">
+														{#each offPath as v}
+															<div class="vuln-line dim">
+																<a
+																	class="vuln-id"
+																	href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
+																	onclick={(e) => e.stopPropagation()}
+																>{v.canonical_id}</a>
+																<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
+																<span class={severityClass(v.severity)}>{v.severity}</span>
+																<span class="vuln-fix" class:none={!v.fixed_version}>{v.fixed_version ? `→ ${v.fixed_version}` : 'no fix'}</span>
+															</div>
+														{/each}
+													</div>
+													{#if detail.vuln_total > detail.vulns.length}
+														<span class="detail-empty">
+															<a href={rowHref(row)} onclick={(e) => e.stopPropagation()}>Open image</a> for all {detail.vuln_total} CVEs.
+														</span>
+													{/if}
+												{/if}
+											{/if}
+										</div>
+									</div>
+									<div class="stage">
+										<span class="stage-label">Action</span>
+										<div class="stage-body"><span class="stage-text">{actionLine(row)}</span></div>
 									</div>
 								{/if}
+							{:else}
+								<div class="stage">
+									<span class="stage-label">Entry</span>
+									<div class="stage-body">
+										<span class="stage-text">
+											{row.asset_type === 'repo'
+												? 'Supply chain — source repository, not directly reachable.'
+												: row.internet_exposed
+													? 'Internet-facing workloads run in this cluster.'
+													: 'Internal only — no internet-facing workloads.'}
+										</span>
+									</div>
+								</div>
+								{#if row.reasons.length > 0}
+									<div class="stage">
+										<span class="stage-label">Weakness</span>
+										<div class="stage-body">
+											<span class="stage-text">{reasonExplain(row.reasons[0]).what}</span>
+										</div>
+									</div>
+								{/if}
+								<div class="stage">
+									<span class="stage-label">Action</span>
+									<div class="stage-body"><span class="stage-text">{actionLine(row)}</span></div>
+								</div>
 							{/if}
 
-							<div class="detail-signals">
-								<div class="detail-col">
-									<div class="detail-head">Threat inputs</div>
-									{#each threatBreakdown(row) as kv}
-										<div class="detail-kv" class:dim={kv.dim}>
-											<span class="detail-label">{kv.label}</span>
-											<span class="detail-value">{kv.value}</span>
-										</div>
-									{/each}
-								</div>
-								<div class="detail-col">
-									<div class="detail-head">Posture (context — does not affect tier)</div>
-									{#each trustBreakdown(row) as kv}
-										<div class="detail-kv" class:dim={kv.dim}>
-											<span class="detail-label">{kv.label}</span>
-											<span class="detail-value">{kv.value}</span>
-										</div>
-									{/each}
-									{#if row.context.length > 0}
+							{#if row.context.length > 0}
+								<div class="stage">
+									<span class="stage-label">Posture</span>
+									<div class="stage-body">
 										<div class="context-pills">
 											{#each row.context as reason}
-												<span class="pill pill-neutral">{renderReason(reason)}</span>
+												<span class="chip chip-muted">{renderReason(reason)}</span>
 											{/each}
 										</div>
-									{/if}
-								</div>
-							</div>
-
-							{#if row.reasons.length > 0}
-								<div class="detail-recos">
-									<div class="detail-head">Why this tier · what to do</div>
-									<ul class="reco-list">
-										{#each row.reasons as reason}
-											{@const ex = reasonExplain(reason)}
-											<li class="reco-card">
-												<header class="reco-head">
-													<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-												</header>
-												<p class="reco-what">{ex.what}</p>
-												<p class="reco-why"><span class="reco-key">Why it matters.</span> {ex.why}</p>
-												{#if ex.action}
-													<p class="reco-action"><span class="reco-key">Action.</span> {ex.action}</p>
-												{/if}
-											</li>
-										{/each}
-									</ul>
+										<span class="stage-hint">Context only — does not affect the tier.</span>
+									</div>
 								</div>
 							{/if}
 						</div>
@@ -1136,81 +1221,137 @@
 	.tier-rows {
 		display: flex;
 		flex-direction: column;
-		gap: 0.4rem;
+		gap: 0.45rem;
 	}
 
-	/* row-wrapper owns the border + background so the expand panel
-	   renders inside the same card without a seam. The row itself
-	   is a single <button> that toggles expansion; nested <a> stops
-	   propagation so the explicit "Open" affordance still navigates. */
-	.row-wrapper {
-		border: 1px solid var(--border-color);
-		border-radius: 0.75rem;
-		background: var(--card-bg);
+	/* Cards: borderless tinted surfaces. Severity is carried by the
+	   dot + chip tones, never by borders or edge stripes. */
+	.card {
+		border-radius: 0.85rem;
+		background: color-mix(in srgb, var(--bg2) 55%, transparent);
 		overflow: hidden;
-		transition: border-color 120ms ease, background 120ms ease;
+		transition: background 120ms ease;
 	}
-	.row-wrapper:hover {
-		border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+	.card:hover {
 		background: var(--hover-bg-subtle);
 	}
-	.row-wrapper.open {
-		border-color: color-mix(in srgb, var(--accent) 35%, var(--border-color));
-	}
-	.tier[data-tier='fix-now'] .row-wrapper {
-		border-color: color-mix(in srgb, var(--error) 35%, var(--border-color));
-	}
-	.tier[data-tier='this-week'] .row-wrapper {
-		border-color: color-mix(in srgb, var(--warning) 28%, var(--border-color));
+	.card.open {
+		background: color-mix(in srgb, var(--bg2) 90%, transparent);
 	}
 
-	.row {
+	.card-head {
 		width: 100%;
-		display: grid;
-		grid-template-columns: minmax(220px, 1fr) auto minmax(180px, 1.5fr) auto;
+		display: flex;
 		align-items: center;
-		gap: 1rem;
-		padding: 0.7rem 1rem;
+		gap: 0.9rem;
+		padding: 0.65rem 0.95rem;
 		border: 0;
 		background: transparent;
 		color: inherit;
+		font: inherit;
 		text-align: left;
 		cursor: pointer;
-		font: inherit;
 	}
-	.row.compact {
-		padding: 0.4rem 0.85rem;
+	.card.compact .card-head {
+		padding: 0.42rem 0.8rem;
 		font-size: 0.85rem;
 	}
 
-	/* Right-edge actions: explicit "Open" link + expand chevron.
-	   The link stops propagation so it navigates without toggling
-	   the panel; the chevron is a visual indicator only — the whole
-	   row is clickable. */
-	.row-actions {
+	.card-id {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.5rem;
-		color: var(--text-muted);
+		min-width: 0;
+		flex: 1 1 38%;
 	}
-	.row-open {
+	.sev-dot {
+		width: 8px;
+		height: 8px;
+		border-radius: 999px;
+		flex-shrink: 0;
+	}
+	.sev-dot[data-level='critical'] {
+		background: var(--error);
+	}
+	.sev-dot[data-level='warning'] {
+		background: var(--warning);
+	}
+	.sev-dot[data-level='info'] {
+		background: var(--text-muted);
+	}
+	.asset-slug {
+		font-weight: 600;
+		color: var(--text-bright);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.asset-kind {
+		font-size: 0.62rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--text-muted);
+		flex-shrink: 0;
+	}
+
+	/* Abstract attack path: entry ▸ surface ▸ weakness ▸ fix. */
+	.path-strip {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: flex-end;
+		gap: 0.3rem;
+		flex: 1 1 62%;
+		min-width: 0;
+	}
+	.path-sep {
+		color: var(--text-muted);
+		font-size: 0.58rem;
+		opacity: 0.7;
+	}
+	.chip {
+		font-size: 0.7rem;
+		font-weight: 600;
+		padding: 0.12rem 0.5rem;
+		border-radius: 999px;
+		white-space: nowrap;
+	}
+	.chip-error {
+		color: var(--error);
+		background: color-mix(in srgb, var(--error) 13%, transparent);
+	}
+	.chip-warning {
+		color: var(--warning);
+		background: color-mix(in srgb, var(--warning) 13%, transparent);
+	}
+	.chip-ok {
+		color: var(--success);
+		background: color-mix(in srgb, var(--success) 13%, transparent);
+	}
+	.chip-muted {
+		color: var(--text-muted);
+		background: color-mix(in srgb, var(--text-muted) 11%, transparent);
+	}
+
+	.card-side {
 		display: inline-flex;
 		align-items: center;
-		gap: 0.25rem;
-		padding: 0.3rem 0.6rem;
-		border: 1px solid var(--border-color);
-		border-radius: 0.4rem;
-		font-size: 0.72rem;
-		font-weight: 600;
-		text-decoration: none;
-		color: var(--text-secondary);
-		background: var(--card-bg);
-		transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+		gap: 0.45rem;
+		color: var(--text-muted);
+		flex-shrink: 0;
 	}
-	.row-open:hover {
+	.card-open {
+		display: inline-flex;
+		align-items: center;
+		padding: 0.3rem;
+		border-radius: 0.45rem;
+		color: var(--text-muted);
+		transition: color 120ms ease, background 120ms ease;
+	}
+	.card-open:hover {
 		color: var(--text-bright);
-		border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-		background: color-mix(in srgb, var(--accent) 8%, var(--card-bg));
+		background: color-mix(in srgb, var(--accent) 14%, transparent);
 	}
 	.row-chevron {
 		transition: transform 120ms ease, color 120ms ease;
@@ -1220,121 +1361,59 @@
 		color: var(--accent);
 	}
 
-	.row-detail {
+	/* Expanded body: the concrete attack-path trace, staged like a
+	   threat model — Entry / Runs in / Weakness / Action / Posture. */
+	.card-body {
 		display: flex;
 		flex-direction: column;
-		gap: 1rem;
-		padding: 0.85rem 1rem 1rem;
-		border-top: 1px dashed color-mix(in srgb, var(--text-muted) 30%, transparent);
-		background: color-mix(in srgb, var(--bg2) 50%, transparent);
+		gap: 0.6rem;
+		padding: 0.15rem 0.95rem 0.95rem;
 	}
-	.detail-signals {
+	.stage {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-		gap: 0.5rem 1.5rem;
+		grid-template-columns: 84px minmax(0, 1fr);
+		gap: 0.8rem;
+		align-items: start;
 	}
-	.detail-col {
-		min-width: 0;
-	}
-	.detail-head {
-		font-size: 0.65rem;
-		font-weight: 600;
+	.stage-label {
+		font-size: 0.6rem;
+		font-weight: 700;
 		text-transform: uppercase;
-		letter-spacing: 0.12em;
+		letter-spacing: 0.13em;
 		color: var(--text-tertiary);
-		margin-bottom: 0.35rem;
+		padding-top: 0.2rem;
 	}
-	.detail-kv {
-		display: flex;
-		justify-content: space-between;
-		font-size: 0.78rem;
-		padding: 0.15rem 0;
-		color: var(--text-secondary);
-	}
-	.detail-kv.dim {
-		opacity: 0.45;
-	}
-	.detail-label {
-		color: var(--text-muted);
-	}
-	.detail-value {
-		color: var(--text-bright);
-		font-variant-numeric: tabular-nums;
-	}
-
-	/* Recommendations: one card per Reason, with a headline pill and
-	   plain-English what / why / action paragraphs so the operator
-	   doesn't have to translate raw counts back into actions. */
-	.detail-recos {
-		display: flex;
-		flex-direction: column;
-		gap: 0.5rem;
-	}
-	.reco-list {
-		display: grid;
-		gap: 0.5rem;
-		margin: 0;
-		padding: 0;
-		list-style: none;
-	}
-	.reco-card {
+	.stage-body {
+		min-width: 0;
 		display: flex;
 		flex-direction: column;
 		gap: 0.35rem;
-		padding: 0.65rem 0.85rem;
-		border: 1px solid var(--border-color);
-		border-radius: 0.5rem;
-		background: var(--card-bg);
 	}
-	.reco-head {
-		display: flex;
-		align-items: center;
-		gap: 0.5rem;
-	}
-	.reco-what {
-		margin: 0;
-		font-size: 0.85rem;
-		color: var(--text-bright);
-	}
-	.reco-why,
-	.reco-action {
-		margin: 0;
-		font-size: 0.78rem;
+	.stage-text {
+		font-size: 0.8rem;
 		color: var(--text-secondary);
 		line-height: 1.45;
 	}
-	.reco-key {
-		font-weight: 600;
-		color: var(--text-tertiary);
-	}
-
-	/* Deployment-spread badge on image rows: one rebuild, N redeploys. */
-	.spread {
-		font-size: 0.68rem;
-		font-weight: 600;
-		white-space: nowrap;
-		padding: 0.1rem 0.45rem;
-		border-radius: 999px;
-		border: 1px solid var(--border-color);
+	.stage-muted {
+		font-size: 0.78rem;
 		color: var(--text-muted);
-		background: var(--card-bg);
+		line-height: 1.45;
 	}
-	.spread.exposed {
-		color: var(--warning);
-		border-color: color-mix(in srgb, var(--warning) 40%, var(--border-color));
+	.stage-hint {
+		font-size: 0.66rem;
+		color: var(--text-muted);
 	}
 
-	/* Image expansion: exposed-domain chips + top-vuln table. */
 	.detail-loading,
 	.detail-empty {
 		font-size: 0.78rem;
 		color: var(--text-muted);
-		margin: 0;
 	}
 	.detail-empty a {
 		color: var(--accent);
 		text-decoration: none;
 	}
+
 	.host-chips {
 		display: flex;
 		flex-wrap: wrap;
@@ -1348,25 +1427,25 @@
 		font-variant-numeric: tabular-nums;
 		padding: 0.2rem 0.55rem;
 		border-radius: 999px;
-		border: 1px solid var(--border-color);
-		background: var(--card-bg);
+		background: color-mix(in srgb, var(--warning) 9%, transparent);
 		color: var(--text-secondary);
 	}
-	.vuln-table {
+
+	.vuln-lines {
 		display: flex;
 		flex-direction: column;
-		gap: 0.25rem;
+		gap: 0.2rem;
 	}
-	.vuln-row {
-		display: grid;
-		grid-template-columns: minmax(140px, auto) auto auto auto minmax(120px, 1fr) auto;
+	.vuln-line {
+		display: flex;
+		flex-wrap: wrap;
 		align-items: center;
-		gap: 0.6rem;
+		gap: 0.55rem;
 		font-size: 0.78rem;
-		padding: 0.3rem 0.5rem;
-		border-radius: 0.4rem;
-		background: var(--card-bg);
-		border: 1px solid var(--border-color);
+		padding: 0.18rem 0;
+	}
+	.vuln-line.dim {
+		opacity: 0.55;
 	}
 	.vuln-id {
 		font-weight: 600;
@@ -1377,10 +1456,25 @@
 	.vuln-id:hover {
 		text-decoration: underline;
 	}
+	.vuln-pkg {
+		color: var(--text-muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		max-width: 26ch;
+	}
+	.vuln-fix {
+		color: var(--success);
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+	}
+	.vuln-fix.none {
+		color: var(--text-muted);
+	}
 	.sev {
-		font-size: 0.68rem;
+		font-size: 0.66rem;
 		font-weight: 700;
-		letter-spacing: 0.04em;
+		letter-spacing: 0.05em;
 	}
 	.sev-critical {
 		color: var(--error);
@@ -1394,70 +1488,26 @@
 	.sev-low {
 		color: var(--text-muted);
 	}
-	.vuln-epss {
-		font-variant-numeric: tabular-nums;
+
+	.offpath-toggle {
+		align-self: flex-start;
+		border: 0;
+		background: none;
+		padding: 0;
+		font-size: 0.72rem;
+		color: var(--text-muted);
+		text-decoration: underline dotted;
+		cursor: pointer;
+		transition: color 120ms ease;
+	}
+	.offpath-toggle:hover {
 		color: var(--text-secondary);
-		white-space: nowrap;
 	}
-	.vuln-pkg {
-		color: var(--text-muted);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-	.vuln-fix {
-		color: var(--success);
-		white-space: nowrap;
-		font-variant-numeric: tabular-nums;
-	}
-	.vuln-epss.dim,
-	.vuln-fix.dim {
-		color: var(--text-muted);
-		opacity: 0.6;
-	}
+
 	.context-pills {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 0.35rem;
-		margin-top: 0.5rem;
-	}
-
-	.row-asset {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.5rem;
-		min-width: 0;
-	}
-	.asset-slug {
-		font-weight: 600;
-		color: var(--text-bright);
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.row-scores {
-		display: inline-flex;
-		gap: 0.5rem;
-		font-size: 0.75rem;
-		font-weight: 600;
-		white-space: nowrap;
-	}
-	.threat[data-level='critical'] {
-		color: var(--error);
-	}
-	.threat[data-level='warning'] {
-		color: var(--warning);
-	}
-	.threat[data-level='info'] {
-		color: var(--text-secondary);
-	}
-
-	.row-reasons {
-		display: flex;
-		flex-wrap: wrap;
-		gap: 0.35rem;
-		justify-content: flex-end;
 	}
 
 	/* Inline search input — extends the global .input class with
@@ -1486,9 +1536,8 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 1.2rem;
-		border-radius: 0.75rem;
-		background: var(--card-bg);
-		border: 1px solid var(--border-color);
+		border-radius: 0.85rem;
+		background: color-mix(in srgb, var(--bg2) 55%, transparent);
 		color: var(--text-secondary);
 		font-size: 0.85rem;
 	}
