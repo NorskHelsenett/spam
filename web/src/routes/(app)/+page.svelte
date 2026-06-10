@@ -129,7 +129,8 @@
 	// The deprioritized section ships collapsed — it's the explicit
 	// "you can ignore these" pile, shown on demand.
 	let deprioOpen = $state(false);
-	let activeTab = $state<'all' | 'repo' | 'image'>('all');
+	// Tier-based tabs: urgent = fix_now + this_week combined.
+	let activeTab = $state<'all' | 'urgent' | 'watch' | 'deprioritized'>('all');
 	// Per-row expansion state for the "show your work" panel. Keyed
 	// by `${asset_type}:${asset_id}` so collapsing one row doesn't
 	// collapse the row-with-the-same-id-in-another-tier (rare, but
@@ -639,42 +640,41 @@
 		);
 	});
 
-	// Tab filter applied client-side over already-fetched lists.
-	// Watch is paginated server-side, so client-tab on watch is just
-	// a visual filter on the current page; users searching for
-	// "this image is in watch" should use the search field too.
-	const filterByTab = (rows: TriageRow[]): TriageRow[] => {
-		if (activeTab === 'all') return rows;
-		return rows.filter((r) => r.asset_type === activeTab);
-	};
-
-	const fixNowFiltered = $derived(() => triage ? filterByTab(triage.fix_now) : []);
-	const thisWeekFiltered = $derived(() => triage ? filterByTab(triage.this_week) : []);
-	const watchFiltered = $derived(() => triage ? filterByTab(triage.watch.rows) : []);
-	const deprioFiltered = $derived(() => triage ? filterByTab(triage.deprioritized.rows) : []);
+	// Tier tabs decide which sections render; the lists themselves are
+	// untouched. 'urgent' = fix_now + this_week together.
+	const showUrgent = $derived(() => activeTab === 'all' || activeTab === 'urgent');
+	const showWatch = $derived(() => activeTab === 'all' || activeTab === 'watch');
+	const showDeprio = $derived(() => activeTab === 'all' || activeTab === 'deprioritized');
+	// Selecting the deprioritized tab implies wanting to see it open.
+	const deprioExpanded = $derived(() => deprioOpen || activeTab === 'deprioritized');
 
 	// Total count for the active tab — shown under the Findings header.
-	// 'all' uses the un-capped scope totals so it reflects the real
-	// population across tiers. Per-type tabs use the capped arrays for
-	// fix_now / this_week (the response only carries the top-N slice
-	// when totals exceed the cap) plus the pre-aggregated watch
-	// .counts.{repo,image} buckets the API returns.
+	// Uses the un-capped totals so it reflects the real population.
 	const activeTabTotal = $derived(() => {
 		if (!triage) return 0;
-		if (activeTab === 'all') {
-			return triage.scope.fix_now_total + triage.scope.this_week_total + triage.watch.counts.total;
+		switch (activeTab) {
+			case 'urgent':
+				return triage.scope.fix_now_total + triage.scope.this_week_total;
+			case 'watch':
+				return triage.watch.counts.total;
+			case 'deprioritized':
+				return triage.deprioritized.counts.total;
+			default:
+				return triage.scope.fix_now_total + triage.scope.this_week_total + triage.watch.counts.total;
 		}
-		const fix = triage.fix_now.filter((r) => r.asset_type === activeTab).length;
-		const week = triage.this_week.filter((r) => r.asset_type === activeTab).length;
-		const watch = triage.watch.counts[activeTab];
-		return fix + week + watch;
 	});
 
-	const activeTabLabel = $derived(() => {
-		if (activeTab === 'all') return 'asset';
-		if (activeTab === 'repo') return 'repo';
-		return 'image';
-	});
+	// Severity inventory + scan freshness for the collapsed card's
+	// meta line — informative without opening the card.
+	const metaLine = (r: TriageRow): string => {
+		const parts: string[] = [];
+		if (r.critical_count > 0) parts.push(`${fmt(r.critical_count)} critical`);
+		if (r.high_count > 0) parts.push(`${fmt(r.high_count)} high`);
+		if (r.medium_count + r.low_count > 0) parts.push(`${fmt(r.medium_count + r.low_count)} med/low`);
+		if (parts.length === 0) parts.push('no open CVEs');
+		parts.push(r.scan_age_days >= 999 ? 'never scanned' : r.scan_age_days <= 0 ? 'scanned today' : `scanned ${r.scan_age_days}d ago`);
+		return parts.join(' · ');
+	};
 
 	const severityClass = (sev: string): string => {
 		switch (sev) {
@@ -781,8 +781,9 @@
 				<TabSelector
 					options={[
 						{ value: 'all', label: 'All' },
-						{ value: 'repo', label: 'Repos' },
-						{ value: 'image', label: 'Images' }
+						{ value: 'urgent', label: 'Urgent' },
+						{ value: 'watch', label: 'Watch' },
+						{ value: 'deprioritized', label: 'Deprioritized' }
 					]}
 					bind:value={activeTab}
 				/>
@@ -798,7 +799,7 @@
 					<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
 					<p class="text-sm text-[var(--text-tertiary)]">
 						{#if activeTabTotal() > 0}
-							{fmt(activeTabTotal())} {activeTabLabel()}{activeTabTotal() === 1 ? '' : 's'} ranked by KEV and EPSS
+							{fmt(activeTabTotal())} asset{activeTabTotal() === 1 ? '' : 's'} ranked by KEV and EPSS
 						{:else}
 							No assets in this filter
 						{/if}
@@ -817,17 +818,21 @@
 						aria-expanded={isOpen}
 						onclick={() => toggleExpanded(key, row)}
 					>
-						<div class="card-id">
-							<span class="sev-dot" data-level={threatLevel}></span>
-							<Icon size={compact ? 13 : 15} class="text-[var(--text-muted)]" />
-							<span class="asset-slug">{row.asset_slug}</span>
-							<span class="asset-kind">{row.asset_type}</span>
+						<div class="icon-tile" data-level={threatLevel}>
+							<Icon size={compact ? 16 : 20} />
 						</div>
-						<div class="path-strip">
-							{#each pathChips(row) as chip, i}
-								{#if i > 0}<span class="path-sep" aria-hidden="true">▸</span>{/if}
-								<span class="chip chip-{chip.tone}">{chip.label}</span>
-							{/each}
+						<div class="card-main">
+							<div class="card-top">
+								<span class="asset-slug">{row.asset_slug}</span>
+								<span class="asset-kind">{row.asset_type}</span>
+							</div>
+							<div class="card-meta">{metaLine(row)}</div>
+							<div class="path-strip">
+								{#each pathChips(row) as chip, i}
+									{#if i > 0}<span class="path-sep" aria-hidden="true">▸</span>{/if}
+									<span class="chip chip-{chip.tone}">{chip.label}</span>
+								{/each}
+							</div>
 						</div>
 						<div class="card-side">
 							<a
@@ -994,7 +999,7 @@
 				</div>
 			{/snippet}
 
-			{#if triage.fix_now.length === 0 && triage.this_week.length === 0 && triage.watch.counts.total === 0}
+			{#if triage.fix_now.length === 0 && triage.this_week.length === 0 && triage.watch.counts.total === 0 && triage.deprioritized.counts.total === 0}
 				<div class="flex flex-1 items-center justify-center py-16">
 					<div class="flex flex-col items-center gap-3 text-center">
 						<EmptyVulns size={64} class="text-[var(--success)]" />
@@ -1009,7 +1014,7 @@
 					<div class="flex flex-col items-center gap-3 text-center">
 						<EmptyVulns size={64} class="text-[var(--success)]" />
 						<div class="space-y-1">
-							<h3 class="text-base font-semibold text-[var(--text-bright)]">No {activeTabLabel()}s need attention</h3>
+							<h3 class="text-base font-semibold text-[var(--text-bright)]">Nothing in this tier</h3>
 							<p class="text-sm text-[var(--text-tertiary)]">Switch tab or check back after the next scan.</p>
 						</div>
 					</div>
@@ -1017,16 +1022,16 @@
 			{:else}
 
 				<!-- Fix now -->
-				{#if fixNowFiltered().length > 0}
+				{#if showUrgent() && triage.fix_now.length > 0}
 					<div class="tier" data-tier="fix-now">
 						<div class="tier-head">
 							<ShieldAlert size={18} class="text-[var(--error)]" />
 							<h3 class="tier-title">Fix now</h3>
-							<span class="badge">{fixNowFiltered().length}</span>
+							<span class="badge">{triage.scope.fix_now_total}</span>
 							<span class="tier-sub">Exploited in the wild and reachable, or leaking credentials</span>
 						</div>
 						<div class="tier-rows">
-							{#each fixNowFiltered() as row}
+							{#each triage.fix_now as row}
 								{@render triageRow(row, 'critical', false)}
 							{/each}
 						</div>
@@ -1034,16 +1039,16 @@
 				{/if}
 
 				<!-- This week -->
-				{#if thisWeekFiltered().length > 0}
+				{#if showUrgent() && triage.this_week.length > 0}
 					<div class="tier" data-tier="this-week">
 						<div class="tier-head">
 							<AlertTriangle size={18} class="text-[var(--warning)]" />
 							<h3 class="tier-title">This week</h3>
-							<span class="badge">{thisWeekFiltered().length}</span>
+							<span class="badge">{triage.scope.this_week_total}</span>
 							<span class="tier-sub">Confirmed or likely exploitation, not internet-reachable</span>
 						</div>
 						<div class="tier-rows">
-							{#each thisWeekFiltered() as row}
+							{#each triage.this_week as row}
 								{@render triageRow(row, 'warning', false)}
 							{/each}
 						</div>
@@ -1051,6 +1056,7 @@
 				{/if}
 
 				<!-- Watch -->
+				{#if showWatch()}
 				<div class="tier" data-tier="watch">
 					<div class="tier-head">
 						<Eye size={18} class="text-[var(--text-muted)]" />
@@ -1069,19 +1075,17 @@
 						</div>
 					</div>
 
-					{#if watchFiltered().length === 0}
+					{#if triage.watch.rows.length === 0}
 						<div class="watch-empty">
 							{#if watchSearch.trim()}
 								No watch-tier assets match "{watchSearch}".
-							{:else if activeTab !== 'all'}
-								No {activeTab} assets in the watch tier.
 							{:else}
 								No additional warnings beyond the urgent tiers.
 							{/if}
 						</div>
 					{:else}
 						<div class="tier-rows compact">
-							{#each watchFiltered() as row}
+							{#each triage.watch.rows as row}
 								{@render triageRow(row, 'info', true)}
 							{/each}
 						</div>
@@ -1097,19 +1101,21 @@
 						{/if}
 					{/if}
 				</div>
+				{/if}
 
 				<!-- Deprioritized — collapsed by default; the explicit
 				     "safe to ignore, and here's why" pile. -->
+				{#if showDeprio()}
 				<div class="tier" data-tier="deprioritized">
-					<button type="button" class="tier-head tier-head-toggle" onclick={() => (deprioOpen = !deprioOpen)} aria-expanded={deprioOpen}>
+					<button type="button" class="tier-head tier-head-toggle" onclick={() => (deprioOpen = !deprioExpanded())} aria-expanded={deprioExpanded()}>
 						<EyeOff size={18} class="text-[var(--text-muted)]" />
 						<h3 class="tier-title">Deprioritized</h3>
 						<span class="badge">{triage.deprioritized.counts.total}</span>
 						<span class="tier-sub">Not worth acting on right now — each row says why</span>
-						<ChevronDown size={14} class="row-chevron {deprioOpen ? 'open' : ''}" />
+						<ChevronDown size={14} class="row-chevron {deprioExpanded() ? 'open' : ''}" />
 					</button>
 
-					{#if deprioOpen}
+					{#if deprioExpanded()}
 						<div class="tier-head deprio-tools">
 							<div class="watch-search">
 								<Search size={13} class="search-icon" />
@@ -1123,19 +1129,17 @@
 							</div>
 						</div>
 
-						{#if deprioFiltered().length === 0}
+						{#if triage.deprioritized.rows.length === 0}
 							<div class="watch-empty">
 								{#if deprioSearch.trim()}
 									No deprioritized assets match "{deprioSearch}".
-								{:else if activeTab !== 'all'}
-									No {activeTab} assets in the deprioritized pile.
 								{:else}
 									Nothing has been deprioritized.
 								{/if}
 							</div>
 						{:else}
 							<div class="tier-rows compact">
-								{#each deprioFiltered() as row}
+								{#each triage.deprioritized.rows as row}
 									{@render triageRow(row, 'info', true)}
 								{/each}
 							</div>
@@ -1152,12 +1156,13 @@
 						{/if}
 					{/if}
 				</div>
+				{/if}
 			{/if}
 
 			<!-- Cluster lens — read-only rollup, not part of the tiers.
 			     Answers "which cluster is worst" while the fix itself
 			     happens on the image rows above. -->
-			{#if triage.clusters.length > 0}
+			{#if activeTab === 'all' && triage.clusters.length > 0}
 				<div class="tier" data-tier="clusters">
 					<div class="tier-head">
 						<span class="flex items-center text-[var(--text-muted)]"><KubernetesIcon size={18} /></span>
@@ -1221,22 +1226,22 @@
 	.tier-rows {
 		display: flex;
 		flex-direction: column;
-		gap: 0.45rem;
+		gap: 0.85rem;
+	}
+	.tier-rows.compact {
+		gap: 0.6rem;
 	}
 
 	/* Cards: borderless tinted surfaces. Severity is carried by the
 	   dot + chip tones, never by borders or edge stripes. */
 	.card {
 		border-radius: 0.85rem;
-		background: color-mix(in srgb, var(--bg2) 55%, transparent);
+		background-color: var(--main-content-bg);
 		overflow: hidden;
-		transition: background 120ms ease;
+		transition: background-color 120ms ease;
 	}
 	.card:hover {
-		background: var(--hover-bg-subtle);
-	}
-	.card.open {
-		background: color-mix(in srgb, var(--bg2) 90%, transparent);
+		background-color: var(--hover-bg-subtle);
 	}
 
 	.card-head {
@@ -1244,7 +1249,7 @@
 		display: flex;
 		align-items: center;
 		gap: 0.9rem;
-		padding: 0.65rem 0.95rem;
+		padding: 0.8rem 1rem;
 		border: 0;
 		background: transparent;
 		color: inherit;
@@ -1253,31 +1258,59 @@
 		cursor: pointer;
 	}
 	.card.compact .card-head {
-		padding: 0.42rem 0.8rem;
+		padding: 0.55rem 0.85rem;
 		font-size: 0.85rem;
 	}
 
-	.card-id {
-		display: inline-flex;
+	/* Asset icon in a quiet tile; the tier level tints the glyph,
+	   nothing else — no borders, no stripes. */
+	.icon-tile {
+		display: flex;
 		align-items: center;
-		gap: 0.5rem;
-		min-width: 0;
-		flex: 1 1 38%;
-	}
-	.sev-dot {
-		width: 8px;
-		height: 8px;
-		border-radius: 999px;
+		justify-content: center;
+		width: 2.6rem;
+		height: 2.6rem;
+		border-radius: 0.7rem;
+		background: color-mix(in srgb, var(--text-muted) 8%, transparent);
 		flex-shrink: 0;
 	}
-	.sev-dot[data-level='critical'] {
-		background: var(--error);
+	.card.compact .icon-tile {
+		width: 2.1rem;
+		height: 2.1rem;
+		border-radius: 0.55rem;
 	}
-	.sev-dot[data-level='warning'] {
-		background: var(--warning);
+	.icon-tile[data-level='critical'] {
+		color: var(--error);
 	}
-	.sev-dot[data-level='info'] {
-		background: var(--text-muted);
+	.icon-tile[data-level='warning'] {
+		color: var(--warning);
+	}
+	.icon-tile[data-level='info'] {
+		color: var(--text-muted);
+	}
+
+	.card-main {
+		display: flex;
+		flex-direction: column;
+		gap: 0.3rem;
+		min-width: 0;
+		flex: 1 1 auto;
+	}
+	.card-top {
+		display: flex;
+		align-items: baseline;
+		gap: 0.5rem;
+		min-width: 0;
+	}
+	.card-meta {
+		font-size: 0.72rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.card.compact .card-meta {
+		display: none;
 	}
 	.asset-slug {
 		font-weight: 600;
@@ -1300,10 +1333,9 @@
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		justify-content: flex-end;
 		gap: 0.3rem;
-		flex: 1 1 62%;
 		min-width: 0;
+		padding-top: 0.1rem;
 	}
 	.path-sep {
 		color: var(--text-muted);
@@ -1367,7 +1399,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: 0.6rem;
-		padding: 0.15rem 0.95rem 0.95rem;
+		padding: 0.15rem 1rem 1rem 4.5rem;
+	}
+	.card.compact .card-body {
+		padding-left: 3.8rem;
 	}
 	.stage {
 		display: grid;
