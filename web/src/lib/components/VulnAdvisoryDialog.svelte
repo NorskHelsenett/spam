@@ -127,6 +127,16 @@
 		}
 	};
 
+	const severityTextClass = (s: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return 'text-red-400';
+			case 'HIGH':     return 'text-orange-400';
+			case 'MEDIUM':   return 'text-yellow-400';
+			case 'LOW':      return 'text-blue-400';
+			default:         return 'text-[var(--text-muted)]';
+		}
+	};
+
 	// Header icon mirrors the severity pill palette (same tailwind
 	// tones severityClass uses) so the dialog reads at a glance.
 	const sevIcon = (s?: string) => {
@@ -221,7 +231,7 @@
 					</div>
 				{:else}
 					<!-- Exploitation signals -->
-					<div class="grid gap-3 sm:grid-cols-2">
+					<div class="grid gap-3 sm:grid-cols-3">
 						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">EPSS</p>
 							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
@@ -251,6 +261,25 @@
 								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no confirmed in-the-wild exploitation</p>
 							{/if}
 						</div>
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Severity</p>
+							{#if d.severity}
+								{@const primary = d.authorities?.find((a) => a.is_primary) ?? d.authorities?.[0]}
+								<p class="mt-2 text-2xl font-semibold {severityTextClass(d.severity)}">
+									{d.severity}
+								</p>
+								<p class="mt-1 text-xs leading-relaxed text-[var(--text-tertiary)]">
+									{#if primary && primary.cvss_score !== undefined && primary.cvss_score !== null && primary.cvss_score > 0}
+										CVSS {primary.cvss_score.toFixed(1)} · {primary.vuln_id}
+									{:else}
+										no CVSS score published yet
+									{/if}
+								</p>
+							{:else}
+								<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">—</p>
+								<p class="mt-1 text-xs text-[var(--text-tertiary)]">not rated by any authority</p>
+							{/if}
+						</div>
 					</div>
 
 					{#if d.description}
@@ -270,7 +299,6 @@
 										<tr>
 											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
 											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
-											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
 											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
 										</tr>
 									</thead>
@@ -289,9 +317,6 @@
 													{:else}
 														<span class="text-xs text-[var(--text-muted)]">—</span>
 													{/if}
-												</td>
-												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
-													{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
 												</td>
 												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
 													{a.cvss_vector || '—'}
