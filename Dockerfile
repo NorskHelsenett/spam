@@ -1,6 +1,6 @@
 # Multi-stage build for spam (SvelteKit static + Go server)
 # 1. Frontend build stage
-FROM node:22-alpine AS frontend
+FROM ncr.sky.nhn.no/dockerhub/library/node:22-alpine AS frontend
 WORKDIR /app
 
 # Only copy package manifests first for better layer caching
@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.npm \
     NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # 2. Go build stage
-FROM golang:1.26-alpine AS gobuilder
+FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26-alpine AS gobuilder
 # Cross-compilation setup
 ARG TARGETOS
 ARG TARGETARCH
@@ -59,7 +59,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o /go/bin/worker ./cmd/worker
 
 # 3. Final runtime stage (scratch for minimal size)
-FROM alpine:3.20 AS certs
+FROM ncr.sky.nhn.no/dockerhub/library/alpine:3.20 AS certs
 # Install CA certificates (kept in its own layer so we can copy just what's needed)
 RUN apk add --no-cache ca-certificates
 

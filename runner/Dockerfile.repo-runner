@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
@@ -18,7 +18,7 @@ FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 
 # Runtime stage
-FROM alpine:3.20
+FROM ncr.sky.nhn.no/dockerhub/library/alpine:3.20
 
 RUN apk add --no-cache git ca-certificates
 
