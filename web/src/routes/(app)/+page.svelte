@@ -8,9 +8,9 @@
 		EyeOff,
 		Container,
 		GitBranch,
+		Bot,
 		Globe,
 		Lock,
-		MessageCircle,
 		ShieldCheck,
 		Target,
 		ChevronDown,
@@ -904,7 +904,7 @@
 														openChat(row);
 													}}
 												>
-													<MessageCircle size={12} />
+													<Bot size={13} />
 													Chat about this
 												</button>
 											{/if}
@@ -923,7 +923,7 @@
 												openChat(row);
 											}}
 										>
-											<MessageCircle size={12} />
+											<Bot size={13} />
 											Chat about this
 										</button>
 									</div>

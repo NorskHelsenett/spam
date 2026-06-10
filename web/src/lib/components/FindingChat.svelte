@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { MessageCircle, Minus, Send, Square, X } from 'lucide-svelte';
+	import { Bot, Minus, Send, Square, X } from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 
 	type ChatMessage = { role: 'user' | 'assistant'; content: string };
@@ -45,7 +45,7 @@
 	let pos = $state<{ left: number; top: number } | null>(null);
 	let size = $state<{ w: number; h: number } | null>(null);
 	let dragFrom: { x: number; y: number; left: number; top: number } | null = null;
-	let resizeFrom: { x: number; y: number; w: number; h: number } | null = null;
+	let resizeFrom: { x: number; y: number; w: number; h: number; left: number; top: number } | null = null;
 	let winEl: HTMLElement | undefined = $state();
 
 	const onDragStart = (e: PointerEvent) => {
@@ -68,28 +68,49 @@
 		window.removeEventListener('pointermove', onDragMove);
 	};
 
-	const onResizeStart = (e: PointerEvent) => {
+	// Any edge or corner resizes; opposite edges stay pinned.
+	type Edges = { n?: boolean; s?: boolean; e?: boolean; w?: boolean };
+	let resizeEdges: Edges = {};
+	const onResizeStart = (edges: Edges) => (e: PointerEvent) => {
 		if (!winEl) return;
 		e.stopPropagation();
 		const rect = winEl.getBoundingClientRect();
-		// Pin the window's top-left so growing the corner feels natural
-		// even while the window is still bottom-right anchored.
 		pos = { left: rect.left, top: rect.top };
-		resizeFrom = { x: e.clientX, y: e.clientY, w: rect.width, h: rect.height };
+		resizeEdges = edges;
+		resizeFrom = { x: e.clientX, y: e.clientY, w: rect.width, h: rect.height, left: rect.left, top: rect.top };
 		(e.target as HTMLElement).setPointerCapture?.(e.pointerId);
 		window.addEventListener('pointermove', onResizeMove);
 		window.addEventListener('pointerup', onResizeEnd, { once: true });
 	};
 	const onResizeMove = (e: PointerEvent) => {
 		if (!resizeFrom) return;
-		size = {
-			w: Math.min(Math.max(resizeFrom.w + e.clientX - resizeFrom.x, 300), window.innerWidth - 16),
-			h: Math.min(Math.max(resizeFrom.h + e.clientY - resizeFrom.y, 320), window.innerHeight - 16)
-		};
+		const dx = e.clientX - resizeFrom.x;
+		const dy = e.clientY - resizeFrom.y;
+		let w = resizeFrom.w;
+		let h = resizeFrom.h;
+		if (resizeEdges.e) w += dx;
+		if (resizeEdges.w) w -= dx;
+		if (resizeEdges.s) h += dy;
+		if (resizeEdges.n) h -= dy;
+		w = Math.min(Math.max(w, 300), window.innerWidth - 16);
+		h = Math.min(Math.max(h, 320), window.innerHeight - 16);
+		// Dragging the west/north edge moves the origin so the
+		// opposite edge stays where it is.
+		const left = resizeEdges.w ? resizeFrom.left + (resizeFrom.w - w) : resizeFrom.left;
+		const top = resizeEdges.n ? resizeFrom.top + (resizeFrom.h - h) : resizeFrom.top;
+		pos = { left, top };
+		size = { w, h };
 	};
 	const onResizeEnd = () => {
 		resizeFrom = null;
+		resizeEdges = {};
 		window.removeEventListener('pointermove', onResizeMove);
+	};
+
+	// Minimizing docks the window back to its bottom-right home.
+	const toggleMinimize = () => {
+		minimized = !minimized;
+		if (minimized) pos = null;
 	};
 
 	const windowStyle = $derived(() => {
@@ -197,27 +218,35 @@
 </script>
 
 {#if open}
+	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<section
 		bind:this={winEl}
 		class="chat-window"
 		class:minimized
 		style={windowStyle()}
 		aria-label="Finding chat"
+		onpointerdown={(e) => {
+			// Grabbing the bare frame (not chat content / controls /
+			// resize strips) moves the window, same as the title bar.
+			if (e.target === e.currentTarget) onDragStart(e);
+		}}
 	>
 		<!-- Window chrome: drag handle + hide/close. Deliberately not
 		     part of the chat surface below. -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div class="win-chrome" aria-label="Drag to move" onpointerdown={onDragStart}>
-			<MessageCircle size={14} />
+			<Bot size={15} />
 			<span class="win-title" title={assetSlug}>{assetSlug}</span>
-			<div class="win-actions">
-				<button type="button" class="win-btn" aria-label={minimized ? 'Restore' : 'Hide'} onclick={() => (minimized = !minimized)} onpointerdown={(e) => e.stopPropagation()}>
-					{#if minimized}<Square size={12} />{:else}<Minus size={13} />{/if}
-				</button>
-				<button type="button" class="win-btn" aria-label="Close" onclick={() => (open = false)} onpointerdown={(e) => e.stopPropagation()}>
-					<X size={14} />
-				</button>
-			</div>
+		</div>
+		<!-- Window controls live on the outer title border, not in the
+		     chat surface. -->
+		<div class="win-actions">
+			<button type="button" class="win-btn" aria-label={minimized ? 'Restore' : 'Hide'} onclick={toggleMinimize} onpointerdown={(e) => e.stopPropagation()}>
+				{#if minimized}<Square size={12} />{:else}<Minus size={13} />{/if}
+			</button>
+			<button type="button" class="win-btn" aria-label="Close" onclick={() => (open = false)} onpointerdown={(e) => e.stopPropagation()}>
+				<X size={14} />
+			</button>
 		</div>
 
 		{#if !minimized}
@@ -265,8 +294,26 @@
 				</button>
 			</footer>
 
+		{/if}
+
+		{#if !minimized}
+			<!-- Resize handles on every edge and corner. -->
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
-			<div class="chat-resize" aria-label="Resize" onpointerdown={onResizeStart}></div>
+			<div class="rz rz-n" onpointerdown={onResizeStart({ n: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-s" onpointerdown={onResizeStart({ s: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-e" onpointerdown={onResizeStart({ e: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-w" onpointerdown={onResizeStart({ w: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-ne" onpointerdown={onResizeStart({ n: true, e: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-nw" onpointerdown={onResizeStart({ n: true, w: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-se" onpointerdown={onResizeStart({ s: true, e: true })}></div>
+			<!-- svelte-ignore a11y_no_static_element_interactions -->
+			<div class="rz rz-sw" onpointerdown={onResizeStart({ s: true, w: true })}></div>
 		{/if}
 	</section>
 {/if}
@@ -285,7 +332,6 @@
 		background: var(--main-content-bg);
 		border: 1px solid var(--border-color);
 		box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
-		overflow: hidden;
 	}
 	.chat-window.minimized {
 		max-height: none;
@@ -298,6 +344,7 @@
 		align-items: center;
 		gap: 0.5rem;
 		padding: 0.5rem 0.7rem;
+		border-radius: 0.9rem 0.9rem 0 0;
 		cursor: grab;
 		user-select: none;
 		color: var(--text-secondary);
@@ -315,6 +362,7 @@
 	.win-title {
 		flex: 1;
 		min-width: 0;
+		padding-right: 3.6rem; /* keep clear of the border controls */
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -322,9 +370,15 @@
 		font-weight: 600;
 		color: var(--text-bright);
 	}
+	/* Controls anchored to the outer title border (top-right of the
+	   frame), above the chrome's drag surface. */
 	.win-actions {
+		position: absolute;
+		top: 0.3rem;
+		right: 0.4rem;
 		display: inline-flex;
 		gap: 0.2rem;
+		z-index: 2;
 	}
 	.win-btn {
 		display: inline-flex;
@@ -459,6 +513,9 @@
 		padding: 0.6rem 0.75rem 0.75rem;
 		flex-shrink: 0;
 	}
+	.chat-window.minimized .win-chrome {
+		border-radius: 0.9rem;
+	}
 	.chat-input {
 		flex: 1;
 		resize: none;
@@ -468,21 +525,18 @@
 		padding: 0.55rem 0.8rem;
 	}
 
-	/* Corner grip — two short strokes, no border styling. */
-	.chat-resize {
+	/* Invisible resize strips on every edge + corner. */
+	.rz {
 		position: absolute;
-		right: 0;
-		bottom: 0;
-		width: 16px;
-		height: 16px;
-		cursor: nwse-resize;
 		touch-action: none;
-		background:
-			linear-gradient(135deg, transparent 55%, var(--text-muted) 55%, var(--text-muted) 60%, transparent 60%),
-			linear-gradient(135deg, transparent 75%, var(--text-muted) 75%, var(--text-muted) 80%, transparent 80%);
-		opacity: 0.6;
+		z-index: 3;
 	}
-	.chat-resize:hover {
-		opacity: 1;
-	}
+	.rz-n { top: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+	.rz-s { bottom: -3px; left: 10px; right: 10px; height: 7px; cursor: ns-resize; }
+	.rz-e { right: -3px; top: 10px; bottom: 10px; width: 7px; cursor: ew-resize; }
+	.rz-w { left: -3px; top: 10px; bottom: 10px; width: 7px; cursor: ew-resize; }
+	.rz-ne { top: -3px; right: -3px; width: 13px; height: 13px; cursor: nesw-resize; }
+	.rz-nw { top: -3px; left: -3px; width: 13px; height: 13px; cursor: nwse-resize; }
+	.rz-se { bottom: -3px; right: -3px; width: 13px; height: 13px; cursor: nwse-resize; }
+	.rz-sw { bottom: -3px; left: -3px; width: 13px; height: 13px; cursor: nesw-resize; }
 </style>
