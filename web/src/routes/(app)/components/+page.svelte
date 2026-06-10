@@ -388,8 +388,8 @@
 		{:else if dependencies.length === 0 && !loading}
 			<div class="flex flex-1 items-center justify-center">
 				<div class="flex max-w-md flex-col items-center gap-4 text-center">
-					<div class="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--card-bg)]/40">
-						<Search class="h-7 w-7 text-[var(--accent)]" aria-hidden="true" />
+					<div class="flex h-32 w-32 items-center justify-center rounded-2xl bg-[var(--card-bg)]/40">
+						<Search class="h-14 w-14 text-[var(--accent)]" aria-hidden="true" />
 					</div>
 					<div>
 						<p class="text-base font-semibold text-[var(--text-bright)]">Search the dependency inventory</p>
