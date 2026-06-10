@@ -209,3 +209,38 @@ func AdminAIBackfillStatusHandler(db *gorm.DB, authService *auth.Service) http.H
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
+
+// AdminAIModelsHandler proxies the endpoint's model list so the admin
+// UI can offer a dropdown. base_url comes from the (possibly unsaved)
+// form value; the stored key of the given use case authenticates,
+// since the UI never holds key plaintext.
+// GET /api/admin/ai/models?use_case=&base_url=
+func AdminAIModelsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.RequireAdmin(r); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		useCase := r.URL.Query().Get("use_case")
+		baseURL := r.URL.Query().Get("base_url")
+		apiKey := ""
+		if useCase != "" {
+			if stored, err := llmadvisory.GetSettings(r.Context(), db, useCase); err == nil {
+				apiKey = stored.APIKey
+				if baseURL == "" {
+					baseURL = stored.BaseURL
+				}
+			}
+		}
+		if baseURL == "" {
+			http.Error(w, "base_url required", http.StatusBadRequest)
+			return
+		}
+		models, err := llmadvisory.ListModels(r.Context(), baseURL, apiKey)
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"models": []string{}, "error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"models": models})
+	}
+}

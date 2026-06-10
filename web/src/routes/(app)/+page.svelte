@@ -10,6 +10,7 @@
 		GitBranch,
 		Globe,
 		Lock,
+		MessageCircle,
 		ShieldCheck,
 		Target,
 		ChevronDown,
@@ -22,6 +23,7 @@
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import VulnAdvisoryDialog from '$lib/components/VulnAdvisoryDialog.svelte';
 	import Tooltip from '$lib/components/Tooltip.svelte';
+	import FindingChat from '$lib/components/FindingChat.svelte';
 
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy export-let
@@ -592,6 +594,15 @@
 	// Off-path CVE visibility per card. Hidden by default: if a vuln
 	// is not on the attack path it is noise for threat modelling, even
 	// at high CVSS.
+	// Floating finding chat — one window at a time, keyed to the row
+	// whose "Chat about this" button opened it.
+	let chatOpen = $state(false);
+	let chatAsset = $state({ type: '', id: '', slug: '' });
+	const openChat = (row: TriageRow) => {
+		chatAsset = { type: row.asset_type, id: row.asset_id, slug: row.asset_slug };
+		chatOpen = true;
+	};
+
 	// Advisory dialog — same component the image page uses, so a CVE
 	// click stays in context instead of navigating away.
 	let vulnDialogOpen = $state(false);
@@ -878,11 +889,43 @@
 					{#if isOpen}
 						<div class="card-body">
 							{#if row.advisory?.summary}
+								<div class="stage stage-advisory">
+									<span class="stage-label">Advisory</span>
+									<div class="stage-body">
+										<span class="stage-text advisory-text">{row.advisory.summary}</span>
+										<div class="advisory-foot">
+											<span class="stage-hint">AI-generated · {row.advisory.summary_model}{row.advisory.stale ? ' · signals changed since generation' : ''}</span>
+											{#if row.asset_type !== 'cluster'}
+												<button
+													type="button"
+													class="chat-open-btn"
+													onclick={(e) => {
+														e.stopPropagation();
+														openChat(row);
+													}}
+												>
+													<MessageCircle size={12} />
+													Chat about this
+												</button>
+											{/if}
+										</div>
+									</div>
+								</div>
+							{:else if row.asset_type !== 'cluster'}
 								<div class="stage">
 									<span class="stage-label">Advisory</span>
 									<div class="stage-body">
-										<span class="stage-text">{row.advisory.summary}</span>
-										<span class="stage-hint">AI-generated · {row.advisory.summary_model}{row.advisory.stale ? ' · signals changed since generation' : ''}</span>
+										<button
+											type="button"
+											class="chat-open-btn"
+											onclick={(e) => {
+												e.stopPropagation();
+												openChat(row);
+											}}
+										>
+											<MessageCircle size={12} />
+											Chat about this
+										</button>
 									</div>
 								</div>
 							{/if}
@@ -1276,6 +1319,8 @@
 
 <VulnAdvisoryDialog bind:open={vulnDialogOpen} vulnId={vulnDialogId} />
 
+<FindingChat bind:open={chatOpen} assetType={chatAsset.type} assetId={chatAsset.id} assetSlug={chatAsset.slug} />
+
 <style>
 	.tier {
 		display: flex;
@@ -1529,6 +1574,39 @@
 	.stage-hint {
 		font-size: 0.66rem;
 		color: var(--text-muted);
+	}
+	/* The AI advisory is the headline of the expansion — give it air
+	   above and below so it reads before the evidence stages. */
+	.stage-advisory {
+		padding: 0.9rem 0 1.1rem;
+	}
+	.advisory-text {
+		font-size: 0.86rem;
+		color: var(--text-bright);
+	}
+	.advisory-foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+	.chat-open-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		align-self: flex-start;
+		border: 0;
+		background: none;
+		padding: 0;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--accent);
+		cursor: pointer;
+		transition: opacity 120ms ease;
+	}
+	.chat-open-btn:hover {
+		opacity: 0.75;
 	}
 
 	.detail-loading,

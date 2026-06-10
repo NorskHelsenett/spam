@@ -213,6 +213,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Post("/admin/ai/test", uiapi.AdminAITestHandler(db, authService))
 				api.With(aiAudit).Post("/admin/ai/backfill", uiapi.AdminAIBackfillHandler(db, authService))
 				api.Get("/admin/ai/backfill/status", uiapi.AdminAIBackfillStatusHandler(db, authService))
+				api.Get("/admin/ai/models", uiapi.AdminAIModelsHandler(db, authService))
 
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
@@ -443,6 +444,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// new endpoint here without ACL filtering would leak data.
 			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
 			approved.Get("/api/triage/image/{id}", uiapi.TriageImageDetailHandler(db, authService))
+			approved.Post("/api/triage/chat", uiapi.TriageChatHandler(db, authService))
 			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
 			approved.Get("/api/images/{id}/vulnerabilities", uiapi.ImageVulnerabilitiesHandler(db, authService))
 			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))

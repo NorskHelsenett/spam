@@ -25,6 +25,7 @@ import (
 const (
 	UseCaseSummary = "advisory_summary"
 	UseCaseVerdict = "triage_verdict"
+	UseCaseChat    = "finding_chat"
 )
 
 // Settings is one llm_settings row — sampling + prompt config for a

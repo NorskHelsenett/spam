@@ -50,6 +50,36 @@
 	let saving = $state<Record<string, boolean>>({});
 	let savedAt = $state<Record<string, number>>({});
 
+	// Model dropdown: fetched from the endpoint per use case; falls
+	// back to (or can be switched to) a free-text input when the list
+	// fetch fails or the model isn't listed.
+	let modelsByUseCase = $state<Record<string, string[]>>({});
+	let modelManual = $state<Record<string, boolean>>({});
+
+	const loadModels = async (s: Settings) => {
+		try {
+			const params = new URLSearchParams({ use_case: s.use_case, base_url: s.base_url });
+			const res = await fetch(`/api/admin/ai/models?${params}`, { credentials: 'include' });
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const data = (await res.json()) as { models: string[]; error?: string };
+			modelsByUseCase = { ...modelsByUseCase, [s.use_case]: data.models ?? [] };
+			if (!data.models?.length) modelManual = { ...modelManual, [s.use_case]: true };
+		} catch {
+			modelsByUseCase = { ...modelsByUseCase, [s.use_case]: [] };
+			modelManual = { ...modelManual, [s.use_case]: true };
+		}
+	};
+
+	const modelOptions = (s: Settings) => {
+		const models = modelsByUseCase[s.use_case] ?? [];
+		// Keep an unlisted saved model selectable instead of clobbering it.
+		const opts = models.map((m) => ({ value: m, label: m }));
+		if (s.model && !models.includes(s.model)) {
+			opts.unshift({ value: s.model, label: `${s.model} (saved)` });
+		}
+		return opts;
+	};
+
 	// Backfill state — enqueue ADVISORY_BACKFILL and poll its progress.
 	type BackfillStatus = {
 		status: string;
@@ -105,6 +135,7 @@
 			const res = await fetch('/api/admin/ai/settings', { credentials: 'include' });
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			settings = ((await res.json()).settings ?? []) as Settings[];
+			for (const s of settings) void loadModels(s);
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Failed to load settings';
 		} finally {
@@ -204,7 +235,22 @@
 						<div class="grid gap-3 sm:grid-cols-2">
 							<div>
 								<label class="mb-1 block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]" for="{s.use_case}-model">Model</label>
-								<input id="{s.use_case}-model" type="text" class="input" bind:value={s.model} placeholder="nhn-medium" />
+								{#if !modelManual[s.use_case] && (modelsByUseCase[s.use_case]?.length ?? 0) > 0}
+									<Select options={modelOptions(s)} bind:value={s.model} class="w-full" />
+								{:else}
+									<input id="{s.use_case}-model" type="text" class="input" bind:value={s.model} placeholder="nhn-medium" />
+								{/if}
+								<button
+									type="button"
+									class="mt-1 text-xs text-[var(--text-muted)] underline decoration-dotted"
+									onclick={() => {
+										const manual = !modelManual[s.use_case];
+										modelManual = { ...modelManual, [s.use_case]: manual };
+										if (!manual) void loadModels(s);
+									}}
+								>
+									{modelManual[s.use_case] || !(modelsByUseCase[s.use_case]?.length ?? 0) ? 'Fetch model list from endpoint' : 'Enter model manually'}
+								</button>
 							</div>
 							<div>
 								<label class="mb-1 block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]" for="{s.use_case}-url">Endpoint URL</label>

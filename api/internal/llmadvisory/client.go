@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 )
@@ -48,13 +49,28 @@ type chatResponse struct {
 //     means the budget was too small, which we surface explicitly;
 //   - replies sometimes arrive wrapped in markdown code fences.
 func Chat(ctx context.Context, s Settings, userPayload string) (string, error) {
+	return Converse(ctx, s, []Message{{Role: "user", Content: userPayload}})
+}
+
+// Message is one turn of a conversation, role "user" or "assistant".
+type Message struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+// Converse relays a multi-turn conversation (the configured system
+// prompt is prepended) and returns the assistant reply. Powers the
+// finding-chat window; same budget/fence handling as Chat.
+func Converse(ctx context.Context, s Settings, messages []Message) (string, error) {
+	msgs := make([]chatMessage, 0, len(messages)+1)
+	msgs = append(msgs, chatMessage{Role: "system", Content: s.SystemPrompt})
+	for _, m := range messages {
+		msgs = append(msgs, chatMessage{Role: m.Role, Content: m.Content})
+	}
 	body, err := json.Marshal(chatRequest{
-		Model:  s.Model,
-		Stream: false,
-		Messages: []chatMessage{
-			{Role: "system", Content: s.SystemPrompt},
-			{Role: "user", Content: userPayload},
-		},
+		Model:       s.Model,
+		Stream:      false,
+		Messages:    msgs,
 		Temperature: s.Temperature,
 		TopK:        s.TopK,
 		TopP:        s.TopP,
@@ -103,6 +119,55 @@ func Chat(ctx context.Context, s Settings, userPayload string) (string, error) {
 		return "", errors.New("llm returned empty content")
 	}
 	return stripFences(content), nil
+}
+
+// ListModels fetches the model ids served by the OpenAI-compatible
+// endpoint behind chatURL. The models route is derived from the chat
+// completions URL (".../chat/completions" → ".../models") so one
+// admin-configured URL drives both.
+func ListModels(ctx context.Context, chatURL, apiKey string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, modelsURL(chatURL), nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("models endpoint returned %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	models := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			models = append(models, m.ID)
+		}
+	}
+	sort.Strings(models)
+	return models, nil
+}
+
+func modelsURL(chatURL string) string {
+	for _, suffix := range []string{"/chat/completions", "/completions"} {
+		if strings.HasSuffix(chatURL, suffix) {
+			return strings.TrimSuffix(chatURL, suffix) + "/models"
+		}
+	}
+	return strings.TrimRight(chatURL, "/") + "/models"
 }
 
 // stripFences unwraps a ```...``` block (optionally ```json) when the
