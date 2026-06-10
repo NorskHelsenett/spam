@@ -41,6 +41,10 @@
 		triage_verdict: {
 			title: 'Triage verdict (shadow mode)',
 			blurb: 'Agent decision keep/suppress with justification + confidence. Recorded and displayed for evaluation only — it never closes or hides anything.'
+		},
+		finding_chat: {
+			title: 'Finding chat',
+			blurb: 'Interactive Q&A about a single finding, opened from the triage card\'s "Chat about this" button. Each conversation is grounded with the finding\'s KEV/EPSS/exposure payload.'
 		}
 	};
 
