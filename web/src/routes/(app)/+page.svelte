@@ -1270,14 +1270,11 @@
 		justify-content: center;
 		width: 2.6rem;
 		height: 2.6rem;
-		border-radius: 0.7rem;
-		background: color-mix(in srgb, var(--text-muted) 8%, transparent);
 		flex-shrink: 0;
 	}
 	.card.compact .icon-tile {
 		width: 2.1rem;
 		height: 2.1rem;
-		border-radius: 0.55rem;
 	}
 	.icon-tile[data-level='critical'] {
 		color: var(--error);
