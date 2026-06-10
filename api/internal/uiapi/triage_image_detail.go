@@ -40,10 +40,23 @@ type TriageImageHost struct {
 	TLS       bool   `json:"tls"        gorm:"column:tls"`
 }
 
+// TriageImageCluster is one cluster currently running the digest.
+type TriageImageCluster struct {
+	ClusterID string `json:"cluster_id" gorm:"column:cluster_id"`
+	Name      string `json:"name"       gorm:"column:name"`
+	Exposed   bool   `json:"exposed"    gorm:"column:exposed"`
+}
+
 type triageImageDetailResponse struct {
 	Vulns     []TriageImageVuln `json:"vulns"`
 	VulnTotal int               `json:"vuln_total"`
 	Hosts     []TriageImageHost `json:"hosts"`
+
+	// Clusters lists only the clusters the caller can read;
+	// ClusterTotal is the true count, so the UI can say "+N outside
+	// your access" without naming them.
+	Clusters     []TriageImageCluster `json:"clusters"`
+	ClusterTotal int                  `json:"cluster_total"`
 }
 
 // triageImageVulnLimit caps the expansion panel — it's a "what drives
@@ -110,8 +123,52 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		}
 
 		resp := triageImageDetailResponse{
-			Vulns: []TriageImageVuln{},
-			Hosts: []TriageImageHost{},
+			Vulns:    []TriageImageVuln{},
+			Hosts:    []TriageImageHost{},
+			Clusters: []TriageImageCluster{},
+		}
+
+		// Clusters currently running the digest, with per-cluster
+		// exposure. The list itself is ACL-trimmed below — being able
+		// to read the image doesn't grant cluster visibility.
+		clusterQ := `
+			SELECT
+				cd.cluster_id,
+				COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
+				EXISTS (
+					SELECT 1 FROM exposed_digests ed
+					WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
+				) AS exposed
+			FROM (
+				SELECT DISTINCT cr.data->>'cluster_id' AS cluster_id
+				FROM cluster_record cr
+				WHERE cr.data->>'kind' = 'Container'
+				  AND cr.data->>'digest' = ?
+				  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
+			) cd
+			LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
+			ORDER BY exposed DESC, name
+		`
+		var allClusters []TriageImageCluster
+		if err := db.WithContext(ctx).Raw(clusterQ, img.Digest, img.Digest).
+			Scan(&allClusters).Error; err != nil {
+			http.Error(w, "failed to load clusters", http.StatusInternalServerError)
+			return
+		}
+		resp.ClusterTotal = len(allClusters)
+		readable, unrestricted, aclErr := readableClusterIDSet(r, db)
+		if aclErr != nil {
+			http.Error(w, "failed to scope results", http.StatusInternalServerError)
+			return
+		}
+		for _, cl := range allClusters {
+			if unrestricted {
+				resp.Clusters = append(resp.Clusters, cl)
+				continue
+			}
+			if _, ok := readable[cl.ClusterID]; ok {
+				resp.Clusters = append(resp.Clusters, cl)
+			}
 		}
 
 		// Whether the digest is internet-reachable — feeds the on_path

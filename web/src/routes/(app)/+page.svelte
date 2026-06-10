@@ -113,10 +113,17 @@
 		namespace: string;
 		tls: boolean;
 	};
+	type ImageTriageCluster = {
+		cluster_id: string;
+		name: string;
+		exposed: boolean;
+	};
 	type ImageTriageDetail = {
 		vulns: ImageTriageVuln[];
 		vuln_total: number;
 		hosts: ImageTriageHost[];
+		clusters: ImageTriageCluster[];
+		cluster_total: number;
 	};
 
 	let triage: TriageResponse | null = $state(null);
@@ -878,11 +885,22 @@
 									<div class="stage">
 										<span class="stage-label">Runs in</span>
 										<div class="stage-body">
-											<span class="stage-text">
-												{row.cluster_count} cluster{row.cluster_count === 1 ? '' : 's'}{row.exposed_cluster_count > 0
-													? ` — internet-facing in ${row.exposed_cluster_count}`
-													: ''}
-											</span>
+											{#if detail.clusters.length > 0}
+												<div class="host-chips">
+													{#each detail.clusters as cl}
+														<span class="chip chip-{cl.exposed ? 'warning' : 'muted'}" title={cl.cluster_id}>
+															{cl.name}{cl.exposed ? ' · exposed' : ''}
+														</span>
+													{/each}
+												</div>
+												{#if detail.cluster_total > detail.clusters.length}
+													<span class="stage-hint">+{detail.cluster_total - detail.clusters.length} cluster{detail.cluster_total - detail.clusters.length === 1 ? '' : 's'} outside your access</span>
+												{/if}
+											{:else if detail.cluster_total > 0}
+												<span class="stage-muted">{detail.cluster_total} cluster{detail.cluster_total === 1 ? '' : 's'} — all outside your access.</span>
+											{:else}
+												<span class="stage-muted">Not currently running in any cluster.</span>
+											{/if}
 										</div>
 									</div>
 									<div class="stage">
@@ -898,12 +916,14 @@
 																onclick={(e) => e.stopPropagation()}
 															>{v.canonical_id}</a>
 															<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
-															{#if v.kev}
-																<span class="chip chip-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
-															{/if}
-															{#if v.epss > 0}
-																<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}">EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
-															{/if}
+															<span class="vuln-badges">
+																{#if v.kev}
+																	<span class="chip chip-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
+																{/if}
+																{#if v.epss > 0}
+																	<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}">EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
+																{/if}
+															</span>
 															<span class={severityClass(v.severity)}>{v.severity}</span>
 															<span class="vuln-fix" class:none={!v.fixed_version}>{v.fixed_version ? `→ ${v.fixed_version}` : 'no fix'}</span>
 														</div>
@@ -935,6 +955,7 @@
 																	onclick={(e) => e.stopPropagation()}
 																>{v.canonical_id}</a>
 																<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
+																<span class="vuln-badges"></span>
 																<span class={severityClass(v.severity)}>{v.severity}</span>
 																<span class="vuln-fix" class:none={!v.fixed_version}>{v.fixed_version ? `→ ${v.fixed_version}` : 'no fix'}</span>
 															</div>
@@ -1468,13 +1489,30 @@
 		flex-direction: column;
 		gap: 0.2rem;
 	}
+	/* Fixed columns so consecutive CVE lines read as a table:
+	   id | package | KEV/EPSS badges | severity | fix. */
 	.vuln-line {
-		display: flex;
-		flex-wrap: wrap;
+		display: grid;
+		grid-template-columns: minmax(9rem, 11rem) minmax(0, 1fr) 11rem 4.5rem minmax(6rem, 9rem);
 		align-items: center;
 		gap: 0.55rem;
 		font-size: 0.78rem;
 		padding: 0.18rem 0;
+	}
+	.vuln-badges {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.35rem;
+		min-width: 0;
+	}
+	@media (max-width: 900px) {
+		.vuln-line {
+			grid-template-columns: minmax(8rem, auto) minmax(0, 1fr);
+			grid-auto-flow: row dense;
+		}
+		.vuln-badges:empty {
+			display: none;
+		}
 	}
 	.vuln-line.dim {
 		opacity: 0.55;
@@ -1493,7 +1531,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		max-width: 26ch;
 	}
 	.vuln-fix {
 		color: var(--success);
