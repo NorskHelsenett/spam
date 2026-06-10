@@ -1583,6 +1583,7 @@
 	.advisory-text {
 		font-size: 0.86rem;
 		color: var(--text-bright);
+		max-width: 80%;
 	}
 	.advisory-foot {
 		display: flex;

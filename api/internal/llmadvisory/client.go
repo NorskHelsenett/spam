@@ -1,6 +1,7 @@
 package llmadvisory
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -119,6 +120,99 @@ func Converse(ctx context.Context, s Settings, messages []Message) (string, erro
 		return "", errors.New("llm returned empty content")
 	}
 	return stripFences(content), nil
+}
+
+// ConverseStream is Converse with server-sent streaming: content
+// deltas invoke onDelta as they arrive; the first hidden-reasoning
+// delta invokes onThinking once so a UI can show "thinking" before
+// any visible text exists. Returns the full accumulated reply.
+func ConverseStream(ctx context.Context, s Settings, messages []Message, onThinking func(), onDelta func(string)) (string, error) {
+	msgs := make([]chatMessage, 0, len(messages)+1)
+	msgs = append(msgs, chatMessage{Role: "system", Content: s.SystemPrompt})
+	for _, m := range messages {
+		msgs = append(msgs, chatMessage{Role: m.Role, Content: m.Content})
+	}
+	body, err := json.Marshal(chatRequest{
+		Model:       s.Model,
+		Stream:      true,
+		Messages:    msgs,
+		Temperature: s.Temperature,
+		TopK:        s.TopK,
+		TopP:        s.TopP,
+		MaxTokens:   s.MaxTokens,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, chatTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.BaseURL, bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if s.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+s.APIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("llm endpoint returned %d", resp.StatusCode)
+	}
+
+	var full strings.Builder
+	thinkingSignalled := false
+	scanner := bufio.NewScanner(resp.Body)
+	// SSE data lines can carry large JSON chunks.
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content   string `json:"content"`
+					Reasoning string `json:"reasoning"`
+				} `json:"delta"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) != nil || len(chunk.Choices) == 0 {
+			continue
+		}
+		d := chunk.Choices[0].Delta
+		if d.Reasoning != "" && !thinkingSignalled && full.Len() == 0 {
+			thinkingSignalled = true
+			if onThinking != nil {
+				onThinking()
+			}
+		}
+		if d.Content != "" {
+			full.WriteString(d.Content)
+			if onDelta != nil {
+				onDelta(d.Content)
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return full.String(), err
+	}
+	out := strings.TrimSpace(full.String())
+	if out == "" {
+		return "", errors.New("llm stream produced no content")
+	}
+	return out, nil
 }
 
 // ListModels fetches the model ids served by the OpenAI-compatible

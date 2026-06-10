@@ -3,6 +3,7 @@ package uiapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -102,11 +103,42 @@ func TriageChatHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 		msgs = append(msgs, llmadvisory.Message{Role: "user", Content: "Finding context:\n" + payload})
 		msgs = append(msgs, body.Messages...)
 
-		reply, err := llmadvisory.Converse(ctx, cfg, msgs)
-		if err != nil {
-			http.Error(w, "llm request failed: "+err.Error(), http.StatusBadGateway)
+		// Stream the reply as SSE data events: {"thinking":true} while
+		// the reasoning model deliberates, {"delta":"…"} per content
+		// chunk, then {"done":true} (or {"error":"…"}). Falls back to
+		// one JSON response when the writer can't flush.
+		flusher, canStream := w.(http.Flusher)
+		if !canStream {
+			reply, err := llmadvisory.Converse(ctx, cfg, msgs)
+			if err != nil {
+				http.Error(w, "llm request failed: "+err.Error(), http.StatusBadGateway)
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+		send := func(v map[string]any) {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return
+			}
+			fmt.Fprintf(w, "data: %s\n\n", b)
+			flusher.Flush()
+		}
+
+		_, err = llmadvisory.ConverseStream(ctx, cfg, msgs,
+			func() { send(map[string]any{"thinking": true}) },
+			func(delta string) { send(map[string]any{"delta": delta}) },
+		)
+		if err != nil {
+			send(map[string]any{"error": err.Error()})
+			return
+		}
+		send(map[string]any{"done": true})
 	}
 }
