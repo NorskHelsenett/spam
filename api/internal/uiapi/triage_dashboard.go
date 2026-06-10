@@ -10,11 +10,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// TriageHandler returns the asset-centric triage view: scope inventory
-// + three-tier ranked queue (fix_now / this_week / watch). One fat
-// endpoint — the page renders all three sections in a single load.
+// TriageHandler returns the image-first triage view: scope inventory,
+// four ranked tiers (fix_now / this_week / watch / deprioritized) over
+// images + repos, and a read-only cluster rollup lens. One fat
+// endpoint — the page renders all sections in a single load.
 //
 // GET /api/triage?watch_limit=&watch_offset=&watch_q=
+//                &deprio_limit=&deprio_offset=&deprio_q=
 //
 // ACL: every branch (repo / image / cluster) is independently scoped
 // using the same clause helpers as the per-tab handlers. A caller with
@@ -33,6 +35,10 @@ func TriageHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			WatchLimit:  parseIntDefault(q.Get("watch_limit"), 0),
 			WatchOffset: parseIntDefault(q.Get("watch_offset"), 0),
 			WatchSearch: q.Get("watch_q"),
+
+			DeprioLimit:  parseIntDefault(q.Get("deprio_limit"), 0),
+			DeprioOffset: parseIntDefault(q.Get("deprio_offset"), 0),
+			DeprioSearch: q.Get("deprio_q"),
 		}
 
 		subj := acl.SubjectFromRequest(r)

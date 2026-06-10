@@ -168,6 +168,7 @@ func run() error {
 		"migrations/20260527_create_vuln_canonical_assets.sql",
 		"migrations/20260527a_create_vuln_canonical_summary.sql",
 		"migrations/20260527_create_host_resolution.sql",
+		"migrations/20260610_asset_risk_v2_vuln_tier_signals.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}

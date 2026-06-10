@@ -13,10 +13,16 @@ type Reason struct {
 	Fields map[string]any `json:"fields,omitempty"`
 }
 
-// Reasons returns the ordered set of reason entries for an asset.
-// Order matters: the first entry is the headline reason rendered next
-// to the asset row; subsequent entries become a "more" expansion.
-func Reasons(s Signals) []Reason {
+// TierReasons returns the ordered vuln-driven reasons that justify the
+// asset's tier. Order matters: the first entry is the headline reason
+// rendered next to the asset row; subsequent entries become a "more"
+// expansion. The order mirrors the Tier() rule bands so the headline
+// always names the rule that fired.
+//
+// Posture signals are deliberately absent — they never move a tier, so
+// listing them here would misrepresent why the asset needs attention.
+// They live in ContextReasons.
+func TierReasons(s Signals, tier string) []Reason {
 	out := make([]Reason, 0, 4)
 
 	if s.ActiveSecretCount > 0 {
@@ -28,14 +34,41 @@ func Reasons(s Signals) []Reason {
 		})
 	}
 
-	if s.KEVCount > 0 && s.InternetExposed {
+	// KEV reasons, most specific first. kev_present only fires when
+	// no sharper KEV reason already explains the row.
+	kevSpecific := false
+	if s.ExposedKEVCount > 0 {
+		kevSpecific = true
 		out = append(out, Reason{
 			ID: "kev_and_exposed",
 			Fields: map[string]any{
-				"kev_count": s.KEVCount,
+				"exposed_kev_count": s.ExposedKEVCount,
 			},
 		})
-	} else if s.KEVCount > 0 {
+	}
+	if s.KEVRansomwareCount > 0 {
+		kevSpecific = true
+		out = append(out, Reason{
+			ID: "kev_ransomware",
+			Fields: map[string]any{
+				"count": s.KEVRansomwareCount,
+			},
+		})
+	}
+	if s.KEVCount > 0 && s.KEVDuePassed {
+		kevSpecific = true
+		out = append(out, Reason{ID: "kev_overdue"})
+	}
+	if s.KEVFixableCount > 0 {
+		kevSpecific = true
+		out = append(out, Reason{
+			ID: "kev_fixable",
+			Fields: map[string]any{
+				"count": s.KEVFixableCount,
+			},
+		})
+	}
+	if s.KEVCount > 0 && !kevSpecific {
 		out = append(out, Reason{
 			ID: "kev_present",
 			Fields: map[string]any{
@@ -44,14 +77,14 @@ func Reasons(s Signals) []Reason {
 		})
 	}
 
-	if s.EPSSMax >= 0.5 {
+	if s.EPSSMax >= EPSSVeryHigh {
 		out = append(out, Reason{
 			ID: "epss_very_high",
 			Fields: map[string]any{
 				"epss_max": s.EPSSMax,
 			},
 		})
-	} else if s.EPSSMax >= 0.1 {
+	} else if s.EPSSMax >= EPSSElevated {
 		out = append(out, Reason{
 			ID: "epss_elevated",
 			Fields: map[string]any{
@@ -60,15 +93,77 @@ func Reasons(s Signals) []Reason {
 		})
 	}
 
-	if s.CriticalCount > 0 {
+	if s.ExposedCriticalCount > 0 {
 		out = append(out, Reason{
-			ID: "critical_severity",
+			ID: "exposed_critical",
 			Fields: map[string]any{
-				"critical": s.CriticalCount,
-				"has_fix":  s.HasFixForCritical,
+				"critical": s.ExposedCriticalCount,
 			},
 		})
 	}
+
+	if s.CriticalCount > 0 && s.HasFixForCritical {
+		out = append(out, Reason{
+			ID: "critical_fixable",
+			Fields: map[string]any{
+				"critical": s.CriticalCount,
+			},
+		})
+	}
+
+	// Deprioritized rows headline the reason they were parked — the
+	// D1..D4 decision is prepended so it always renders as the first
+	// pill, ahead of any incidental signal (e.g. elevated EPSS on a
+	// medium-only row).
+	if tier == TierDeprioritized {
+		var dep Reason
+		switch {
+		case (s.CriticalCount > 0 && !s.HasFixForCritical) ||
+			(s.HighCount > 0 && !s.HasFixForHigh):
+			dep = Reason{
+				ID: "no_fix_available",
+				Fields: map[string]any{
+					"critical": s.CriticalCount,
+					"high":     s.HighCount,
+				},
+			}
+		case s.CriticalCount > 0 || s.HighCount > 0:
+			dep = Reason{
+				ID: "low_epss_not_exposed",
+				Fields: map[string]any{
+					"epss_max": s.EPSSMax,
+					"critical": s.CriticalCount,
+					"high":     s.HighCount,
+				},
+			}
+		case s.MediumCount > 0 || s.LowCount > 0:
+			dep = Reason{
+				ID: "low_severity_only",
+				Fields: map[string]any{
+					"medium": s.MediumCount,
+					"low":    s.LowCount,
+				},
+			}
+		default:
+			dep = Reason{
+				ID: "no_scan_data",
+				Fields: map[string]any{
+					"scan_age_days": s.ScanAgeDays,
+				},
+			}
+		}
+		out = append([]Reason{dep}, out...)
+	}
+
+	return out
+}
+
+// ContextReasons returns the posture signals as display-only context.
+// These never influence Tier() — the UI renders them separately
+// ("posture — does not affect tier") so the advisory's urgency claims
+// stay credible.
+func ContextReasons(s Signals) []Reason {
+	out := make([]Reason, 0, 4)
 
 	if s.ScanAgeDays > 30 {
 		out = append(out, Reason{

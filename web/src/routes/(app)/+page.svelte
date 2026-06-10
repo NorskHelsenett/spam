@@ -5,8 +5,11 @@
 		ShieldAlert,
 		AlertTriangle,
 		Eye,
+		EyeOff,
 		Container,
 		GitBranch,
+		Globe,
+		Lock,
 		ShieldCheck,
 		Target,
 		ChevronDown,
@@ -32,9 +35,21 @@
 		image_digest?: string;
 		critical_count: number;
 		high_count: number;
+		medium_count: number;
+		low_count: number;
 		kev_count: number;
 		epss_max: number;
 		has_fix_for_critical: boolean;
+		has_fix_for_high: boolean;
+		kev_fixable_count: number;
+		kev_ransomware_count: number;
+		kev_due_passed: boolean;
+		kev_epss_max: number;
+		exposed_kev_count: number;
+		exposed_critical_count: number;
+		exposed_epss_max: number;
+		cluster_count: number;
+		exposed_cluster_count: number;
 		active_secret_count: number;
 		internet_exposed: boolean;
 		signed_commits_pct: number;
@@ -50,8 +65,9 @@
 		threat_score: number;
 		trust_score: number;
 		trust_grade: string;
-		tier: 'fix_now' | 'this_week' | 'watch';
+		tier: 'fix_now' | 'this_week' | 'watch' | 'deprioritized';
 		reasons: Reason[];
+		context: Reason[];
 	};
 	type Scope = {
 		clusters: number;
@@ -63,13 +79,43 @@
 		avg_trust: number;
 		view_refreshed_at: string | null;
 	};
-	type WatchCounts = { total: number; repo: number; image: number; cluster: number };
-	type WatchSection = { counts: WatchCounts; limit: number; offset: number; rows: TriageRow[] };
+	type SectionCounts = { total: number; repo: number; image: number };
+	type PagedSection = { counts: SectionCounts; limit: number; offset: number; rows: TriageRow[] };
 	type TriageResponse = {
 		scope: Scope;
 		fix_now: TriageRow[];
 		this_week: TriageRow[];
-		watch: WatchSection;
+		watch: PagedSection;
+		deprioritized: PagedSection;
+		clusters: TriageRow[];
+	};
+
+	// Lazy expansion payload for image rows — top KEV/EPSS-ranked CVEs
+	// + the exposed domains serving the digest.
+	type ImageTriageVuln = {
+		vuln_id: string;
+		canonical_id: string;
+		severity: string;
+		pkg_name: string;
+		installed_version: string;
+		fixed_version: string;
+		epss: number;
+		epss_percentile: number;
+		kev: boolean;
+		kev_due_date?: string | null;
+		kev_ransomware: boolean;
+	};
+	type ImageTriageHost = {
+		host: string;
+		cluster: string;
+		cluster_id: string;
+		namespace: string;
+		tls: boolean;
+	};
+	type ImageTriageDetail = {
+		vulns: ImageTriageVuln[];
+		vuln_total: number;
+		hosts: ImageTriageHost[];
 	};
 
 	let triage: TriageResponse | null = $state(null);
@@ -77,7 +123,12 @@
 	let error = $state('');
 	let watchSearch = $state('');
 	let watchOffset = $state(0);
-	let activeTab = $state<'all' | 'repo' | 'image' | 'cluster'>('all');
+	let deprioSearch = $state('');
+	let deprioOffset = $state(0);
+	// The deprioritized section ships collapsed — it's the explicit
+	// "you can ignore these" pile, shown on demand.
+	let deprioOpen = $state(false);
+	let activeTab = $state<'all' | 'repo' | 'image'>('all');
 	// Per-row expansion state for the "show your work" panel. Keyed
 	// by `${asset_type}:${asset_id}` so collapsing one row doesn't
 	// collapse the row-with-the-same-id-in-another-tier (rare, but
@@ -85,18 +136,49 @@
 	let expanded = $state(new Set<string>());
 	let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
+	// Lazy-loaded image expansion details, cached per asset_id so
+	// re-expanding a row doesn't refetch. 'loading' marks an inflight
+	// fetch; null marks a failed one (renders a retry-less notice).
+	let imageDetails = $state(new Map<string, ImageTriageDetail | 'loading' | null>());
+
 	const rowKey = (r: TriageRow) => `${r.asset_type}:${r.asset_id}`;
-	const toggleExpanded = (key: string) => {
+	const toggleExpanded = (key: string, row?: TriageRow) => {
 		const next = new Set(expanded);
 		if (next.has(key)) next.delete(key);
-		else next.add(key);
+		else {
+			next.add(key);
+			if (row && row.asset_type === 'image') void loadImageDetail(row.asset_id);
+		}
 		expanded = next;
 	};
 
-	const fetchTriage = async (search: string, offset: number) => {
+	const loadImageDetail = async (assetId: string) => {
+		if (imageDetails.has(assetId)) return;
+		const next = new Map(imageDetails);
+		next.set(assetId, 'loading');
+		imageDetails = next;
+		try {
+			const res = await fetch(`/api/triage/image/${encodeURIComponent(assetId)}`, {
+				credentials: 'include'
+			});
+			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+			const detail = (await res.json()) as ImageTriageDetail;
+			const done = new Map(imageDetails);
+			done.set(assetId, detail);
+			imageDetails = done;
+		} catch {
+			const failed = new Map(imageDetails);
+			failed.set(assetId, null);
+			imageDetails = failed;
+		}
+	};
+
+	const fetchTriage = async () => {
 		const params = new URLSearchParams();
-		if (search.trim()) params.set('watch_q', search.trim());
-		if (offset > 0) params.set('watch_offset', String(offset));
+		if (watchSearch.trim()) params.set('watch_q', watchSearch.trim());
+		if (watchOffset > 0) params.set('watch_offset', String(watchOffset));
+		if (deprioSearch.trim()) params.set('deprio_q', deprioSearch.trim());
+		if (deprioOffset > 0) params.set('deprio_offset', String(deprioOffset));
 		const res = await fetch(`/api/triage?${params}`, { credentials: 'include' });
 		if (!res.ok) throw new Error(`Failed to load triage (HTTP ${res.status})`);
 		return (await res.json()) as TriageResponse;
@@ -104,7 +186,7 @@
 
 	const reload = async () => {
 		try {
-			triage = await fetchTriage(watchSearch, watchOffset);
+			triage = await fetchTriage();
 		} catch (err) {
 			error = err instanceof Error ? err.message : 'Failed to load triage';
 		} finally {
@@ -123,6 +205,13 @@
 			void reload();
 		}, 250);
 	};
+	const onDeprioSearchInput = () => {
+		if (searchTimer) clearTimeout(searchTimer);
+		searchTimer = setTimeout(() => {
+			deprioOffset = 0;
+			void reload();
+		}, 250);
+	};
 
 	const goNextPage = () => {
 		if (!triage) return;
@@ -134,6 +223,18 @@
 	const goPrevPage = () => {
 		if (!triage || watchOffset === 0) return;
 		watchOffset = Math.max(0, watchOffset - triage.watch.limit);
+		void reload();
+	};
+	const goDeprioNext = () => {
+		if (!triage) return;
+		const next = deprioOffset + triage.deprioritized.limit;
+		if (next >= triage.deprioritized.counts.total) return;
+		deprioOffset = next;
+		void reload();
+	};
+	const goDeprioPrev = () => {
+		if (!triage || deprioOffset === 0) return;
+		deprioOffset = Math.max(0, deprioOffset - triage.deprioritized.limit);
 		void reload();
 	};
 
@@ -148,15 +249,31 @@
 			case 'active_secret_leak':
 				return `${f.count} active secret${(f.count as number) === 1 ? '' : 's'}`;
 			case 'kev_and_exposed':
-				return `${f.kev_count} KEV on exposed workload`;
+				return `${f.exposed_kev_count} KEV on exposed workload`;
+			case 'kev_ransomware':
+				return `${f.count} ransomware KEV${(f.count as number) === 1 ? '' : 's'}`;
+			case 'kev_overdue':
+				return `KEV past CISA due date`;
+			case 'kev_fixable':
+				return `${f.count} KEV with fix`;
 			case 'kev_present':
 				return `${f.kev_count} KEV CVE${(f.kev_count as number) === 1 ? '' : 's'}`;
 			case 'epss_very_high':
 				return `EPSS ${(((f.epss_max as number) ?? 0) * 100).toFixed(0)}%`;
 			case 'epss_elevated':
 				return `EPSS ${(((f.epss_max as number) ?? 0) * 100).toFixed(0)}%`;
-			case 'critical_severity':
-				return `${f.critical} Critical${f.has_fix ? ' (fix avail.)' : ''}`;
+			case 'exposed_critical':
+				return `${f.critical} Critical on exposed workload`;
+			case 'critical_fixable':
+				return `${f.critical} Critical (fix avail.)`;
+			case 'no_fix_available':
+				return `No fix available`;
+			case 'low_epss_not_exposed':
+				return `EPSS ${(((f.epss_max as number) ?? 0) * 100).toFixed(1)}% · not exposed`;
+			case 'low_severity_only':
+				return `Medium/Low only`;
+			case 'no_scan_data':
+				return `Never scanned`;
 			case 'scan_stale':
 				return `Scan ${f.days}d old`;
 			case 'low_commit_signing':
@@ -193,15 +310,33 @@
 				};
 			case 'kev_and_exposed':
 				return {
-					what: `${f.kev_count} CVE${(f.kev_count as number) === 1 ? '' : 's'} on this asset are listed in CISA's Known Exploited Vulnerabilities catalogue, and the workload is reachable from the internet.`,
+					what: `${f.exposed_kev_count} CVE${(f.exposed_kev_count as number) === 1 ? '' : 's'} listed in CISA's Known Exploited Vulnerabilities catalogue sit on a workload that is reachable from the internet.`,
 					why: 'KEV is the authoritative "we have seen this exploited in the wild" list. Combined with internet reach, this is the single highest-priority class of finding — public exploits typically exist.',
 					action: 'Patch or remove the affected component immediately. If a fix release is unavailable, consider taking the workload offline behind authentication or a WAF until upstream lands a fix.'
+				};
+			case 'kev_ransomware':
+				return {
+					what: `${f.count} KEV CVE${(f.count as number) === 1 ? '' : 's'} on this asset ${(f.count as number) === 1 ? 'is' : 'are'} flagged by CISA as used in ransomware campaigns.`,
+					why: 'Ransomware operators move laterally after the initial foothold — "not internet-facing" is not a defense once anything in the environment is compromised.',
+					action: 'Apply the available fix now. Ransomware-flagged KEVs with a patch should not wait for a regular sprint window.'
+				};
+			case 'kev_overdue':
+				return {
+					what: "A KEV CVE on this asset is past the remediation due date CISA set in its catalogue (BOD 22-01).",
+					why: 'The due date is the deadline US federal agencies are ordered to remediate by — a useful external bar for "this has been actionable long enough".',
+					action: 'Patch if a fix exists. If none does, make an explicit risk decision this week and record it (VEX or compensating control) so the overdue state is owned, not ignored.'
+				};
+			case 'kev_fixable':
+				return {
+					what: `${f.count} KEV CVE${(f.count as number) === 1 ? '' : 's'} on this asset ${(f.count as number) === 1 ? 'has' : 'have'} a fixed version available.`,
+					why: 'Confirmed in-the-wild exploitation plus an available patch is the clearest possible patch call — the only cost is the rollout.',
+					action: 'Schedule the upgrade in this week\'s window. The expansion panel lists each CVE with its fixed version.'
 				};
 			case 'kev_present':
 				return {
 					what: `${f.kev_count} CVE${(f.kev_count as number) === 1 ? '' : 's'} on this asset are in CISA's Known Exploited Vulnerabilities catalogue.`,
 					why: "KEV CVEs have confirmed in-the-wild exploitation. Even when the asset isn't internet-exposed today, exploit code is generally public — any future exposure path is high-risk.",
-					action: 'Apply the fix-available upgrade for the affected package. If you intentionally accept the risk (mitigating control, not reachable, etc.), record a VEX `not_affected` so triage stops surfacing it.'
+					action: 'No fix release exists yet — watch for one (the tier escalates automatically when it ships). If you accept the risk (mitigating control, not reachable, etc.), record a VEX `not_affected` so triage stops surfacing it.'
 				};
 			case 'epss_very_high':
 				return {
@@ -215,13 +350,41 @@
 					why: 'Elevated EPSS means real-world signal of exploitability is rising. Most vulns never reach this threshold.',
 					action: 'Schedule the upgrade in the current sprint. Keep an eye on EPSS — a jump above 50% means escalating to "act now".'
 				};
-			case 'critical_severity':
+			case 'exposed_critical':
 				return {
-					what: `${f.critical} CRITICAL CVE${(f.critical as number) === 1 ? '' : 's'} on this asset${f.has_fix ? ' — at least one has a fix release available' : ' — no fix release available yet'}.`,
-					why: 'CRITICAL severity per the scanner means CVSS≥9.0 (or vendor equivalent). These are the loudest items by impact alone.',
-					action: f.has_fix
-						? 'Upgrade the affected package to the fix version. The asset detail view lists each CVE with its fixed_version.'
-						: 'Pin the vulnerable version, monitor for an upstream fix, and consider VEX `under_investigation` so triage shows the active reasoning.'
+					what: `${f.critical} CRITICAL CVE${(f.critical as number) === 1 ? '' : 's'} sit on a workload that is reachable from the internet.`,
+					why: 'Critical impact plus internet reach means a working exploit, when one appears, has a direct path in. The EPSS score on the row tells you how likely that is.',
+					action: 'Patch the exposed criticals first — they outrank higher CVE counts on internal-only workloads.'
+				};
+			case 'critical_fixable':
+				return {
+					what: `${f.critical} CRITICAL CVE${(f.critical as number) === 1 ? '' : 's'} on this asset ${(f.critical as number) === 1 ? 'has' : 'have'} a fix release available.`,
+					why: 'CRITICAL severity per the scanner means CVSS≥9.0 (or vendor equivalent). With a fix available, the remaining risk is purely a scheduling decision.',
+					action: 'Upgrade the affected package to the fix version on the normal patch cadence. The expansion panel lists each CVE with its fixed version.'
+				};
+			case 'no_fix_available':
+				return {
+					what: `Critical or high findings exist (${f.critical} critical, ${f.high} high) but no upstream fix release is available for them.`,
+					why: "There is nothing for the team to do yet — burning a sprint on an unfixable CVE is exactly the false urgency this view avoids. Nothing else on this asset predicts exploitation (low EPSS, not in KEV, not exposed).",
+					action: 'No action. The tier escalates automatically when a fix ships or exploitation signals appear. Record a VEX `under_investigation` if you want the reasoning visible to auditors.'
+				};
+			case 'low_epss_not_exposed':
+				return {
+					what: `The remaining critical/high findings (${f.critical} critical, ${f.high} high) have low predicted exploitation (EPSS ${(((f.epss_max as number) ?? 0) * 100).toFixed(1)}%) and the workload is not internet-reachable.`,
+					why: 'Severity alone overstates these: nothing in KEV, exploitation unlikely in the next 30 days, and no exposure path. They are queue noise compared to the tiers above.',
+					action: 'Fold the upgrades into routine dependency maintenance. The tier escalates automatically if EPSS rises, the CVE enters KEV, or the workload becomes exposed.'
+				};
+			case 'low_severity_only':
+				return {
+					what: `Only medium/low findings exist on this asset (${f.medium} medium, ${f.low} low).`,
+					why: 'Medium and low severities almost never carry standalone exploitation risk; they matter in chains, which the exposure and EPSS signals would surface.',
+					action: 'No dedicated action — these resolve as a side effect of routine image rebuilds and dependency bumps.'
+				};
+			case 'no_scan_data':
+				return {
+					what: 'This asset has no scan data — no SBOM or no completed scan run.',
+					why: 'The asset is listed so "deprioritized" stays honest: we are not saying it is safe, we are saying we cannot see it.',
+					action: 'Trigger a scan from the asset detail page so the asset gets a real tier.'
 				};
 			case 'scan_stale':
 				return {
@@ -284,11 +447,15 @@
 		switch (id) {
 			case 'active_secret_leak':
 			case 'kev_and_exposed':
-			case 'kev_present':
+			case 'kev_ransomware':
+			case 'kev_overdue':
 				return 'pill pill-error';
+			case 'kev_fixable':
+			case 'kev_present':
 			case 'epss_very_high':
 			case 'epss_elevated':
-			case 'critical_severity':
+			case 'exposed_critical':
+			case 'critical_fixable':
 			case 'scan_stale':
 			case 'archived_deps':
 			case 'deprecated_deps':
@@ -326,7 +493,10 @@
 		return [
 			{ label: 'Critical CVEs', value: r.critical_count, dim: r.critical_count === 0 },
 			{ label: 'High CVEs', value: r.high_count, dim: r.high_count === 0 },
+			{ label: 'Medium / Low CVEs', value: `${r.medium_count} / ${r.low_count}`, dim: r.medium_count + r.low_count === 0 },
 			{ label: 'KEV CVEs', value: r.kev_count, dim: r.kev_count === 0 },
+			{ label: 'KEV with fix', value: r.kev_fixable_count, dim: r.kev_fixable_count === 0 },
+			{ label: 'KEV on exposed workload', value: r.exposed_kev_count, dim: r.exposed_kev_count === 0 },
 			{ label: 'EPSS max', value: epssPct, dim: r.epss_max === 0 },
 			{ label: 'Active secrets', value: r.active_secret_count, dim: r.active_secret_count === 0 },
 			{ label: 'Internet exposed', value: r.internet_exposed ? 'Yes' : 'No', dim: !r.internet_exposed },
@@ -367,8 +537,8 @@
 	});
 
 	// Asset-type distribution donut: how does the "needs attention"
-	// population break down across repos / images / clusters? Helps
-	// the operator orient on where to invest tooling.
+	// population break down across repos / images? Clusters aren't
+	// tier rows anymore — they live in the rollup lens below.
 	const distributionSegments = $derived((): DonutSegment[] => {
 		if (!triage) return [];
 		const counts = { repo: 0, image: 0, cluster: 0 };
@@ -378,11 +548,9 @@
 		// Watch counts already pre-bucketed in the response.
 		counts.repo += triage.watch.counts.repo;
 		counts.image += triage.watch.counts.image;
-		counts.cluster += triage.watch.counts.cluster;
 		const segs: DonutSegment[] = [];
 		if (counts.repo > 0) segs.push({ label: 'Repos', value: counts.repo, color: 'var(--accent)' });
 		if (counts.image > 0) segs.push({ label: 'Images', value: counts.image, color: 'var(--info)' });
-		if (counts.cluster > 0) segs.push({ label: 'Clusters', value: counts.cluster, color: 'var(--warning)' });
 		return segs;
 	});
 
@@ -401,12 +569,18 @@
 		if (triage.scope.fix_now_total > 0) segs.push({ label: 'Fix now', value: triage.scope.fix_now_total, color: 'var(--error)' });
 		if (triage.scope.this_week_total > 0) segs.push({ label: 'This week', value: triage.scope.this_week_total, color: 'var(--warning)' });
 		if (triage.watch.counts.total > 0) segs.push({ label: 'Watch', value: triage.watch.counts.total, color: 'var(--text-muted)' });
+		if (triage.deprioritized.counts.total > 0) segs.push({ label: 'Deprioritized', value: triage.deprioritized.counts.total, color: 'color-mix(in srgb, var(--text-muted) 45%, transparent)' });
 		return segs;
 	});
 
 	const tierTotal = $derived(() => {
 		if (!triage) return 0;
-		return triage.scope.fix_now_total + triage.scope.this_week_total + triage.watch.counts.total;
+		return (
+			triage.scope.fix_now_total +
+			triage.scope.this_week_total +
+			triage.watch.counts.total +
+			triage.deprioritized.counts.total
+		);
 	});
 
 	// Tab filter applied client-side over already-fetched lists.
@@ -421,13 +595,14 @@
 	const fixNowFiltered = $derived(() => triage ? filterByTab(triage.fix_now) : []);
 	const thisWeekFiltered = $derived(() => triage ? filterByTab(triage.this_week) : []);
 	const watchFiltered = $derived(() => triage ? filterByTab(triage.watch.rows) : []);
+	const deprioFiltered = $derived(() => triage ? filterByTab(triage.deprioritized.rows) : []);
 
 	// Total count for the active tab — shown under the Findings header.
 	// 'all' uses the un-capped scope totals so it reflects the real
 	// population across tiers. Per-type tabs use the capped arrays for
 	// fix_now / this_week (the response only carries the top-N slice
 	// when totals exceed the cap) plus the pre-aggregated watch
-	// .counts.{repo,image,cluster} buckets the API returns.
+	// .counts.{repo,image} buckets the API returns.
 	const activeTabTotal = $derived(() => {
 		if (!triage) return 0;
 		if (activeTab === 'all') {
@@ -442,9 +617,21 @@
 	const activeTabLabel = $derived(() => {
 		if (activeTab === 'all') return 'asset';
 		if (activeTab === 'repo') return 'repo';
-		if (activeTab === 'image') return 'image';
-		return 'cluster';
+		return 'image';
 	});
+
+	const severityClass = (sev: string): string => {
+		switch (sev) {
+			case 'CRITICAL':
+				return 'sev sev-critical';
+			case 'HIGH':
+				return 'sev sev-high';
+			case 'MEDIUM':
+				return 'sev sev-medium';
+			default:
+				return 'sev sev-low';
+		}
+	};
 </script>
 
 <svelte:head>
@@ -460,7 +647,7 @@
 					<Target class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
 					<div>
 						<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Triage</h1>
-						<p class="text-sm text-[var(--text-tertiary)]">Asset-centric "fix this now" view across repos, images, and clusters.</p>
+						<p class="text-sm text-[var(--text-tertiary)]">Image-first advisory — which image to act on, ranked by KEV and EPSS, with what's safe to ignore.</p>
 					</div>
 				</div>
 			</div>
@@ -474,7 +661,7 @@
 			<div class="rounded-2xl border border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-3 text-sm text-[var(--error)]">{error}</div>
 		{:else if triage}
 			<!-- Metric cards: tier counts + scope + posture -->
-			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Need attention</h3>
 					<p class="text-3xl font-bold {triage.scope.needs_attention === 0 ? 'text-[var(--success)]' : 'text-[var(--text-bright)]'}">{fmt(triage.scope.needs_attention)}</p>
@@ -493,7 +680,12 @@
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Watch</h3>
 					<p class="text-3xl font-bold text-[var(--text-secondary)]">{fmt(triage.watch.counts.total)}</p>
-					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Eye class="h-3 w-3 text-[var(--text-muted)]" /> Warnings, not urgent</p>
+					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Eye class="h-3 w-3 text-[var(--text-muted)]" /> Real but not urgent</p>
+				</div>
+				<div class="metric-card space-y-1 rounded-2xl p-4">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Deprioritized</h3>
+					<p class="text-3xl font-bold text-[var(--text-muted)]">{fmt(triage.deprioritized.counts.total)}</p>
+					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><EyeOff class="h-3 w-3 text-[var(--text-muted)]" /> Reviewed, not actionable</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Avg trust</h3>
@@ -534,8 +726,7 @@
 					options={[
 						{ value: 'all', label: 'All' },
 						{ value: 'repo', label: 'Repos' },
-						{ value: 'image', label: 'Images' },
-						{ value: 'cluster', label: 'Clusters' }
+						{ value: 'image', label: 'Images' }
 					]}
 					bind:value={activeTab}
 				/>
@@ -551,13 +742,172 @@
 					<h2 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Findings</h2>
 					<p class="text-sm text-[var(--text-tertiary)]">
 						{#if activeTabTotal() > 0}
-							{fmt(activeTabTotal())} {activeTabLabel()}{activeTabTotal() === 1 ? '' : 's'} ranked by composite Threat × Trust
+							{fmt(activeTabTotal())} {activeTabLabel()}{activeTabTotal() === 1 ? '' : 's'} ranked by KEV and EPSS
 						{:else}
 							No assets in this filter
 						{/if}
 					</p>
 				</div>
 			</header>
+
+			{#snippet triageRow(row: TriageRow, threatLevel: 'critical' | 'warning' | 'info', compact: boolean)}
+				{@const Icon = rowIcon(row.asset_type)}
+				{@const key = rowKey(row)}
+				{@const isOpen = expanded.has(key)}
+				<div class="row-wrapper" class:open={isOpen}>
+					<button
+						type="button"
+						class="row"
+						class:compact
+						aria-expanded={isOpen}
+						onclick={() => toggleExpanded(key, row)}
+					>
+						<div class="row-asset">
+							<Icon size={compact ? 14 : 16} class="text-[var(--text-muted)]" />
+							<span class="asset-slug">{row.asset_slug}</span>
+							<span class="badge">{row.asset_type}</span>
+							{#if row.asset_type === 'image' && row.cluster_count > 0}
+								<span class="spread" class:exposed={row.exposed_cluster_count > 0}>
+									{row.cluster_count} cluster{row.cluster_count === 1 ? '' : 's'}{row.exposed_cluster_count > 0 ? ` · ${row.exposed_cluster_count} exposed` : ''}
+								</span>
+							{/if}
+						</div>
+						<div class="row-scores">
+							<span class="threat" data-level={threatLevel}>Threat {row.threat_score}</span>
+							<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
+						</div>
+						<div class="row-reasons">
+							{#each row.reasons.slice(0, compact ? 1 : 2) as reason}
+								<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+							{/each}
+						</div>
+						<div class="row-actions">
+							<a
+								class="row-open"
+								href={rowHref(row)}
+								title="Open {row.asset_type} detail"
+								onclick={(e) => e.stopPropagation()}
+							>
+								Open <ArrowUpRight size={12} />
+							</a>
+							<ChevronDown size={14} class="row-chevron {isOpen ? 'open' : ''}" />
+						</div>
+					</button>
+					{#if isOpen}
+						<div class="row-detail">
+							{#if row.asset_type === 'image'}
+								{@const detail = imageDetails.get(row.asset_id)}
+								{#if detail === 'loading' || detail === undefined}
+									<div class="detail-loading">Loading image details…</div>
+								{:else if detail === null}
+									<div class="detail-loading">Could not load image details.</div>
+								{:else}
+									<div class="detail-image">
+										<div class="detail-head">
+											Exposed domains
+										</div>
+										{#if detail.hosts.length > 0}
+											<div class="host-chips">
+												{#each detail.hosts as h}
+													<span class="host-chip" title="{h.cluster || h.cluster_id} / {h.namespace}">
+														{#if h.tls}<Lock size={11} />{:else}<Globe size={11} />{/if}
+														{h.host}
+													</span>
+												{/each}
+											</div>
+										{:else}
+											<p class="detail-empty">Not internet-exposed.</p>
+										{/if}
+
+										<div class="detail-head" style="margin-top: 0.75rem;">
+											Top vulnerabilities — KEV first, then EPSS
+										</div>
+										{#if detail.vulns.length > 0}
+											<div class="vuln-table" role="table">
+												{#each detail.vulns as v}
+													<div class="vuln-row" role="row">
+														<a
+															class="vuln-id"
+															href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
+															onclick={(e) => e.stopPropagation()}
+														>{v.canonical_id}</a>
+														<span class={severityClass(v.severity)}>{v.severity}</span>
+														<span class="vuln-epss" class:dim={v.epss === 0}>EPSS {(v.epss * 100).toFixed(1)}%</span>
+														{#if v.kev}
+															<span class="pill pill-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
+														{/if}
+														<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}</span>
+														<span class="vuln-fix" class:dim={!v.fixed_version}>
+															{v.fixed_version ? `fix: ${v.fixed_version}` : 'no fix'}
+														</span>
+													</div>
+												{/each}
+											</div>
+											{#if detail.vuln_total > detail.vulns.length}
+												<p class="detail-empty">
+													Showing top {detail.vulns.length} of {detail.vuln_total} —
+													<a href={rowHref(row)} onclick={(e) => e.stopPropagation()}>open image for the full list</a>
+												</p>
+											{/if}
+										{:else}
+											<p class="detail-empty">No open vulnerabilities counted for this image.</p>
+										{/if}
+									</div>
+								{/if}
+							{/if}
+
+							<div class="detail-signals">
+								<div class="detail-col">
+									<div class="detail-head">Threat inputs</div>
+									{#each threatBreakdown(row) as kv}
+										<div class="detail-kv" class:dim={kv.dim}>
+											<span class="detail-label">{kv.label}</span>
+											<span class="detail-value">{kv.value}</span>
+										</div>
+									{/each}
+								</div>
+								<div class="detail-col">
+									<div class="detail-head">Posture (context — does not affect tier)</div>
+									{#each trustBreakdown(row) as kv}
+										<div class="detail-kv" class:dim={kv.dim}>
+											<span class="detail-label">{kv.label}</span>
+											<span class="detail-value">{kv.value}</span>
+										</div>
+									{/each}
+									{#if row.context.length > 0}
+										<div class="context-pills">
+											{#each row.context as reason}
+												<span class="pill pill-neutral">{renderReason(reason)}</span>
+											{/each}
+										</div>
+									{/if}
+								</div>
+							</div>
+
+							{#if row.reasons.length > 0}
+								<div class="detail-recos">
+									<div class="detail-head">Why this tier · what to do</div>
+									<ul class="reco-list">
+										{#each row.reasons as reason}
+											{@const ex = reasonExplain(reason)}
+											<li class="reco-card">
+												<header class="reco-head">
+													<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
+												</header>
+												<p class="reco-what">{ex.what}</p>
+												<p class="reco-why"><span class="reco-key">Why it matters.</span> {ex.why}</p>
+												{#if ex.action}
+													<p class="reco-action"><span class="reco-key">Action.</span> {ex.action}</p>
+												{/if}
+											</li>
+										{/each}
+									</ul>
+								</div>
+							{/if}
+						</div>
+					{/if}
+				</div>
+			{/snippet}
 
 			{#if triage.fix_now.length === 0 && triage.this_week.length === 0 && triage.watch.counts.total === 0}
 				<div class="flex flex-1 items-center justify-center py-16">
@@ -580,91 +930,6 @@
 					</div>
 				</div>
 			{:else}
-				{#snippet triageRow(row: TriageRow, threatLevel: 'critical' | 'warning' | 'info', compact: boolean)}
-					{@const Icon = rowIcon(row.asset_type)}
-					{@const key = rowKey(row)}
-					{@const isOpen = expanded.has(key)}
-					<div class="row-wrapper" class:open={isOpen}>
-						<button
-							type="button"
-							class="row"
-							class:compact
-							aria-expanded={isOpen}
-							onclick={() => toggleExpanded(key)}
-						>
-							<div class="row-asset">
-								<Icon size={compact ? 14 : 16} class="text-[var(--text-muted)]" />
-								<span class="asset-slug">{row.asset_slug}</span>
-								<span class="badge">{row.asset_type}</span>
-							</div>
-							<div class="row-scores">
-								<span class="threat" data-level={threatLevel}>Threat {row.threat_score}</span>
-								<span class="trust" style="color: {trustColor(row.trust_grade)}">Trust {row.trust_grade}</span>
-							</div>
-							<div class="row-reasons">
-								{#each row.reasons.slice(0, compact ? 1 : 2) as reason}
-									<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-								{/each}
-							</div>
-							<div class="row-actions">
-								<a
-									class="row-open"
-									href={rowHref(row)}
-									title="Open {row.asset_type} detail"
-									onclick={(e) => e.stopPropagation()}
-								>
-									Open <ArrowUpRight size={12} />
-								</a>
-								<ChevronDown size={14} class="row-chevron {isOpen ? 'open' : ''}" />
-							</div>
-						</button>
-						{#if isOpen}
-							<div class="row-detail">
-								<div class="detail-signals">
-									<div class="detail-col">
-										<div class="detail-head">Threat inputs</div>
-										{#each threatBreakdown(row) as kv}
-											<div class="detail-kv" class:dim={kv.dim}>
-												<span class="detail-label">{kv.label}</span>
-												<span class="detail-value">{kv.value}</span>
-											</div>
-										{/each}
-									</div>
-									<div class="detail-col">
-										<div class="detail-head">Trust inputs</div>
-										{#each trustBreakdown(row) as kv}
-											<div class="detail-kv" class:dim={kv.dim}>
-												<span class="detail-label">{kv.label}</span>
-												<span class="detail-value">{kv.value}</span>
-											</div>
-										{/each}
-									</div>
-								</div>
-
-								{#if row.reasons.length > 0}
-									<div class="detail-recos">
-										<div class="detail-head">What's wrong here · what to fix</div>
-										<ul class="reco-list">
-											{#each row.reasons as reason}
-												{@const ex = reasonExplain(reason)}
-												<li class="reco-card">
-													<header class="reco-head">
-														<span class={reasonPillClass(reason.id)}>{renderReason(reason)}</span>
-													</header>
-													<p class="reco-what">{ex.what}</p>
-													<p class="reco-why"><span class="reco-key">Why it matters.</span> {ex.why}</p>
-													{#if ex.action}
-														<p class="reco-action"><span class="reco-key">Action.</span> {ex.action}</p>
-													{/if}
-												</li>
-											{/each}
-										</ul>
-									</div>
-								{/if}
-							</div>
-						{/if}
-					</div>
-				{/snippet}
 
 				<!-- Fix now -->
 				{#if fixNowFiltered().length > 0}
@@ -673,6 +938,7 @@
 							<ShieldAlert size={18} class="text-[var(--error)]" />
 							<h3 class="tier-title">Fix now</h3>
 							<span class="badge">{fixNowFiltered().length}</span>
+							<span class="tier-sub">Exploited in the wild and reachable, or leaking credentials</span>
 						</div>
 						<div class="tier-rows">
 							{#each fixNowFiltered() as row}
@@ -689,6 +955,7 @@
 							<AlertTriangle size={18} class="text-[var(--warning)]" />
 							<h3 class="tier-title">This week</h3>
 							<span class="badge">{thisWeekFiltered().length}</span>
+							<span class="tier-sub">Confirmed or likely exploitation, not internet-reachable</span>
 						</div>
 						<div class="tier-rows">
 							{#each thisWeekFiltered() as row}
@@ -704,6 +971,7 @@
 						<Eye size={18} class="text-[var(--text-muted)]" />
 						<h3 class="tier-title">Watch</h3>
 						<span class="badge">{triage.watch.counts.total}</span>
+						<span class="tier-sub">Real but not urgent — normal patch cadence</span>
 						<div class="watch-search">
 							<Search size={13} class="search-icon" />
 							<input
@@ -744,6 +1012,80 @@
 						{/if}
 					{/if}
 				</div>
+
+				<!-- Deprioritized — collapsed by default; the explicit
+				     "safe to ignore, and here's why" pile. -->
+				<div class="tier" data-tier="deprioritized">
+					<button type="button" class="tier-head tier-head-toggle" onclick={() => (deprioOpen = !deprioOpen)} aria-expanded={deprioOpen}>
+						<EyeOff size={18} class="text-[var(--text-muted)]" />
+						<h3 class="tier-title">Deprioritized</h3>
+						<span class="badge">{triage.deprioritized.counts.total}</span>
+						<span class="tier-sub">Not worth acting on right now — each row says why</span>
+						<ChevronDown size={14} class="row-chevron {deprioOpen ? 'open' : ''}" />
+					</button>
+
+					{#if deprioOpen}
+						<div class="tier-head deprio-tools">
+							<div class="watch-search">
+								<Search size={13} class="search-icon" />
+								<input
+									type="text"
+									class="input"
+									placeholder="Filter deprioritized…"
+									bind:value={deprioSearch}
+									oninput={onDeprioSearchInput}
+								/>
+							</div>
+						</div>
+
+						{#if deprioFiltered().length === 0}
+							<div class="watch-empty">
+								{#if deprioSearch.trim()}
+									No deprioritized assets match "{deprioSearch}".
+								{:else if activeTab !== 'all'}
+									No {activeTab} assets in the deprioritized pile.
+								{:else}
+									Nothing has been deprioritized.
+								{/if}
+							</div>
+						{:else}
+							<div class="tier-rows compact">
+								{#each deprioFiltered() as row}
+									{@render triageRow(row, 'info', true)}
+								{/each}
+							</div>
+
+							{#if triage.deprioritized.counts.total > triage.deprioritized.limit}
+								<div class="pagination">
+									<button type="button" class="btn btn-ghost" onclick={goDeprioPrev} disabled={deprioOffset === 0}>← Prev</button>
+									<span class="pagination-info">
+										{deprioOffset + 1}–{Math.min(deprioOffset + triage.deprioritized.limit, triage.deprioritized.counts.total)} of {triage.deprioritized.counts.total}
+									</span>
+									<button type="button" class="btn btn-ghost" onclick={goDeprioNext} disabled={deprioOffset + triage.deprioritized.limit >= triage.deprioritized.counts.total}>Next →</button>
+								</div>
+							{/if}
+						{/if}
+					{/if}
+				</div>
+			{/if}
+
+			<!-- Cluster lens — read-only rollup, not part of the tiers.
+			     Answers "which cluster is worst" while the fix itself
+			     happens on the image rows above. -->
+			{#if triage.clusters.length > 0}
+				<div class="tier" data-tier="clusters">
+					<div class="tier-head">
+						<span class="flex items-center text-[var(--text-muted)]"><KubernetesIcon size={18} /></span>
+						<h3 class="tier-title">Clusters</h3>
+						<span class="badge">{triage.clusters.length}</span>
+						<span class="tier-sub">Rollup of the images running there — fix the images above, not the cluster</span>
+					</div>
+					<div class="tier-rows compact">
+						{#each triage.clusters as row}
+							{@render triageRow(row, 'info', true)}
+						{/each}
+					</div>
+				</div>
 			{/if}
 		</section>
 	{/if}
@@ -761,23 +1103,34 @@
 		gap: 0.5rem;
 		padding: 0 0.25rem;
 	}
-	.tier[data-tier='fix-now'] .tier-head {
-		border-left: 3px solid var(--error);
-		padding-left: 0.6rem;
-	}
-	.tier[data-tier='this-week'] .tier-head {
-		border-left: 3px solid var(--warning);
-		padding-left: 0.6rem;
-	}
-	.tier[data-tier='watch'] .tier-head {
-		border-left: 3px solid var(--text-muted);
-		padding-left: 0.6rem;
-	}
 	.tier-title {
 		font-size: 0.95rem;
 		font-weight: 600;
 		color: var(--text-bright);
 		letter-spacing: 0.02em;
+	}
+	.tier-sub {
+		font-size: 0.75rem;
+		color: var(--text-muted);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* The deprioritized header doubles as its collapse toggle. */
+	.tier-head-toggle {
+		width: 100%;
+		border: 0;
+		background: transparent;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+	.tier-head-toggle :global(.row-chevron) {
+		margin-left: auto;
+	}
+	.deprio-tools {
+		justify-content: flex-end;
 	}
 
 	.tier-rows {
@@ -953,6 +1306,120 @@
 	.reco-key {
 		font-weight: 600;
 		color: var(--text-tertiary);
+	}
+
+	/* Deployment-spread badge on image rows: one rebuild, N redeploys. */
+	.spread {
+		font-size: 0.68rem;
+		font-weight: 600;
+		white-space: nowrap;
+		padding: 0.1rem 0.45rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		color: var(--text-muted);
+		background: var(--card-bg);
+	}
+	.spread.exposed {
+		color: var(--warning);
+		border-color: color-mix(in srgb, var(--warning) 40%, var(--border-color));
+	}
+
+	/* Image expansion: exposed-domain chips + top-vuln table. */
+	.detail-loading,
+	.detail-empty {
+		font-size: 0.78rem;
+		color: var(--text-muted);
+		margin: 0;
+	}
+	.detail-empty a {
+		color: var(--accent);
+		text-decoration: none;
+	}
+	.host-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+	}
+	.host-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		font-size: 0.75rem;
+		font-variant-numeric: tabular-nums;
+		padding: 0.2rem 0.55rem;
+		border-radius: 999px;
+		border: 1px solid var(--border-color);
+		background: var(--card-bg);
+		color: var(--text-secondary);
+	}
+	.vuln-table {
+		display: flex;
+		flex-direction: column;
+		gap: 0.25rem;
+	}
+	.vuln-row {
+		display: grid;
+		grid-template-columns: minmax(140px, auto) auto auto auto minmax(120px, 1fr) auto;
+		align-items: center;
+		gap: 0.6rem;
+		font-size: 0.78rem;
+		padding: 0.3rem 0.5rem;
+		border-radius: 0.4rem;
+		background: var(--card-bg);
+		border: 1px solid var(--border-color);
+	}
+	.vuln-id {
+		font-weight: 600;
+		color: var(--accent);
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.vuln-id:hover {
+		text-decoration: underline;
+	}
+	.sev {
+		font-size: 0.68rem;
+		font-weight: 700;
+		letter-spacing: 0.04em;
+	}
+	.sev-critical {
+		color: var(--error);
+	}
+	.sev-high {
+		color: var(--warning);
+	}
+	.sev-medium {
+		color: var(--text-secondary);
+	}
+	.sev-low {
+		color: var(--text-muted);
+	}
+	.vuln-epss {
+		font-variant-numeric: tabular-nums;
+		color: var(--text-secondary);
+		white-space: nowrap;
+	}
+	.vuln-pkg {
+		color: var(--text-muted);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.vuln-fix {
+		color: var(--success);
+		white-space: nowrap;
+		font-variant-numeric: tabular-nums;
+	}
+	.vuln-epss.dim,
+	.vuln-fix.dim {
+		color: var(--text-muted);
+		opacity: 0.6;
+	}
+	.context-pills {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0.35rem;
+		margin-top: 0.5rem;
 	}
 
 	.row-asset {
