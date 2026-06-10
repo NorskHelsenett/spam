@@ -211,6 +211,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/ai/settings", uiapi.AdminAISettingsListHandler(db, authService))
 				api.With(aiAudit).Put("/admin/ai/settings/{use_case}", uiapi.AdminAISettingsUpdateHandler(db, authService))
 				api.Post("/admin/ai/test", uiapi.AdminAITestHandler(db, authService))
+				api.With(aiAudit).Post("/admin/ai/backfill", uiapi.AdminAIBackfillHandler(db, authService))
+				api.Get("/admin/ai/backfill/status", uiapi.AdminAIBackfillStatusHandler(db, authService))
 
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))

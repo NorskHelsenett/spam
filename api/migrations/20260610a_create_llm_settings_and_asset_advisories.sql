@@ -27,7 +27,12 @@ CREATE TABLE IF NOT EXISTS llm_settings (
     use_case      text        PRIMARY KEY,
     enabled       boolean     NOT NULL DEFAULT FALSE,
     base_url      text        NOT NULL DEFAULT '',
-    api_key       text        NOT NULL DEFAULT '',
+    -- API key is AES-GCM encrypted with the provider secrets key
+    -- (same scheme as git provider PATs); api_key_fp keeps a masked
+    -- fingerprint so the admin UI can show "****abcd" without a
+    -- decrypt round-trip.
+    api_key_enc   bytea       NOT NULL DEFAULT ''::bytea,
+    api_key_fp    text        NOT NULL DEFAULT '',
     model         text        NOT NULL DEFAULT '',
     system_prompt text        NOT NULL DEFAULT '',
     temperature   real        NOT NULL DEFAULT 0,
@@ -70,3 +75,11 @@ CREATE TABLE IF NOT EXISTS asset_advisories (
     generated_at          timestamptz NOT NULL DEFAULT NOW(),
     PRIMARY KEY (asset_type, asset_id)
 );
+
+-- One advisory backfill at a time: the partial unique index makes a
+-- second enqueue hit the constraint instead of double-draining the
+-- LLM endpoint.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_jobs_advisory_backfill_active
+  ON jobs (type)
+  WHERE type = 'ADVISORY_BACKFILL'
+    AND status IN ('QUEUED', 'RETRY');

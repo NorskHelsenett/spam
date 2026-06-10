@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/sbomviews"
@@ -79,6 +80,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchDepHealth(ctx, db, job.ID)
 	case JobTypeDBMaintenance:
 		return processDBMaintenance(ctx, db, job)
+	case JobTypeAdvisoryBackfill:
+		return processAdvisoryBackfill(ctx, db, job.ID)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -582,4 +585,22 @@ func NextRetryTime(attempts, maxAttempts int, now time.Time) time.Time {
 		delay = maxDelay
 	}
 	return now.Add(delay)
+}
+
+// processAdvisoryBackfill drains the LLM advisory backlog for the
+// fix_now tier in one go (no per-cycle cap), streaming progress into
+// the job result so the admin page can render "37/120".
+func processAdvisoryBackfill(ctx context.Context, db *gorm.DB, jobID string) (interface{}, error) {
+	generated, total, err := llmadvisory.Backfill(ctx, db, func(done, total int) {
+		payload, jsonErr := json.Marshal(map[string]any{
+			"status": "generating", "done": done, "total": total,
+		})
+		if jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", jobID).Update("result", payload)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "complete", "generated": generated, "total": total}, nil
 }

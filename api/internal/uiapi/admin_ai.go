@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
+	"github.com/NorskHelsenett/spam/internal/jobs"
 	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"gorm.io/gorm"
 )
@@ -109,6 +110,13 @@ func AdminAITestHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 
 		cfg := body.Settings
 		cfg.UseCase = body.UseCase
+		// The admin UI never holds the stored key's plaintext, so an
+		// empty api_key in a test request means "use the saved one".
+		if cfg.APIKey == "" {
+			if stored, err := llmadvisory.GetSettings(r.Context(), db, body.UseCase); err == nil {
+				cfg.APIKey = stored.APIKey
+			}
+		}
 
 		start := time.Now()
 		out, chatErr := llmadvisory.Chat(r.Context(), cfg, payload)
@@ -127,6 +135,75 @@ func AdminAITestHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 				resp["verdict_parse_error"] = err.Error()
 			} else {
 				resp["verdict"] = v
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// AdminAIBackfillHandler enqueues an ADVISORY_BACKFILL job: generate
+// advisories for every fix_now asset whose cache is missing or stale,
+// without the background worker's batch cap.
+// POST /api/admin/ai/backfill
+func AdminAIBackfillHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.RequireAdmin(r); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		var active int64
+		db.WithContext(r.Context()).Model(&jobs.Job{}).
+			Where("type = ? AND status IN ?", jobs.JobTypeAdvisoryBackfill,
+				[]jobs.JobStatus{jobs.JobStatusQueued, jobs.JobStatusRunning, jobs.JobStatusRetry}).
+			Count(&active)
+		if active > 0 {
+			http.Error(w, "advisory backfill already queued or running", http.StatusConflict)
+			return
+		}
+
+		job, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
+			Type:        jobs.JobTypeAdvisoryBackfill,
+			MaxAttempts: 1, // a partial backfill is fine — the 5-min worker mops up
+		})
+		if err != nil {
+			http.Error(w, "failed to enqueue backfill: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]string{
+			"job_id": job.ID,
+			"status": string(job.Status),
+		})
+	}
+}
+
+// AdminAIBackfillStatusHandler reports the latest backfill job so the
+// admin page can poll progress ({status, done, total} mid-run;
+// {status: complete, generated, total} when finished).
+// GET /api/admin/ai/backfill/status
+func AdminAIBackfillStatusHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, err := authService.RequireAdmin(r); err != nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var job jobs.Job
+		if err := db.WithContext(r.Context()).
+			Where("type = ?", jobs.JobTypeAdvisoryBackfill).
+			Order("created_at DESC").
+			First(&job).Error; err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"status": "never_run"})
+			return
+		}
+		resp := map[string]any{
+			"status":     string(job.Status),
+			"created_at": job.CreatedAt,
+			"error":      job.Error,
+		}
+		if len(job.Result) > 0 {
+			var result map[string]any
+			if json.Unmarshal(job.Result, &result) == nil {
+				resp["result"] = result
 			}
 		}
 		writeJSON(w, http.StatusOK, resp)

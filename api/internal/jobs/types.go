@@ -25,6 +25,11 @@ const (
 	// cadence — packages don't change health that fast and rate-
 	// limited registries thank us for the lower QPS.
 	JobTypeFetchDepHealth JobType = "FETCH_DEP_HEALTH"
+	// ADVISORY_BACKFILL generates LLM advisories for every fix_now
+	// asset whose cached advisory is missing or stale, without the
+	// background worker's per-cycle batch cap. Admin-triggered from
+	// /admin/ai; the partial unique index keeps one active at a time.
+	JobTypeAdvisoryBackfill JobType = "ADVISORY_BACKFILL"
 	// DB_MAINTENANCE runs a safe-by-default Postgres maintenance op
 	// (ANALYZE or VACUUM ANALYZE) on a single named table. Driven from
 	// the admin Database page. We deliberately do not expose VACUUM

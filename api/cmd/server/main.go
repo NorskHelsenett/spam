@@ -235,6 +235,7 @@ func run() error {
 		// LLM advisory generation reads asset_risk, so it starts only
 		// after the first populate. No-ops while every llm_settings
 		// use case is disabled.
+		llmadvisory.SetSecretsKey(cfg.ProviderSecretsKey)
 		llmadvisory.StartWorker(ctx, gormDB)
 	}()
 

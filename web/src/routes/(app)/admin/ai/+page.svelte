@@ -9,7 +9,11 @@
 		use_case: string;
 		enabled: boolean;
 		base_url: string;
-		api_key: string;
+		// api_key is write-only: blank keeps the stored key, a value
+		// replaces it; the server returns only the fingerprint.
+		api_key?: string;
+		api_key_fingerprint?: string;
+		clear_api_key?: boolean;
 		model: string;
 		system_prompt: string;
 		temperature: number;
@@ -46,6 +50,48 @@
 	let saving = $state<Record<string, boolean>>({});
 	let savedAt = $state<Record<string, number>>({});
 
+	// Backfill state — enqueue ADVISORY_BACKFILL and poll its progress.
+	type BackfillStatus = {
+		status: string;
+		error?: string;
+		result?: { status?: string; done?: number; total?: number; generated?: number };
+	};
+	let backfill = $state<BackfillStatus | null>(null);
+	let backfillBusy = $state(false);
+	let backfillTimer: ReturnType<typeof setTimeout> | null = null;
+
+	const pollBackfill = async () => {
+		try {
+			const res = await fetch('/api/admin/ai/backfill/status', { credentials: 'include' });
+			if (res.ok) backfill = (await res.json()) as BackfillStatus;
+		} catch {
+			/* ignore poll errors */
+		}
+		if (backfill && (backfill.status === 'QUEUED' || backfill.status === 'RUNNING' || backfill.status === 'RETRY')) {
+			backfillTimer = setTimeout(pollBackfill, 3000);
+		}
+	};
+	if (browser) void pollBackfill();
+
+	const startBackfill = async () => {
+		if (backfillBusy) return;
+		backfillBusy = true;
+		try {
+			const res = await fetch('/api/admin/ai/backfill', { method: 'POST', credentials: 'include' });
+			if (res.status === 409) {
+				error = 'A backfill is already queued or running.';
+			} else if (!res.ok) {
+				throw new Error(`HTTP ${res.status}`);
+			}
+			if (backfillTimer) clearTimeout(backfillTimer);
+			void pollBackfill();
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Failed to start backfill';
+		} finally {
+			backfillBusy = false;
+		}
+	};
+
 	// Test bench state
 	let testUseCase = $state('advisory_summary');
 	let testAssetType = $state('image');
@@ -78,6 +124,7 @@
 			});
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 			const updated = (await res.json()) as Settings;
+			updated.api_key = '';
 			settings = settings.map((x) => (x.use_case === updated.use_case ? updated : x));
 			savedAt = { ...savedAt, [s.use_case]: Date.now() };
 			setTimeout(() => {
@@ -165,6 +212,30 @@
 							</div>
 						</div>
 
+						<div>
+							<label class="mb-1 block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]" for="{s.use_case}-key">API key</label>
+							<div class="flex items-center gap-2">
+								<input
+									id="{s.use_case}-key"
+									type="password"
+									class="input flex-1"
+									bind:value={s.api_key}
+									autocomplete="off"
+									placeholder={s.api_key_fingerprint ? `saved ${s.api_key_fingerprint} — enter a value to replace` : 'none — leave blank if the endpoint needs no auth'}
+								/>
+								{#if s.api_key_fingerprint}
+									<button
+										type="button"
+										class="btn btn-ghost px-3 py-1.5 text-xs"
+										onclick={() => { s.clear_api_key = true; s.api_key = ''; void save(s); s.clear_api_key = false; }}
+									>
+										Clear key
+									</button>
+								{/if}
+							</div>
+							<p class="mt-1 text-xs text-[var(--text-muted)]">Encrypted at rest with the provider secrets key (same as git PATs); only the fingerprint is ever sent back.</p>
+						</div>
+
 						<div class="grid gap-3 sm:grid-cols-4">
 							<div>
 								<label class="mb-1 block text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]" for="{s.use_case}-temp">Temp</label>
@@ -208,6 +279,41 @@
 						</div>
 					</section>
 				{/each}
+			</div>
+		{/if}
+
+		{#if !loading}
+			<div class="flex flex-wrap items-center gap-3 rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<div class="min-w-0 flex-1">
+					<p class="text-sm font-semibold text-[var(--text-bright)]">Backfill fix-now advisories</p>
+					<p class="text-xs leading-relaxed text-[var(--text-tertiary)]">
+						Generate for every fix-now asset whose advisory is missing or stale, in one job — skips the background worker's {'20'}-per-cycle ramp. Requires at least one enabled use case.
+					</p>
+				</div>
+				<div class="flex items-center gap-3">
+					{#if backfill && backfill.status !== 'never_run'}
+						<span class="text-xs text-[var(--text-muted)]">
+							{#if backfill.status === 'RUNNING' && backfill.result?.done !== undefined}
+								generating {backfill.result.done}/{backfill.result.total}…
+							{:else if backfill.status === 'SUCCEEDED' && backfill.result}
+								last run: {backfill.result.generated}/{backfill.result.total} generated
+							{:else if backfill.status === 'FAILED'}
+								<span class="text-[var(--error)]">failed: {backfill.error}</span>
+							{:else}
+								{backfill.status.toLowerCase()}
+							{/if}
+						</span>
+					{/if}
+					<button
+						type="button"
+						class="btn btn-secondary"
+						onclick={startBackfill}
+						disabled={backfillBusy || backfill?.status === 'QUEUED' || backfill?.status === 'RUNNING'}
+					>
+						<Play class="h-4 w-4" />
+						Backfill now
+					</button>
+				</div>
 			</div>
 		{/if}
 	</article>

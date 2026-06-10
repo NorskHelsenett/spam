@@ -3,6 +3,7 @@ package llmadvisory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 	"time"
@@ -72,62 +73,111 @@ func runCycle(ctx context.Context, db *gorm.DB) {
 		return
 	}
 
-	work := selectStale(ctx, db)
+	work := selectStale(ctx, db, urgentTiers)
 	generated := 0
 	for _, sig := range work {
 		if generated >= batchPerCycle || ctx.Err() != nil {
 			return
 		}
-		payload, err := BuildPayload(ctx, db, sig)
-		if err != nil {
-			log.Printf("llmadvisory: payload %s/%s: %v", sig.AssetType, sig.AssetID, err)
-			continue
+		if generateOne(ctx, db, sumCfg, verCfg, sig) {
+			generated++
 		}
-		row := Advisory{
-			AssetType:   sig.AssetType,
-			AssetID:     sig.AssetID,
-			SignalsHash: assetrisk.SignalsHash(sig),
-			GeneratedAt: time.Now(),
-		}
-		if sumCfg.Enabled {
-			if out, err := Chat(ctx, sumCfg, payload); err != nil {
-				log.Printf("llmadvisory: summary %s: %v", sig.AssetSlug, err)
-			} else {
-				row.Summary = out
-				row.SummaryModel = sumCfg.Model
-			}
-		}
-		if verCfg.Enabled {
-			if out, err := Chat(ctx, verCfg, payload); err != nil {
-				log.Printf("llmadvisory: verdict %s: %v", sig.AssetSlug, err)
-			} else if v, err := ParseVerdict(out); err != nil {
-				log.Printf("llmadvisory: verdict parse %s: %v", sig.AssetSlug, err)
-			} else {
-				row.Verdict = v.Verdict
-				row.VerdictJustification = v.Justification
-				row.VerdictConfidence = v.Confidence
-				row.VerdictMissingData = strings.Join(v.MissingData, "; ")
-				row.VerdictModel = verCfg.Model
-			}
-		}
-		if row.Summary == "" && row.Verdict == "" {
-			continue // both calls failed — leave the old row in place
-		}
-		if err := db.WithContext(ctx).Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "asset_type"}, {Name: "asset_id"}},
-			UpdateAll: true,
-		}).Create(&row).Error; err != nil {
-			log.Printf("llmadvisory: upsert %s: %v", sig.AssetSlug, err)
-		}
-		generated++
 	}
 }
 
-// selectStale returns image/repo signals whose tier warrants an
-// advisory (fix_now / this_week) and whose cached advisory is missing
-// or built from different signals. Tier() runs in Go to stay the
-// single source of truth.
-func selectStale(ctx context.Context, db *gorm.DB) []assetrisk.Signals {
+// Backfill drains the advisory backlog for the fix_now tier in one
+// pass — no per-cycle cap; this is the explicit admin "fill it now"
+// path (ADVISORY_BACKFILL job). Returns how many assets produced
+// output out of how many were stale.
+func Backfill(ctx context.Context, db *gorm.DB, onProgress func(done, total int)) (int, int, error) {
+	sumCfg, err := GetSettings(ctx, db, UseCaseSummary)
+	if err != nil {
+		return 0, 0, err
+	}
+	verCfg, err := GetSettings(ctx, db, UseCaseVerdict)
+	if err != nil {
+		return 0, 0, err
+	}
+	if !sumCfg.Enabled && !verCfg.Enabled {
+		return 0, 0, errors.New("no LLM use case is enabled — turn one on under /admin/ai first")
+	}
+
+	work := selectStale(ctx, db, map[string]bool{assetrisk.TierFixNow: true})
+	generated := 0
+	for i, sig := range work {
+		if ctx.Err() != nil {
+			return generated, len(work), ctx.Err()
+		}
+		if generateOne(ctx, db, sumCfg, verCfg, sig) {
+			generated++
+		}
+		if onProgress != nil {
+			onProgress(i+1, len(work))
+		}
+	}
+	return generated, len(work), nil
+}
+
+// generateOne runs the enabled use cases for a single asset and
+// upserts the cache row. Returns true when at least one output was
+// stored.
+func generateOne(ctx context.Context, db *gorm.DB, sumCfg, verCfg Settings, sig assetrisk.Signals) bool {
+	payload, err := BuildPayload(ctx, db, sig)
+	if err != nil {
+		log.Printf("llmadvisory: payload %s/%s: %v", sig.AssetType, sig.AssetID, err)
+		return false
+	}
+	row := Advisory{
+		AssetType:   sig.AssetType,
+		AssetID:     sig.AssetID,
+		SignalsHash: assetrisk.SignalsHash(sig),
+		GeneratedAt: time.Now(),
+	}
+	if sumCfg.Enabled {
+		if out, err := Chat(ctx, sumCfg, payload); err != nil {
+			log.Printf("llmadvisory: summary %s: %v", sig.AssetSlug, err)
+		} else {
+			row.Summary = out
+			row.SummaryModel = sumCfg.Model
+		}
+	}
+	if verCfg.Enabled {
+		if out, err := Chat(ctx, verCfg, payload); err != nil {
+			log.Printf("llmadvisory: verdict %s: %v", sig.AssetSlug, err)
+		} else if v, err := ParseVerdict(out); err != nil {
+			log.Printf("llmadvisory: verdict parse %s: %v", sig.AssetSlug, err)
+		} else {
+			row.Verdict = v.Verdict
+			row.VerdictJustification = v.Justification
+			row.VerdictConfidence = v.Confidence
+			row.VerdictMissingData = strings.Join(v.MissingData, "; ")
+			row.VerdictModel = verCfg.Model
+		}
+	}
+	if row.Summary == "" && row.Verdict == "" {
+		return false // both calls failed — leave the old row in place
+	}
+	if err := db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "asset_type"}, {Name: "asset_id"}},
+		UpdateAll: true,
+	}).Create(&row).Error; err != nil {
+		log.Printf("llmadvisory: upsert %s: %v", sig.AssetSlug, err)
+		return false
+	}
+	return true
+}
+
+// urgentTiers is the background worker's scope: the tiers a team is
+// actually asked to act on.
+var urgentTiers = map[string]bool{
+	assetrisk.TierFixNow:   true,
+	assetrisk.TierThisWeek: true,
+}
+
+// selectStale returns image/repo signals whose tier is in tiers and
+// whose cached advisory is missing or built from different signals.
+// Tier() runs in Go to stay the single source of truth.
+func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool) []assetrisk.Signals {
 	var rows []assetrisk.Signals
 	if err := db.WithContext(ctx).Raw(`
 		SELECT ar.*, COALESCE(d.digest, '') AS image_digest
@@ -147,8 +197,7 @@ func selectStale(ctx context.Context, db *gorm.DB) []assetrisk.Signals {
 
 	var out []assetrisk.Signals
 	for _, sig := range rows {
-		tier := assetrisk.Tier(sig)
-		if tier != assetrisk.TierFixNow && tier != assetrisk.TierThisWeek {
+		if !tiers[assetrisk.Tier(sig)] {
 			continue
 		}
 		if have[sig.AssetType+"|"+sig.AssetID] == assetrisk.SignalsHash(sig) {
