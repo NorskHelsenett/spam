@@ -12,6 +12,17 @@ import (
 	"gorm.io/gorm"
 )
 
+
+// validAIUseCase gates the admin endpoints to known llm_settings rows.
+func validAIUseCase(useCase string) bool {
+	switch useCase {
+	case llmadvisory.UseCaseSummary, llmadvisory.UseCaseVerdict, llmadvisory.UseCaseChat:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdminAISettingsListHandler returns the per-use-case LLM settings.
 // GET /api/admin/ai/settings
 func AdminAISettingsListHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
@@ -39,7 +50,7 @@ func AdminAISettingsUpdateHandler(db *gorm.DB, authService *auth.Service) http.H
 			return
 		}
 		useCase := r.PathValue("use_case")
-		if useCase != llmadvisory.UseCaseSummary && useCase != llmadvisory.UseCaseVerdict {
+		if !validAIUseCase(useCase) {
 			http.Error(w, "unknown use case", http.StatusBadRequest)
 			return
 		}
@@ -84,7 +95,7 @@ func AdminAITestHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		if body.UseCase != llmadvisory.UseCaseSummary && body.UseCase != llmadvisory.UseCaseVerdict {
+		if !validAIUseCase(body.UseCase) {
 			http.Error(w, "unknown use case", http.StatusBadRequest)
 			return
 		}
