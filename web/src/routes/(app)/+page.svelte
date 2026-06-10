@@ -21,6 +21,7 @@
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
 	import VulnAdvisoryDialog from '$lib/components/VulnAdvisoryDialog.svelte';
+	import Tooltip from '$lib/components/Tooltip.svelte';
 
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy export-let
@@ -590,8 +591,6 @@
 		vulnDialogOpen = true;
 	};
 
-	const EPSS_TOOLTIP =
-		'EPSS (FIRST.org): estimated probability that this CVE will be exploited in the wild within the next 30 days, updated daily.';
 
 	let offPathShown = $state(new Set<string>());
 	const toggleOffPath = (key: string) => {
@@ -937,7 +936,21 @@
 																	<span class="chip chip-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
 																{/if}
 																{#if v.epss > 0}
-																	<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}" title={EPSS_TOOLTIP}>EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
+																	<Tooltip width={17}>
+																		<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}">EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
+																		{#snippet content()}
+																			<p class="text-xs font-semibold text-[var(--text-bright)]">EPSS {(v.epss * 100).toFixed(1)}%</p>
+																			<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+																				Probability that this CVE is exploited in the wild within the next 30 days.
+																			</p>
+																			{#if v.epss_percentile > 0}
+																				<p class="mt-1 text-[11px] text-[var(--text-muted)]">
+																					Higher than {(v.epss_percentile * 100).toFixed(0)}% of all scored CVEs.
+																				</p>
+																			{/if}
+																			<p class="mt-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">FIRST.org · updated daily</p>
+																		{/snippet}
+																	</Tooltip>
 																{/if}
 															</span>
 															<span class={severityClass(v.severity)}>{v.severity}</span>
