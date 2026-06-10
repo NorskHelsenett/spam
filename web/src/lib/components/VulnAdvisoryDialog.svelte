@@ -45,7 +45,7 @@
 </script>
 
 <script lang="ts">
-	import { ExternalLink, Eye, X } from 'lucide-svelte';
+	import { AlertOctagon, AlertTriangle, ExternalLink, Info, X } from 'lucide-svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 
 	let { open = $bindable(false), vulnId = '' }: { open?: boolean; vulnId?: string } = $props();
@@ -127,6 +127,23 @@
 		}
 	};
 
+	// Header icon mirrors the severity pill palette (same tailwind
+	// tones severityClass uses) so the dialog reads at a glance.
+	const sevIcon = (s?: string) => {
+		switch (s?.toUpperCase()) {
+			case 'CRITICAL': return { icon: AlertOctagon, cls: 'text-red-400 bg-red-500/10' };
+			case 'HIGH':     return { icon: AlertTriangle, cls: 'text-orange-400 bg-orange-500/10' };
+			case 'MEDIUM':   return { icon: AlertTriangle, cls: 'text-yellow-400 bg-yellow-500/10' };
+			case 'LOW':      return { icon: Info, cls: 'text-blue-400 bg-blue-500/10' };
+			default:         return { icon: Info, cls: 'text-[var(--text-muted)] bg-[var(--hover-bg-subtle)]' };
+		}
+	};
+
+	// Actions that navigate away from the dialog get the warning tone
+	// so "this leaves the modal" is visible before clicking.
+	const leaveBtn =
+		'inline-flex items-center gap-1 rounded-lg border border-[var(--warning)]/40 text-[var(--warning)] transition hover:bg-[var(--warning)]/10';
+
 	const vulnUrl = (id: string) => `/vuln/${encodeURIComponent(id)}`;
 
 	// Canonical external advisory link for the given vuln id. CVE-* → NVD
@@ -145,38 +162,44 @@
 	};
 </script>
 
-<Dialog bind:open maxWidth="max-w-3xl" showCloseButton={false}>
+<Dialog bind:open maxWidth="max-w-4xl" showCloseButton={false}>
 	{#snippet children()}
 		{@const d = detail}
 		{@const adv = vulnId ? advisoryLink(vulnId) : { href: '', label: '' }}
-		{@const primary = d?.authorities?.find((a) => a.is_primary) ?? d?.authorities?.[0]}
+		{@const sev = sevIcon(d?.severity)}
+		{@const SevIcon = sev.icon}
 		<div class="flex h-full min-h-0 flex-col">
 			<header class="flex items-start justify-between gap-4 px-6 pb-4 pt-5">
-				<div class="min-w-0 flex-1">
-					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Advisory</p>
-					<div class="mt-1 flex min-w-0 flex-wrap items-center gap-2.5">
-						<h2 class="truncate font-mono text-lg font-semibold text-[var(--text-bright)]">{vulnId}</h2>
-						{#if d?.severity}
-							<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(d.severity)}">
-								{d.severity}
-							</span>
-						{/if}
-						{#if d?.kev_known}
-							<span class="inline-flex items-center rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
-								KEV{d.kev_known_ransomware ? ' · ransomware' : ''}
-							</span>
+				<div class="flex min-w-0 flex-1 items-start gap-3.5">
+					<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-full {sev.cls}">
+						<SevIcon size={22} />
+					</div>
+					<div class="min-w-0 flex-1">
+						<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Advisory</p>
+						<div class="mt-1 flex min-w-0 flex-wrap items-center gap-2.5">
+							<h2 class="truncate font-mono text-lg font-semibold leading-none text-[var(--text-bright)]">{vulnId}</h2>
+							{#if d?.severity}
+								<span class="inline-flex items-center rounded-full border px-2 py-1 text-xs font-semibold leading-none {severityClass(d.severity)}">
+									{d.severity}
+								</span>
+							{/if}
+							{#if d?.kev_known}
+								<span class="inline-flex items-center rounded-full border border-red-500/40 bg-red-500/10 px-2 py-1 text-xs font-semibold leading-none text-red-400">
+									KEV{d.kev_known_ransomware ? ' · ransomware' : ''}
+								</span>
+							{/if}
+						</div>
+						{#if d?.title}
+							<p class="mt-1.5 text-sm leading-snug text-[var(--text-secondary)]">{d.title}</p>
 						{/if}
 					</div>
-					{#if d?.title}
-						<p class="mt-1.5 text-sm leading-snug text-[var(--text-secondary)]">{d.title}</p>
-					{/if}
 				</div>
 				<div class="flex shrink-0 items-center gap-1.5">
-					<a class="btn btn-ghost px-2.5 py-1.5 text-xs" href={vulnUrl(vulnId)}>
+					<a class="{leaveBtn} px-2.5 py-1.5 text-xs font-medium" href={vulnUrl(vulnId)}>
 						Full page
 						<ExternalLink class="h-3 w-3" />
 					</a>
-					<a class="btn btn-ghost px-2.5 py-1.5 text-xs" href={adv.href} target="_blank" rel="noopener noreferrer">
+					<a class="{leaveBtn} px-2.5 py-1.5 text-xs font-medium" href={adv.href} target="_blank" rel="noopener noreferrer">
 						{adv.label}
 						<ExternalLink class="h-3 w-3" />
 					</a>
@@ -198,7 +221,7 @@
 					</div>
 				{:else}
 					<!-- Exploitation signals -->
-					<div class="grid gap-3 sm:grid-cols-3">
+					<div class="grid gap-3 sm:grid-cols-2">
 						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">EPSS</p>
 							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
@@ -228,18 +251,6 @@
 								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no confirmed in-the-wild exploitation</p>
 							{/if}
 						</div>
-						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
-							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">CVSS</p>
-							{#if primary && primary.cvss_score !== undefined && primary.cvss_score !== null && primary.cvss_score > 0}
-								<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">{primary.cvss_score.toFixed(1)}</p>
-								<p class="mt-1 truncate text-xs text-[var(--text-tertiary)]" title={primary.cvss_vector ?? ''}>
-									{primary.vuln_id}{primary.cvss_vector ? ` · ${primary.cvss_vector}` : ''}
-								</p>
-							{:else}
-								<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">—</p>
-								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no score published yet</p>
-							{/if}
-						</div>
 					</div>
 
 					{#if d.description}
@@ -267,12 +278,12 @@
 										{#each d.authorities as a, idx (a.vuln_id)}
 											{@const isLast = idx === (d.authorities?.length ?? 0) - 1}
 											<tr>
-												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
+												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}whitespace-nowrap px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
 													{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
 												</td>
 												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
 													{#if a.severity}
-														<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
+														<span class="inline-flex items-center rounded-full border px-2 py-1 text-xs font-semibold leading-none {severityClass(a.severity)}">
 															{a.severity}
 														</span>
 													{:else}
@@ -311,11 +322,11 @@
 													{r.repo_slug || r.repo_id}
 												</span>
 												<a
-													class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+													class="{leaveBtn} shrink-0 py-1 px-2 text-[11px] font-medium"
 													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_instance_id ? `&provider_id=${r.provider_instance_id}` : ''}`}
 												>
-													<Eye class="h-3.5 w-3.5" />
-													View
+													Open
+													<ExternalLink class="h-3 w-3" />
 												</a>
 											</li>
 										{/each}
@@ -343,11 +354,11 @@
 												</div>
 												{#if i.image_digest}
 													<a
-														class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
+														class="{leaveBtn} shrink-0 py-1 px-2 text-[11px] font-medium"
 														href={`/images/${encodeURIComponent(i.image_digest)}`}
 													>
-														<Eye class="h-3.5 w-3.5" />
-														View
+														Open
+														<ExternalLink class="h-3 w-3" />
 													</a>
 												{/if}
 											</li>
@@ -360,9 +371,9 @@
 
 					{#if d.sources && d.sources.length > 0}
 						<div class="flex flex-wrap items-center gap-1.5">
-							<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Sources</span>
+							<span class="text-xs uppercase leading-none tracking-[0.2em] text-[var(--text-muted)]">Sources</span>
 							{#each d.sources as s}
-								<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">{s}</span>
+								<span class="inline-flex items-center rounded-full bg-[var(--hover-bg-subtle)] px-2 py-1 text-[11px] leading-none text-[var(--text-tertiary)]">{s}</span>
 							{/each}
 						</div>
 					{/if}
