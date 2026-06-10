@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/llmadvisory"
@@ -105,9 +106,11 @@ func TriageChatHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 
 		// Stream the reply as SSE data events: {"thinking":true} while
 		// the reasoning model deliberates, {"delta":"…"} per content
-		// chunk, then {"done":true} (or {"error":"…"}). Falls back to
-		// one JSON response when the writer can't flush.
-		flusher, canStream := w.(http.Flusher)
+		// chunk, then {"done":true} (or {"error":"…"}). Streaming is
+		// opt-in via the Accept header so clients that expect a single
+		// JSON body (older bundles, scripts) keep working.
+		flusher, canFlush := w.(http.Flusher)
+		canStream := canFlush && strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 		if !canStream {
 			reply, err := llmadvisory.Converse(ctx, cfg, msgs)
 			if err != nil {

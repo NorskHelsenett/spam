@@ -121,7 +121,7 @@
 			const res = await fetch('/api/triage/chat', {
 				method: 'POST',
 				credentials: 'include',
-				headers: { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
 				body: JSON.stringify({ asset_type: assetType, asset_id: assetId, messages })
 			});
 			if (res.status === 503) throw new Error('Finding chat is not enabled — turn it on under /admin/ai.');
