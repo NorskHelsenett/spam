@@ -9,7 +9,8 @@
       "Skill(code-review:code-review)",
       "Bash(git diff:*)",
       "Bash(grep:*)",
-      "mcp__ide__getDiagnostics"
+      "mcp__ide__getDiagnostics",
+      "Bash(docker exec *)"
     ]
   }
 }

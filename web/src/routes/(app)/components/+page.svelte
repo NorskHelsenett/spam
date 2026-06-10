@@ -388,7 +388,7 @@
 		{:else if dependencies.length === 0 && !loading}
 			<div class="flex flex-1 items-center justify-center">
 				<div class="flex max-w-md flex-col items-center gap-4 text-center">
-					<div class="flex h-16 w-16 items-center justify-center rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+					<div class="flex h-16 w-16 items-center justify-center rounded-2xl bg-[var(--card-bg)]/40">
 						<Search class="h-7 w-7 text-[var(--accent)]" aria-hidden="true" />
 					</div>
 					<div>
