@@ -17,6 +17,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -170,6 +171,7 @@ func run() error {
 		"migrations/20260527_create_host_resolution.sql",
 		"migrations/20260610_asset_risk_v2_vuln_tier_signals.sql",
 		"migrations/20260610a_mv_refresh_source_version.sql",
+		"migrations/20260610a_create_llm_settings_and_asset_advisories.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
@@ -230,6 +232,10 @@ func run() error {
 		if err := assetrisk.EnsureFirstPopulate(ctx, gormDB); err != nil {
 			log.Printf("assetrisk first populate: %v", err)
 		}
+		// LLM advisory generation reads asset_risk, so it starts only
+		// after the first populate. No-ops while every llm_settings
+		// use case is disabled.
+		llmadvisory.StartWorker(ctx, gormDB)
 	}()
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))

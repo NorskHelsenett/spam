@@ -206,7 +206,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database, Sparkles } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 	import { session, isAdmin as isAdminStore, hasOnlyClusters as hasOnlyClustersStore, loadSession } from '$lib/stores/session';
@@ -267,7 +267,8 @@ $effect(() => {
 		{ href: '/runs', label: 'Runs', icon: Play },
 		{ href: '/admin/jobs', label: 'Jobs', icon: Layers },
 		{ href: '/admin/users', label: 'Users', icon: Users },
-		{ href: '/admin/database', label: 'Database', icon: Database }
+		{ href: '/admin/database', label: 'Database', icon: Database },
+		{ href: '/admin/ai', label: 'AI', icon: Sparkles }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {

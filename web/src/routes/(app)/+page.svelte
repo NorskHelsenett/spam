@@ -70,6 +70,16 @@
 		tier: 'fix_now' | 'this_week' | 'watch' | 'deprioritized';
 		reasons: Reason[];
 		context: Reason[];
+		advisory?: {
+			summary?: string;
+			summary_model?: string;
+			verdict?: 'keep' | 'suppress';
+			verdict_justification?: string;
+			verdict_confidence?: number;
+			verdict_missing_data?: string;
+			generated_at: string;
+			stale?: boolean;
+		};
 	};
 	type Scope = {
 		clusters: number;
@@ -867,6 +877,15 @@
 					</button>
 					{#if isOpen}
 						<div class="card-body">
+							{#if row.advisory?.summary}
+								<div class="stage">
+									<span class="stage-label">Advisory</span>
+									<div class="stage-body">
+										<span class="stage-text">{row.advisory.summary}</span>
+										<span class="stage-hint">AI-generated · {row.advisory.summary_model}{row.advisory.stale ? ' · signals changed since generation' : ''}</span>
+									</div>
+								</div>
+							{/if}
 							{#if row.asset_type === 'image'}
 								{@const detail = imageDetails.get(row.asset_id)}
 								{#if detail === 'loading' || detail === undefined}
@@ -1044,6 +1063,27 @@
 											{/each}
 										</div>
 										<span class="stage-hint">Context only — does not affect the tier.</span>
+									</div>
+								</div>
+							{/if}
+
+							{#if row.advisory?.verdict}
+								<div class="stage">
+									<span class="stage-label">Agent</span>
+									<div class="stage-body">
+										<div class="context-pills">
+											<span class="chip chip-{row.advisory.verdict === 'suppress' ? 'warning' : 'muted'}">{row.advisory.verdict === 'suppress' ? 'would suppress' : 'would keep'}</span>
+											{#if row.advisory.verdict_confidence}
+												<span class="chip chip-muted">{Math.round(row.advisory.verdict_confidence * 100)}% confident</span>
+											{/if}
+										</div>
+										{#if row.advisory.verdict_justification}
+											<span class="stage-text">{row.advisory.verdict_justification}</span>
+										{/if}
+										{#if row.advisory.verdict_missing_data}
+											<span class="stage-hint">Would verify: {row.advisory.verdict_missing_data}</span>
+										{/if}
+										<span class="stage-hint">Shadow mode — recorded to evaluate the agent, takes no action.</span>
 									</div>
 								</div>
 							{/if}

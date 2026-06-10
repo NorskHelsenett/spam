@@ -204,6 +204,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.With(providerAudit).Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(authService, providerStore, syncMgr))
 				api.Get("/admin/providers/sync/status", uiapi.AdminProvidersSyncStatusHandler(authService, providerStore, syncMgr))
 				api.With(providerAudit).Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
+				// LLM advisory settings + prompt test bench. Writes are
+				// audited — prompt/model changes alter what every user
+				// reads on the triage page.
+				aiAudit := audit.Middleware(db, auditUserID, "admin.ai")
+				api.Get("/admin/ai/settings", uiapi.AdminAISettingsListHandler(db, authService))
+				api.With(aiAudit).Put("/admin/ai/settings/{use_case}", uiapi.AdminAISettingsUpdateHandler(db, authService))
+				api.Post("/admin/ai/test", uiapi.AdminAITestHandler(db, authService))
+
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))

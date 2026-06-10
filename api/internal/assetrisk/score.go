@@ -7,6 +7,9 @@
 package assetrisk
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"math"
 	"time"
 )
@@ -320,6 +323,25 @@ func Tier(s Signals) string {
 	}
 
 	return TierSkip
+}
+
+// SignalsHash fingerprints the tier-relevant signals of an asset.
+// LLM-generated advisories are cached against this hash so a summary
+// regenerates only when something that could change the advisory
+// actually changed. Scan-age / posture fields are deliberately
+// excluded — they drift daily without altering the vuln story.
+func SignalsHash(s Signals) string {
+	key := fmt.Sprintf("v1|%s|%s|%d|%d|%d|%d|%d|%d|%d|%t|%t|%t|%.4f|%.4f|%.4f|%d|%t|%d|%d",
+		s.AssetType, s.AssetID,
+		s.CriticalCount, s.HighCount, s.MediumCount, s.LowCount,
+		s.KEVCount, s.KEVFixableCount, s.KEVRansomwareCount,
+		s.KEVDuePassed, s.HasFixForCritical, s.HasFixForHigh,
+		s.EPSSMax, s.KEVEPSSMax, s.ExposedEPSSMax,
+		s.ExposedKEVCount, s.InternetExposed,
+		s.ClusterCount, s.ExposedClusterCount,
+	)
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
 }
 
 func clamp(v, lo, hi int) int {

@@ -79,6 +79,51 @@ type TriageRow struct {
 	Tier        string   `json:"tier"`
 	Reasons     []Reason `json:"reasons"`
 	Context     []Reason `json:"context"`
+
+	// Advisory carries the cached LLM enrichment when one exists:
+	// the narrative summary and the shadow-mode agent verdict
+	// (recorded for evaluation, never acted on). Nil when the
+	// llmadvisory worker hasn't covered this asset yet.
+	Advisory *AdvisoryInfo `json:"advisory,omitempty"`
+}
+
+// AdvisoryInfo is the wire shape of one asset_advisories row. Stale
+// means the asset's signals changed after generation — the text may
+// describe a previous state.
+type AdvisoryInfo struct {
+	Summary              string    `json:"summary,omitempty"               gorm:"column:summary"`
+	SummaryModel         string    `json:"summary_model,omitempty"         gorm:"column:summary_model"`
+	Verdict              string    `json:"verdict,omitempty"               gorm:"column:verdict"`
+	VerdictJustification string    `json:"verdict_justification,omitempty" gorm:"column:verdict_justification"`
+	VerdictConfidence    float32   `json:"verdict_confidence,omitempty"    gorm:"column:verdict_confidence"`
+	VerdictMissingData   string    `json:"verdict_missing_data,omitempty"  gorm:"column:verdict_missing_data"`
+	GeneratedAt          time.Time `json:"generated_at"                    gorm:"column:generated_at"`
+	Stale                bool      `json:"stale,omitempty"                 gorm:"-"`
+}
+
+// advisoryScanRow adds the cache-key columns to AdvisoryInfo for the
+// one bulk SELECT in loadAdvisories.
+type advisoryScanRow struct {
+	AdvisoryInfo
+	AssetType   string `gorm:"column:asset_type"`
+	AssetID     string `gorm:"column:asset_id"`
+	SignalsHash string `gorm:"column:signals_hash"`
+}
+
+// loadAdvisories pulls every cached advisory in one query. The table
+// only holds fix_now/this_week assets (worker-scoped), so it stays a
+// few hundred rows. Errors degrade to "no advisories" — the triage
+// page must not break because the LLM enrichment table is missing.
+func loadAdvisories(ctx context.Context, db *gorm.DB) map[string]advisoryScanRow {
+	var rows []advisoryScanRow
+	if err := db.WithContext(ctx).Raw(`SELECT * FROM asset_advisories`).Scan(&rows).Error; err != nil {
+		return nil
+	}
+	out := make(map[string]advisoryScanRow, len(rows))
+	for _, r := range rows {
+		out[r.AssetType+"|"+r.AssetID] = r
+	}
+	return out
 }
 
 // PagedSection paginates a long tier: watch ("warnings, but not
@@ -282,6 +327,8 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 		}
 	}
 
+	advisories := loadAdvisories(ctx, db)
+
 	// Score every row. Images and repos partition into tiers; cluster
 	// rows go to the read-only lens — the fix happens at the image,
 	// so cluster rows in the tiers would just duplicate every image
@@ -298,6 +345,11 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 			Context:     ContextReasons(sig),
 		}
 		row.TrustGrade = TrustGrade(row.TrustScore)
+		if adv, ok := advisories[sig.AssetType+"|"+sig.AssetID]; ok {
+			info := adv.AdvisoryInfo
+			info.Stale = adv.SignalsHash != SignalsHash(sig)
+			row.Advisory = &info
+		}
 		if sig.AssetType == "cluster" {
 			if tier != TierSkip {
 				resp.Clusters = append(resp.Clusters, row)
