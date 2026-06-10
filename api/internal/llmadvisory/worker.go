@@ -220,22 +220,22 @@ func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (stri
 		"asset_type": sig.AssetType,
 		"tier":       tier,
 		"signals": map[string]any{
-			"critical_count":        sig.CriticalCount,
-			"high_count":            sig.HighCount,
-			"medium_count":          sig.MediumCount,
-			"low_count":             sig.LowCount,
-			"kev_count":             sig.KEVCount,
-			"kev_fixable_count":     sig.KEVFixableCount,
-			"kev_ransomware_count":  sig.KEVRansomwareCount,
-			"epss_max":              sig.EPSSMax,
-			"exposed_kev_count":     sig.ExposedKEVCount,
+			"critical_count":         sig.CriticalCount,
+			"high_count":             sig.HighCount,
+			"medium_count":           sig.MediumCount,
+			"low_count":              sig.LowCount,
+			"kev_count":              sig.KEVCount,
+			"kev_fixable_count":      sig.KEVFixableCount,
+			"kev_ransomware_count":   sig.KEVRansomwareCount,
+			"epss_max":               sig.EPSSMax,
+			"exposed_kev_count":      sig.ExposedKEVCount,
 			"exposed_critical_count": sig.ExposedCriticalCount,
-			"internet_exposed":      sig.InternetExposed,
-			"cluster_count":         sig.ClusterCount,
-			"exposed_cluster_count": sig.ExposedClusterCount,
-			"active_secret_count":   sig.ActiveSecretCount,
-			"has_fix_for_critical":  sig.HasFixForCritical,
-			"has_fix_for_high":      sig.HasFixForHigh,
+			"internet_exposed":       sig.InternetExposed,
+			"cluster_count":          sig.ClusterCount,
+			"exposed_cluster_count":  sig.ExposedClusterCount,
+			"active_secret_count":    sig.ActiveSecretCount,
+			"has_fix_for_critical":   sig.HasFixForCritical,
+			"has_fix_for_high":       sig.HasFixForHigh,
 		},
 	}
 	if tier == assetrisk.TierDeprioritized {
@@ -316,6 +316,223 @@ func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (stri
 		// Repos carry no per-CVE lazy detail yet — the structured
 		// reasons are the evidence.
 		payload["reasons"] = assetrisk.TierReasons(sig, tier)
+	}
+
+	b, err := json.Marshal(payload)
+	return string(b), err
+}
+
+// Chat payload budgets. The chat models carry ~256k context, so the
+// grounding can be far richer than the batch-advisory payload — but
+// still bounded so a 3000-CVE base image doesn't ship megabytes per
+// turn.
+const (
+	chatVulnCap    = 150
+	chatDescCap    = 600
+	chatHostCap    = 30
+	chatClusterCap = 20
+)
+
+// BuildChatPayload assembles the full-context grounding for the
+// finding chat: every signal, ALL vulns up to the cap (with full
+// titles, descriptions, installed/fixed versions, per-CVE KEV
+// detail + EPSS percentile), exposed hosts with namespace/cluster,
+// the clusters running the digest, posture context, and the cached
+// advisory + shadow verdict when present. BuildPayload stays lean on
+// purpose — it feeds bulk generation; this feeds interactive triage.
+func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (string, error) {
+	tier := assetrisk.Tier(sig)
+	payload := map[string]any{
+		"asset":        sig.AssetSlug,
+		"asset_type":   sig.AssetType,
+		"tier":         tier,
+		"tier_reasons": assetrisk.TierReasons(sig, tier),
+		"signals": map[string]any{
+			"critical_count":         sig.CriticalCount,
+			"high_count":             sig.HighCount,
+			"medium_count":           sig.MediumCount,
+			"low_count":              sig.LowCount,
+			"kev_count":              sig.KEVCount,
+			"kev_fixable_count":      sig.KEVFixableCount,
+			"kev_ransomware_count":   sig.KEVRansomwareCount,
+			"kev_due_passed":         sig.KEVDuePassed,
+			"epss_max":               sig.EPSSMax,
+			"exposed_kev_count":      sig.ExposedKEVCount,
+			"exposed_critical_count": sig.ExposedCriticalCount,
+			"exposed_epss_max":       sig.ExposedEPSSMax,
+			"internet_exposed":       sig.InternetExposed,
+			"cluster_count":          sig.ClusterCount,
+			"exposed_cluster_count":  sig.ExposedClusterCount,
+			"active_secret_count":    sig.ActiveSecretCount,
+			"has_fix_for_critical":   sig.HasFixForCritical,
+			"has_fix_for_high":       sig.HasFixForHigh,
+		},
+		"posture": map[string]any{
+			"has_sbom":        sig.HasSBOM,
+			"scan_age_days":   sig.ScanAgeDays,
+			"image_signed":    sig.ImageSigned,
+			"archived_deps":   sig.ArchivedDepCount,
+			"deprecated_deps": sig.DeprecatedDepCount,
+		},
+	}
+
+	// Cached enrichment, so the model can reference (or be challenged
+	// on) what the dashboard already claims.
+	var adv Advisory
+	if err := db.WithContext(ctx).
+		Where("asset_type = ? AND asset_id = ?", sig.AssetType, sig.AssetID).
+		First(&adv).Error; err == nil {
+		enrich := map[string]any{}
+		if adv.Summary != "" {
+			enrich["advisory_summary"] = adv.Summary
+		}
+		if adv.Verdict != "" {
+			enrich["shadow_verdict"] = map[string]any{
+				"verdict":       adv.Verdict,
+				"justification": adv.VerdictJustification,
+				"confidence":    adv.VerdictConfidence,
+				"missing_data":  adv.VerdictMissingData,
+			}
+		}
+		if len(enrich) > 0 {
+			payload["existing_assessment"] = enrich
+		}
+	}
+
+	if sig.AssetType == "image" {
+		type chatVuln struct {
+			ID             string  `json:"id"              gorm:"column:canonical_id"`
+			Severity       string  `json:"severity"        gorm:"column:severity"`
+			Pkg            string  `json:"pkg"             gorm:"column:pkg_name"`
+			Installed      string  `json:"installed"       gorm:"column:installed_version"`
+			Fixed          string  `json:"fixed"           gorm:"column:fixed_version"`
+			Title          string  `json:"title"           gorm:"column:title"`
+			Description    string  `json:"description,omitempty" gorm:"column:description"`
+			EPSS           float32 `json:"epss"            gorm:"column:epss"`
+			EPSSPercentile float32 `json:"epss_percentile" gorm:"column:epss_percentile"`
+			KEV            bool    `json:"kev"             gorm:"column:kev"`
+			KEVDueDate     string  `json:"kev_due_date,omitempty" gorm:"column:kev_due_date"`
+			KEVRansomware  bool    `json:"kev_ransomware"  gorm:"column:kev_ransomware"`
+		}
+		var vulns []chatVuln
+		if err := db.WithContext(ctx).Raw(`
+			SELECT * FROM (
+				SELECT DISTINCT ON (COALESCE(vm.canonical_id, v.vuln_id))
+					COALESCE(vm.canonical_id, v.vuln_id) AS canonical_id,
+					v.severity, v.pkg_name, v.installed_version, v.fixed_version,
+					COALESCE(NULLIF(vm.title, ''), v.title) AS title,
+					LEFT(COALESCE(NULLIF(vm.description, ''), v.description), ?) AS description,
+					COALESCE(e.score, 0)::real AS epss,
+					COALESCE(e.percentile, 0)::real AS epss_percentile,
+					(k.cve_id IS NOT NULL) AS kev,
+					COALESCE(k.due_date::text, '') AS kev_due_date,
+					COALESCE(k.known_ransomware, false) AS kev_ransomware
+				FROM view_unified_image_vulnerabilities v
+				LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+				LEFT JOIN epss_entries e ON e.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				LEFT JOIN cisa_kev_entries k ON k.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				WHERE v.image_id = ?
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM component_vex vex
+					LEFT JOIN vuln_metadata vmx ON vmx.vuln_id = vex.vuln_id
+					JOIN sbom_component_view sc ON sc.purl = vex.p_url
+					JOIN sbom_bindings sb       ON sb.sbom_id     = sc.sbom_id
+					                           AND sb.asset_type = 'IMAGE_DIGEST'
+					WHERE vex.status IN ('not_affected', 'fixed')
+					  AND COALESCE(vmx.canonical_id, vex.vuln_id)
+					      = COALESCE(vm.canonical_id, v.vuln_id)
+					  AND sb.asset_ref_id::text = v.image_id
+				  )
+				ORDER BY COALESCE(vm.canonical_id, v.vuln_id)
+			) dedup
+			ORDER BY kev DESC, epss DESC,
+			         CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END
+			LIMIT ?
+		`, chatDescCap, sig.AssetID, chatVulnCap).Scan(&vulns).Error; err != nil {
+			return "", err
+		}
+		payload["vulns"] = vulns
+
+		var vulnTotal int
+		db.WithContext(ctx).Raw(`
+			SELECT COUNT(DISTINCT COALESCE(vm.canonical_id, v.vuln_id))
+			FROM view_unified_image_vulnerabilities v
+			LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+			WHERE v.image_id = ?
+		`, sig.AssetID).Scan(&vulnTotal)
+		payload["vuln_total"] = vulnTotal
+		if vulnTotal > len(vulns) {
+			payload["vulns_note"] = "list truncated to the highest-risk entries; totals in signals cover everything"
+		}
+
+		type chatHost struct {
+			Host      string `json:"host"       gorm:"column:host"`
+			Cluster   string `json:"cluster"    gorm:"column:cluster"`
+			Namespace string `json:"namespace"  gorm:"column:namespace"`
+			TLS       bool   `json:"tls"        gorm:"column:tls"`
+		}
+		var hosts []chatHost
+		db.WithContext(ctx).Raw(`
+			SELECT DISTINCT ed.host, COALESCE(he.cluster, ed.cluster_id) AS cluster,
+			       ed.namespace, COALESCE(he.tls, false) AS tls
+			FROM exposed_digests ed
+			LEFT JOIN host_exposure he
+			  ON he.cluster_id = ed.cluster_id AND he.namespace = ed.namespace
+			 AND he.host = ed.host AND he.kind = ed.exposure_kind AND he.name = ed.exposure_name
+			WHERE ed.digest = ? ORDER BY ed.host LIMIT ?
+		`, sig.ImageDigest, chatHostCap).Scan(&hosts)
+		payload["exposed_hosts"] = hosts
+
+		type chatCluster struct {
+			Name    string `json:"name"    gorm:"column:name"`
+			Exposed bool   `json:"exposed" gorm:"column:exposed"`
+		}
+		var clusters []chatCluster
+		db.WithContext(ctx).Raw(`
+			SELECT
+				COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
+				EXISTS (
+					SELECT 1 FROM exposed_digests ed
+					WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
+				) AS exposed
+			FROM (
+				SELECT DISTINCT cr.data->>'cluster_id' AS cluster_id
+				FROM cluster_record cr
+				WHERE cr.data->>'kind' = 'Container'
+				  AND cr.data->>'digest' = ?
+				  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
+			) cd
+			LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
+			ORDER BY exposed DESC, name LIMIT ?
+		`, sig.ImageDigest, sig.ImageDigest, chatClusterCap).Scan(&clusters)
+		payload["runs_in_clusters"] = clusters
+	} else {
+		type chatRepoVuln struct {
+			ID       string  `json:"id"       gorm:"column:canonical_id"`
+			Severity string  `json:"severity" gorm:"column:severity"`
+			Fixed    string  `json:"fixed"    gorm:"column:fixed_version"`
+			EPSS     float32 `json:"epss"     gorm:"column:epss"`
+			KEV      bool    `json:"kev"      gorm:"column:kev"`
+		}
+		var vulns []chatRepoVuln
+		db.WithContext(ctx).Raw(`
+			SELECT * FROM (
+				SELECT DISTINCT ON (COALESCE(vm.canonical_id, v.vuln_id))
+					COALESCE(vm.canonical_id, v.vuln_id) AS canonical_id,
+					v.severity, v.fixed_version,
+					COALESCE(e.score, 0)::real AS epss,
+					(k.cve_id IS NOT NULL) AS kev
+				FROM view_unified_repositories_vulnerabilities v
+				LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+				LEFT JOIN epss_entries e ON e.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				LEFT JOIN cisa_kev_entries k ON k.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				WHERE v.repo_id = ?
+				ORDER BY COALESCE(vm.canonical_id, v.vuln_id)
+			) dedup
+			ORDER BY kev DESC, epss DESC LIMIT ?
+		`, sig.AssetID, chatVulnCap).Scan(&vulns)
+		payload["vulns"] = vulns
 	}
 
 	b, err := json.Marshal(payload)

@@ -89,7 +89,7 @@ func TriageChatHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc 
 			http.Error(w, "failed to load asset", http.StatusInternalServerError)
 			return
 		}
-		payload, err := llmadvisory.BuildPayload(ctx, db, sig)
+		payload, err := llmadvisory.BuildChatPayload(ctx, db, sig)
 		if err != nil {
 			http.Error(w, "failed to build finding context", http.StatusInternalServerError)
 			return
