@@ -45,7 +45,7 @@
 </script>
 
 <script lang="ts">
-	import { ExternalLink, Eye, ShieldX } from 'lucide-svelte';
+	import { ExternalLink, Eye, X } from 'lucide-svelte';
 	import Dialog from '$lib/components/Dialog.svelte';
 
 	let { open = $bindable(false), vulnId = '' }: { open?: boolean; vulnId?: string } = $props();
@@ -145,98 +145,165 @@
 	};
 </script>
 
-<Dialog bind:open maxWidth="max-w-4xl">
+<Dialog bind:open maxWidth="max-w-3xl" showCloseButton={false}>
 	{#snippet children()}
 		{@const d = detail}
 		{@const adv = vulnId ? advisoryLink(vulnId) : { href: '', label: '' }}
+		{@const primary = d?.authorities?.find((a) => a.is_primary) ?? d?.authorities?.[0]}
 		<div class="flex h-full min-h-0 flex-col">
-			<header class="flex items-start justify-between gap-4 border-b border-[var(--border-color)]/40 px-6 py-4">
+			<header class="flex items-start justify-between gap-4 px-6 pb-4 pt-5">
 				<div class="min-w-0 flex-1">
-					<p class="font-mono text-xs text-[var(--text-tertiary)]">Advisory</p>
-					<h2 class="mt-0.5 truncate text-lg font-semibold text-[var(--text-bright)]">{vulnId}</h2>
+					<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Advisory</p>
+					<div class="mt-1 flex min-w-0 flex-wrap items-center gap-2.5">
+						<h2 class="truncate font-mono text-lg font-semibold text-[var(--text-bright)]">{vulnId}</h2>
+						{#if d?.severity}
+							<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(d.severity)}">
+								{d.severity}
+							</span>
+						{/if}
+						{#if d?.kev_known}
+							<span class="inline-flex items-center rounded-full border border-red-500/40 bg-red-500/10 px-2 py-0.5 text-xs font-semibold text-red-400">
+								KEV{d.kev_known_ransomware ? ' · ransomware' : ''}
+							</span>
+						{/if}
+					</div>
 					{#if d?.title}
-						<p class="mt-0.5 truncate text-sm text-[var(--text-secondary)]">{d.title}</p>
+						<p class="mt-1.5 text-sm leading-snug text-[var(--text-secondary)]">{d.title}</p>
 					{/if}
 				</div>
-				<div class="flex shrink-0 items-center gap-2">
-					<a
-						class="inline-flex items-center gap-1 rounded-lg border border-[var(--border-color)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover-bg)]"
-						href={vulnUrl(vulnId)}
-					>
-						Open full page
+				<div class="flex shrink-0 items-center gap-1.5">
+					<a class="btn btn-ghost px-2.5 py-1.5 text-xs" href={vulnUrl(vulnId)}>
+						Full page
 						<ExternalLink class="h-3 w-3" />
 					</a>
+					<a class="btn btn-ghost px-2.5 py-1.5 text-xs" href={adv.href} target="_blank" rel="noopener noreferrer">
+						{adv.label}
+						<ExternalLink class="h-3 w-3" />
+					</a>
+					<button
+						type="button"
+						class="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
+						aria-label="Close"
+						onclick={() => (open = false)}
+					>
+						<X size={16} />
+					</button>
 				</div>
 			</header>
-			<div class="flex-1 overflow-y-auto px-6 py-4">
+			<div class="flex-1 space-y-5 overflow-y-auto px-6 pb-6">
 				{#if loading || !d}
 					<div class="flex items-center gap-2 py-12 text-sm text-[var(--text-tertiary)]">
 						<div class="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
 						Loading advisory…
 					</div>
 				{:else}
-					<div class="grid gap-5 lg:grid-cols-3">
-						<div class="lg:col-span-2 space-y-4">
-							{#if d.description}
-								<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{d.description}</p>
-							{:else if d.enrichment_loading}
-								<p class="text-xs italic text-[var(--text-muted)]">Enriching from upstream feeds — re-open in a moment.</p>
+					<!-- Exploitation signals -->
+					<div class="grid gap-3 sm:grid-cols-3">
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">EPSS</p>
+							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
+								<p class="mt-2 text-2xl font-semibold {d.epss_score >= 0.1 ? 'text-[var(--warning)]' : 'text-[var(--text-bright)]'}">
+									{(d.epss_score * 100).toFixed(1)}%
+								</p>
+								<p class="mt-1 text-xs leading-relaxed text-[var(--text-tertiary)]">
+									chance of exploitation within 30 days{#if d.epss_percentile !== undefined && d.epss_percentile !== null}
+										· above {(d.epss_percentile * 100).toFixed(0)}% of all CVEs{/if}
+								</p>
 							{:else}
-								<p class="text-xs italic text-[var(--text-muted)]">No description available. Use the canonical link on the right.</p>
+								<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">—</p>
+								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no exploit-prediction data</p>
 							{/if}
-
-							{#if d.authorities && d.authorities.length > 0}
-								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CVSS / severity by authority</h3>
-									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										<table class="min-w-full border-separate border-spacing-0 text-sm">
-											<thead class="bg-[var(--hover-bg-subtle)] text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
-												<tr>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
-												</tr>
-											</thead>
-											<tbody class="text-[var(--text-secondary)]">
-												{#each d.authorities as a, idx (a.vuln_id)}
-													{@const isLast = idx === (d.authorities?.length ?? 0) - 1}
-													<tr>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
-															{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
-															{#if a.severity}
-																<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
-																	{a.severity}
-																</span>
-															{:else}
-																<span class="text-xs text-[var(--text-muted)]">—</span>
-															{/if}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
-															{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
-															{a.cvss_vector || '—'}
-														</td>
-													</tr>
-												{/each}
-											</tbody>
-										</table>
-									</div>
-								</div>
+						</div>
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">CISA KEV</p>
+							{#if d.kev_known}
+								<p class="mt-2 text-2xl font-semibold text-red-400">Listed</p>
+								<p class="mt-1 text-xs leading-relaxed text-[var(--text-tertiary)]">
+									confirmed exploited in the wild{#if d.kev_date_added}
+										· added {formatShortDate(d.kev_date_added)}{/if}{#if d.kev_known_ransomware}
+										· used by ransomware{/if}
+								</p>
+							{:else}
+								<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">No</p>
+								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no confirmed in-the-wild exploitation</p>
 							{/if}
+						</div>
+						<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+							<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">CVSS</p>
+							{#if primary && primary.cvss_score !== undefined && primary.cvss_score !== null && primary.cvss_score > 0}
+								<p class="mt-2 text-2xl font-semibold text-[var(--text-bright)]">{primary.cvss_score.toFixed(1)}</p>
+								<p class="mt-1 truncate text-xs text-[var(--text-tertiary)]" title={primary.cvss_vector ?? ''}>
+									{primary.vuln_id}{primary.cvss_vector ? ` · ${primary.cvss_vector}` : ''}
+								</p>
+							{:else}
+								<p class="mt-2 text-2xl font-semibold text-[var(--text-muted)]">—</p>
+								<p class="mt-1 text-xs text-[var(--text-tertiary)]">no score published yet</p>
+							{/if}
+						</div>
+					</div>
 
+					{#if d.description}
+						<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{d.description}</p>
+					{:else if d.enrichment_loading}
+						<p class="text-xs italic text-[var(--text-muted)]">Enriching from upstream feeds — re-open in a moment.</p>
+					{:else}
+						<p class="text-xs italic text-[var(--text-muted)]">No description available. Use the {adv.label} link above.</p>
+					{/if}
+
+					{#if d.authorities && d.authorities.length > 1}
+						<div>
+							<p class="mb-2 text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Severity by authority</p>
+							<div class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
+								<table class="min-w-full border-separate border-spacing-0 text-sm">
+									<thead class="text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
+										<tr>
+											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
+											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
+											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
+											<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
+										</tr>
+									</thead>
+									<tbody class="text-[var(--text-secondary)]">
+										{#each d.authorities as a, idx (a.vuln_id)}
+											{@const isLast = idx === (d.authorities?.length ?? 0) - 1}
+											<tr>
+												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
+													{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
+												</td>
+												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
+													{#if a.severity}
+														<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
+															{a.severity}
+														</span>
+													{:else}
+														<span class="text-xs text-[var(--text-muted)]">—</span>
+													{/if}
+												</td>
+												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
+													{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
+												</td>
+												<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
+													{a.cvss_vector || '—'}
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+						</div>
+					{/if}
+
+					{#if (d.affected_repos && d.affected_repos.length > 0) || (d.affected_images && d.affected_images.length > 0)}
+						<div class="grid gap-4 lg:grid-cols-2">
 							{#if d.affected_repos && d.affected_repos.length > 0}
 								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+									<p class="mb-2 text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">
 										Affected repos
 										{#if d.repo_count !== undefined && d.repo_count > d.affected_repos.length}
-											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_repos.length} of {d.repo_count}</span>
+											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">first {d.affected_repos.length} of {d.repo_count}</span>
 										{/if}
-									</h3>
-									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+									</p>
+									<ul class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 										{#each d.affected_repos.slice(0, 8) as r, idx (r.repo_id)}
 											{@const isLast = idx === Math.min(d.affected_repos?.length ?? 0, 8) - 1}
 											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
@@ -258,13 +325,13 @@
 
 							{#if d.affected_images && d.affected_images.length > 0}
 								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
+									<p class="mb-2 text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">
 										Affected images
 										{#if d.image_count !== undefined && d.image_count > d.affected_images.length}
-											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_images.length} of {d.image_count}</span>
+											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">first {d.affected_images.length} of {d.image_count}</span>
 										{/if}
-									</h3>
-									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
+									</p>
+									<ul class="overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
 										{#each d.affected_images.slice(0, 8) as i, idx (i.image_id)}
 											{@const isLast = idx === Math.min(d.affected_images?.length ?? 0, 8) - 1}
 											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
@@ -289,70 +356,16 @@
 								</div>
 							{/if}
 						</div>
+					{/if}
 
-						<aside class="space-y-2">
-							{#if d.kev_known}
-								<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
-									<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
-										<ShieldX class="h-3.5 w-3.5" /> CISA KEV
-									</div>
-									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-										Listed in CISA's <strong>Known Exploited Vulnerabilities</strong> catalog — confirmed in-the-wild use. Patch on KEV-mandated timelines.
-									</p>
-									<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
-										{#if d.kev_date_added}
-											<span class="text-[var(--text-tertiary)]">Added {formatShortDate(d.kev_date_added)}</span>
-										{/if}
-										{#if d.kev_known_ransomware}
-											<span class="rounded-full bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">ransomware</span>
-										{/if}
-									</div>
-								</div>
-							{/if}
-
-							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
-								<div class="rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2.5">
-									<div class="flex items-center justify-between gap-2">
-										<div class="text-xs font-semibold uppercase tracking-wider text-orange-400">EPSS</div>
-										<span class="text-lg font-bold text-orange-300">{(d.epss_score * 100).toFixed(1)}%</span>
-									</div>
-									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-										FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
-										{#if d.epss_percentile !== undefined && d.epss_percentile !== null}
-											Ranks above {(d.epss_percentile * 100).toFixed(0)}% of every CVE in the global EPSS feed.
-										{/if}
-									</p>
-								</div>
-							{/if}
-
-							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
-								<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Canonical source</div>
-								<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-									<strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
-								</p>
-								<a
-									class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
-									href={adv.href}
-									target="_blank"
-									rel="noopener noreferrer"
-								>
-									Open on {adv.label}
-									<ExternalLink class="h-3 w-3" />
-								</a>
-							</div>
-
-							{#if d.sources && d.sources.length > 0}
-								<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
-									<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Sources</div>
-									<div class="mt-1.5 flex flex-wrap gap-1">
-										{#each d.sources as s}
-											<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">{s}</span>
-										{/each}
-									</div>
-								</div>
-							{/if}
-						</aside>
-					</div>
+					{#if d.sources && d.sources.length > 0}
+						<div class="flex flex-wrap items-center gap-1.5">
+							<span class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Sources</span>
+							{#each d.sources as s}
+								<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">{s}</span>
+							{/each}
+						</div>
+					{/if}
 				{/if}
 			</div>
 		</div>

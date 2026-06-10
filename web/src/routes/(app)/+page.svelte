@@ -1505,38 +1505,31 @@
 		color: var(--text-secondary);
 	}
 
+	/* One grid for all CVE lines: columns size to their widest cell
+	   (aligned like a table) but the table hugs its content instead
+	   of stretching across the card. Each .vuln-line contributes its
+	   five cells via display: contents. */
 	.vuln-lines {
-		display: flex;
-		flex-direction: column;
-		gap: 0.2rem;
-	}
-	/* Fixed columns so consecutive CVE lines read as a table:
-	   id | package | KEV/EPSS badges | severity | fix. */
-	.vuln-line {
 		display: grid;
-		grid-template-columns: minmax(9rem, 11rem) minmax(0, 1fr) 11rem 4.5rem minmax(6rem, 9rem);
+		grid-template-columns: repeat(5, max-content);
+		column-gap: 1.1rem;
+		row-gap: 0.3rem;
 		align-items: center;
-		gap: 0.55rem;
+		width: fit-content;
+		max-width: 100%;
 		font-size: 0.78rem;
-		padding: 0.18rem 0;
+		overflow-x: auto;
+	}
+	.vuln-line {
+		display: contents;
+	}
+	.vuln-line.dim > :global(*) {
+		opacity: 0.55;
 	}
 	.vuln-badges {
 		display: inline-flex;
 		align-items: center;
 		gap: 0.35rem;
-		min-width: 0;
-	}
-	@media (max-width: 900px) {
-		.vuln-line {
-			grid-template-columns: minmax(8rem, auto) minmax(0, 1fr);
-			grid-auto-flow: row dense;
-		}
-		.vuln-badges:empty {
-			display: none;
-		}
-	}
-	.vuln-line.dim {
-		opacity: 0.55;
 	}
 	.vuln-id {
 		font-weight: 600;
@@ -1559,6 +1552,7 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		max-width: 30ch;
 	}
 	.vuln-fix {
 		color: var(--success);
