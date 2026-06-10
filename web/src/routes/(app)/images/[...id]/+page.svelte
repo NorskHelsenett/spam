@@ -578,25 +578,25 @@
 					<div class="grid grid-cols-2 gap-3">
 						<div>
 							<p class="text-2xl font-bold text-red-500">{severity.critical}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<ShieldX class="h-3 w-3 text-red-500" /> Critical
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-orange-500">{severity.high}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<ShieldAlert class="h-3 w-3 text-orange-500" /> High
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-yellow-500">{severity.medium}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Shield class="h-3 w-3 text-yellow-500" /> Medium
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-secondary)]">{severity.low}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Shield class="h-3 w-3" /> Low
 							</p>
 						</div>
@@ -609,19 +609,19 @@
 					<div class="grid grid-cols-2 gap-3">
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{clusterCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Server class="h-3 w-3" /> Clusters
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{namespaceCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Package class="h-3 w-3" /> Namespaces
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{podCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Container class="h-3 w-3" /> Pods
 							</p>
 						</div>
@@ -633,7 +633,7 @@
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Components</h3>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{componentCount.toLocaleString()}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 							<FileBox class="h-3 w-3" /> Packages in SBOM
 						</p>
 					</div>
@@ -649,7 +649,7 @@
 						<p class="text-lg font-bold {secretCount > 0 ? 'text-orange-400' : 'text-[var(--text-secondary)]'}">
 							{secretCount.toLocaleString()}
 						</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 							<KeyRound class="h-3 w-3" /> Secrets found
 						</p>
 					</div>

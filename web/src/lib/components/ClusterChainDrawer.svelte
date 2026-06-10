@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { X, Server } from 'lucide-svelte';
+	import { X, Server, ExternalLink } from 'lucide-svelte';
 	import HostChainDiagram from './HostChainDiagram.svelte';
-	import type { ChainData } from './HostChainDiagram.svelte';
+	import { nsChainToChainData, type ClusterChainData } from './chainLayout';
 
 	let {
 		cluster,
@@ -13,55 +13,9 @@
 		onClose?: () => void;
 	} = $props();
 
-	type NsChain = {
-		namespace: string;
-		ingresses: { host: string; kind: string; name: string; ingress_class: string; tls: boolean; backends: string }[];
-		services: { name: string; service_type: string; ports: any[]; selector: Record<string, string> }[];
-		pods: { owner: string; owner_kind: string; pod_count: number; phase: string; containers: { name: string; image: string; tag: string; digest?: string; registry: string }[]; service_names?: string[]; transient?: boolean; last_seen?: string }[];
-	};
-
-	type ClusterChainData = {
-		cluster: string;
-		cluster_id: string;
-		namespaces: NsChain[];
-	};
-
 	let data: ClusterChainData | null = $state(null);
 	let loading = $state(true);
 	let error = $state('');
-
-	// Convert a NsChain into a ChainData for the diagram component
-	function toChainData(ns: NsChain, clusterName: string, clId: string): ChainData {
-		return {
-			host: ns.ingresses?.[0]?.host ?? '',
-			cluster: clusterName,
-			cluster_id: clId,
-			namespace: ns.namespace,
-			ingress: null,
-			ingresses: (ns.ingresses ?? []).map(ing => ({
-				kind: ing.kind,
-				name: ing.name,
-				namespace: ns.namespace,
-				ingress_class: ing.ingress_class,
-				tls: ing.tls,
-				lb_ips: '',
-				paths: [],
-				backends: ing.backends,
-				host: ing.host
-			})),
-			services: ns.services?.map(s => ({
-				...s,
-				namespace: ns.namespace,
-				pod_count: 0
-			})) ?? [],
-			pods: ns.pods?.map(p => ({
-				...p,
-				service_names: p.service_names ?? [],
-				transient: p.transient ?? false,
-				last_seen: p.last_seen
-			})) ?? []
-		};
-	}
 
 	$effect(() => {
 		if (!clusterId) return;
@@ -84,9 +38,17 @@
 			<Server class="mt-0.5 h-5 w-5 shrink-0 text-[var(--accent)]" />
 			<div class="min-w-0 flex-1">
 				<h3 class="truncate text-base font-semibold text-[var(--text-bright)]">{cluster || clusterId}</h3>
-				<p class="mt-0.5 text-xs text-[var(--text-tertiary)]">
-					{data ? `${data.namespaces.length} namespace${data.namespaces.length !== 1 ? 's' : ''}` : 'Loading...'}
-				</p>
+				<div class="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
+					<p class="text-xs text-[var(--text-tertiary)]">
+						{data ? `${data.namespaces.length} namespace${data.namespaces.length !== 1 ? 's' : ''}` : 'Loading...'}
+					</p>
+					<a
+						href="/cluster/{encodeURIComponent(clusterId)}"
+						class="inline-flex items-center gap-1 text-xs font-medium leading-none text-[var(--accent)] transition hover:underline"
+					>
+						Open cluster page <ExternalLink class="h-3 w-3" />
+					</a>
+				</div>
 			</div>
 			<button
 				type="button"
@@ -120,7 +82,7 @@
 
 					{#if ns.ingresses?.length || ns.services?.length || ns.pods?.length}
 						<div class="overflow-x-auto rounded-xl border border-[var(--border-color)]/40 bg-[var(--card-bg)]/40 p-3">
-							<HostChainDiagram chain={toChainData(ns, data.cluster, data.cluster_id)} />
+							<HostChainDiagram chain={nsChainToChainData(ns, data.cluster, data.cluster_id)} />
 						</div>
 					{/if}
 				</div>

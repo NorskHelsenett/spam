@@ -441,6 +441,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
 			approved.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
 
+			// Single-cluster detail surface — the cluster-scope analogue of
+			// /api/images/{id}. {id} accepts the cluster_id, ROR slug, ROR
+			// name, or display name; the handler resolves and ACL-gates it.
+			approved.Get("/api/cluster/{id}", scam.ClusterDetailHandler(db))
+			// Cluster-scoped advisory list — lazy companion to the detail
+			// surface, grouped by canonical CVE over the cluster's images.
+			approved.Get("/api/cluster/{id}/vulnerabilities", scam.ClusterVulnerabilitiesHandler(db))
+
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
 			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))

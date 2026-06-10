@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { X, Globe } from 'lucide-svelte';
 	import HostChainDiagram from './HostChainDiagram.svelte';
-	import type { ChainData } from './HostChainDiagram.svelte';
+	import type { ChainData } from './chainLayout';
 
 	let {
 		host,

@@ -483,26 +483,26 @@
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Fix now</h3>
 					<p class="text-3xl font-bold text-[var(--error)]">{fmt(triage.scope.fix_now_total)}</p>
-					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-[var(--error)]" /> Acute, exposed, or leaking</p>
+					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-[var(--error)]" /> Acute, exposed, or leaking</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">This week</h3>
 					<p class="text-3xl font-bold text-[var(--warning)]">{fmt(triage.scope.this_week_total)}</p>
-					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><AlertTriangle class="h-3 w-3 text-[var(--warning)]" /> High-risk or stale</p>
+					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><AlertTriangle class="h-3 w-3 text-[var(--warning)]" /> High-risk or stale</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Watch</h3>
 					<p class="text-3xl font-bold text-[var(--text-secondary)]">{fmt(triage.watch.counts.total)}</p>
-					<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Eye class="h-3 w-3 text-[var(--text-muted)]" /> Warnings, not urgent</p>
+					<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Eye class="h-3 w-3 text-[var(--text-muted)]" /> Warnings, not urgent</p>
 				</div>
 				<div class="metric-card space-y-1 rounded-2xl p-4">
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Avg trust</h3>
 					{#if avgTrust() === null}
 						<p class="text-3xl font-bold text-[var(--text-secondary)]">—</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldCheck class="h-3 w-3" /> No actionable assets</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><ShieldCheck class="h-3 w-3" /> No actionable assets</p>
 					{:else}
 						<p class="text-3xl font-bold" style="color: {trustColor((avgTrust() ?? 0) >= 90 ? 'A' : (avgTrust() ?? 0) >= 75 ? 'B' : (avgTrust() ?? 0) >= 60 ? 'C' : 'F')}">{avgTrust()}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldCheck class="h-3 w-3" /> Across actionable assets</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><ShieldCheck class="h-3 w-3" /> Across actionable assets</p>
 					{/if}
 				</div>
 			</div>

@@ -486,7 +486,12 @@
 		<div class="grid gap-6 lg:grid-cols-3">
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Tab selector</p>
-				<TabSelector options={mockTabs} bind:value={tabValue} />
+				<!-- Backed by --main-content-bg: the tab track is a translucent
+				     mix of that color, so on a bare card the pill reads wrong.
+				     This matches how it sits in the page's upper panel. -->
+				<div class="mt-3 rounded-xl bg-[var(--main-content-bg)] p-3">
+					<TabSelector options={mockTabs} bind:value={tabValue} />
+				</div>
 				<p class="mt-2 text-xs text-[var(--text-tertiary)]">Selected: {tabValue}</p>
 			</div>
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">

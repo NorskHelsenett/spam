@@ -350,7 +350,7 @@
 		} else if (item.kind === 'image') {
 			goto(`/images/${encodeURIComponent(item.data.value ?? '')}`);
 		} else if (item.kind === 'cluster') {
-			goto(`/clusters/${encodeURIComponent(item.data.cluster_id)}`);
+			goto(`/cluster/${encodeURIComponent(item.data.cluster_id)}`);
 		} else {
 			goto(`/components?q=${encodeURIComponent(item.data.name)}&ecosystem=${encodeURIComponent(item.data.ecosystem)}`);
 		}
