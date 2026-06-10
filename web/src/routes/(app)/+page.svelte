@@ -20,6 +20,7 @@
 	import Loading from '$lib/components/Loading.svelte';
 	import DonutChart from '$lib/components/DonutChart.svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import VulnAdvisoryDialog from '$lib/components/VulnAdvisoryDialog.svelte';
 
 	// DonutSegment is exported from DonutChart.svelte but svelte-check
 	// fails to resolve type-only imports across the legacy export-let
@@ -580,6 +581,18 @@
 	// Off-path CVE visibility per card. Hidden by default: if a vuln
 	// is not on the attack path it is noise for threat modelling, even
 	// at high CVSS.
+	// Advisory dialog — same component the image page uses, so a CVE
+	// click stays in context instead of navigating away.
+	let vulnDialogOpen = $state(false);
+	let vulnDialogId = $state('');
+	const openVulnDialog = (id: string) => {
+		vulnDialogId = id;
+		vulnDialogOpen = true;
+	};
+
+	const EPSS_TOOLTIP =
+		'EPSS (FIRST.org): estimated probability that this CVE will be exploited in the wild within the next 30 days, updated daily.';
+
 	let offPathShown = $state(new Set<string>());
 	const toggleOffPath = (key: string) => {
 		const next = new Set(offPathShown);
@@ -910,18 +923,21 @@
 												<div class="vuln-lines">
 													{#each onPath as v}
 														<div class="vuln-line">
-															<a
+															<button
+																type="button"
 																class="vuln-id"
-																href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
-																onclick={(e) => e.stopPropagation()}
-															>{v.canonical_id}</a>
+																onclick={(e) => {
+																	e.stopPropagation();
+																	openVulnDialog(v.canonical_id);
+																}}
+															>{v.canonical_id}</button>
 															<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
 															<span class="vuln-badges">
 																{#if v.kev}
 																	<span class="chip chip-error">KEV{v.kev_ransomware ? ' · ransomware' : ''}</span>
 																{/if}
 																{#if v.epss > 0}
-																	<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}">EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
+																	<span class="chip chip-{v.epss >= 0.5 ? 'error' : v.epss >= 0.1 ? 'warning' : 'muted'}" title={EPSS_TOOLTIP}>EPSS {(v.epss * 100).toFixed(v.epss < 0.1 ? 1 : 0)}%</span>
 																{/if}
 															</span>
 															<span class={severityClass(v.severity)}>{v.severity}</span>
@@ -949,11 +965,14 @@
 													<div class="vuln-lines">
 														{#each offPath as v}
 															<div class="vuln-line dim">
-																<a
+																<button
+																	type="button"
 																	class="vuln-id"
-																	href={`/vulnerabilities/${encodeURIComponent(v.canonical_id)}`}
-																	onclick={(e) => e.stopPropagation()}
-																>{v.canonical_id}</a>
+																	onclick={(e) => {
+																		e.stopPropagation();
+																		openVulnDialog(v.canonical_id);
+																	}}
+																>{v.canonical_id}</button>
 																<span class="vuln-pkg" title="{v.pkg_name}@{v.installed_version}">{v.pkg_name}@{v.installed_version}</span>
 																<span class="vuln-badges"></span>
 																<span class={severityClass(v.severity)}>{v.severity}</span>
@@ -1201,6 +1220,8 @@
 		</section>
 	{/if}
 </div>
+
+<VulnAdvisoryDialog bind:open={vulnDialogOpen} vulnId={vulnDialogId} />
 
 <style>
 	.tier {
@@ -1522,6 +1543,13 @@
 		color: var(--accent);
 		text-decoration: none;
 		white-space: nowrap;
+		border: 0;
+		background: none;
+		padding: 0;
+		font: inherit;
+		font-weight: 600;
+		text-align: left;
+		cursor: pointer;
 	}
 	.vuln-id:hover {
 		text-decoration: underline;
