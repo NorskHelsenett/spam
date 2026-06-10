@@ -104,6 +104,24 @@
 		bodyEl?.scrollTo({ top: bodyEl.scrollHeight });
 	};
 
+	// consumeSSEEvent applies one "data: {...}" block to the
+	// in-progress reply. Throws on a server-reported error.
+	const consumeSSEEvent = (evt: string) => {
+		const line = evt.trim();
+		if (!line.startsWith('data:')) return;
+		let parsed: { thinking?: boolean; delta?: string; done?: boolean; error?: string };
+		try {
+			parsed = JSON.parse(line.slice(5).trim());
+		} catch {
+			return;
+		}
+		if (parsed.error) throw new Error(parsed.error);
+		if (parsed.delta) {
+			streamingReply += parsed.delta;
+			void scrollToEnd();
+		}
+	};
+
 	// --- Streaming send -------------------------------------------
 	// The server relays SSE data events: {"thinking":true} while the
 	// reasoning model deliberates, {"delta":"…"} per visible chunk,
@@ -127,7 +145,8 @@
 			if (res.status === 503) throw new Error('Finding chat is not enabled — turn it on under /admin/ai.');
 			if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-			if (res.headers.get('content-type')?.includes('text/event-stream') && res.body) {
+			const isStream = (res.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream');
+			if (isStream && res.body) {
 				const reader = res.body.getReader();
 				const decoder = new TextDecoder();
 				let buffer = '';
@@ -135,30 +154,30 @@
 					const { done, value } = await reader.read();
 					if (done) break;
 					buffer += decoder.decode(value, { stream: true });
-					const events = buffer.split('\n\n');
+					// SSE events end with a blank line; tolerate \r\n.
+					const events = buffer.replace(/\r\n/g, '\n').split('\n\n');
 					buffer = events.pop() ?? '';
-					for (const evt of events) {
-						const line = evt.trim();
-						if (!line.startsWith('data:')) continue;
-						let parsed: { thinking?: boolean; delta?: string; done?: boolean; error?: string };
-						try {
-							parsed = JSON.parse(line.slice(5).trim());
-						} catch {
-							continue;
-						}
-						if (parsed.error) throw new Error(parsed.error);
-						if (parsed.delta) {
-							streamingReply += parsed.delta;
-							void scrollToEnd();
-						}
-					}
+					for (const evt of events) consumeSSEEvent(evt);
 				}
+				consumeSSEEvent(buffer);
 				if (streamingReply.trim()) {
 					messages = [...messages, { role: 'assistant', content: streamingReply.trim() }];
 				}
 			} else {
-				const data = (await res.json()) as { reply: string };
-				messages = [...messages, { role: 'assistant', content: data.reply }];
+				// Non-stream reply. Be liberal: a proxy (or version skew)
+				// may hand us an SSE-shaped body under a JSON-ish
+				// content type — detect and parse it instead of choking.
+				const text = await res.text();
+				const trimmed = text.trimStart();
+				if (trimmed.startsWith('data:')) {
+					for (const evt of trimmed.replace(/\r\n/g, '\n').split('\n\n')) consumeSSEEvent(evt);
+					if (streamingReply.trim()) {
+						messages = [...messages, { role: 'assistant', content: streamingReply.trim() }];
+					}
+				} else {
+					const data = JSON.parse(text) as { reply: string };
+					messages = [...messages, { role: 'assistant', content: data.reply }];
+				}
 			}
 		} catch (e) {
 			error = e instanceof Error ? e.message : 'Chat request failed';
