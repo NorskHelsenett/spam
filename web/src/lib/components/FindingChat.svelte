@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { tick } from 'svelte';
-	import { Bot, Minus, Send, Square, X } from 'lucide-svelte';
+	import { Bot, Minus, RotateCcw, Send, Square, X } from 'lucide-svelte';
 	import Markdown from '$lib/components/Markdown.svelte';
 
 	type ChatMessage = { role: 'user' | 'assistant'; content: string };
@@ -22,6 +22,7 @@
 	let sending = $state(false);
 	let streamingReply = $state('');
 	let error = $state('');
+	let retryAttempt = $state(0); // attempt about to run; 0 = first try
 	let minimized = $state(false);
 	let messagesFor = $state('');
 	let bodyEl: HTMLElement | undefined = $state();
@@ -35,6 +36,8 @@
 			messages = [];
 			error = '';
 			minimized = false;
+			historyIdx = null;
+			historyDraft = '';
 		}
 	});
 
@@ -147,72 +150,194 @@
 	// The server relays SSE data events: {"thinking":true} while the
 	// reasoning model deliberates, {"delta":"…"} per visible chunk,
 	// {"done":true} / {"error":"…"} to finish.
+
+	// Errors that more attempts won't fix (config / client errors).
+	class NoRetryError extends Error {}
+
+	const sleep = (ms: number, signal: AbortSignal) =>
+		new Promise<void>((resolve) => {
+			const done = () => {
+				clearTimeout(timer);
+				signal.removeEventListener('abort', done);
+				resolve();
+			};
+			const timer = setTimeout(done, ms);
+			signal.addEventListener('abort', done);
+		});
+
+	// attemptOnce runs a single request/stream cycle and returns the
+	// assistant's reply text (possibly empty). Throws on transport or
+	// server-reported errors.
+	const attemptOnce = async (signal: AbortSignal): Promise<string> => {
+		streamingReply = '';
+		const res = await fetch('/api/triage/chat', {
+			method: 'POST',
+			credentials: 'include',
+			headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+			body: JSON.stringify({ asset_type: assetType, asset_id: assetId, messages }),
+			signal
+		});
+		if (res.status === 503) throw new NoRetryError('Finding chat is not enabled — turn it on under /admin/ai.');
+		if (!res.ok) {
+			// Client errors won't be fixed by retrying; server hiccups might.
+			const fatal = res.status >= 400 && res.status < 500 && res.status !== 429;
+			throw fatal ? new NoRetryError(`HTTP ${res.status}`) : new Error(`HTTP ${res.status}`);
+		}
+
+		const isStream = (res.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream');
+		if (isStream && res.body) {
+			const reader = res.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = '';
+			for (;;) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				buffer += decoder.decode(value, { stream: true });
+				// SSE events end with a blank line; tolerate \r\n.
+				const events = buffer.replace(/\r\n/g, '\n').split('\n\n');
+				buffer = events.pop() ?? '';
+				for (const evt of events) consumeSSEEvent(evt);
+			}
+			consumeSSEEvent(buffer);
+			return streamingReply.trim();
+		}
+
+		// Non-stream reply. Be liberal: a proxy (or version skew)
+		// may hand us an SSE-shaped body under a JSON-ish
+		// content type — detect and parse it instead of choking.
+		const text = await res.text();
+		const trimmed = text.trimStart();
+		if (trimmed.startsWith('data:')) {
+			for (const evt of trimmed.replace(/\r\n/g, '\n').split('\n\n')) consumeSSEEvent(evt);
+			return streamingReply.trim();
+		}
+		return (JSON.parse(text) as { reply: string }).reply;
+	};
+
+	// request streams a reply for the conversation as it stands,
+	// auto-retrying transient failures (network drops, 5xx, stream
+	// errors, empty replies) before surfacing the error + Resend.
+	const MAX_ATTEMPTS = 3;
+	let aborter: AbortController | null = null;
+	const request = async () => {
+		error = '';
+		sending = true;
+		retryAttempt = 0;
+		aborter = new AbortController();
+		const { signal } = aborter;
+		void scrollToEnd();
+		try {
+			for (let attempt = 1; ; attempt++) {
+				try {
+					const reply = (await attemptOnce(signal)).trim();
+					if (!reply) throw new Error('The model returned an empty reply');
+					messages = [...messages, { role: 'assistant', content: reply }];
+					return;
+				} catch (e) {
+					if (signal.aborted || e instanceof NoRetryError || attempt >= MAX_ATTEMPTS) throw e;
+					retryAttempt = attempt + 1;
+					await sleep(attempt * 1500, signal);
+					if (signal.aborted) return;
+				}
+			}
+		} catch (e) {
+			// Closing the window aborts the request — not an error.
+			if (signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
+			error = e instanceof Error ? e.message : 'Chat request failed';
+		} finally {
+			sending = false;
+			retryAttempt = 0;
+			streamingReply = '';
+			void scrollToEnd();
+		}
+	};
+
 	const send = async () => {
 		const text = input.trim();
 		if (!text || sending) return;
 		input = '';
-		error = '';
+		historyIdx = null;
+		historyDraft = '';
 		messages = [...messages, { role: 'user', content: text }];
-		sending = true;
-		streamingReply = '';
-		void scrollToEnd();
-		try {
-			const res = await fetch('/api/triage/chat', {
-				method: 'POST',
-				credentials: 'include',
-				headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-				body: JSON.stringify({ asset_type: assetType, asset_id: assetId, messages })
-			});
-			if (res.status === 503) throw new Error('Finding chat is not enabled — turn it on under /admin/ai.');
-			if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		await request();
+	};
 
-			const isStream = (res.headers.get('content-type') ?? '').toLowerCase().includes('text/event-stream');
-			if (isStream && res.body) {
-				const reader = res.body.getReader();
-				const decoder = new TextDecoder();
-				let buffer = '';
-				for (;;) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					buffer += decoder.decode(value, { stream: true });
-					// SSE events end with a blank line; tolerate \r\n.
-					const events = buffer.replace(/\r\n/g, '\n').split('\n\n');
-					buffer = events.pop() ?? '';
-					for (const evt of events) consumeSSEEvent(evt);
-				}
-				consumeSSEEvent(buffer);
-				if (streamingReply.trim()) {
-					messages = [...messages, { role: 'assistant', content: streamingReply.trim() }];
-				}
-			} else {
-				// Non-stream reply. Be liberal: a proxy (or version skew)
-				// may hand us an SSE-shaped body under a JSON-ish
-				// content type — detect and parse it instead of choking.
-				const text = await res.text();
-				const trimmed = text.trimStart();
-				if (trimmed.startsWith('data:')) {
-					for (const evt of trimmed.replace(/\r\n/g, '\n').split('\n\n')) consumeSSEEvent(evt);
-					if (streamingReply.trim()) {
-						messages = [...messages, { role: 'assistant', content: streamingReply.trim() }];
-					}
-				} else {
-					const data = JSON.parse(text) as { reply: string };
-					messages = [...messages, { role: 'assistant', content: data.reply }];
-				}
+	const resend = () => {
+		if (sending || messages.length === 0) return;
+		void request();
+	};
+
+	// Starter queries shown while the conversation is empty. Each maps
+	// to evidence the grounding payload actually carries (tier reasons,
+	// exposure, fix versions, image metadata).
+	const suggestions = [
+		'Is this actually exploitable in our environment?',
+		'What should we patch first, and to which version?',
+		'Can we mitigate this without upgrading?',
+		'Why did this finding get its tier — do you agree?',
+		'Write a short summary for a ticket.'
+	];
+
+	const sendSuggestion = (q: string) => {
+		if (sending) return;
+		input = q;
+		void send();
+	};
+
+	// Closing discards the conversation; reopening starts fresh.
+	const close = () => {
+		open = false;
+		aborter?.abort();
+		messages = [];
+		input = '';
+		error = '';
+		messagesFor = '';
+		historyIdx = null;
+		historyDraft = '';
+	};
+
+	// --- Input history --------------------------------------------
+	// Arrow up/down in the input recalls previously sent messages,
+	// shell-style. Arrows are only hijacked at the edge of the text
+	// so caret movement inside a multi-line draft still works.
+	let historyIdx: number | null = null;
+	let historyDraft = '';
+
+	const navigateHistory = (e: KeyboardEvent) => {
+		const el = e.currentTarget as HTMLTextAreaElement;
+		const hist = messages.filter((m) => m.role === 'user').map((m) => m.content);
+		if (hist.length === 0) return;
+		if (e.key === 'ArrowUp') {
+			if (el.value.slice(0, el.selectionStart).includes('\n')) return;
+			if (historyIdx === null) {
+				historyDraft = input;
+				historyIdx = hist.length - 1;
+			} else if (historyIdx > 0) {
+				historyIdx -= 1;
 			}
-		} catch (e) {
-			error = e instanceof Error ? e.message : 'Chat request failed';
-		} finally {
-			sending = false;
-			streamingReply = '';
-			void scrollToEnd();
+			input = hist[historyIdx];
+		} else {
+			if (historyIdx === null) return;
+			if (el.value.slice(el.selectionEnd).includes('\n')) return;
+			if (historyIdx < hist.length - 1) {
+				historyIdx += 1;
+				input = hist[historyIdx];
+			} else {
+				// Walked past the newest entry — restore the draft.
+				historyIdx = null;
+				input = historyDraft;
+			}
 		}
+		e.preventDefault();
+		void tick().then(() => el.setSelectionRange(el.value.length, el.value.length));
 	};
 
 	const onKeydown = (e: KeyboardEvent) => {
 		if (e.key === 'Enter' && !e.shiftKey) {
 			e.preventDefault();
 			void send();
+		} else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+			navigateHistory(e);
 		}
 	};
 </script>
@@ -244,7 +369,7 @@
 			<button type="button" class="win-btn" aria-label={minimized ? 'Restore' : 'Hide'} onclick={toggleMinimize} onpointerdown={(e) => e.stopPropagation()}>
 				{#if minimized}<Square size={12} />{:else}<Minus size={13} />{/if}
 			</button>
-			<button type="button" class="win-btn" aria-label="Close" onclick={() => (open = false)} onpointerdown={(e) => e.stopPropagation()}>
+			<button type="button" class="win-btn" aria-label="Close" onclick={close} onpointerdown={(e) => e.stopPropagation()}>
 				<X size={14} />
 			</button>
 		</div>
@@ -253,8 +378,13 @@
 			<div class="chat-body" bind:this={bodyEl}>
 				{#if messages.length === 0 && !sending}
 					<p class="chat-empty">
-						Ask about this finding — exploitability, what to patch first, possible mitigations, or whether it even applies to your setup. The model sees the full evidence: all CVEs with advisories, exposure, and the dashboard's own assessment.
+						Ask about this finding — exploitability, what to patch first, possible mitigations, or whether it even applies to your setup. The model sees the full evidence: all CVEs with advisories, exposure, image metadata and labels, and the dashboard's own assessment.
 					</p>
+					<div class="chat-suggestions">
+						{#each suggestions as q}
+							<button type="button" class="chat-suggestion" onclick={() => sendSuggestion(q)}>{q}</button>
+						{/each}
+					</div>
 				{/if}
 				{#each messages as m}
 					<div class="chat-msg" class:user={m.role === 'user'}>
@@ -272,12 +402,18 @@
 				{:else if sending}
 					<div class="chat-msg">
 						<p class="chat-bubble chat-thinking">
-							Thinking<span class="dots"><span>.</span><span>.</span><span>.</span></span>
+							{#if retryAttempt}Hit a snag — retrying ({retryAttempt}/{MAX_ATTEMPTS}){:else}Thinking{/if}<span class="dots"><span>.</span><span>.</span><span>.</span></span>
 						</p>
 					</div>
 				{/if}
 				{#if error}
-					<p class="chat-error">{error}</p>
+					<div class="chat-error-row">
+						<p class="chat-error">{error}</p>
+						<button type="button" class="chat-retry" onclick={resend} disabled={sending}>
+							<RotateCcw size={12} />
+							Resend
+						</button>
+					</div>
 				{/if}
 			</div>
 
@@ -326,7 +462,7 @@
 		z-index: 900;
 		display: flex;
 		flex-direction: column;
-		width: min(34rem, calc(100vw - 2rem));
+		width: min(68rem, calc(100vw - 2rem));
 		max-height: min(34rem, calc(100vh - 4rem));
 		border-radius: 0.9rem;
 		background: var(--main-content-bg);
@@ -411,6 +547,28 @@
 		font-size: 0.75rem;
 		line-height: 1.5;
 		color: var(--text-muted);
+	}
+	.chat-suggestions {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.4rem;
+	}
+	.chat-suggestion {
+		border: 1px solid var(--border-color);
+		border-radius: 0.7rem;
+		padding: 0.35rem 0.65rem;
+		font-size: 0.75rem;
+		line-height: 1.4;
+		text-align: left;
+		color: var(--text-secondary);
+		background: transparent;
+		cursor: pointer;
+		transition: background 120ms ease, color 120ms ease;
+	}
+	.chat-suggestion:hover {
+		background: var(--hover-bg);
+		color: var(--text-bright);
 	}
 	.chat-msg {
 		display: flex;
@@ -499,10 +657,39 @@
 		}
 	}
 
+	.chat-error-row {
+		display: flex;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
 	.chat-error {
 		margin: 0;
 		font-size: 0.75rem;
 		color: var(--error);
+	}
+	.chat-retry {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		flex-shrink: 0;
+		border: 1px solid var(--border-color);
+		border-radius: 0.4rem;
+		padding: 0.2rem 0.55rem;
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--text-secondary);
+		background: transparent;
+		cursor: pointer;
+		transition: background 120ms ease, color 120ms ease;
+	}
+	.chat-retry:hover:not(:disabled) {
+		background: var(--hover-bg);
+		color: var(--text-bright);
+	}
+	.chat-retry:disabled {
+		opacity: 0.5;
+		cursor: default;
 	}
 
 	.chat-input-row {
