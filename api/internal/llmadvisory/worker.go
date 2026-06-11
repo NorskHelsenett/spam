@@ -24,9 +24,56 @@ const (
 	// instead of hammering the shared endpoint.
 	batchPerCycle = 20
 
-	// topVulnsInPayload bounds the CVE evidence handed to the model.
-	topVulnsInPayload = 8
+	// Advisory payload budgets. The endpoint carries ~256k context,
+	// so triage-driving vulns ship with their full description while
+	// the remainder ships as one metadata line each — bounded so a
+	// 3000-CVE base image stays well inside the window.
+	advisoryTriageVulnCap = 60
+	advisoryOtherVulnCap  = 500
+	advisoryDescCap       = 2000
+	advisoryHostCap       = 20
 )
+
+// exposedHost is one exposed-host row in the model payload: the
+// public hostname, everything host_exposure knows about how it is
+// served — cluster, namespace, route kind, TLS, the ingress
+// load-balancer IPs, ingress class, environment label — plus the
+// hostresolve worker's verdict: the DNS-resolved addresses and the
+// internal/external/unresolvable/pending classification.
+type exposedHost struct {
+	Host           string `json:"host"                    gorm:"column:host"`
+	Cluster        string `json:"cluster"                 gorm:"column:cluster"`
+	Namespace      string `json:"namespace"               gorm:"column:namespace"`
+	Kind           string `json:"kind"                    gorm:"column:kind"`
+	TLS            bool   `json:"tls"                     gorm:"column:tls"`
+	LBIPs          string `json:"lb_ips,omitempty"        gorm:"column:lb_ips"`
+	IngressClass   string `json:"ingress_class,omitempty" gorm:"column:ingress_class"`
+	Environment    string `json:"environment,omitempty"   gorm:"column:environment"`
+	ResolvedIPs    string `json:"resolved_ips,omitempty"  gorm:"column:resolved_ips"`
+	Classification string `json:"classification"          gorm:"column:classification"`
+}
+
+// exposedHostsQuery feeds both payload builders so the summary and
+// the chat ground on the same exposure detail. host_resolution is
+// the hostresolve worker's precomputed DNS verdict; a host it has
+// not reached yet reads as pending.
+const exposedHostsQuery = `
+	SELECT DISTINCT ed.host,
+	       COALESCE(he.cluster, ed.cluster_id) AS cluster,
+	       ed.namespace,
+	       ed.exposure_kind AS kind,
+	       COALESCE(he.tls, false) AS tls,
+	       COALESCE(he.lb_ips, '') AS lb_ips,
+	       COALESCE(he.ingress_class, '') AS ingress_class,
+	       COALESCE(he.environment, '') AS environment,
+	       COALESCE(hr.ips, '') AS resolved_ips,
+	       COALESCE(hr.classification, 'pending') AS classification
+	FROM exposed_digests ed
+	LEFT JOIN host_exposure he
+	  ON he.cluster_id = ed.cluster_id AND he.namespace = ed.namespace
+	 AND he.host = ed.host AND he.kind = ed.exposure_kind AND he.name = ed.exposure_name
+	LEFT JOIN host_resolution hr ON hr.host = ed.host
+	WHERE ed.digest = ? ORDER BY ed.host LIMIT ?`
 
 // Advisory is one asset_advisories row.
 type Advisory struct {
@@ -209,8 +256,12 @@ func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool) []asse
 }
 
 // BuildPayload assembles the JSON evidence handed to the model: the
-// asset's tier + signals, its top CVEs enriched with KEV/EPSS (VEX-
-// filtered exactly like the tier counts), and its exposed hosts.
+// asset's tier + signals, its CVEs (VEX-filtered exactly like the
+// tier counts), and its exposed hosts. Vulns that drive the tier —
+// KEV, elevated EPSS, criticals, highs on an exposed asset — carry
+// their full description; the rest ship as one metadata line each
+// (id, title, CVSS, EPSS, KEV, fix) so the model sees the whole
+// picture without the long tail dominating the context window.
 // Exported so the admin test bench can show precisely what the model
 // sees.
 func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (string, error) {
@@ -246,71 +297,89 @@ func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (stri
 
 	if sig.AssetType == "image" {
 		type vulnRow struct {
-			ID       string  `json:"id"        gorm:"column:canonical_id"`
-			Severity string  `json:"severity"  gorm:"column:severity"`
-			Pkg      string  `json:"pkg"       gorm:"column:pkg_name"`
-			Title    string  `json:"title"     gorm:"column:title"`
-			Fixed    string  `json:"fixed"     gorm:"column:fixed_version"`
-			EPSS     float32 `json:"epss"      gorm:"column:epss"`
-			KEV      bool    `json:"kev"       gorm:"column:kev"`
+			ID            string  `json:"id"                      gorm:"column:canonical_id"`
+			Severity      string  `json:"severity"                gorm:"column:severity"`
+			Pkg           string  `json:"pkg"                     gorm:"column:pkg_name"`
+			Installed     string  `json:"installed,omitempty"     gorm:"column:installed_version"`
+			Fixed         string  `json:"fixed"                   gorm:"column:fixed_version"`
+			Title         string  `json:"title"                   gorm:"column:title"`
+			Description   string  `json:"description,omitempty"   gorm:"column:description"`
+			CVSS          float32 `json:"cvss"                    gorm:"column:cvss"`
+			EPSS          float32 `json:"epss"                    gorm:"column:epss"`
+			KEV           bool    `json:"kev"                     gorm:"column:kev"`
+			KEVDueDate    string  `json:"kev_due_date,omitempty"  gorm:"column:kev_due_date"`
+			KEVRansomware bool    `json:"kev_ransomware,omitempty" gorm:"column:kev_ransomware"`
+			Triage        bool    `json:"-"                       gorm:"column:triage"`
 		}
 		var vulns []vulnRow
 		if err := db.WithContext(ctx).Raw(`
-			SELECT DISTINCT ON (COALESCE(vm.canonical_id, v.vuln_id))
-				COALESCE(vm.canonical_id, v.vuln_id) AS canonical_id,
-				v.severity, v.pkg_name,
-				LEFT(COALESCE(NULLIF(vm.title, ''), v.title), 160) AS title,
-				v.fixed_version,
-				COALESCE(e.score, 0)::real AS epss,
-				(k.cve_id IS NOT NULL) AS kev
-			FROM view_unified_image_vulnerabilities v
-			LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
-			LEFT JOIN epss_entries e ON e.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
-			LEFT JOIN cisa_kev_entries k ON k.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
-			WHERE v.image_id = ?
-			  AND NOT EXISTS (
-				SELECT 1
-				FROM component_vex vex
-				LEFT JOIN vuln_metadata vmx ON vmx.vuln_id = vex.vuln_id
-				JOIN sbom_component_view sc ON sc.purl = vex.p_url
-				JOIN sbom_bindings sb       ON sb.sbom_id     = sc.sbom_id
-				                           AND sb.asset_type = 'IMAGE_DIGEST'
-				WHERE vex.status IN ('not_affected', 'fixed')
-				  AND COALESCE(vmx.canonical_id, vex.vuln_id)
-				      = COALESCE(vm.canonical_id, v.vuln_id)
-				  AND sb.asset_ref_id::text = v.image_id
-			  )
-			ORDER BY COALESCE(vm.canonical_id, v.vuln_id),
-			         (k.cve_id IS NOT NULL) DESC, e.score DESC NULLS LAST
-		`, sig.AssetID).Scan(&vulns).Error; err != nil {
+			SELECT * FROM (
+				SELECT DISTINCT ON (COALESCE(vm.canonical_id, v.vuln_id))
+					COALESCE(vm.canonical_id, v.vuln_id) AS canonical_id,
+					v.severity, v.pkg_name, v.installed_version, v.fixed_version,
+					COALESCE(NULLIF(vm.title, ''), v.title) AS title,
+					LEFT(COALESCE(NULLIF(vm.description, ''), v.description), ?) AS description,
+					COALESCE(vm.cvss_score, 0)::real AS cvss,
+					COALESCE(e.score, 0)::real AS epss,
+					(k.cve_id IS NOT NULL) AS kev,
+					COALESCE(k.due_date::text, '') AS kev_due_date,
+					COALESCE(k.known_ransomware, false) AS kev_ransomware,
+					(
+						k.cve_id IS NOT NULL
+						OR COALESCE(e.score, 0) >= ?
+						OR v.severity = 'CRITICAL'
+						OR (? AND v.severity = 'HIGH')
+					) AS triage
+				FROM view_unified_image_vulnerabilities v
+				LEFT JOIN vuln_metadata vm ON vm.vuln_id = v.vuln_id
+				LEFT JOIN epss_entries e ON e.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				LEFT JOIN cisa_kev_entries k ON k.cve_id = COALESCE(vm.canonical_id, v.vuln_id)
+				WHERE v.image_id = ?
+				  AND NOT EXISTS (
+					SELECT 1
+					FROM component_vex vex
+					LEFT JOIN vuln_metadata vmx ON vmx.vuln_id = vex.vuln_id
+					JOIN sbom_component_view sc ON sc.purl = vex.p_url
+					JOIN sbom_bindings sb       ON sb.sbom_id     = sc.sbom_id
+					                           AND sb.asset_type = 'IMAGE_DIGEST'
+					WHERE vex.status IN ('not_affected', 'fixed')
+					  AND COALESCE(vmx.canonical_id, vex.vuln_id)
+					      = COALESCE(vm.canonical_id, v.vuln_id)
+					  AND sb.asset_ref_id::text = v.image_id
+				  )
+				ORDER BY COALESCE(vm.canonical_id, v.vuln_id)
+			) dedup
+			ORDER BY kev DESC, epss DESC,
+			         CASE severity WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END
+		`, advisoryDescCap, assetrisk.EPSSElevated, sig.InternetExposed, sig.AssetID).Scan(&vulns).Error; err != nil {
 			return "", err
 		}
-		// DISTINCT ON forces canonical_id ordering first; re-rank by
-		// exploitation evidence and trim to the payload budget here.
-		rank := func(v vulnRow) float64 {
-			r := float64(v.EPSS)
-			if v.KEV {
-				r += 1
+		// Split on the triage flag: tier-driving vulns keep the full
+		// row, the long tail is stripped to its metadata line.
+		var triageVulns, otherVulns []vulnRow
+		for _, v := range vulns {
+			if v.Triage {
+				triageVulns = append(triageVulns, v)
+				continue
 			}
-			return r
+			v.Description = ""
+			v.Installed = ""
+			otherVulns = append(otherVulns, v)
 		}
-		for i := 0; i < len(vulns); i++ {
-			for j := i + 1; j < len(vulns); j++ {
-				if rank(vulns[j]) > rank(vulns[i]) {
-					vulns[i], vulns[j] = vulns[j], vulns[i]
-				}
-			}
+		payload["vuln_total"] = len(vulns)
+		if len(triageVulns) > advisoryTriageVulnCap {
+			triageVulns = triageVulns[:advisoryTriageVulnCap]
+			payload["triage_vulns_note"] = "truncated to the highest-risk entries; totals in signals cover everything"
 		}
-		if len(vulns) > topVulnsInPayload {
-			vulns = vulns[:topVulnsInPayload]
+		if len(otherVulns) > advisoryOtherVulnCap {
+			otherVulns = otherVulns[:advisoryOtherVulnCap]
+			payload["other_vulns_note"] = "truncated; totals in signals cover everything"
 		}
-		payload["top_vulns"] = vulns
+		payload["triage_vulns"] = triageVulns
+		payload["other_vulns"] = otherVulns
 
-		var hosts []string
-		db.WithContext(ctx).Raw(
-			`SELECT DISTINCT host FROM exposed_digests WHERE digest = ? ORDER BY host LIMIT 10`,
-			sig.ImageDigest,
-		).Scan(&hosts)
+		var hosts []exposedHost
+		db.WithContext(ctx).Raw(exposedHostsQuery, sig.ImageDigest, advisoryHostCap).Scan(&hosts)
 		payload["exposed_hosts"] = hosts
 	} else {
 		// Repos carry no per-CVE lazy detail yet — the structured
@@ -338,8 +407,9 @@ const (
 // titles, descriptions, installed/fixed versions, per-CVE KEV
 // detail + EPSS percentile), exposed hosts with namespace/cluster,
 // the clusters running the digest, posture context, and the cached
-// advisory + shadow verdict when present. BuildPayload stays lean on
-// purpose — it feeds bulk generation; this feeds interactive triage.
+// advisory + shadow verdict when present. BuildPayload carries full
+// descriptions only for tier-driving vulns — it feeds bulk
+// generation; this feeds interactive triage.
 func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (string, error) {
 	tier := assetrisk.Tier(sig)
 	payload := map[string]any{
@@ -466,22 +536,8 @@ func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (
 			payload["vulns_note"] = "list truncated to the highest-risk entries; totals in signals cover everything"
 		}
 
-		type chatHost struct {
-			Host      string `json:"host"       gorm:"column:host"`
-			Cluster   string `json:"cluster"    gorm:"column:cluster"`
-			Namespace string `json:"namespace"  gorm:"column:namespace"`
-			TLS       bool   `json:"tls"        gorm:"column:tls"`
-		}
-		var hosts []chatHost
-		db.WithContext(ctx).Raw(`
-			SELECT DISTINCT ed.host, COALESCE(he.cluster, ed.cluster_id) AS cluster,
-			       ed.namespace, COALESCE(he.tls, false) AS tls
-			FROM exposed_digests ed
-			LEFT JOIN host_exposure he
-			  ON he.cluster_id = ed.cluster_id AND he.namespace = ed.namespace
-			 AND he.host = ed.host AND he.kind = ed.exposure_kind AND he.name = ed.exposure_name
-			WHERE ed.digest = ? ORDER BY ed.host LIMIT ?
-		`, sig.ImageDigest, chatHostCap).Scan(&hosts)
+		var hosts []exposedHost
+		db.WithContext(ctx).Raw(exposedHostsQuery, sig.ImageDigest, chatHostCap).Scan(&hosts)
 		payload["exposed_hosts"] = hosts
 
 		type chatCluster struct {
