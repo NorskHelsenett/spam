@@ -1893,16 +1893,14 @@ type hostSummaryCacheEntry struct {
 // overview chip / donut — it is NOT a substitute for the full hosts
 // list, just the summary numbers.
 //
-// Categorisation rules:
-//   - first resolve the hostname through SPAM_HOST_DNS_RESOLVER
-//     (defaults to 9.9.9.9) and classify that result. This answers
-//     the operator-facing question: "does public DNS point this host
-//     at a public address?";
-//   - if DNS is unavailable/unresolvable, fall back to the cluster-
-//     reported LoadBalancer IP;
-//   - internal means RFC1918/loopback, plus any operator-owned ranges
-//     in SPAM_HOST_INTERNAL_CIDRS. Everything else is external;
-//   - else → pending (no usable DNS and no LB IP).
+// Categorisation comes from host_resolution, written by the
+// internal/hostresolve worker (see hostresolve.Classify for the full
+// precedence). In short: a host-specific public-DNS answer (DoH, since
+// outbound :53 is blocked) wins — under split-DNS only the public
+// vantage can prove external exposure; otherwise the split-horizon
+// resolver's answer, then the cluster-reported LoadBalancer IP.
+// internal means RFC1918/loopback plus any operator-owned ranges in
+// SPAM_HOST_INTERNAL_CIDRS; pending means no usable answer yet.
 //
 // Cached in kv_store keyed on the ACL fragment + the host_exposure MV
 // watermark, so the cache invalidates naturally on the next MV refresh.

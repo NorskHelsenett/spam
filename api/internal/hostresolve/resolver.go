@@ -29,14 +29,24 @@ import (
 	"github.com/NorskHelsenett/spam/internal/cache"
 )
 
-// Result is the cached shape of a single DNS lookup. Mirrors
-// scam.resolveResult on purpose so the future consolidation lands as a
-// type alias rather than a rename.
+// Result is the cached shape of one host's DNS verdict from both
+// vantage points. IPs/IsLocal/Error mirror scam.resolveResult (the
+// split-horizon view) so the future consolidation lands as a type alias
+// rather than a rename; the Public* fields carry the DoH public-DNS
+// view that drives classification under split-DNS.
 type Result struct {
 	Host    string   `json:"host"`
 	IPs     []string `json:"ips"`
 	IsLocal bool     `json:"is_local"`
 	Error   string   `json:"error,omitempty"`
+	// Public-DNS vantage (DoH — see doh.go). PublicError is
+	// publicErrUnresolvable when public DNS authoritatively has no
+	// record, publicErrUnavailable when the DoH lookup failed or is
+	// disabled. Wildcard marks a public answer that matches the parent
+	// zone's wildcard probe — zone-level exposure, not host-level.
+	PublicIPs   []string `json:"public_ips,omitempty"`
+	PublicError string   `json:"public_error,omitempty"`
+	Wildcard    bool     `json:"wildcard,omitempty"`
 }
 
 // Classification buckets. Stored verbatim in host_resolution.classification
@@ -134,59 +144,117 @@ func IsPrivateIP(ipStr string) bool {
 	return false
 }
 
-func cacheKey(host string) string {
+// cacheKeyHash digests every config knob that changes a lookup's
+// outcome — resolver address, internal CIDR ranges, DoH endpoint — so a
+// config change naturally invalidates cached results instead of serving
+// verdicts computed under the old config.
+func cacheKeyHash() string {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(resolverAddr))
+	_, _ = h.Write([]byte(dohURL))
 	for _, cidr := range internalCIDRs {
 		_, _ = h.Write([]byte(cidr.String()))
 	}
-	return fmt.Sprintf("%s%x:%s", cachePrefix, h.Sum64(), host)
+	return fmt.Sprintf("%x", h.Sum64())
 }
 
-// Resolve does (or replays from cache) a single DNS lookup. Negative
-// results are cached too, so an unresolvable host doesn't pay the 3s
-// lookup timeout every pass.
+func cacheKey(host string) string {
+	return cachePrefix + cacheKeyHash() + ":" + host
+}
+
+// allPrivate reports whether every address is private. False for an
+// empty slice — no addresses proves nothing. Answer order is
+// nondeterministic (round-robin, mixed A/AAAA), and any single public
+// address means the host is reachable from outside.
+func allPrivate(ips []string) bool {
+	if len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !IsPrivateIP(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+// Resolve does (or replays from cache) the two DNS lookups for a host:
+// the split-horizon view through the pod's/operator's resolver, and the
+// public view through DoH. Negative results are cached too, so an
+// unresolvable host doesn't pay the lookup timeouts every pass.
 func Resolve(ctx context.Context, cs cache.Store, host string) Result {
 	key := cacheKey(host)
 	if cached, ok, _ := cache.GetJSON[Result](ctx, cs, key); ok {
 		return cached
 	}
 
+	res := Result{Host: host}
+
+	// Split-horizon view. Kept even when it fails — the public lookup
+	// below may still classify the host.
 	lookupCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
 	ips, err := netResolver.LookupHost(lookupCtx, host)
+	cancel()
 	if err != nil {
-		res := Result{Host: host, Error: "unresolvable"}
-		_ = cache.SetJSON(ctx, cs, key, res, cacheTTL)
-		return res
+		res.Error = "unresolvable"
+	} else {
+		res.IPs = ips
+		res.IsLocal = allPrivate(ips)
 	}
 
-	// Internal iff every resolved address is private: answer order is
-	// nondeterministic (round-robin, mixed A/AAAA), and any public
-	// address means the host is reachable from outside.
-	local := len(ips) > 0
-	for _, ip := range ips {
-		if !IsPrivateIP(ip) {
-			local = false
-			break
-		}
+	// Public view. A positive answer is checked against the parent
+	// zone's wildcard probe so a *.zone record doesn't masquerade as a
+	// host-specific public record.
+	res.PublicIPs, res.PublicError = resolvePublic(ctx, host)
+	if len(res.PublicIPs) > 0 {
+		res.Wildcard = publicAnswerIsWildcard(ctx, cs, host, res.PublicIPs)
 	}
-	res := Result{Host: host, IPs: ips, IsLocal: local}
-	_ = cache.SetJSON(ctx, cs, key, res, cacheTTL)
+
+	// A transient DoH outage shouldn't pin a vantage-less verdict for
+	// the full TTL — cache it briefly so the next worker pass retries
+	// the public lookup.
+	ttl := cacheTTL
+	if res.PublicError == publicErrUnavailable {
+		ttl = time.Hour
+	}
+	_ = cache.SetJSON(ctx, cs, key, res, ttl)
 	return res
 }
 
-// Classify reduces a DNS result plus the cluster-reported LB IP CSV to
-// a single classification bucket. Mirrors classifyHostInto in scam:
+// Classify reduces the two-vantage DNS result plus the cluster-reported
+// LB IP CSV to a single classification bucket:
 //
-//   1. DNS A record wins — split-horizon/public DNS may point a host
-//      at an external address even when the cluster's LB is private.
-//   2. DNS missing → fall back to the first LB IP.
-//   3. Neither → unresolvable when DNS errored, pending when the host
-//      simply has nothing yet (caller passes Result{} to signal "I
-//      haven't even tried to resolve this one").
+//  1. A host-specific public DNS answer wins. Under split-DNS the
+//     internal resolver answers with the internal zone record, so only
+//     the public vantage can prove external exposure — a public record
+//     pointing at a public address is external no matter what the
+//     internal zone says.
+//  2. A wildcard-derived public answer proves the *zone* resolves, not
+//     the host, so the split-horizon answer is preferred when there is
+//     one; a host unknown even internally falls back to the wildcard
+//     target addresses.
+//  3. No public answer (absent from public DNS, or DoH unavailable):
+//     the legacy path — split-horizon answer first, then the first LB
+//     IP, then unresolvable/pending.
 func Classify(res Result, lbIPsCSV string) string {
+	if len(res.PublicIPs) > 0 && !res.Wildcard {
+		if allPrivate(res.PublicIPs) {
+			return ClassInternal
+		}
+		return ClassExternal
+	}
+	if res.Wildcard {
+		if res.Error == "" && len(res.IPs) > 0 {
+			if res.IsLocal {
+				return ClassInternal
+			}
+			return ClassExternal
+		}
+		if allPrivate(res.PublicIPs) {
+			return ClassInternal
+		}
+		return ClassExternal
+	}
 	if res.Error == "" && len(res.IPs) > 0 {
 		if res.IsLocal {
 			return ClassInternal

@@ -154,7 +154,8 @@ func (w *Worker) resolveAndUpsert(ctx context.Context, it workItem) {
 	res := Resolve(ctx, w.cs, it.Host)
 	classification := Classify(res, it.LBIPs)
 	ips := strings.Join(res.IPs, ",")
-	if err := upsert(ctx, w.db, it.Host, classification, ips, it.LBIPs); err != nil {
+	publicIPs := strings.Join(res.PublicIPs, ",")
+	if err := upsert(ctx, w.db, it.Host, classification, ips, publicIPs, res.Wildcard, it.LBIPs); err != nil {
 		// Don't log every host — a flaky DB during shutdown can
 		// spam. Print one line per failed row at debug-ish verbosity
 		// using the host so operators can correlate.

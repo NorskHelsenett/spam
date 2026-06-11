@@ -45,15 +45,20 @@ func listWork(ctx context.Context, db *gorm.DB, staleAfter time.Duration, limit 
 }
 
 // upsert writes a single resolved row, bumping resolved_at on conflict
-// so the next listWork pass skips it until staleAfter elapses.
-func upsert(ctx context.Context, db *gorm.DB, host, classification, ips, lbIPs string) error {
+// so the next listWork pass skips it until staleAfter elapses. ips is
+// the split-horizon answer, public_ips the DoH answer that (when
+// host-specific) drives the classification — stored so "why is this
+// external?" is answerable from the row itself.
+func upsert(ctx context.Context, db *gorm.DB, host, classification, ips, publicIPs string, wildcard bool, lbIPs string) error {
 	return db.WithContext(ctx).Exec(`
-		INSERT INTO host_resolution (host, classification, ips, lb_ips, resolved_at)
-		VALUES (?, ?, ?, ?, NOW())
+		INSERT INTO host_resolution (host, classification, ips, public_ips, wildcard, lb_ips, resolved_at)
+		VALUES (?, ?, ?, ?, ?, ?, NOW())
 		ON CONFLICT (host) DO UPDATE
 		   SET classification = EXCLUDED.classification,
 		       ips            = EXCLUDED.ips,
+		       public_ips     = EXCLUDED.public_ips,
+		       wildcard       = EXCLUDED.wildcard,
 		       lb_ips          = EXCLUDED.lb_ips,
 		       resolved_at    = NOW()
-	`, host, classification, ips, lbIPs).Error
+	`, host, classification, ips, publicIPs, wildcard, lbIPs).Error
 }
