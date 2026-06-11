@@ -2974,25 +2974,38 @@ const (
 
 var (
 	hostDNSResolverAddr = resolveHostDNSResolverAddr()
-	hostDNSResolver     = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
-			return d.DialContext(ctx, network, hostDNSResolverAddr)
-		},
-	}
-	hostInternalCIDRs = parseHostInternalCIDRs()
+	hostDNSResolver     = newHostDNSResolver(hostDNSResolverAddr)
+	hostInternalCIDRs   = parseHostInternalCIDRs()
 )
 
+// resolveHostDNSResolverAddr returns the operator-configured DNS server,
+// or "" for the system resolver. The system default matters: it knows
+// split-horizon internal zones, while a hardcoded public resolver can
+// never resolve internal-only hosts (and outbound :53 to the internet is
+// blocked in most of our environments), which left every host
+// unresolvable and the internal/external split empty.
 func resolveHostDNSResolverAddr() string {
 	raw := strings.TrimSpace(os.Getenv("SPAM_HOST_DNS_RESOLVER"))
 	if raw == "" {
-		return "9.9.9.9:53"
+		return ""
 	}
 	if _, _, err := net.SplitHostPort(raw); err == nil {
 		return raw
 	}
 	return net.JoinHostPort(raw, "53")
+}
+
+func newHostDNSResolver(addr string) *net.Resolver {
+	if addr == "" {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, network, addr)
+		},
+	}
 }
 
 func resolveCacheKey(host string) string {
@@ -3052,9 +3065,15 @@ func resolveHost(ctx context.Context, cs cache.Store, host string) resolveResult
 		return res
 	}
 
-	local := false
-	if len(ips) > 0 {
-		local = isPrivateIP(ips[0])
+	// Internal iff every resolved address is private: answer order is
+	// nondeterministic (round-robin, mixed A/AAAA), and any public
+	// address means the host is reachable from outside.
+	local := len(ips) > 0
+	for _, ip := range ips {
+		if !isPrivateIP(ip) {
+			local = false
+			break
+		}
 	}
 
 	res := resolveResult{Host: host, IPs: ips, IsLocal: local}
@@ -3080,21 +3099,16 @@ func ResolveHostHandler(cs cache.Store) http.HandlerFunc {
 	}
 }
 
+// isPrivateIP returns true when ipStr falls in RFC1918, RFC4193 (IPv6
+// ULA), loopback, link-local, or any operator-configured
+// SPAM_HOST_INTERNAL_CIDRS range.
 func isPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
-	privateRanges := []struct{ start, end net.IP }{
-		{net.ParseIP("10.0.0.0"), net.ParseIP("10.255.255.255")},
-		{net.ParseIP("172.16.0.0"), net.ParseIP("172.31.255.255")},
-		{net.ParseIP("192.168.0.0"), net.ParseIP("192.168.255.255")},
-		{net.ParseIP("127.0.0.0"), net.ParseIP("127.255.255.255")},
-	}
-	for _, r := range privateRanges {
-		if bytesCompare(ip.To16(), r.start.To16()) >= 0 && bytesCompare(ip.To16(), r.end.To16()) <= 0 {
-			return true
-		}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return true
 	}
 	for _, cidr := range hostInternalCIDRs {
 		if cidr.Contains(ip) {
@@ -3102,18 +3116,6 @@ func isPrivateIP(ipStr string) bool {
 		}
 	}
 	return false
-}
-
-func bytesCompare(a, b net.IP) int {
-	for i := range a {
-		if a[i] < b[i] {
-			return -1
-		}
-		if a[i] > b[i] {
-			return 1
-		}
-	}
-	return 0
 }
 
 type ingestResponse struct {

@@ -5,8 +5,8 @@
 // DNS lookup per unique host inline, which serialised into multi-second
 // responses on real fleets — see HostSummaryHandler in
 // internal/scam/handler.go. A background Worker (worker.go) periodically
-// resolves every host present in host_exposure through the operator-
-// configured DNS resolver (SPAM_HOST_DNS_RESOLVER) and upserts the
+// resolves every host present in host_exposure through the system
+// resolver (or SPAM_HOST_DNS_RESOLVER when set) and upserts the
 // classification here; the handler joins host_resolution and answers
 // in O(rows-in-acl) without ever touching DNS.
 //
@@ -59,25 +59,38 @@ const (
 
 var (
 	resolverAddr  = loadResolverAddr()
-	netResolver   = &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			d := net.Dialer{Timeout: 3 * time.Second}
-			return d.DialContext(ctx, network, resolverAddr)
-		},
-	}
+	netResolver   = newResolver(resolverAddr)
 	internalCIDRs = loadInternalCIDRs()
 )
 
+// loadResolverAddr returns the operator-configured DNS server, or "" for
+// the system resolver. The system default matters: the pod's resolver
+// knows split-horizon internal zones, while a hardcoded public resolver
+// can never resolve internal-only hosts (and outbound :53 to the
+// internet is blocked in most of our environments), which left every
+// host unresolvable and the internal/external split empty.
 func loadResolverAddr() string {
 	raw := strings.TrimSpace(os.Getenv("SPAM_HOST_DNS_RESOLVER"))
 	if raw == "" {
-		return "9.9.9.9:53"
+		return ""
 	}
 	if _, _, err := net.SplitHostPort(raw); err == nil {
 		return raw
 	}
 	return net.JoinHostPort(raw, "53")
+}
+
+func newResolver(addr string) *net.Resolver {
+	if addr == "" {
+		return net.DefaultResolver
+	}
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 3 * time.Second}
+			return d.DialContext(ctx, network, addr)
+		},
+	}
 }
 
 func loadInternalCIDRs() []*net.IPNet {
@@ -101,25 +114,17 @@ func loadInternalCIDRs() []*net.IPNet {
 	return out
 }
 
-// IsPrivateIP returns true when ipStr falls in RFC1918, loopback, or any
-// operator-configured SPAM_HOST_INTERNAL_CIDRS range. Mirrors the
-// equivalent in scam so the worker and the legacy inline-resolve path
-// agree on classification.
+// IsPrivateIP returns true when ipStr falls in RFC1918, RFC4193 (IPv6
+// ULA), loopback, link-local, or any operator-configured
+// SPAM_HOST_INTERNAL_CIDRS range. Mirrors the equivalent in scam so the
+// worker and the legacy inline-resolve path agree on classification.
 func IsPrivateIP(ipStr string) bool {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		return false
 	}
-	privateRanges := []struct{ start, end net.IP }{
-		{net.ParseIP("10.0.0.0"), net.ParseIP("10.255.255.255")},
-		{net.ParseIP("172.16.0.0"), net.ParseIP("172.31.255.255")},
-		{net.ParseIP("192.168.0.0"), net.ParseIP("192.168.255.255")},
-		{net.ParseIP("127.0.0.0"), net.ParseIP("127.255.255.255")},
-	}
-	for _, r := range privateRanges {
-		if bytesCompare(ip.To16(), r.start.To16()) >= 0 && bytesCompare(ip.To16(), r.end.To16()) <= 0 {
-			return true
-		}
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return true
 	}
 	for _, cidr := range internalCIDRs {
 		if cidr.Contains(ip) {
@@ -127,18 +132,6 @@ func IsPrivateIP(ipStr string) bool {
 		}
 	}
 	return false
-}
-
-func bytesCompare(a, b net.IP) int {
-	for i := range a {
-		if a[i] < b[i] {
-			return -1
-		}
-		if a[i] > b[i] {
-			return 1
-		}
-	}
-	return 0
 }
 
 func cacheKey(host string) string {
@@ -169,9 +162,15 @@ func Resolve(ctx context.Context, cs cache.Store, host string) Result {
 		return res
 	}
 
-	local := false
-	if len(ips) > 0 {
-		local = IsPrivateIP(ips[0])
+	// Internal iff every resolved address is private: answer order is
+	// nondeterministic (round-robin, mixed A/AAAA), and any public
+	// address means the host is reachable from outside.
+	local := len(ips) > 0
+	for _, ip := range ips {
+		if !IsPrivateIP(ip) {
+			local = false
+			break
+		}
 	}
 	res := Result{Host: host, IPs: ips, IsLocal: local}
 	_ = cache.SetJSON(ctx, cs, key, res, cacheTTL)
