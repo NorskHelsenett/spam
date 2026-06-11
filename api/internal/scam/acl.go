@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/hiddenns"
 	"gorm.io/gorm"
 )
 
@@ -84,6 +85,36 @@ func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	}
 	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (ror_slug <> '' AND ror_slug IN (?))))"
 	return frag, []any{ids, ids}, false
+}
+
+// hiddenNamespaceWhere compiles the admin-curated hidden-namespace
+// patterns (hiddenns package) into an "AND …" fragment over the given
+// namespace column, or "" when nothing should be filtered. Admin and
+// global_reader keep the unfiltered fleet view — hiding administrative
+// namespaces (nhn-scam, nhn-ror, …) is a focus aid for regular users,
+// not an access boundary.
+func hiddenNamespaceWhere(r *http.Request, db *gorm.DB, col string) (string, []any) {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return "", nil
+	}
+	frag, args := hiddenns.Clause(r.Context(), db, col)
+	if frag == "" {
+		return "", nil
+	}
+	return "AND " + frag, args
+}
+
+// hiddenNamespaceMatch is the Go-side twin of hiddenNamespaceWhere for
+// handlers that group rows in memory (ClusterChainHandler). Returns a
+// predicate that reports whether a namespace should be hidden from the
+// caller.
+func hiddenNamespaceMatch(r *http.Request, db *gorm.DB) func(string) bool {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return func(string) bool { return false }
+	}
+	return hiddenns.MatcherFor(hiddenns.Patterns(r.Context(), db))
 }
 
 // canReadCluster is the per-cluster gate used by chain-style handlers

@@ -1049,6 +1049,11 @@ func ImageFacetsHandler(db *gorm.DB) http.HandlerFunc {
 		clusterIDs := parseImageFilterCSV(r.URL.Query().Get("cluster_ids"))
 		namespaces := parseImageFilterCSV(r.URL.Query().Get("namespaces"))
 
+		// Hidden-namespace exclusion applies to all three facet queries —
+		// unlike the user-driven dimensions it is never skipped, so a
+		// hidden namespace can't reappear in its own dropdown.
+		hiddenWhere, hiddenArgs := hiddenNamespaceWhere(r, db, "cii.namespace")
+
 		// buildWhere assembles the pre-GROUP-BY filter fragment for a
 		// facet query. The three include* flags let each facet skip its
 		// own dimension — that's the bit that keeps the registry dropdown
@@ -1093,12 +1098,13 @@ func ImageFacetsHandler(db *gorm.DB) http.HandlerFunc {
 			       COUNT(DISTINCT (cii.raw_registry || '/' || cii.image || '@' || cii.digest))::bigint AS image_count
 			FROM cluster_image_inventory cii
 			` + livenessJoin + `
-			WHERE TRUE ` + aclWhere + ` ` + regWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + regWhere + ` ` + hiddenWhere + `
 			GROUP BY cii.registry
 			ORDER BY image_count DESC
 		`
 		regFullArgs := append([]any{}, aclArgs...)
 		regFullArgs = append(regFullArgs, regArgs...)
+		regFullArgs = append(regFullArgs, hiddenArgs...)
 		if err := db.WithContext(ctx).Raw(regQuery, regFullArgs...).Scan(&resp.Registries).Error; err != nil {
 			log.Printf("ImageFacetsHandler registry query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -1119,11 +1125,12 @@ func ImageFacetsHandler(db *gorm.DB) http.HandlerFunc {
 			FROM cluster_image_inventory cii
 			LEFT JOIN cluster_summary cs ON cs.cluster_id = cii.cluster_id
 			` + livenessJoin + `
-			WHERE TRUE ` + aclWhere + ` ` + clWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + clWhere + ` ` + hiddenWhere + `
 			ORDER BY label
 		`
 		clFullArgs := append([]any{}, aclArgs...)
 		clFullArgs = append(clFullArgs, clArgs...)
+		clFullArgs = append(clFullArgs, hiddenArgs...)
 		if err := db.WithContext(ctx).Raw(clQuery, clFullArgs...).Scan(&resp.Clusters).Error; err != nil {
 			log.Printf("ImageFacetsHandler cluster query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -1136,11 +1143,12 @@ func ImageFacetsHandler(db *gorm.DB) http.HandlerFunc {
 			SELECT DISTINCT cii.namespace
 			FROM cluster_image_inventory cii
 			` + livenessJoin + `
-			WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` AND cii.namespace <> ''
+			WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` ` + hiddenWhere + ` AND cii.namespace <> ''
 			ORDER BY cii.namespace
 		`
 		nsFullArgs := append([]any{}, aclArgs...)
 		nsFullArgs = append(nsFullArgs, nsArgs...)
+		nsFullArgs = append(nsFullArgs, hiddenArgs...)
 		if err := db.WithContext(ctx).Raw(nsQuery, nsFullArgs...).Scan(&resp.Namespaces).Error; err != nil {
 			log.Printf("ImageFacetsHandler namespace query error: %v", err)
 			http.Error(w, "query failed", http.StatusInternalServerError)
@@ -1338,6 +1346,13 @@ func ImageDetailHandler(db *gorm.DB) http.HandlerFunc {
 				preGroupWhere += `AND cii.namespace IN (` + placeholders + `) `
 				preGroupArgs = append(preGroupArgs, values...)
 			}
+		}
+		// Hidden-namespace exclusion, pre-GROUP BY like the user filters
+		// so cluster_count / namespace_count / container_count don't
+		// leak rows from administrative namespaces.
+		if hiddenWhere, hiddenArgs := hiddenNamespaceWhere(r, db, "cii.namespace"); hiddenWhere != "" {
+			preGroupWhere += hiddenWhere + ` `
+			preGroupArgs = append(preGroupArgs, hiddenArgs...)
 		}
 
 		// Sort allowlist — never interpolate user input into ORDER BY.
@@ -1617,6 +1632,10 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 
 		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
 
+		// Admin-curated hidden namespaces (nhn-scam, nhn-ror, …) drop
+		// out of regular users' host list; admin/global_reader see all.
+		hiddenWhere, hiddenArgs := hiddenNamespaceWhere(r, db, "he.namespace")
+
 		// Exposure filter rides on the hostresolve worker's DNS verdict
 		// (host_resolution.classification) — the same source
 		// computeHostSummary buckets by, so the table filter and the
@@ -1651,12 +1670,13 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			      AND ed.exposure_name = he.name
 			) w ON TRUE
 			` + exposureJoin + `
-			WHERE TRUE ` + aclWhere + ` ` + filterWhere + ` ` + exposureWhere + `
+			WHERE TRUE ` + aclWhere + ` ` + filterWhere + ` ` + hiddenWhere + ` ` + exposureWhere + `
 			ORDER BY ` + sortColumn + ` ` + sortDirection + `, he.host ` + sortDirection + `, he.cluster ` + sortDirection + `
 			LIMIT ? OFFSET ?
 		`
 		queryArgs := append([]any{}, aclArgs...)
 		queryArgs = append(queryArgs, filterArgs...)
+		queryArgs = append(queryArgs, hiddenArgs...)
 		queryArgs = append(queryArgs, limit, offset)
 
 		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
@@ -1934,10 +1954,16 @@ func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
 		filtersApplied := filterWhere != ""
 
+		// Hidden-namespace exclusion participates in the cache key (not
+		// in filtersApplied — it's a standing per-role view, not a user
+		// filter, so the cache stays useful) and in every aggregate /
+		// facet query so the chip counts match the filtered table.
+		hiddenWhere, hiddenArgs := hiddenNamespaceWhere(r, db, "he.namespace")
+
 		watermark := hostExposureWatermark(ctx, db)
 		var cacheKey string
 		if !filtersApplied {
-			cacheKey = buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive)
+			cacheKey = buildHostSummaryCacheKey(aclFrag, aclArgs, includeInactive, hiddenWhere, hiddenArgs)
 			if entry, ok, _ := cache.GetJSON[hostSummaryCacheEntry](ctx, cs, cacheKey); ok {
 				if !watermark.IsZero() && !entry.Watermark.Before(watermark) {
 					writeJSON(w, http.StatusOK, entry.Summary)
@@ -1946,7 +1972,7 @@ func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			}
 		}
 
-		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive, filterWhere, filterArgs)
+		summary, err := computeHostSummary(ctx, db, cs, aclFrag, aclArgs, includeInactive, filterWhere, filterArgs, hiddenWhere, hiddenArgs)
 		if err != nil {
 			http.Error(w, "query failed", http.StatusInternalServerError)
 			return
@@ -1957,7 +1983,7 @@ func HostSummaryHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		// filter. So picking one cluster doesn't collapse the cluster
 		// list — the user can still add another cluster without
 		// clearing first.
-		clusters, namespaces, kinds, ferr := hostFacets(ctx, db, aclFrag, aclArgs, includeInactive, searchQuery, filterClusters, filterNamespaces, filterKinds)
+		clusters, namespaces, kinds, ferr := hostFacets(ctx, db, aclFrag, aclArgs, includeInactive, searchQuery, filterClusters, filterNamespaces, filterKinds, hiddenWhere, hiddenArgs)
 		if ferr != nil {
 			http.Error(w, "facet query failed", http.StatusInternalServerError)
 			return
@@ -1985,7 +2011,7 @@ func hostExposureWatermark(ctx context.Context, db *gorm.DB) time.Time {
 	return refreshedAt
 }
 
-func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive bool) string {
+func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive bool, hiddenWhere string, hiddenArgs []any) string {
 	h := fnv.New64a()
 	enc := json.NewEncoder(h)
 	_ = enc.Encode(struct {
@@ -1994,7 +2020,9 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 		IncludeInactive bool
 		Resolver        string
 		InternalCIDRs   []string
-	}{aclFrag, aclArgs, includeInactive, hostDNSResolverAddr, hostInternalCIDRStrings()})
+		HiddenWhere     string
+		HiddenArgs      []any
+	}{aclFrag, aclArgs, includeInactive, hostDNSResolverAddr, hostInternalCIDRStrings(), hiddenWhere, hiddenArgs})
 	return fmt.Sprintf("%s%x", hostSummaryCacheKeyPrefix, h.Sum64())
 }
 
@@ -2005,7 +2033,7 @@ func buildHostSummaryCacheKey(aclFrag string, aclArgs []any, includeInactive boo
 // answers in milliseconds even on multi-thousand-host fleets. A host
 // that the worker hasn't reached yet shows up as "pending", same as a
 // host whose DNS lookup has failed and has no LB IP fallback.
-func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any) (HostSummary, error) {
+func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag string, aclArgs []any, includeInactive bool, filterWhere string, filterArgs []any, hiddenWhere string, hiddenArgs []any) (HostSummary, error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
 		livenessJoin = ""
@@ -2032,9 +2060,10 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag
 		FROM host_exposure he
 		` + livenessJoin + `
 		LEFT JOIN host_resolution hr ON hr.host = he.host
-		WHERE TRUE ` + aclWhere + ` ` + filterWhere
+		WHERE TRUE ` + aclWhere + ` ` + filterWhere + ` ` + hiddenWhere
 	queryArgs := append([]any{}, aclArgs...)
 	queryArgs = append(queryArgs, filterArgs...)
+	queryArgs = append(queryArgs, hiddenArgs...)
 	if err := db.WithContext(ctx).Raw(query, queryArgs...).Scan(&agg).Error; err != nil {
 		return HostSummary{}, err
 	}
@@ -2057,7 +2086,7 @@ func computeHostSummary(ctx context.Context, db *gorm.DB, _ cache.Store, aclFrag
 // Three queries because each dropdown needs a different filter scope.
 // They're all DISTINCT scans over the host_exposure MV; cheap in
 // practice (a few thousand rows max for typical fleets).
-func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any, includeInactive bool, searchQuery string, filterClusters, filterNamespaces, filterKinds []string) (clusters []HostFacetOption, namespaces []string, kinds []string, err error) {
+func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any, includeInactive bool, searchQuery string, filterClusters, filterNamespaces, filterKinds []string, hiddenWhere string, hiddenArgs []any) (clusters []HostFacetOption, namespaces []string, kinds []string, err error) {
 	livenessJoin := "JOIN cluster_sessions cs ON cs.cluster_id = he.cluster_id AND cs.last_push_at >= NOW() - " + liveWindowInterval()
 	if includeInactive {
 		livenessJoin = ""
@@ -2078,11 +2107,12 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 		SELECT DISTINCT he.cluster_id, he.cluster
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + ` ` + clusterWhere + ` AND he.cluster_id <> ''
+		WHERE TRUE ` + aclWhere + ` ` + clusterWhere + ` ` + hiddenWhere + ` AND he.cluster_id <> ''
 		ORDER BY he.cluster
 	`
 	cArgs := append([]any{}, aclArgs...)
 	cArgs = append(cArgs, clusterArgs...)
+	cArgs = append(cArgs, hiddenArgs...)
 	if err = db.WithContext(ctx).Raw(clusterQuery, cArgs...).Scan(&clusterRows).Error; err != nil {
 		return nil, nil, nil, err
 	}
@@ -2101,11 +2131,12 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 		SELECT DISTINCT he.namespace
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` AND he.namespace <> ''
+		WHERE TRUE ` + aclWhere + ` ` + nsWhere + ` ` + hiddenWhere + ` AND he.namespace <> ''
 		ORDER BY he.namespace
 	`
 	nArgs := append([]any{}, aclArgs...)
 	nArgs = append(nArgs, nsArgs...)
+	nArgs = append(nArgs, hiddenArgs...)
 	if err = db.WithContext(ctx).Raw(nsQuery, nArgs...).Scan(&namespaces).Error; err != nil {
 		return nil, nil, nil, err
 	}
@@ -2116,11 +2147,12 @@ func hostFacets(ctx context.Context, db *gorm.DB, aclFrag string, aclArgs []any,
 		SELECT DISTINCT he.kind
 		FROM host_exposure he
 		` + livenessJoin + `
-		WHERE TRUE ` + aclWhere + ` ` + kindWhere + ` AND he.kind <> ''
+		WHERE TRUE ` + aclWhere + ` ` + kindWhere + ` ` + hiddenWhere + ` AND he.kind <> ''
 		ORDER BY he.kind
 	`
 	kArgs := append([]any{}, aclArgs...)
 	kArgs = append(kArgs, kindArgs...)
+	kArgs = append(kArgs, hiddenArgs...)
 	if err = db.WithContext(ctx).Raw(kindQuery, kArgs...).Scan(&kinds).Error; err != nil {
 		return nil, nil, nil, err
 	}
@@ -2565,9 +2597,15 @@ func ClusterChainHandler(db *gorm.DB) http.HandlerFunc {
 			Namespaces []nsChain `json:"namespaces"`
 		}
 		res := result{Cluster: clusterName, ClusterID: clusterID}
-		// Collect and sort namespace names
+		// Collect and sort namespace names. Admin-curated hidden
+		// namespaces drop out here for regular users — filtering the
+		// assembled map once covers all five source queries above.
+		nsHidden := hiddenNamespaceMatch(r, db)
 		nsNames := make([]string, 0, len(nsMap))
 		for ns := range nsMap {
+			if nsHidden(ns) {
+				continue
+			}
 			nsNames = append(nsNames, ns)
 		}
 		sort.Strings(nsNames)

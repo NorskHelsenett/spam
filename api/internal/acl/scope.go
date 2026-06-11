@@ -298,7 +298,8 @@ func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias st
 		args = append(args, imageArgs...)
 	}
 
-	clusterImageSQL, clusterImageArgs := compileClusterImageInheritance(clusterPatterns, alias)
+	nsSQL, nsArgs := hiddenNamespaceExclusion(ctx, "namespace")
+	clusterImageSQL, clusterImageArgs := compileClusterImageInheritance(clusterPatterns, alias, nsSQL, nsArgs)
 	if clusterImageSQL != "" {
 		parts = append(parts, clusterImageSQL)
 		args = append(args, clusterImageArgs...)
@@ -435,7 +436,13 @@ func compileClusterPatterns(patterns []ScopePattern, alias string) (string, []an
 // raw_registry, not the COALESCE'd `registry` column, is the join key
 // into image_digests.registry — same convention the scam ImageDetail
 // query uses.
-func compileClusterImageInheritance(patterns []ScopePattern, alias string) (string, []any) {
+//
+// nsSQL/nsArgs (from hiddenNamespaceExclusion, may be empty) prune the
+// inventory subquery so an image whose only running instances sit in
+// admin-curated hidden namespaces doesn't inherit visibility. An image
+// that also runs in one of the user's regular namespaces still matches
+// through that row.
+func compileClusterImageInheritance(patterns []ScopePattern, alias string, nsSQL string, nsArgs []any) (string, []any) {
 	if len(patterns) == 0 {
 		return "", nil
 	}
@@ -450,19 +457,24 @@ func compileClusterImageInheritance(patterns []ScopePattern, alias string) (stri
 			ids = append(ids, p.ClusterID)
 		}
 	}
+	nsWhere := ""
+	if nsSQL != "" {
+		nsWhere = " AND " + nsSQL
+	}
 	if wildcard {
 		return fmt.Sprintf(
-			"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory))",
-			alias, alias, alias,
-		), nil
+			"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE TRUE%s))",
+			alias, alias, alias, nsWhere,
+		), nsArgs
 	}
 	if len(ids) == 0 {
 		return "", nil
 	}
+	args := append([]any{ids}, nsArgs...)
 	return fmt.Sprintf(
-		"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE cluster_id IN ?))",
-		alias, alias, alias,
-	), []any{ids}
+		"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE cluster_id IN ?%s))",
+		alias, alias, alias, nsWhere,
+	), args
 }
 
 func compileImagePatterns(patterns []ScopePattern, alias string) (string, []any, bool) {

@@ -26,6 +26,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/hiddenns"
 	"github.com/NorskHelsenett/spam/internal/hostexposure"
 	"github.com/NorskHelsenett/spam/internal/hostresolve"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
@@ -108,9 +109,18 @@ func run() error {
 		&scam.Cluster{},
 		&audit.Log{},
 		&acl.Grant{},
+		&hiddenns.HiddenNamespace{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
+
+	// Admin-curated hidden namespaces also prune the cluster→image ACL
+	// inheritance branch, so regular users' vuln/triage lists skip
+	// images that only run in administrative namespaces. Wired here
+	// because the acl clause builders don't carry a DB handle.
+	acl.SetHiddenNamespaceClause(func(ctx context.Context, col string) (string, []any) {
+		return hiddenns.Clause(ctx, gormDB, col)
+	})
 
 	if err := db.EnsureViews(ctx, gormDB,
 		"migrations/20260211_create_unique_active_create_run_jobs.sql",

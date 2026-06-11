@@ -232,6 +232,16 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
 				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
 
+				// Admin-curated hidden namespaces — administrative
+				// namespaces (nhn-scam, nhn-ror, …) filtered out of
+				// regular users' cluster views so teams focus on their
+				// own workloads. Writes are audited: a pattern change
+				// alters what every non-admin user sees.
+				nsAudit := audit.Middleware(db, auditUserID, "admin.namespaces")
+				api.Get("/admin/namespaces/hidden", uiapi.AdminHiddenNamespacesListHandler(db, authService))
+				api.With(nsAudit).Post("/admin/namespaces/hidden", uiapi.AdminHiddenNamespacesCreateHandler(db, authService))
+				api.With(nsAudit).Delete("/admin/namespaces/hidden/{id}", uiapi.AdminHiddenNamespacesDeleteHandler(db, authService))
+
 				// Admin ACL grant management. Admin-only, audit-wrapped
 				// so every grant add/remove leaves a trail.
 				aclAudit := audit.Middleware(db, auditUserID, "admin.acl")
