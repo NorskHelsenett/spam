@@ -120,7 +120,7 @@ func runCycle(ctx context.Context, db *gorm.DB) {
 		return
 	}
 
-	work := selectStale(ctx, db, urgentTiers)
+	work := selectStale(ctx, db, urgentTiers, false)
 	generated := 0
 	for _, sig := range work {
 		if generated >= batchPerCycle || ctx.Err() != nil {
@@ -132,11 +132,15 @@ func runCycle(ctx context.Context, db *gorm.DB) {
 	}
 }
 
-// Backfill drains the advisory backlog for the fix_now tier in one
-// pass — no per-cycle cap; this is the explicit admin "fill it now"
-// path (ADVISORY_BACKFILL job). Returns how many assets produced
-// output out of how many were stale.
-func Backfill(ctx context.Context, db *gorm.DB, onProgress func(done, total int)) (int, int, error) {
+// Backfill drains the advisory backlog in one pass — no per-cycle
+// cap; this is the explicit admin "fill it now" path
+// (ADVISORY_BACKFILL job). The default pass covers fix_now assets
+// whose advisory is missing or stale; replace widens the scope to
+// every urgent-tier asset and regenerates unconditionally — the
+// escape hatch after a prompt or payload-shape change, which the
+// signals hash can't see. Returns how many assets produced output
+// out of how many were selected.
+func Backfill(ctx context.Context, db *gorm.DB, replace bool, onProgress func(done, total int)) (int, int, error) {
 	sumCfg, err := GetSettings(ctx, db, UseCaseSummary)
 	if err != nil {
 		return 0, 0, err
@@ -149,7 +153,11 @@ func Backfill(ctx context.Context, db *gorm.DB, onProgress func(done, total int)
 		return 0, 0, errors.New("no LLM use case is enabled — turn one on under /admin/ai first")
 	}
 
-	work := selectStale(ctx, db, map[string]bool{assetrisk.TierFixNow: true})
+	tiers := map[string]bool{assetrisk.TierFixNow: true}
+	if replace {
+		tiers = urgentTiers
+	}
+	work := selectStale(ctx, db, tiers, replace)
 	generated := 0
 	for i, sig := range work {
 		if ctx.Err() != nil {
@@ -222,9 +230,10 @@ var urgentTiers = map[string]bool{
 }
 
 // selectStale returns image/repo signals whose tier is in tiers and
-// whose cached advisory is missing or built from different signals.
-// Tier() runs in Go to stay the single source of truth.
-func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool) []assetrisk.Signals {
+// whose cached advisory is missing or built from different signals;
+// includeFresh keeps up-to-date rows in the result too (the replace
+// path). Tier() runs in Go to stay the single source of truth.
+func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool, includeFresh bool) []assetrisk.Signals {
 	var rows []assetrisk.Signals
 	if err := db.WithContext(ctx).Raw(`
 		SELECT ar.*, COALESCE(d.digest, '') AS image_digest
@@ -247,7 +256,7 @@ func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool) []asse
 		if !tiers[assetrisk.Tier(sig)] {
 			continue
 		}
-		if have[sig.AssetType+"|"+sig.AssetID] == assetrisk.SignalsHash(sig) {
+		if !includeFresh && have[sig.AssetType+"|"+sig.AssetID] == assetrisk.SignalsHash(sig) {
 			continue
 		}
 		out = append(out, sig)

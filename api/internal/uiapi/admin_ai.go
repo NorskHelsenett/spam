@@ -3,6 +3,7 @@ package uiapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -154,12 +155,23 @@ func AdminAITestHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc
 
 // AdminAIBackfillHandler enqueues an ADVISORY_BACKFILL job: generate
 // advisories for every fix_now asset whose cache is missing or stale,
-// without the background worker's batch cap.
-// POST /api/admin/ai/backfill
+// without the background worker's batch cap. An optional JSON body
+// {"replace": true} regenerates every fix_now + this_week advisory
+// regardless of freshness — for rolling out prompt/payload changes
+// over the existing cache.
+// POST /api/admin/ai/backfill {replace?}
 func AdminAIBackfillHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, err := authService.RequireAdmin(r); err != nil {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		// Body is optional: a bare POST keeps the original stale-only
+		// backfill, so curl-without-body and the old UI still work.
+		var body jobs.AdvisoryBackfillPayload
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
 
@@ -175,6 +187,7 @@ func AdminAIBackfillHandler(db *gorm.DB, authService *auth.Service) http.Handler
 
 		job, err := jobs.CreateJob(r.Context(), db, jobs.CreateJobInput{
 			Type:        jobs.JobTypeAdvisoryBackfill,
+			Payload:     body,
 			MaxAttempts: 1, // a partial backfill is fine — the 5-min worker mops up
 		})
 		if err != nil {

@@ -4,6 +4,7 @@
 	import Loading from '$lib/components/Loading.svelte';
 	import Toggle from '$lib/components/Toggle.svelte';
 	import Select from '$lib/components/Select.svelte';
+	import Checkbox from '$lib/components/Checkbox.svelte';
 
 	type Settings = {
 		use_case: string;
@@ -92,6 +93,7 @@
 	};
 	let backfill = $state<BackfillStatus | null>(null);
 	let backfillBusy = $state(false);
+	let backfillReplace = $state(false);
 	let backfillTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const pollBackfill = async () => {
@@ -111,7 +113,12 @@
 		if (backfillBusy) return;
 		backfillBusy = true;
 		try {
-			const res = await fetch('/api/admin/ai/backfill', { method: 'POST', credentials: 'include' });
+			const res = await fetch('/api/admin/ai/backfill', {
+				method: 'POST',
+				credentials: 'include',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ replace: backfillReplace })
+			});
 			if (res.status === 409) {
 				error = 'A backfill is already queued or running.';
 			} else if (!res.ok) {
@@ -337,10 +344,11 @@
 				<div class="min-w-0 flex-1">
 					<p class="text-sm font-semibold text-[var(--text-bright)]">Backfill fix-now advisories</p>
 					<p class="text-xs leading-relaxed text-[var(--text-tertiary)]">
-						Generate for every fix-now asset whose advisory is missing or stale, in one job — skips the background worker's {'20'}-per-cycle ramp. Requires at least one enabled use case.
+						Generate for every fix-now asset whose advisory is missing or stale, in one job — skips the background worker's {'20'}-per-cycle ramp. Replace existing regenerates every fix-now and this-week advisory from scratch — use after changing a prompt or the payload format. Requires at least one enabled use case.
 					</p>
 				</div>
 				<div class="flex items-center gap-3">
+					<Checkbox bind:checked={backfillReplace} label="Replace existing" />
 					{#if backfill && backfill.status !== 'never_run'}
 						<span class="text-xs text-[var(--text-muted)]">
 							{#if backfill.status === 'RUNNING' && backfill.result?.done !== undefined}
