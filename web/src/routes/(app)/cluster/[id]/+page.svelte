@@ -63,6 +63,7 @@
 		kind: string;
 		tls: boolean;
 		ingress_class?: string;
+		classification?: string; // internal | external | unresolvable | pending
 	};
 	type ClusterDetail = {
 		cluster_id: string;
@@ -393,6 +394,18 @@
 	};
 	const sortedHosts = $derived(detail ? [...detail.hosts].sort(byDomain) : []);
 
+	// Hosts-tab exposure filter, fed by the hostresolve worker's DNS
+	// verdict on each host (classification). 'all' passes everything,
+	// including hosts still pending resolution or unresolvable.
+	let exposureFilter = $state('all');
+	const exposureCount = (cls: string) =>
+		detail ? detail.hosts.filter((h) => h.classification === cls).length : 0;
+	const filteredHosts = $derived(
+		exposureFilter === 'all'
+			? sortedHosts
+			: sortedHosts.filter((h) => h.classification === exposureFilter)
+	);
+
 	const nsWorkloads = (ns: string) =>
 		detail ? detail.workloads.filter((w) => w.namespace === ns) : [];
 	const nsIngresses = (ns: string) =>
@@ -720,11 +733,35 @@
 				{#if detail.hosts.length === 0}
 					<p class="py-10 text-center text-sm text-[var(--text-tertiary)]">No exposed hosts found.</p>
 				{:else}
-					<div class="flex flex-col gap-1.5">
-						{#each sortedHosts as h, i (h.namespace + '/' + h.kind + '/' + h.host + '#' + i)}
-							{@render exposureRow(h, true)}
-						{/each}
+					<div class="mb-3 flex items-center justify-end">
+						<div class="relative">
+							<select
+								bind:value={exposureFilter}
+								class="appearance-none rounded-lg border border-[var(--border-color)] bg-transparent px-3 py-1.5 pr-8 text-xs text-[var(--text-secondary)] focus:border-[var(--accent)] focus:outline-none"
+								aria-label="Filter hosts by exposure"
+							>
+								<option value="all">All exposure ({detail.hosts.length})</option>
+								<option value="external">External ({exposureCount('external')})</option>
+								<option value="internal">Internal IP range ({exposureCount('internal')})</option>
+							</select>
+							<div
+								class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)]"
+							>
+								<ChevronDown size={13} />
+							</div>
+						</div>
 					</div>
+					{#if filteredHosts.length === 0}
+						<p class="py-10 text-center text-sm text-[var(--text-tertiary)]">
+							No {exposureFilter} hosts found.
+						</p>
+					{:else}
+						<div class="flex flex-col gap-1.5">
+							{#each filteredHosts as h, i (h.namespace + '/' + h.kind + '/' + h.host + '#' + i)}
+								{@render exposureRow(h, true)}
+							{/each}
+						</div>
+					{/if}
 				{/if}
 			{:else if tab === 'vulnerabilities'}
 				{#if vulnsLoading}

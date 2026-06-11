@@ -161,6 +161,10 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 			Kind         string `gorm:"column:kind" json:"kind"`
 			TLS          bool   `gorm:"column:tls" json:"tls"`
 			IngressClass string `gorm:"column:ingress_class" json:"ingress_class,omitempty"`
+			// hostresolve worker verdict: internal / external /
+			// unresolvable, or pending when the worker hasn't reached
+			// this host yet. Drives the Hosts-tab exposure filter.
+			Classification string `gorm:"column:classification" json:"classification,omitempty"`
 		}
 		var hostRows []hostRow
 		// Collapse to one row per (namespace, host, kind): the same host can
@@ -171,6 +175,10 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		// the client. bool_or(tls) means "TLS if any record terminates it";
 		// MAX picks a representative non-empty ingress_class.
 		_ = db.WithContext(ctx).Raw(liveCTEForCluster+`
+			SELECT
+				g.namespace, g.host, g.kind, g.tls, g.ingress_class,
+				COALESCE(hr.classification, 'pending') AS classification
+			FROM (
 			SELECT
 				namespace, host, kind,
 				bool_or(tls) AS tls,
@@ -225,7 +233,9 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 				  AND NULLIF(h,'') IS NOT NULL
 			) sub
 			GROUP BY namespace, host, kind
-			ORDER BY namespace, host
+			) g
+			LEFT JOIN host_resolution hr ON hr.host = g.host
+			ORDER BY g.namespace, g.host
 		`, clusterID).Scan(&hostRows).Error
 
 		// 7. Security severity breakdown. Walk the running images in the
