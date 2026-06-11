@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
@@ -33,6 +36,61 @@ const (
 	advisoryDescCap       = 2000
 	advisoryHostCap       = 20
 )
+
+// llmConcurrency caps simultaneous in-flight LLM requests across one
+// generation pass (worker cycle or backfill). Each asset runs its
+// summary and verdict calls sequentially, so this number equals
+// concurrent requests at the endpoint. SPAM_LLM_CONCURRENCY tunes it
+// to the endpoint's capacity.
+var llmConcurrency = loadLLMConcurrency()
+
+func loadLLMConcurrency() int {
+	const def = 5
+	raw := strings.TrimSpace(os.Getenv("SPAM_LLM_CONCURRENCY"))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		log.Printf("llmadvisory: ignoring invalid SPAM_LLM_CONCURRENCY %q, using %d", raw, def)
+		return def
+	}
+	return n
+}
+
+// generateAll fans work out over llmConcurrency goroutines and
+// returns how many assets produced output. Stops scheduling new
+// assets once ctx is cancelled; already-running ones finish (their
+// in-flight HTTP requests die with the context anyway).
+func generateAll(ctx context.Context, db *gorm.DB, sumCfg, verCfg Settings, work []assetrisk.Signals, onProgress func(done, total int)) int {
+	sem := make(chan struct{}, llmConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	generated, done := 0, 0
+	for _, sig := range work {
+		if ctx.Err() != nil {
+			break
+		}
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(sig assetrisk.Signals) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			ok := generateOne(ctx, db, sumCfg, verCfg, sig)
+			mu.Lock()
+			if ok {
+				generated++
+			}
+			done++
+			if onProgress != nil {
+				onProgress(done, len(work))
+			}
+			mu.Unlock()
+		}(sig)
+	}
+	wg.Wait()
+	return generated
+}
 
 // exposedHost is one exposed-host row in the model payload: the
 // public hostname, everything host_exposure knows about how it is
@@ -121,15 +179,10 @@ func runCycle(ctx context.Context, db *gorm.DB) {
 	}
 
 	work := selectStale(ctx, db, urgentTiers, false)
-	generated := 0
-	for _, sig := range work {
-		if generated >= batchPerCycle || ctx.Err() != nil {
-			return
-		}
-		if generateOne(ctx, db, sumCfg, verCfg, sig) {
-			generated++
-		}
+	if len(work) > batchPerCycle {
+		work = work[:batchPerCycle]
 	}
+	generateAll(ctx, db, sumCfg, verCfg, work, nil)
 }
 
 // Backfill drains the advisory backlog in one pass — no per-cycle
@@ -158,19 +211,8 @@ func Backfill(ctx context.Context, db *gorm.DB, replace bool, onProgress func(do
 		tiers = urgentTiers
 	}
 	work := selectStale(ctx, db, tiers, replace)
-	generated := 0
-	for i, sig := range work {
-		if ctx.Err() != nil {
-			return generated, len(work), ctx.Err()
-		}
-		if generateOne(ctx, db, sumCfg, verCfg, sig) {
-			generated++
-		}
-		if onProgress != nil {
-			onProgress(i+1, len(work))
-		}
-	}
-	return generated, len(work), nil
+	generated := generateAll(ctx, db, sumCfg, verCfg, work, onProgress)
+	return generated, len(work), ctx.Err()
 }
 
 // generateOne runs the enabled use cases for a single asset and
