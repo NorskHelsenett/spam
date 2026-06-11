@@ -336,6 +336,9 @@ func run() error {
 		Addr:              addr,
 		Handler:           router,
 		ReadHeaderTimeout: 15 * time.Second,
+		// No WriteTimeout: it would cut long-lived SSE streams. The
+		// JSON routes are bounded by per-route Chi timeouts instead.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {
