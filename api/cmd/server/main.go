@@ -173,6 +173,7 @@ func run() error {
 		"migrations/20260610a_mv_refresh_source_version.sql",
 		"migrations/20260610a_create_llm_settings_and_asset_advisories.sql",
 		"migrations/20260611_host_resolution_public_dns.sql",
+		"migrations/20260611a_finding_chat_prompt_image_metadata.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
