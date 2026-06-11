@@ -44,7 +44,11 @@ type TriageImageHost struct {
 type TriageImageCluster struct {
 	ClusterID string `json:"cluster_id" gorm:"column:cluster_id"`
 	Name      string `json:"name"       gorm:"column:name"`
-	Exposed   bool   `json:"exposed"    gorm:"column:exposed"`
+	// Namespaces is a comma-separated, sorted list of namespaces the
+	// digest runs in within this cluster (same shape as the advisory
+	// payload's runs_in).
+	Namespaces string `json:"namespaces" gorm:"column:namespaces"`
+	Exposed    bool   `json:"exposed"    gorm:"column:exposed"`
 }
 
 type triageImageDetailResponse struct {
@@ -135,16 +139,19 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			SELECT
 				cd.cluster_id,
 				COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
+				cd.namespaces,
 				EXISTS (
 					SELECT 1 FROM publicly_exposed_digests ed
 					WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
 				) AS exposed
 			FROM (
-				SELECT DISTINCT cr.data->>'cluster_id' AS cluster_id
+				SELECT cr.data->>'cluster_id' AS cluster_id,
+				       string_agg(DISTINCT cr.data->>'namespace', ', ' ORDER BY cr.data->>'namespace') AS namespaces
 				FROM cluster_record cr
 				WHERE cr.data->>'kind' = 'Container'
 				  AND cr.data->>'digest' = ?
 				  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
+				GROUP BY cr.data->>'cluster_id'
 			) cd
 			LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
 			ORDER BY exposed DESC, name

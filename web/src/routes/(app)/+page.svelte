@@ -130,6 +130,7 @@
 	type ImageTriageCluster = {
 		cluster_id: string;
 		name: string;
+		namespaces: string;
 		exposed: boolean;
 	};
 	type ImageTriageDetail = {
@@ -930,9 +931,21 @@
 											{#if detail.clusters.length > 0}
 												<div class="host-chips">
 													{#each detail.clusters as cl}
-														<span class="chip chip-{cl.exposed ? 'warning' : 'muted'}" title={cl.cluster_id}>
-															{cl.name}{cl.exposed ? ' · exposed' : ''}
-														</span>
+														<Tooltip width={17}>
+															<span class="chip chip-{cl.exposed ? 'warning' : 'muted'}">
+																{cl.name}{cl.exposed ? ' · exposed' : ''}
+															</span>
+															{#snippet content()}
+																<p class="text-xs font-semibold text-[var(--text-bright)]">{cl.name}</p>
+																{#if cl.cluster_id !== cl.name}
+																	<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">{cl.cluster_id}</p>
+																{/if}
+																{#if cl.namespaces}
+																	<p class="mt-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Namespace{cl.namespaces.includes(',') ? 's' : ''}</p>
+																	<p class="mt-0.5 text-xs leading-relaxed text-[var(--text-secondary)]">{cl.namespaces}</p>
+																{/if}
+															{/snippet}
+														</Tooltip>
 													{/each}
 												</div>
 												{#if detail.cluster_total > detail.clusters.length}
