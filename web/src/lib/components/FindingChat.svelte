@@ -326,7 +326,7 @@
 		z-index: 900;
 		display: flex;
 		flex-direction: column;
-		width: min(26rem, calc(100vw - 2rem));
+		width: min(34rem, calc(100vw - 2rem));
 		max-height: min(34rem, calc(100vh - 4rem));
 		border-radius: 0.9rem;
 		background: var(--main-content-bg);
@@ -348,7 +348,6 @@
 		cursor: grab;
 		user-select: none;
 		color: var(--text-secondary);
-		background: var(--bg2);
 		border-bottom: 1px solid var(--border-color);
 		touch-action: none;
 		flex-shrink: 0;

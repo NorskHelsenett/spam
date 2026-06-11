@@ -893,39 +893,7 @@
 									<span class="stage-label">Advisory</span>
 									<div class="stage-body">
 										<span class="stage-text advisory-text">{row.advisory.summary}</span>
-										<div class="advisory-foot">
-											<span class="stage-hint">AI-generated · {row.advisory.summary_model}{row.advisory.stale ? ' · signals changed since generation' : ''}</span>
-											{#if row.asset_type !== 'cluster'}
-												<button
-													type="button"
-													class="chat-open-btn"
-													onclick={(e) => {
-														e.stopPropagation();
-														openChat(row);
-													}}
-												>
-													<Bot size={13} />
-													Chat about this
-												</button>
-											{/if}
-										</div>
-									</div>
-								</div>
-							{:else if row.asset_type !== 'cluster'}
-								<div class="stage">
-									<span class="stage-label">Advisory</span>
-									<div class="stage-body">
-										<button
-											type="button"
-											class="chat-open-btn"
-											onclick={(e) => {
-												e.stopPropagation();
-												openChat(row);
-											}}
-										>
-											<Bot size={13} />
-											Chat about this
-										</button>
+										<span class="stage-hint">AI-generated · {row.advisory.summary_model}{row.advisory.stale ? ' · signals changed since generation' : ''}</span>
 									</div>
 								</div>
 							{/if}
@@ -1115,7 +1083,7 @@
 									<span class="stage-label">Agent</span>
 									<div class="stage-body">
 										<div class="context-pills">
-											<span class="chip chip-{row.advisory.verdict === 'suppress' ? 'warning' : 'muted'}">{row.advisory.verdict === 'suppress' ? 'would suppress' : 'would keep'}</span>
+											<span class="chip chip-{row.advisory.verdict === 'suppress' ? 'muted' : 'warning'}">{row.advisory.verdict === 'suppress' ? 'would suppress' : 'would keep'}</span>
 											{#if row.advisory.verdict_confidence}
 												<span class="chip chip-muted">{Math.round(row.advisory.verdict_confidence * 100)}% confident</span>
 											{/if}
@@ -1128,6 +1096,22 @@
 										{/if}
 										<span class="stage-hint">Shadow mode — recorded to evaluate the agent, takes no action.</span>
 									</div>
+								</div>
+							{/if}
+
+							{#if row.asset_type !== 'cluster'}
+								<div class="card-actions">
+									<button
+										type="button"
+										class="chat-open-btn"
+										onclick={(e) => {
+											e.stopPropagation();
+											openChat(row);
+										}}
+									>
+										<Bot size={13} />
+										Chat about this
+									</button>
 								</div>
 							{/if}
 						</div>
@@ -1372,15 +1356,19 @@
 		gap: 0.6rem;
 	}
 
-	/* Cards: borderless tinted surfaces. Severity is carried by the
-	   dot + chip tones, never by borders or edge stripes. */
+	/* Cards: tinted surfaces with a neutral border. Severity is carried
+	   by the dot + chip tones, never by border colors or edge stripes. */
 	.card {
 		border-radius: 0.85rem;
+		border: 1px solid #3e3b3b;
 		background-color: var(--main-content-bg);
 		overflow: hidden;
 		transition: background-color 120ms ease;
 	}
-	.card:hover {
+	:global(html.light) .card {
+		border-color: #d7dde4;
+	}
+	.card:not(.open):hover {
 		background-color: var(--hover-bg-subtle);
 	}
 
@@ -1585,12 +1573,10 @@
 		color: var(--text-bright);
 		max-width: 80%;
 	}
-	.advisory-foot {
+	.card-actions {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		justify-content: space-between;
-		gap: 0.5rem;
+		justify-content: flex-end;
+		padding-top: 0.2rem;
 	}
 	.chat-open-btn {
 		display: inline-flex;

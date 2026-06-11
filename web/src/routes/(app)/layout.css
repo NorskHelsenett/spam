@@ -27,7 +27,7 @@
 
   .metric-card {
     border-radius: 1rem;
-    border: 1px solid var(--hover-bg);
+    border: 1px solid #3e3b3b;
     background-color: var(--main-content-bg);
     background-color: color-mix(in srgb, var(--main-content-bg) 88%, transparent);
     /* box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25); */
@@ -35,6 +35,10 @@
 
   .light .panel-surface {
     box-shadow: 0 14px 28px rgba(0, 0, 0, 0.1);
+  }
+
+  .light .metric-card {
+    border-color: #d7dde4;
   }
 
   @media (max-width: 768px) {
