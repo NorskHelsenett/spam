@@ -932,7 +932,7 @@
 												<div class="host-chips">
 													{#each detail.clusters as cl}
 														<Tooltip width={17}>
-															<span class="chip chip-{cl.exposed ? 'warning' : 'muted'}">
+															<span class="chip chip-{cl.exposed ? 'warning' : 'muted'} cursor-pointer">
 																{cl.name}{cl.exposed ? ' · exposed' : ''}
 															</span>
 															{#snippet content()}
