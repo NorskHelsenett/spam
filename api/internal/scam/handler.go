@@ -1579,6 +1579,7 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 		filterClusters := parseHostFilterCSV(r.URL.Query().Get("cluster_ids"))
 		filterNamespaces := parseHostFilterCSV(r.URL.Query().Get("namespaces"))
 		filterKinds := parseHostFilterCSV(r.URL.Query().Get("kinds"))
+		filterExposure := parseHostFilterCSV(r.URL.Query().Get("exposure"))
 		activeWorkloadsOnly := isTruthy(r.URL.Query().Get("active_workloads_only"))
 		sortColumn, sortDirection := parseHostSortParams(r.URL.Query().Get("sort"), r.URL.Query().Get("order"))
 
@@ -1616,6 +1617,17 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 
 		filterWhere, filterArgs := buildHostFilterClauses(searchQuery, filterClusters, filterNamespaces, filterKinds)
 
+		// Exposure filter rides on the hostresolve worker's DNS verdict
+		// (host_resolution.classification) — the same source
+		// computeHostSummary buckets by, so the table filter and the
+		// summary chip counts always agree. The join is only added when
+		// the filter is active so the unfiltered query plan is untouched.
+		exposureWhere := buildHostExposureClause(filterExposure)
+		exposureJoin := ""
+		if exposureWhere != "" {
+			exposureJoin = "LEFT JOIN host_resolution hr ON hr.host = he.host"
+		}
+
 		// workload_count is the count of distinct image digests that
 		// sit on this URL's backend chain (see exposed_digests MV).
 		// Better signal than the old EndpointSlice ready-address count
@@ -1638,7 +1650,8 @@ func HostsHandler(db *gorm.DB, cs cache.Store) http.HandlerFunc {
 			      AND ed.exposure_kind = he.kind
 			      AND ed.exposure_name = he.name
 			) w ON TRUE
-			WHERE TRUE ` + aclWhere + ` ` + filterWhere + `
+			` + exposureJoin + `
+			WHERE TRUE ` + aclWhere + ` ` + filterWhere + ` ` + exposureWhere + `
 			ORDER BY ` + sortColumn + ` ` + sortDirection + `, he.host ` + sortDirection + `, he.cluster ` + sortDirection + `
 			LIMIT ? OFFSET ?
 		`
@@ -1807,6 +1820,32 @@ func buildHostFilterClauses(searchQuery string, clusterIDs, namespaces, kinds []
 		return "", nil
 	}
 	return "AND " + strings.Join(parts, " AND "), args
+}
+
+// buildHostExposureClause maps the ?exposure= CSV onto the hostresolve
+// worker's classification column (requires the host_resolution join to
+// be in place). Allowlisted values: external, internal, pending —
+// anything else is dropped. "pending" matches every host not classified
+// internal/external (never resolved, or unresolvable), mirroring
+// computeHostSummary's pending bucket so the filtered table lines up
+// with the chip counts. All values are emitted as SQL literals from the
+// allowlist, never from user input. Empty result means no filter.
+func buildHostExposureClause(exposures []string) string {
+	var parts []string
+	for _, e := range exposures {
+		switch strings.ToLower(strings.TrimSpace(e)) {
+		case "external":
+			parts = append(parts, "hr.classification = 'external'")
+		case "internal":
+			parts = append(parts, "hr.classification = 'internal'")
+		case "pending":
+			parts = append(parts, "COALESCE(hr.classification, 'pending') NOT IN ('internal', 'external')")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "AND (" + strings.Join(parts, " OR ") + ")"
 }
 
 // HostSummary is the small response shape backing the cluster page's

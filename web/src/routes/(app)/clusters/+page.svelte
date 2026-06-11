@@ -259,6 +259,7 @@
 			hostSelectedClusters,
 			hostSelectedNamespaces,
 			hostSelectedKinds,
+			hostSelectedExposure,
 			hostActiveWorkloadsOnly,
 			scroll: {
 				cluster: clusterScrollTop,
@@ -278,6 +279,7 @@
 			hostSelectedClusters?: string[];
 			hostSelectedNamespaces?: string[];
 			hostSelectedKinds?: string[];
+			hostSelectedExposure?: string[];
 			hostActiveWorkloadsOnly?: boolean;
 			scroll?: { cluster?: number; image?: number; host?: number };
 		}) => {
@@ -292,6 +294,7 @@
 			if (v.hostSelectedClusters) hostSelectedClusters = v.hostSelectedClusters;
 			if (v.hostSelectedNamespaces) hostSelectedNamespaces = v.hostSelectedNamespaces;
 			if (v.hostSelectedKinds) hostSelectedKinds = v.hostSelectedKinds;
+			if (v.hostSelectedExposure) hostSelectedExposure = v.hostSelectedExposure;
 			if (v.hostActiveWorkloadsOnly !== undefined) hostActiveWorkloadsOnly = v.hostActiveWorkloadsOnly;
 			if (v.scroll) {
 				if (v.scroll.cluster) restoreClusterScroll = v.scroll.cluster;
@@ -812,6 +815,7 @@
 			hostSelectedClusters.join(' '),
 			hostSelectedNamespaces.join(' '),
 			hostSelectedKinds.join(' '),
+			hostSelectedExposure.join(','),
 			hostActiveWorkloadsOnly,
 			hostSortKey,
 			hostSortDir
@@ -931,6 +935,7 @@
 		if (hostSelectedClusters.length > 0) params.set('cluster_ids', hostSelectedClusters.join(','));
 		if (hostSelectedNamespaces.length > 0) params.set('namespaces', hostSelectedNamespaces.join(','));
 		if (hostSelectedKinds.length > 0) params.set('kinds', hostSelectedKinds.join(','));
+		if (hostSelectedExposure.length > 0) params.set('exposure', hostSelectedExposure.join(','));
 		if (hostActiveWorkloadsOnly) params.set('active_workloads_only', 'true');
 		// Sort applies only to the paginated list endpoint, not the
 		// summary — summary aggregates over the whole set regardless.
@@ -1078,7 +1083,36 @@
 	let hostSelectedClusters: string[] = $state([]);
 	let hostSelectedNamespaces: string[] = $state([]);
 	let hostSelectedKinds: string[] = $state([]);
+	let hostSelectedExposure: string[] = $state([]);
 	let hostActiveWorkloadsOnly = $state(false);
+
+	// Exposure options mirror the server's classification buckets
+	// (hostresolve worker verdict). "Pending" covers hosts not yet
+	// resolved plus unresolvable ones — same grouping as the summary chip.
+	const hostExposureOptions: MultiSelectOption[] = [
+		{ value: 'external', label: 'External' },
+		{ value: 'internal', label: 'Internal IP range' },
+		{ value: 'pending', label: 'Pending' }
+	];
+
+	// "N matching" + virtual-scroll length under an exposure filter:
+	// the summary endpoint already breaks the filtered scope down into
+	// external/internal/pending, so the filtered total is derivable
+	// client-side without teaching the summary endpoint about exposure.
+	const hostMatchingTotal = $derived(
+		hostSelectedExposure.length === 0
+			? hostSummary.total
+			: hostSelectedExposure.reduce(
+					(s, k) =>
+						s +
+						(k === 'external'
+							? hostSummary.external
+							: k === 'internal'
+								? hostSummary.internal
+								: hostSummary.pending),
+					0
+				)
+	);
 
 	// Filter dropdown options come from the host summary endpoint —
 	// it scans every host the caller can see, regardless of pagination.
@@ -1099,6 +1133,7 @@
 		(hostSelectedClusters.length > 0 ? 1 : 0) +
 		(hostSelectedNamespaces.length > 0 ? 1 : 0) +
 		(hostSelectedKinds.length > 0 ? 1 : 0) +
+		(hostSelectedExposure.length > 0 ? 1 : 0) +
 		(hostActiveWorkloadsOnly ? 1 : 0)
 	);
 
@@ -1113,6 +1148,7 @@
 		hostSelectedClusters = [];
 		hostSelectedNamespaces = [];
 		hostSelectedKinds = [];
+		hostSelectedExposure = [];
 		hostActiveWorkloadsOnly = false;
 	};
 
@@ -1181,7 +1217,7 @@
 	// Virtual scroll ranges (must be after sorted* declarations)
 	let clusterVirt = $derived(useVirtualScroll(sortedClusters.length, ROW_HEIGHT, clusterScrollTop, clusterViewH));
 	let imageVirt = $derived(useVirtualScroll(sortedImages.length, ROW_HEIGHT, imageScrollTop, imageViewH, imageTotal));
-	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH, hostSummary.total));
+	let hostVirt = $derived(useVirtualScroll(sortedHosts.length, HOST_ROW_HEIGHT, hostScrollTop, hostViewH, hostMatchingTotal));
 
 	// Apply pending scroll restores once the target tab's DOM has
 	// mounted (scrollEl bound) and its data has landed (rows > 0).
@@ -1656,7 +1692,7 @@
 							<p class="text-sm text-[var(--text-tertiary)]">
 								Hostnames exposed via Ingress and route resources.
 								{#if hostActiveFilterCount > 0}
-									<span class="text-[var(--text-muted)]">&middot; {hostSummary.total} matching</span>
+									<span class="text-[var(--text-muted)]">&middot; {hostMatchingTotal} matching</span>
 								{/if}
 							</p>
 						</div>
@@ -1705,6 +1741,11 @@
 								<div class="flex flex-col gap-1">
 									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Kind</span>
 									<MultiSelect bind:selected={hostSelectedKinds} options={hostKindOptions} placeholder="All kinds" size="sm" />
+								</div>
+
+								<div class="flex flex-col gap-1">
+									<span class="text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-[var(--text-tertiary)] pl-0.5">Exposure</span>
+									<MultiSelect bind:selected={hostSelectedExposure} options={hostExposureOptions} placeholder="All exposure" size="sm" />
 								</div>
 
 								<div class="flex flex-col gap-1">
