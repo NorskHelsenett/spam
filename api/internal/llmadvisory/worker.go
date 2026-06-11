@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -90,6 +91,100 @@ func generateAll(ctx context.Context, db *gorm.DB, sumCfg, verCfg Settings, work
 	}
 	wg.Wait()
 	return generated
+}
+
+// Image-context budgets: OCI labels are self-reported and can be
+// arbitrarily large (some build systems stuff changelogs in there),
+// so cap count and value length.
+const (
+	imageLabelCap    = 40
+	imageLabelValCap = 200
+)
+
+// imageContext loads identity + OCI-config metadata for an image
+// asset: registry coordinates and the source-repo claim from
+// image_digests, plus created/architecture/os/author and the label
+// map from the latest crane labels artifact. Returns nil when
+// nothing is known (image never scanned). Tags are deliberately
+// absent — the registry's tag list isn't collected anywhere yet.
+func imageContext(ctx context.Context, db *gorm.DB, imageID string) map[string]any {
+	out := map[string]any{}
+
+	var dig struct {
+		Registry    string `gorm:"column:registry"`
+		Repository  string `gorm:"column:repository"`
+		SourceLabel string `gorm:"column:source_label"`
+		Verified    bool   `gorm:"column:verified_source"`
+	}
+	if err := db.WithContext(ctx).Raw(
+		`SELECT registry, repository, source_label, verified_source FROM image_digests WHERE id = ?`,
+		imageID,
+	).Scan(&dig).Error; err == nil && dig.Repository != "" {
+		out["registry"] = dig.Registry
+		out["repository"] = dig.Repository
+		if dig.SourceLabel != "" {
+			out["source_repo_claim"] = dig.SourceLabel
+			out["source_claim_verified"] = dig.Verified
+		}
+	}
+
+	var artifact struct {
+		Content []byte `gorm:"column:content"`
+	}
+	db.WithContext(ctx).Raw(`
+		SELECT isa.content
+		FROM image_scan_artifacts isa
+		JOIN image_scan_runs isr ON isr.id = isa.scan_run_id
+		WHERE isr.image_digest_id = ? AND isa.category = 'labels'
+		ORDER BY isa.created_at DESC LIMIT 1
+	`, imageID).Scan(&artifact)
+	if len(artifact.Content) > 0 {
+		var config struct {
+			Architecture string `json:"architecture"`
+			OS           string `json:"os"`
+			Created      string `json:"created"`
+			Author       string `json:"author"`
+			Config       struct {
+				Labels map[string]string `json:"Labels"`
+			} `json:"config"`
+		}
+		if json.Unmarshal(artifact.Content, &config) == nil {
+			if config.Created != "" {
+				out["created"] = config.Created
+			}
+			if config.OS != "" || config.Architecture != "" {
+				out["platform"] = strings.TrimSuffix(config.OS+"/"+config.Architecture, "/")
+			}
+			if config.Author != "" {
+				out["author"] = config.Author
+			}
+			if len(config.Config.Labels) > 0 {
+				keys := make([]string, 0, len(config.Config.Labels))
+				for k := range config.Config.Labels {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				if len(keys) > imageLabelCap {
+					keys = keys[:imageLabelCap]
+					out["labels_note"] = "label list truncated"
+				}
+				labels := make(map[string]string, len(keys))
+				for _, k := range keys {
+					v := config.Config.Labels[k]
+					if len(v) > imageLabelValCap {
+						v = v[:imageLabelValCap]
+					}
+					labels[k] = v
+				}
+				out["labels"] = labels
+			}
+		}
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // exposedHost is one exposed-host row in the model payload: the
@@ -275,6 +370,12 @@ var urgentTiers = map[string]bool{
 // whose cached advisory is missing or built from different signals;
 // includeFresh keeps up-to-date rows in the result too (the replace
 // path). Tier() runs in Go to stay the single source of truth.
+//
+// The result is ordered most-critical-first — tier, then threat
+// score descending, then trust ascending — so the backfill's
+// progress bar burns down the queue in the order a human would, and
+// the worker cycle's per-cycle cap spends its budget on the worst
+// assets.
 func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool, includeFresh bool) []assetrisk.Signals {
 	var rows []assetrisk.Signals
 	if err := db.WithContext(ctx).Raw(`
@@ -303,7 +404,33 @@ func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool, includ
 		}
 		out = append(out, sig)
 	}
+	// Pure int math on in-memory structs — recomputing per comparison
+	// is cheaper than materialising a ranked copy for a few hundred rows.
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if ta, tb := tierRank(assetrisk.Tier(a)), tierRank(assetrisk.Tier(b)); ta != tb {
+			return ta < tb
+		}
+		if sa, sb := assetrisk.ThreatScore(a), assetrisk.ThreatScore(b); sa != sb {
+			return sa > sb
+		}
+		if ua, ub := assetrisk.TrustScore(a), assetrisk.TrustScore(b); ua != ub {
+			return ua < ub
+		}
+		return a.AssetSlug < b.AssetSlug
+	})
 	return out
+}
+
+func tierRank(tier string) int {
+	switch tier {
+	case assetrisk.TierFixNow:
+		return 0
+	case assetrisk.TierThisWeek:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // BuildPayload assembles the JSON evidence handed to the model: the
@@ -318,9 +445,11 @@ func selectStale(ctx context.Context, db *gorm.DB, tiers map[string]bool, includ
 func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (string, error) {
 	tier := assetrisk.Tier(sig)
 	payload := map[string]any{
-		"asset":      sig.AssetSlug,
-		"asset_type": sig.AssetType,
-		"tier":       tier,
+		"asset":        sig.AssetSlug,
+		"asset_type":   sig.AssetType,
+		"tier":         tier,
+		"threat_score": assetrisk.ThreatScore(sig),
+		"trust_score":  assetrisk.TrustScore(sig),
 		"signals": map[string]any{
 			"critical_count":         sig.CriticalCount,
 			"high_count":             sig.HighCount,
@@ -347,6 +476,9 @@ func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (stri
 	}
 
 	if sig.AssetType == "image" {
+		if ic := imageContext(ctx, db, sig.AssetID); ic != nil {
+			payload["image"] = ic
+		}
 		type vulnRow struct {
 			ID            string  `json:"id"                      gorm:"column:canonical_id"`
 			Severity      string  `json:"severity"                gorm:"column:severity"`
@@ -468,6 +600,9 @@ func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (
 		"asset_type":   sig.AssetType,
 		"tier":         tier,
 		"tier_reasons": assetrisk.TierReasons(sig, tier),
+		"threat_score": assetrisk.ThreatScore(sig),
+		"trust_score":  assetrisk.TrustScore(sig),
+		"trust_grade":  assetrisk.TrustGrade(assetrisk.TrustScore(sig)),
 		"signals": map[string]any{
 			"critical_count":         sig.CriticalCount,
 			"high_count":             sig.HighCount,
@@ -521,6 +656,9 @@ func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (
 	}
 
 	if sig.AssetType == "image" {
+		if ic := imageContext(ctx, db, sig.AssetID); ic != nil {
+			payload["image"] = ic
+		}
 		type chatVuln struct {
 			ID             string  `json:"id"              gorm:"column:canonical_id"`
 			Severity       string  `json:"severity"        gorm:"column:severity"`
