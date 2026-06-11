@@ -348,6 +348,7 @@
 		bind:this={winEl}
 		class="chat-window"
 		class:minimized
+		class:engaged={messages.length > 0 || sending}
 		style={windowStyle()}
 		aria-label="Finding chat"
 		onpointerdown={(e) => {
@@ -463,16 +464,23 @@
 		display: flex;
 		flex-direction: column;
 		width: min(68rem, calc(100vw - 2rem));
-		/* Fixed height (not max-height) so the window doesn't collapse
-		   to fit a short conversation once the empty-state content
-		   disappears after the first message. */
-		height: min(48rem, calc(100vh - 4rem));
+		max-height: calc(100vh - 4rem);
 		border-radius: 0.9rem;
 		background: var(--main-content-bg);
 		border: 1px solid var(--border-color);
 		box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
 	}
+	/* The start window stays content-sized (empty-state blurb +
+	   starter queries + input). Once a conversation is underway the
+	   window takes its full working height — fixed, not max, so it
+	   doesn't collapse to fit a short exchange. */
+	.chat-window.engaged {
+		height: min(48rem, calc(100vh - 4rem));
+	}
+	/* Minimized docks as a compact chip: title bar only, narrow.
+	   Declared after .engaged so it wins while a chat is running. */
 	.chat-window.minimized {
+		width: min(22rem, calc(100vw - 2rem));
 		height: auto;
 		max-height: none;
 	}
