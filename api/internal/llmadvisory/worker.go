@@ -36,6 +36,7 @@ const (
 	advisoryOtherVulnCap  = 500
 	advisoryDescCap       = 2000
 	advisoryHostCap       = 20
+	advisoryClusterCap    = 10
 )
 
 // llmConcurrency caps simultaneous in-flight LLM requests across one
@@ -227,6 +228,44 @@ const exposedHostsQuery = `
 	 AND he.host = ed.host AND he.kind = ed.exposure_kind AND he.name = ed.exposure_name
 	LEFT JOIN host_resolution hr ON hr.host = ed.host
 	WHERE ed.digest = ? ORDER BY ed.host LIMIT ?`
+
+// runsInCluster is one row of the runs_in_clusters payload section:
+// the cluster, the namespaces the digest runs in there, and whether
+// any of its ingress hosts is publicly reachable — the same
+// publicly_exposed_digests gate the asset_risk exposure signals use,
+// so the model never sees an "exposed" flag the tier engine wouldn't.
+type runsInCluster struct {
+	Name       string `json:"name"       gorm:"column:name"`
+	Namespaces string `json:"namespaces" gorm:"column:namespaces"`
+	Exposed    bool   `json:"exposed"    gorm:"column:exposed"`
+}
+
+// runsInClusters feeds both payload builders: where (cluster +
+// namespaces) the digest currently runs, exposed clusters first.
+func runsInClusters(ctx context.Context, db *gorm.DB, digest string, limit int) []runsInCluster {
+	var out []runsInCluster
+	db.WithContext(ctx).Raw(`
+		SELECT
+			COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
+			cd.namespaces,
+			EXISTS (
+				SELECT 1 FROM publicly_exposed_digests ed
+				WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
+			) AS exposed
+		FROM (
+			SELECT cr.data->>'cluster_id' AS cluster_id,
+			       string_agg(DISTINCT cr.data->>'namespace', ', ' ORDER BY cr.data->>'namespace') AS namespaces
+			FROM cluster_record cr
+			WHERE cr.data->>'kind' = 'Container'
+			  AND cr.data->>'digest' = ?
+			  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
+			GROUP BY cr.data->>'cluster_id'
+		) cd
+		LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
+		ORDER BY exposed DESC, name LIMIT ?
+	`, digest, digest, limit).Scan(&out)
+	return out
+}
 
 // Advisory is one asset_advisories row.
 type Advisory struct {
@@ -564,6 +603,10 @@ func BuildPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (stri
 		var hosts []exposedHost
 		db.WithContext(ctx).Raw(exposedHostsQuery, sig.ImageDigest, advisoryHostCap).Scan(&hosts)
 		payload["exposed_hosts"] = hosts
+
+		if rc := runsInClusters(ctx, db, sig.ImageDigest, advisoryClusterCap); len(rc) > 0 {
+			payload["runs_in_clusters"] = rc
+		}
 	} else {
 		// Repos carry no per-CVE lazy detail yet — the structured
 		// reasons are the evidence.
@@ -729,29 +772,7 @@ func BuildChatPayload(ctx context.Context, db *gorm.DB, sig assetrisk.Signals) (
 		db.WithContext(ctx).Raw(exposedHostsQuery, sig.ImageDigest, chatHostCap).Scan(&hosts)
 		payload["exposed_hosts"] = hosts
 
-		type chatCluster struct {
-			Name    string `json:"name"    gorm:"column:name"`
-			Exposed bool   `json:"exposed" gorm:"column:exposed"`
-		}
-		var clusters []chatCluster
-		db.WithContext(ctx).Raw(`
-			SELECT
-				COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
-				EXISTS (
-					SELECT 1 FROM exposed_digests ed
-					WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
-				) AS exposed
-			FROM (
-				SELECT DISTINCT cr.data->>'cluster_id' AS cluster_id
-				FROM cluster_record cr
-				WHERE cr.data->>'kind' = 'Container'
-				  AND cr.data->>'digest' = ?
-				  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
-			) cd
-			LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
-			ORDER BY exposed DESC, name LIMIT ?
-		`, sig.ImageDigest, sig.ImageDigest, chatClusterCap).Scan(&clusters)
-		payload["runs_in_clusters"] = clusters
+		payload["runs_in_clusters"] = runsInClusters(ctx, db, sig.ImageDigest, chatClusterCap)
 	} else {
 		type chatRepoVuln struct {
 			ID       string  `json:"id"       gorm:"column:canonical_id"`

@@ -136,7 +136,7 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 				cd.cluster_id,
 				COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
 				EXISTS (
-					SELECT 1 FROM exposed_digests ed
+					SELECT 1 FROM publicly_exposed_digests ed
 					WHERE ed.digest = ? AND ed.cluster_id = cd.cluster_id
 				) AS exposed
 			FROM (
@@ -174,9 +174,11 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 		// Whether the digest is internet-reachable — feeds the on_path
 		// projection below (an exposed critical is on the path even
 		// without KEV/EPSS signal, mirroring the F4/W4 tier rules).
+		// publicly_exposed_digests gates on the host_resolution DNS
+		// verdict, matching the asset_risk exposure signals.
 		var imgExposed bool
 		if err := db.WithContext(ctx).Raw(
-			"SELECT EXISTS (SELECT 1 FROM exposed_digests WHERE digest = ?)", img.Digest,
+			"SELECT EXISTS (SELECT 1 FROM publicly_exposed_digests WHERE digest = ?)", img.Digest,
 		).Scan(&imgExposed).Error; err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
