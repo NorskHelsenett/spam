@@ -463,13 +463,17 @@
 		display: flex;
 		flex-direction: column;
 		width: min(68rem, calc(100vw - 2rem));
-		max-height: min(34rem, calc(100vh - 4rem));
+		/* Fixed height (not max-height) so the window doesn't collapse
+		   to fit a short conversation once the empty-state content
+		   disappears after the first message. */
+		height: min(48rem, calc(100vh - 4rem));
 		border-radius: 0.9rem;
 		background: var(--main-content-bg);
 		border: 1px solid var(--border-color);
 		box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
 	}
 	.chat-window.minimized {
+		height: auto;
 		max-height: none;
 	}
 
