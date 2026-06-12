@@ -117,27 +117,28 @@ spec:
                 {{- toYaml . | nindent 16 }}
               {{- end }}
           volumes:
-            # Scratch space for the extracted image rootfs (filesystem
-            # scanners like betterleaks/trivy need real filesystem, not
-            # tmpfs — layers can be hundreds of MB). sizeLimit caps the
-            # per-pod charge against node ephemeral storage so one
-            # runaway scan can't fill the node and trigger DiskPressure
-            # eviction of other pods. See imageScanner.workSizeLimit.
+            # Per-job scratch: syft/grype layer extraction (TMPDIR is
+            # pointed here per job by the scanner binary), exported
+            # rootfs, and artifacts. sizeLimit caps the per-pod charge
+            # against node ephemeral storage so one runaway scan can't
+            # fill the node and trigger DiskPressure eviction of other
+            # pods. See imageScanner.workSizeLimit.
             - name: work
               emptyDir:
-                sizeLimit: {{ .Values.imageScanner.workSizeLimit | default "8Gi" }}
+                sizeLimit: {{ .Values.imageScanner.workSizeLimit | default "16Gi" }}
             - name: grype-cache
               emptyDir:
                 sizeLimit: {{ .Values.imageScanner.grypeCacheSizeLimit | default "2Gi" }}
             - name: trivy-cache
               emptyDir:
                 sizeLimit: {{ .Values.imageScanner.trivyCacheSizeLimit | default "2Gi" }}
-            # /tmp is disk-backed (not tmpfs) so image-layer extraction can
-            # exceed pod memory without OOMing. sizeLimit caps node
-            # ephemeral-storage use per pod. See imageScanner.tmpSizeLimit.
+            # /tmp only holds incidental small files — scan subprocesses
+            # get a per-job TMPDIR under /work so orphaned extraction
+            # dirs are cleaned with the job instead of accumulating
+            # here. See imageScanner.tmpSizeLimit.
             - name: tmp
               emptyDir:
-                sizeLimit: {{ .Values.imageScanner.tmpSizeLimit | default "8Gi" }}
+                sizeLimit: {{ .Values.imageScanner.tmpSizeLimit | default "1Gi" }}
             - name: home
               emptyDir:
                 medium: Memory

@@ -133,6 +133,9 @@ func (p Pipeline) Run(ctx context.Context) (Result, error) {
 	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
 		return Result{}, fmt.Errorf("mkdir artifact dir: %w", err)
 	}
+	if err := os.MkdirAll(p.tmpDir(), 0o755); err != nil {
+		return Result{}, fmt.Errorf("mkdir tmp dir: %w", err)
+	}
 
 	res := Result{Failed: map[Category]error{}}
 
@@ -400,7 +403,7 @@ func (p Pipeline) exportRootfs(ctx context.Context, rootfsDir string) error {
 	}
 	p.Log(fmt.Sprintf("crane export -> %s", rootfsDir))
 	cmd := exec.CommandContext(ctx, "crane", "export", p.Ref.String(), "-")
-	cmd.Env = scannerEnv()
+	cmd.Env = p.env()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -429,7 +432,7 @@ func (p Pipeline) exportRootfs(ctx context.Context, rootfsDir string) error {
 // stdout/stderr are streamed to p.Log.
 func (p Pipeline) runDirect(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = scannerEnv()
+	cmd.Env = p.env()
 	cmd.Stdout = &lineWriter{prefix: name + ": ", log: p.Log}
 	cmd.Stderr = &lineWriter{prefix: name + ": ", log: p.Log}
 	return cmd.Run()
@@ -444,7 +447,7 @@ func (p Pipeline) runTo(ctx context.Context, outPath string, name string, args .
 	}
 	defer f.Close()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = scannerEnv()
+	cmd.Env = p.env()
 	cmd.Stdout = f
 	cmd.Stderr = &lineWriter{prefix: name + ": ", log: p.Log}
 	return cmd.Run()
@@ -453,18 +456,31 @@ func (p Pipeline) runTo(ctx context.Context, outPath string, name string, args .
 // capture runs a command and returns stdout bytes; stderr -> p.Log.
 func (p Pipeline) capture(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Env = scannerEnv()
+	cmd.Env = p.env()
 	cmd.Stderr = &lineWriter{prefix: name + ": ", log: p.Log}
 	return cmd.Output()
 }
 
-// scannerEnv builds the subprocess env. Strips secrets from the parent
+// tmpDir is the per-job temp directory handed to subprocesses via
+// TMPDIR. syft/grype pull and unpack image layers under TMPDIR; with
+// the process default (/tmp) those multi-GB dirs leak when a scan
+// deadline SIGKILLs the tool mid-extraction, and a lingering pod
+// accumulates them across digests until the kubelet evicts it for
+// exceeding the tmp emptyDir's sizeLimit. Keeping temp inside WorkDir
+// means the per-job cleanup in NewWorkDir removes leftovers even
+// after a kill.
+func (p Pipeline) tmpDir() string {
+	return filepath.Join(p.WorkDir, "tmp")
+}
+
+// env builds the subprocess env. Strips secrets from the parent
 // environment and passes through the scanner-specific vars the operator
 // configured (GRYPE_DB_UPDATE_URL, etc.).
-func scannerEnv() []string {
+func (p Pipeline) env() []string {
 	env := []string{
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + os.Getenv("HOME"),
+		"TMPDIR=" + p.tmpDir(),
 		"SYFT_CHECK_FOR_APP_UPDATE=false",
 	}
 	for _, k := range []string{
