@@ -230,16 +230,16 @@
 </script>
 
 <svelte:head>
-	<title>Admin · Jobs — Spam Monitor</title>
+	<title>Jobs · Settings — Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-4">
 	<article class="panel-surface space-y-2 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex items-start justify-between gap-4">
 			<div class="flex items-center gap-3">
-				<Layers class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
+				<Layers class="h-8 w-8 flex-shrink-0 text-[var(--accent)]" />
 				<div>
-					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Jobs</h1>
+					<h2 class="text-xl font-semibold text-[var(--text-bright)]">Jobs</h2>
 					<p class="text-sm text-[var(--text-tertiary)]">
 						Live queue across all worker pools. Updates every {POLL_INTERVAL_MS / 1000}s.
 					</p>

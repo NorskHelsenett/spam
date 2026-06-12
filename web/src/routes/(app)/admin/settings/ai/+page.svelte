@@ -209,15 +209,15 @@
 </script>
 
 <svelte:head>
-	<title>AI Settings • Spam Monitor</title>
+	<title>AI · Settings — Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-4">
 	<article class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex items-center gap-3">
-			<Sparkles class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
+			<Sparkles class="h-8 w-8 flex-shrink-0 text-[var(--accent)]" />
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">AI advisories</h1>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">AI advisories</h2>
 				<p class="text-sm text-[var(--text-tertiary)]">
 					Prompt, model, and sampling per use case. Generation runs in the background against an OpenAI-compatible endpoint; nothing is sent until a use case is enabled.
 				</p>

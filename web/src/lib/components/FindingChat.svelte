@@ -177,7 +177,7 @@
 			body: JSON.stringify({ asset_type: assetType, asset_id: assetId, messages }),
 			signal
 		});
-		if (res.status === 503) throw new NoRetryError('Finding chat is not enabled — turn it on under /admin/ai.');
+		if (res.status === 503) throw new NoRetryError('Finding chat is not enabled — turn it on under /admin/settings/ai.');
 		if (!res.ok) {
 			// Client errors won't be fixed by retrying; server hiccups might.
 			const fatal = res.status >= 400 && res.status < 500 && res.status !== 429;

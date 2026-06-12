@@ -206,7 +206,7 @@
 	});
 	import MoonIcon from 'lucide-svelte/icons/moon';
 	import SunIcon from 'lucide-svelte/icons/sun';
-	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Layers, Boxes, Users, Database, Sparkles, EyeOff } from 'lucide-svelte';
+	import { ChartPie, ShieldAlert, CircleUserRound, Package, GitBranch, Play, KeyRound, Settings, Boxes } from 'lucide-svelte';
 	import KubernetesIcon from '$lib/components/icons/KubernetesIcon.svelte';
 	import { writable, get } from 'svelte/store';
 	import { session, isAdmin as isAdminStore, hasOnlyClusters as hasOnlyClustersStore, loadSession } from '$lib/stores/session';
@@ -260,16 +260,11 @@ $effect(() => {
 	);
 
 	// Admin-only nav — Runs exposes the job queue (CREATE_RUN artifacts
-	// can contain credentials surfaced in scan history), Jobs is the
-	// live queue view across all worker pools, Settings covers provider
-	// config + user management.
+	// can contain credentials surfaced in scan history). Everything else
+	// (providers, scanners, AI, users, namespaces, jobs, database) lives
+	// under the consolidated /admin/settings hub rendered below.
 	const adminNavLinks = [
-		{ href: '/runs', label: 'Runs', icon: Play },
-		{ href: '/admin/jobs', label: 'Jobs', icon: Layers },
-		{ href: '/admin/users', label: 'Users', icon: Users },
-		{ href: '/admin/namespaces', label: 'Namespaces', icon: EyeOff },
-		{ href: '/admin/database', label: 'Database', icon: Database },
-		{ href: '/admin/ai', label: 'AI', icon: Sparkles }
+		{ href: '/runs', label: 'Runs', icon: Play }
 	] as const;
 
 	type ExtendedMediaQueryList = MediaQueryList & {
@@ -355,7 +350,7 @@ $effect(() => {
 	const pageStore = page;
 
 	$effect(() => {
-		if ($pageStore.url?.pathname === '/admin/users') {
+		if ($pageStore.url?.pathname === '/admin/settings/users') {
 			newUserCount.set(0);
 		}
 	});
@@ -442,12 +437,12 @@ $effect(() => {
 				<button
 					type="button"
 					class={`group flex items-center gap-2 rounded-full border border-transparent px-4 py-2 text-[0.9rem] transition-all duration-200 active:scale-95 ${
-						isActive('/admin/providers')
+						isActive('/admin/settings')
 							? 'bg-[var(--hover-bg)] text-[var(--accent)] border-[var(--border-color)] shadow-md'
 							: 'text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
 					}`}
-					onclick={() => goto('/admin/providers')}
-					aria-current={isActive('/admin/providers') ? 'page' : undefined}
+					onclick={() => goto('/admin/settings')}
+					aria-current={isActive('/admin/settings') ? 'page' : undefined}
 					aria-label="Settings"
 				>
 					<span class="flex h-8 w-8 items-center justify-center rounded-full text-[var(--accent)]" aria-hidden="true">
