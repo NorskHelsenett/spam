@@ -1,35 +1,41 @@
 <script lang="ts">
 	import { page } from '$app/stores';
+	import { goto } from '$app/navigation';
+	import TabSelector from '$lib/components/TabSelector.svelte';
 	import { newUserCount } from '$lib/stores/newUserCount';
+
+	type TabOption = { value: string; label: string; badge?: number };
 
 	let { children } = $props();
 
 	// Two groups: configuration on the left, operational/read-mostly
-	// monitoring on the right. Each tab is a real route so deep links
+	// monitoring on the right. Tab values are real routes so deep links
 	// and back/forward work, and each page stays its own code-split chunk.
-	const groups = [
-		{
-			label: 'Settings',
-			links: [
-				{ href: '/admin/settings/providers', label: 'Providers' },
-				{ href: '/admin/settings/scanners', label: 'Scanners' },
-				{ href: '/admin/settings/ai', label: 'AI' },
-				{ href: '/admin/settings/users', label: 'Users' },
-				{ href: '/admin/settings/namespaces', label: 'Namespaces' }
-			]
-		},
-		{
-			label: 'Monitoring',
-			links: [
-				{ href: '/admin/settings/jobs', label: 'Jobs' },
-				{ href: '/admin/settings/database', label: 'Database' }
-			]
-		}
+	const settingsTabs = $derived<TabOption[]>([
+		{ value: '/admin/settings/providers', label: 'Providers' },
+		{ value: '/admin/settings/scanners', label: 'Scanners' },
+		{ value: '/admin/settings/ai', label: 'AI' },
+		{ value: '/admin/settings/users', label: 'Users', badge: $newUserCount },
+		{ value: '/admin/settings/namespaces', label: 'Namespaces' }
+	]);
+
+	const monitoringTabs: TabOption[] = [
+		{ value: '/admin/settings/jobs', label: 'Jobs' },
+		{ value: '/admin/settings/database', label: 'Database' }
 	];
 
-	const isActive = (href: string) => {
-		const path = $page.url?.pathname ?? '';
-		return path === href || path.startsWith(`${href}/`);
+	const path = $derived($page.url?.pathname ?? '');
+
+	// '' when the current route belongs to the other group — the
+	// selector then renders with no indicator (see TabSelector).
+	const activeTab = (tabs: TabOption[]) =>
+		tabs.find((t) => path === t.value || path.startsWith(`${t.value}/`))?.value ?? '';
+
+	const settingsValue = $derived(activeTab(settingsTabs));
+	const monitoringValue = $derived(activeTab(monitoringTabs));
+
+	const navigate = (href: string) => {
+		if (href && href !== path) goto(href);
 	};
 </script>
 
@@ -42,34 +48,19 @@
 			</p>
 		</header>
 
-		<nav class="flex flex-wrap items-start gap-x-10 gap-y-4" aria-label="Settings sections">
-			{#each groups as group (group.label)}
-				<div class="space-y-2">
-					<p class="px-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
-						{group.label}
-					</p>
-					<div class="flex flex-wrap gap-1.5">
-						{#each group.links as link (link.href)}
-							<a
-								href={link.href}
-								class={`inline-flex items-center rounded-full border px-4 py-1.5 text-[0.85rem] font-medium transition active:scale-95 ${
-									isActive(link.href)
-										? 'border-[var(--border-color)] bg-[var(--hover-bg)] text-[var(--accent)] shadow-md'
-										: 'border-transparent text-[var(--text-secondary)] hover:bg-[var(--hover-bg-subtle)] hover:text-[var(--text-bright)]'
-								}`}
-								aria-current={isActive(link.href) ? 'page' : undefined}
-							>
-								{link.label}
-								{#if link.href === '/admin/settings/users' && $newUserCount > 0}
-									<span class="ml-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--accent)] px-1 text-[10px] font-bold text-[var(--bg-primary)]">
-										{$newUserCount > 99 ? '99+' : $newUserCount}
-									</span>
-								{/if}
-							</a>
-						{/each}
-					</div>
-				</div>
-			{/each}
+		<nav class="flex flex-wrap items-end gap-x-10 gap-y-5" aria-label="Settings sections">
+			<div class="space-y-2">
+				<p class="px-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+					Settings
+				</p>
+				<TabSelector options={settingsTabs} value={settingsValue} onchange={navigate} showLines={false} />
+			</div>
+			<div class="space-y-2">
+				<p class="px-1 text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--text-muted)]">
+					Monitoring
+				</p>
+				<TabSelector options={monitoringTabs} value={monitoringValue} onchange={navigate} showLines={false} />
+			</div>
 		</nav>
 	</section>
 
