@@ -49,6 +49,7 @@
 	let results = $state<AdvancedSearchResult[]>([]);
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 	let searchPending = $state(false);
+	let searchAbort: AbortController | null = null;
 
 	let previewOpen = $state(false);
 	let previewLoading = $state(false);
@@ -75,6 +76,9 @@
 		{ value: 'language', label: 'Languages' },
 		{ value: 'readme', label: 'README files' }
 	];
+	const allSearchTargets = targetOptions
+		.map((option) => option.value)
+		.filter((value): value is AdvancedSearchType => value !== 'all');
 
 	const iconForType = (type: AdvancedSearchType) => {
 		switch (type) {
@@ -159,33 +163,83 @@
 			.map((part) => ({ text: part, match: part.toLowerCase() === term.toLowerCase() }));
 	};
 
+	let searchRun = 0;
+
+	const resultKey = (r: AdvancedSearchResult) =>
+		`${r.type}|${r.repo_id || ''}|${r.cluster_id || ''}|${r.image_id || ''}|${r.source_ref || ''}|${r.title}|${r.value || ''}`;
+
+	const sortResults = (items: AdvancedSearchResult[]) =>
+		items.sort((a, b) => {
+			const at = a.created_at ? new Date(a.created_at).getTime() : 0;
+			const bt = b.created_at ? new Date(b.created_at).getTime() : 0;
+			return bt - at;
+		});
+
+	const fetchTarget = async (q: string, searchTarget: AdvancedSearchType, signal: AbortSignal) => {
+		const params = new URLSearchParams({ q, per_page: '120', target: searchTarget });
+		const res = await fetch(`/api/search/advanced?${params}`, { credentials: 'include', signal });
+		if (!res.ok) {
+			throw new Error(res.status === 401 ? 'Please log in.' : `Search failed for ${labelForType(searchTarget).toLowerCase()}.`);
+		}
+		return res.json();
+	};
+
 	const loadResults = async () => {
+		const run = ++searchRun;
+		searchAbort?.abort();
 		if (!query.trim()) {
 			results = [];
 			error = '';
 			hasMore = false;
 			searchPending = false;
+			searchAbort = null;
 			return;
 		}
+		const controller = new AbortController();
+		searchAbort = controller;
 		searchPending = true;
 		loading = true;
 		error = '';
 		try {
-			const params = new URLSearchParams({ q: query.trim(), per_page: '120' });
-			if (target !== 'all') params.set('target', target);
-			const res = await fetch(`/api/search/advanced?${params}`, { credentials: 'include' });
-			if (!res.ok) {
-				error = res.status === 401 ? 'Please log in.' : 'Failed to run advanced search.';
-				results = [];
+			const q = query.trim();
+			if (target === 'all') {
+				const responses = await Promise.allSettled(allSearchTargets.map((t) => fetchTarget(q, t, controller.signal)));
+				if (run !== searchRun) return;
+				const merged: AdvancedSearchResult[] = [];
+				const seen = new Set<string>();
+				let failed = 0;
+				let more = false;
+				for (const response of responses) {
+					if (response.status === 'rejected') {
+						failed += 1;
+						continue;
+					}
+					more = more || Boolean(response.value.has_more);
+					for (const item of response.value.results || []) {
+						const key = resultKey(item);
+						if (seen.has(key)) continue;
+						seen.add(key);
+						merged.push(item);
+					}
+				}
+				results = sortResults(merged);
+				hasMore = more;
+				error = failed > 0 ? `${failed} search target${failed === 1 ? '' : 's'} failed. Results shown are incomplete.` : '';
 				return;
 			}
-			const data = await res.json();
+
+			const data = await fetchTarget(q, target as AdvancedSearchType, controller.signal);
+			if (run !== searchRun) return;
 			results = data.results || [];
 			hasMore = !!data.has_more;
-		} catch {
-			error = 'Failed to run advanced search.';
+		} catch (e) {
+			if (run !== searchRun) return;
+			if (e instanceof DOMException && e.name === 'AbortError') return;
+			error = e instanceof Error ? e.message : 'Failed to run advanced search.';
 			results = [];
 		} finally {
+			if (run !== searchRun) return;
+			if (searchAbort === controller) searchAbort = null;
 			loading = false;
 			searchPending = false;
 		}
@@ -215,6 +269,10 @@
 			}
 			return;
 		}
+		if (r.type === 'vulnerability') {
+			goto(`/vuln/${encodeURIComponent(r.title)}`);
+			return;
+		}
 		openRepo(r);
 	};
 
@@ -222,6 +280,7 @@
 		switch (type) {
 			case 'cluster': return 'Open cluster';
 			case 'image': return 'Open image';
+			case 'vulnerability': return 'Open vulnerability';
 			default: return 'Open repository';
 		}
 	};
@@ -232,6 +291,11 @@
 		if (r.provider_id) params.set('provider_id', r.provider_id);
 		else if (r.base_url) params.set('base_url', r.base_url);
 		goto(`/providers/repo?${params.toString()}`);
+	};
+
+	const openPreviewRepo = () => {
+		if (!previewFrom) return;
+		openRepo(previewFrom);
 	};
 
 	const openPreview = async (r: AdvancedSearchResult) => {
@@ -595,7 +659,7 @@
 				{#if previewFrom}
 					<button
 						type="button"
-						onclick={() => openRepo(previewFrom)}
+						onclick={openPreviewRepo}
 						class="inline-flex shrink-0 items-center gap-1.5 pt-1 text-[11px] font-medium transition-opacity hover:opacity-70"
 						style="color: var(--accent);"
 					>
