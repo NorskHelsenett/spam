@@ -4,6 +4,7 @@
 	import { Search, SearchX, GitBranch, Box, ShieldCheck, Play, ArrowRight, Package, Codesandbox, Github, Gitlab, Microscope, Container, Server, Globe, Boxes } from 'lucide-svelte';
 	import Gitea from '$lib/components/icons/Gitea.svelte';
 	import VulnBadges from '$lib/components/VulnBadges.svelte';
+	import { session } from '$lib/stores/session';
 
 	type RepoResult = {
 		id: string;
@@ -99,6 +100,14 @@
 	let previewLoading = $state(false);
 	let inputEl: HTMLInputElement | undefined = $state();
 	let resultsListEl: HTMLDivElement | undefined = $state();
+	let canUseAdvancedSearch = $state(false);
+
+	$effect(() => {
+		const unsub = session.subscribe((s) => {
+			canUseAdvancedSearch = s.role === 'admin' || s.role === 'global_reader';
+		});
+		return unsub;
+	});
 
 	const previewCache = new Map<string, RepoPreview>();
 	const contributorsCache = new Map<string, Contributor[]>();
@@ -973,6 +982,7 @@
 								<p style="color: var(--text-muted); font-size: 0.85em; margin-top: 0.3em;">npm · Maven · PyPI · NuGet · Go</p>
 							</div>
 						</div>
+						{#if canUseAdvancedSearch}
 							<button
 								type="button"
 								onclick={() => {
@@ -981,15 +991,16 @@
 								}}
 								class="-mx-3 flex w-[calc(100%+1.5rem)] items-center justify-between gap-6 rounded-xl px-3 py-2 text-left transition-colors duration-150 hover:bg-[var(--hover-bg)]"
 							>
-							<div style="display: flex; align-items: center; gap: 1.5em;">
-								<Microscope size={20} style="color: var(--accent); flex-shrink: 0; margin-left: 0.5em;" />
-								<div class="ml-[0.2em]">
-									<p style="color: var(--text-primary); font-size: 0.92em; font-weight: 500;">Advanced search</p>
-									<p style="color: var(--text-muted); font-size: 0.78em; margin-top: 0.3em;">Search manifests, SBOMs, secrets, contributors, languages, commits, repos, and README</p>
+								<div style="display: flex; align-items: center; gap: 1.5em;">
+									<Microscope size={20} style="color: var(--accent); flex-shrink: 0; margin-left: 0.5em;" />
+									<div class="ml-[0.2em]">
+										<p style="color: var(--text-primary); font-size: 0.92em; font-weight: 500;">Advanced search</p>
+										<p style="color: var(--text-muted); font-size: 0.78em; margin-top: 0.3em;">Search manifests, SBOMs, secrets, contributors, languages, commits, repos, and README</p>
+									</div>
 								</div>
-							</div>
-							<ArrowRight size={14} style="color: var(--accent); flex-shrink: 0;" />
-						</button>
+								<ArrowRight size={14} style="color: var(--accent); flex-shrink: 0;" />
+							</button>
+						{/if}
 					</div>
 				</div>
 			{/if}
