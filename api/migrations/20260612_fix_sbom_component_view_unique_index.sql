@@ -19,6 +19,13 @@
 -- DROP + CREATE run in one transaction (EnsureViews wraps each file),
 -- so concurrent refreshes on other replicas never observe the view
 -- without a unique index.
+--
+-- NOTE: this migration runs once (hash-gated). If the 20260311 view
+-- definition is ever re-applied — edited, or replayed by EnsureViews'
+-- missing-matview recovery — it recreates the COALESCE index. The
+-- EnsureSbomComponentViewIndex guard (internal/db/views.go) re-asserts
+-- the plain-column index on every boot to cover that; keep the two in
+-- sync if the index shape ever changes.
 
 DROP INDEX IF EXISTS ux_sbom_component_mv;
 

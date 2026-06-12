@@ -27,6 +27,10 @@ type ViewSchemaVersion struct {
 // replica refreshes the SBOM materialized views at a time.
 const sbomViewRefreshLockID = 8_742_635_912
 
+// sbomComponentIndexGuardLockID serialises the ux_sbom_component_mv
+// index swap in EnsureSbomComponentViewIndex across replicas.
+const sbomComponentIndexGuardLockID = 8_742_635_914
+
 // vulnUnifiedViewRefreshLockID guards refreshes of the unified vuln MVs
 // (view_unified_repositories_vulnerabilities + view_unified_image_vulnerabilities).
 // Distinct from the SBOM lock so a slow SBOM refresh does not block a
@@ -328,6 +332,83 @@ func tryApplyView(ctx context.Context, db *gorm.DB, lockKey int64, path string, 
 		return nil
 	})
 	return applied, err
+}
+
+// EnsureSbomComponentViewIndex re-asserts the plain-column unique index
+// that REFRESH MATERIALIZED VIEW CONCURRENTLY requires on
+// sbom_component_view. The canonical view-definition migration
+// (20260311_fix_sbom_component_view_implicit_root.sql) carries the
+// original COALESCE expression index, which disqualifies the view from
+// CONCURRENTLY; 20260612_fix_sbom_component_view_unique_index.sql swaps
+// it for a plain-column one, but hash-gated migrations run once — so any
+// path that re-applies the 20260311 file (a future edit, or EnsureViews'
+// missing-matview recovery after a CASCADE drop) would silently restore
+// the broken index and background refreshes would start failing again.
+// The 20260311 file itself can't be edited to carry the fix: changing
+// its hash re-applies it everywhere, which both forces a full rebuild
+// of the view family and replays a stale plain-view definition of
+// view_unified_repositories_vulnerabilities over the materialized one
+// from 20260430.
+//
+// Call after EnsureViews (so a just-recreated view gets fixed before the
+// first refresh) and before EnsureViewsPopulated. Healthy boots cost one
+// catalog read. The advisory try-lock keeps concurrent replicas from
+// racing the DROP/CREATE; losers skip — the winner's commit is enough.
+func EnsureSbomComponentViewIndex(ctx context.Context, db *gorm.DB) error {
+	broken, err := sbomComponentIndexBroken(ctx, db)
+	if err != nil || !broken {
+		return err
+	}
+	return db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var acquired bool
+		if err := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", sbomComponentIndexGuardLockID).Scan(&acquired).Error; err != nil {
+			return fmt.Errorf("try index guard lock: %w", err)
+		}
+		if !acquired {
+			return nil // another replica is mid-swap
+		}
+		// Re-check under the lock — the winning replica may have already
+		// committed the swap between our first check and here.
+		broken, err := sbomComponentIndexBroken(ctx, tx)
+		if err != nil || !broken {
+			return err
+		}
+		log.Printf("sbom_component_view: replacing CONCURRENTLY-incompatible unique index")
+		if err := tx.Exec("DROP INDEX IF EXISTS ux_sbom_component_mv").Error; err != nil {
+			return fmt.Errorf("drop expression index: %w", err)
+		}
+		return tx.Exec(`
+			CREATE UNIQUE INDEX ux_sbom_component_mv
+			  ON sbom_component_view (sbom_id, asset_type, asset_ref_id, component_ref)
+			  NULLS NOT DISTINCT
+		`).Error
+	})
+}
+
+// sbomComponentIndexBroken reports whether sbom_component_view exists
+// but its unique index is missing or is the COALESCE expression variant
+// that REFRESH CONCURRENTLY rejects. A missing view is not "broken" —
+// EnsureViews owns creating it.
+func sbomComponentIndexBroken(ctx context.Context, db *gorm.DB) (bool, error) {
+	var viewExists bool
+	if err := db.WithContext(ctx).Raw(
+		"SELECT EXISTS (SELECT 1 FROM pg_matviews WHERE matviewname = 'sbom_component_view')",
+	).Scan(&viewExists).Error; err != nil {
+		return false, fmt.Errorf("check sbom_component_view exists: %w", err)
+	}
+	if !viewExists {
+		return false, nil
+	}
+	var indexdef string
+	if err := db.WithContext(ctx).Raw(`
+		SELECT COALESCE(
+			(SELECT indexdef FROM pg_indexes
+			 WHERE schemaname = 'public' AND indexname = 'ux_sbom_component_mv'),
+			'')
+	`).Scan(&indexdef).Error; err != nil {
+		return false, fmt.Errorf("read ux_sbom_component_mv indexdef: %w", err)
+	}
+	return indexdef == "" || strings.Contains(indexdef, "COALESCE"), nil
 }
 
 // EnsureViewsPopulated blocks until all SBOM materialized views are populated.

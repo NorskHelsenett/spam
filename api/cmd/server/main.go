@@ -190,6 +190,13 @@ func run() error {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
 
+	// Self-healing backstop: if any migration-replay path restored the
+	// COALESCE expression index on sbom_component_view (which disqualifies
+	// it from REFRESH CONCURRENTLY), swap it back before the first refresh.
+	if err := db.EnsureSbomComponentViewIndex(ctx, gormDB); err != nil {
+		return fmt.Errorf("ensure sbom_component_view unique index: %w", err)
+	}
+
 	populateCtx, populateCancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer populateCancel()
 	if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
