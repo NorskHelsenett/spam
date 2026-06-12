@@ -18,8 +18,8 @@ import (
 //	db.Raw(sql, append(aclArgs, otherArgs...)...).Scan(&rows)
 //
 // Results:
-//   - fragment = "TRUE" (no args) → admin or wildcard grant; no-op
-//     filter.
+//   - fragment = "TRUE" (no args) → admin, global_reader, or wildcard
+//     grant; no-op filter.
 //   - fragment with two `?` placeholders bound to the same []string of
 //     pattern identifiers → grant-scoped. The IN-clause subquery
 //     resolves each identifier as either a cluster_id (kube-system
@@ -57,7 +57,7 @@ func ClusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 // against that authoritative set.
 func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	subj := acl.SubjectFromRequest(r)
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return "TRUE", nil, false
 	}
 
@@ -126,7 +126,7 @@ func hiddenNamespaceMatch(r *http.Request, db *gorm.DB) func(string) bool {
 // cache makes the second Grants call cheap.
 func canReadCluster(r *http.Request, db *gorm.DB, clusterID string) (bool, error) {
 	subj := acl.SubjectFromRequest(r)
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return true, nil
 	}
 	p := acl.ProviderFromRequest(r)
