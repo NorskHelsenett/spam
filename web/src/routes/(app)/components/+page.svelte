@@ -279,7 +279,8 @@
 				<div class="flex w-full overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)] sm:w-auto">
 					<button type="button"
 						class="flex flex-1 items-center gap-2 px-[1.1rem] py-[0.55rem] text-[0.85rem] font-semibold tracking-[0.02em] text-[var(--text-bright)] transition hover:brightness-110 disabled:opacity-50 sm:flex-none"
-						onclick={exportCsv} disabled={exporting || loading}>
+						onclick={exportFullCsv} disabled={exporting || loading}
+						title="Export the full result set with repo URLs and contributor emails">
 						<Download class="h-4 w-4" />
 						{exporting ? 'Exporting…' : 'Export CSV'}
 					</button>
@@ -296,13 +297,15 @@
 						<p class="px-3.5 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">All dependencies</p>
 						<button type="button"
 							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-							onclick={() => { exportDropdownOpen = false; exportCsv(); }}>
-							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Standard export (CSV)
+							onclick={() => { exportDropdownOpen = false; exportFullCsv(); }}
+							title="Repo URLs and contributor emails included">
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Full export with emails (CSV)
 						</button>
 						<button type="button"
 							class="flex w-full items-center gap-2 px-3.5 py-2 text-left text-[12px] text-[var(--text-secondary)] transition hover:bg-[var(--hover-bg)]"
-							onclick={() => { exportDropdownOpen = false; exportFullCsv(); }}>
-							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Full export (CSV)
+							onclick={() => { exportDropdownOpen = false; exportCsv(); }}
+							title="Components and repos only — no URLs or emails">
+							<Download class="h-3 w-3 shrink-0 text-[var(--accent)]" /> Standard export (CSV)
 						</button>
 						<div class="mx-3 my-1 border-t border-[var(--border-color)]/60"></div>
 						<p class="px-3.5 pb-1 pt-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">Selected package</p>
