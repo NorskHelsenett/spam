@@ -9,6 +9,7 @@
 		version: string;
 		repo_count: number;
 		created_at: string;
+		vuln_count?: number;
 	};
 
 	type ComponentAsset = {
@@ -535,9 +536,13 @@
 						onclick={clearVersionSelection}>All</button>
 					{#each sortedVersions as v}
 						<button type="button"
-							class="rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersions.includes(v.version) ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
+							class="relative rounded-full border px-2.5 py-0.5 text-[11px] transition {selectedVersions.includes(v.version) ? 'border-[var(--accent)] text-[var(--accent)]' : 'border-[var(--border-color)] text-[var(--text-muted)] hover:border-[var(--text-muted)]'}"
+							title={v.vuln_count ? `${v.vuln_count} known ${v.vuln_count === 1 ? 'vulnerability' : 'vulnerabilities'}` : undefined}
 							onclick={(e) => handleVersionClick(e, v.version)}>
 							{v.version || '(no version)'}
+							{#if v.vuln_count}
+								<span class="absolute -right-0.5 -top-0.5 block h-2 w-2 rounded-full bg-red-400 ring-2 ring-[var(--bg-soft)]"></span>
+							{/if}
 						</button>
 					{/each}
 				</div>

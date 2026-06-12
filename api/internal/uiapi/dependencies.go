@@ -19,6 +19,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
 
@@ -1425,6 +1426,7 @@ type DependencyVersionInfo struct {
 	Version   string   `json:"version"`
 	RepoCount int      `json:"repo_count"`
 	Sources   []string `json:"sources"` // "sbom", "manifest", or both
+	VulnCount int      `json:"vuln_count,omitempty"`
 }
 
 // DependencyAsset describes where a dependency is used (from SBOM or manifest)
@@ -1631,6 +1633,17 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		if len(versions) == 0 {
 			http.Error(w, "dependency not found", http.StatusNotFound)
 			return
+		}
+
+		versionNames := make([]string, 0, len(versions))
+		for _, v := range versions {
+			if v.Version != "" {
+				versionNames = append(versionNames, v.Version)
+			}
+		}
+		vulnCounts := vulnerabilities.CountByVersion(r.Context(), db, overallPURL.String, name, versionNames)
+		for i := range versions {
+			versions[i].VulnCount = vulnCounts[versions[i].Version]
 		}
 
 		var licenses []string
