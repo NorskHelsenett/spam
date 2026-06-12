@@ -2,6 +2,7 @@
 	import { page } from '$app/stores';
 	import { goto } from '$app/navigation';
 	import TabSelector from '$lib/components/TabSelector.svelte';
+	import SettingsOverviewCards from '$lib/components/settings/SettingsOverviewCards.svelte';
 	import { newUserCount } from '$lib/stores/newUserCount';
 
 	type TabOption = { value: string; label: string; badge?: number };
@@ -47,6 +48,8 @@
 				Providers, scanners, access, and operational monitoring — admin only.
 			</p>
 		</header>
+
+		<SettingsOverviewCards />
 
 		<nav class="flex flex-wrap items-end gap-x-10 gap-y-5" aria-label="Settings sections">
 			<div class="space-y-2">
