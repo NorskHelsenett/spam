@@ -76,9 +76,20 @@
 		{ value: 'language', label: 'Languages' },
 		{ value: 'readme', label: 'README files' }
 	];
-	const allSearchTargets = targetOptions
-		.map((option) => option.value)
-		.filter((value): value is AdvancedSearchType => value !== 'all');
+	const allSearchTargets: AdvancedSearchType[] = [
+		'repo',
+		'cluster',
+		'image',
+		'commit',
+		'vulnerability',
+		'contributor',
+		'language',
+		'manifest',
+		'sbom',
+		'secret',
+		'readme'
+	];
+	const TARGET_TIMEOUT_MS = 15_000;
 
 	const iconForType = (type: AdvancedSearchType) => {
 		switch (type) {
@@ -177,11 +188,32 @@
 
 	const fetchTarget = async (q: string, searchTarget: AdvancedSearchType, signal: AbortSignal) => {
 		const params = new URLSearchParams({ q, per_page: '120', target: searchTarget });
-		const res = await fetch(`/api/search/advanced?${params}`, { credentials: 'include', signal });
-		if (!res.ok) {
-			throw new Error(res.status === 401 ? 'Please log in.' : `Search failed for ${labelForType(searchTarget).toLowerCase()}.`);
+		const targetController = new AbortController();
+		let timedOut = false;
+		const abortTarget = () => targetController.abort();
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			targetController.abort();
+		}, TARGET_TIMEOUT_MS);
+		signal.addEventListener('abort', abortTarget, { once: true });
+		try {
+			const res = await fetch(`/api/search/advanced?${params}`, {
+				credentials: 'include',
+				signal: targetController.signal
+			});
+			if (!res.ok) {
+				throw new Error(res.status === 401 ? 'Please log in.' : `Search failed for ${labelForType(searchTarget).toLowerCase()}.`);
+			}
+			return res.json();
+		} catch (e) {
+			if (timedOut) {
+				throw new Error(`Search timed out for ${labelForType(searchTarget).toLowerCase()}.`);
+			}
+			throw e;
+		} finally {
+			clearTimeout(timeout);
+			signal.removeEventListener('abort', abortTarget);
 		}
-		return res.json();
 	};
 
 	const loadResults = async () => {
@@ -205,15 +237,15 @@
 			if (target === 'all') {
 				const merged: AdvancedSearchResult[] = [];
 				const seen = new Set<string>();
-				let failed = 0;
+				const failedTargets: string[] = [];
 				let more = false;
 				for (const t of allSearchTargets) {
 					let data;
 					try {
 						data = await fetchTarget(q, t, controller.signal);
 					} catch (e) {
-						if (e instanceof DOMException && e.name === 'AbortError') return;
-						failed += 1;
+						if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
+						failedTargets.push(labelForType(t));
 						continue;
 					}
 					if (run !== searchRun) return;
@@ -229,7 +261,7 @@
 				}
 				results = sortResults(merged);
 				hasMore = more;
-				error = failed > 0 ? `${failed} search target${failed === 1 ? '' : 's'} failed. Results shown are incomplete.` : '';
+				error = failedTargets.length > 0 ? `Timed out or failed: ${failedTargets.join(', ')}. Results shown are incomplete.` : '';
 				return;
 			}
 
@@ -449,7 +481,7 @@
 		{/if}
 
 				<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-					{#if loading || searchPending}
+					{#if (loading || searchPending) && results.length === 0}
 						<div class="flex h-full items-center justify-center">
 							<Loading message="Searching..." variant="spinner" size="md" />
 						</div>
@@ -530,6 +562,12 @@
 							<p class="text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</p>
 						</div>
 				{:else}
+				{#if loading || searchPending}
+					<div class="flex items-center justify-between border-b border-[var(--border-color)]/50 bg-[var(--hover-bg-subtle)] px-5 py-2 text-xs text-[var(--text-tertiary)]">
+						<span>Searching remaining targets...</span>
+						<span>{results.length} result{results.length === 1 ? '' : 's'} so far</span>
+					</div>
+				{/if}
 				<div class="flex-1 overflow-y-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
