@@ -203,24 +203,29 @@
 		try {
 			const q = query.trim();
 			if (target === 'all') {
-				const responses = await Promise.allSettled(allSearchTargets.map((t) => fetchTarget(q, t, controller.signal)));
-				if (run !== searchRun) return;
 				const merged: AdvancedSearchResult[] = [];
 				const seen = new Set<string>();
 				let failed = 0;
 				let more = false;
-				for (const response of responses) {
-					if (response.status === 'rejected') {
+				for (const t of allSearchTargets) {
+					let data;
+					try {
+						data = await fetchTarget(q, t, controller.signal);
+					} catch (e) {
+						if (e instanceof DOMException && e.name === 'AbortError') return;
 						failed += 1;
 						continue;
 					}
-					more = more || Boolean(response.value.has_more);
-					for (const item of response.value.results || []) {
+					if (run !== searchRun) return;
+					more = more || Boolean(data.has_more);
+					for (const item of data.results || []) {
 						const key = resultKey(item);
 						if (seen.has(key)) continue;
 						seen.add(key);
 						merged.push(item);
 					}
+					results = sortResults([...merged]);
+					hasMore = more;
 				}
 				results = sortResults(merged);
 				hasMore = more;
@@ -250,7 +255,7 @@
 		searchPending = Boolean(query.trim());
 		searchTimeout = setTimeout(() => {
 			loadResults();
-		}, 220);
+		}, 450);
 	};
 
 	// openResult dispatches on entity type. Clusters and images aren't
