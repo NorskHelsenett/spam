@@ -261,6 +261,29 @@ func TestDependencyExportQuery(t *testing.T) {
 		}
 	})
 
+	t.Run("repoCacheSQL fragment exposes kv_store entries as repo_caches rows", func(t *testing.T) {
+		var row struct {
+			RepoID           string
+			ContributorsJSON string `gorm:"column:contributors_json"`
+			CommitsJSON      string `gorm:"column:commits_json"`
+		}
+		err := gormDB.Raw(
+			`SELECT repo_id, contributors_json, commits_json FROM `+repoCacheSQL+` rc WHERE rc.repo_id = ?`,
+			"repo-a",
+		).Scan(&row).Error
+		if err != nil {
+			t.Fatalf("repoCacheSQL query: %v", err)
+		}
+		if row.RepoID != "repo-a" || row.ContributorsJSON != `[{"email":"alice@nhn.no"}]` {
+			t.Errorf("unexpected repo cache row: %+v", row)
+		}
+
+		contributors := loadLinkedRepoContributors(ctx, gormDB, "repo-a", 5)
+		if len(contributors) != 1 || contributors[0].Email != "alice@nhn.no" {
+			t.Errorf("loadLinkedRepoContributors = %+v", contributors)
+		}
+	})
+
 	t.Run("contributor emails merge repo_commits and kv_store cache", func(t *testing.T) {
 		emails := loadContributorEmailsByRepo(gormDB, ctx, []string{"repo-a", "repo-b"})
 		if got := emails["repo-a"]; got != "alice@nhn.no;bob@nhn.no;runner@nhn.no" {

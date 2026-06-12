@@ -253,7 +253,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.contributors_json, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.contributors_json ILIKE ?
@@ -277,7 +277,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.details_json, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.details_json ILIKE ?
@@ -348,7 +348,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.readme_content, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.readme_content ILIKE ?
@@ -778,7 +778,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 					COALESCE(rc.readme_content, '') AS readme_content,
 					COALESCE(rc.contributors_json, '') AS contributors_json,
 					COALESCE(rc.details_json, '') AS details_json
-				FROM repo_caches rc
+				FROM `+repoCacheSQL+` rc
 				JOIN repos r ON r.id = rc.repo_id
 				WHERE rc.repo_id = ?
 				LIMIT 1
@@ -790,13 +790,13 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.RepoID, resp.Provider, resp.Org, resp.Slug = row.RepoID, row.Provider, row.Org, row.Slug
 			if targetType == "contributor" {
 				resp.Raw = row.ContributorsJSON
-				resp.Metadata["source"] = "repo_caches.contributors_json"
+				resp.Metadata["source"] = "repo_cache.contributors_json"
 			} else if targetType == "language" {
 				resp.Raw = row.DetailsJSON
-				resp.Metadata["source"] = "repo_caches.details_json"
+				resp.Metadata["source"] = "repo_cache.details_json"
 			} else {
 				resp.Raw = row.ReadmeContent
-				resp.Metadata["source"] = "repo_caches.readme_content"
+				resp.Metadata["source"] = "repo_cache.readme_content"
 			}
 		case "commit":
 			var row struct {
@@ -856,7 +856,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 					COALESCE(rc.commits_json, '') AS commits,
 					COALESCE(rc.contributors_json, '') AS contribs
 				FROM repos r
-				LEFT JOIN repo_caches rc ON rc.repo_id = r.id
+				LEFT JOIN `+repoCacheSQL+` rc ON rc.repo_id = r.id
 				WHERE r.id = ?
 				LIMIT 1
 			`, sourceRef).Scan(&row).Error
