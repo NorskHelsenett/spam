@@ -259,6 +259,7 @@ func runsInClusters(ctx context.Context, db *gorm.DB, digest string, limit int) 
 			WHERE cr.data->>'kind' = 'Container'
 			  AND cr.data->>'digest' = ?
 			  AND COALESCE(cr.data->>'msg', '') <> 'DELETE'
+			  AND cr.data->>'pod_phase' = 'Running'
 			GROUP BY cr.data->>'cluster_id'
 		) cd
 		LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id

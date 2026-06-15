@@ -71,7 +71,22 @@ DROP MATERIALIZED VIEW IF EXISTS asset_risk;
 -- exposed_digests.
 CREATE MATERIALIZED VIEW asset_risk AS
 WITH
--- ---------- chain: cluster → digests currently running ----------
+-- ---------- chain: cluster → digests of *available* workloads ----------
+-- A digest counts toward triage only when it backs at least one
+-- currently-running pod in the cluster. Two gates, both required:
+--   * msg <> 'DELETE'        drops tombstoned pods
+--   * pod_phase = 'Running'  drops pods that exist but aren't available
+--
+-- The pod_phase gate is what excludes scaled-to-zero workloads (e.g. a
+-- Deployment set to 0 replicas): when the desired count drops the pods
+-- stop being Running, so their digests fall out of triage even if the
+-- DELETE event was missed (controller restart, dropped watch). This is
+-- the same "currently running" definition the cluster-detail and
+-- /api/clusters/chain projections use (pod_phase = 'Running'), so the
+-- dashboard, the cluster view, and the tier engine all agree on which
+-- workloads are live. DISTINCT means a digest survives as long as ANY
+-- of its pods in the cluster is Running, so a rolling update with one
+-- pod still coming up never drops a genuinely-available workload.
 cluster_digests AS (
     SELECT DISTINCT
         cr.data->>'cluster_id' AS cluster_id,
@@ -80,6 +95,7 @@ cluster_digests AS (
     WHERE cr.data->>'kind' = 'Container'
       AND COALESCE(cr.data->>'digest', '') <> ''
       AND COALESCE(cr.data->>'msg', '')   <> 'DELETE'
+      AND cr.data->>'pod_phase' = 'Running'
 ),
 
 -- ---------- per-vuln canonical projections (with VEX exclusion) ----------

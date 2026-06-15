@@ -129,7 +129,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// session only (handler self-checks via LoadSession), not
 			// APIGuard. Returns the clusters the caller can see in ROR
 			// based on their EntraID identity + the service ApiKey.
-			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(authService, rorClient))
+			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(db, authService, rorClient))
 		})
 
 		// Pending-approval SSE accepts a pending session (pre-approval),
