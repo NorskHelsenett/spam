@@ -176,8 +176,11 @@
 		expanded = next;
 	};
 
-	const loadImageDetail = async (assetId: string) => {
-		if (imageDetails.has(assetId)) return;
+	const loadImageDetail = async (assetId: string, force = false) => {
+		// A prior fetch may have 504'd: the server keeps computing on a
+		// detached context and warms its cache, so a forced retry usually
+		// lands on the warm result. `force` bypasses the cached failure.
+		if (!force && imageDetails.has(assetId)) return;
 		const next = new Map(imageDetails);
 		next.set(assetId, 'loading');
 		imageDetails = next;
@@ -903,7 +906,16 @@
 								{#if detail === 'loading' || detail === undefined}
 									<div class="detail-loading">Tracing attack path…</div>
 								{:else if detail === null}
-									<div class="detail-loading">Could not load attack-path details.</div>
+									<div class="detail-loading">
+										Could not load attack-path details.
+										<button
+											type="button"
+											class="detail-retry"
+											onclick={() => void loadImageDetail(row.asset_id, true)}
+										>
+											Retry
+										</button>
+									</div>
 								{:else}
 									{@const onPath = detail.vulns.filter((v) => v.on_path)}
 									{@const offPath = detail.vulns.filter((v) => !v.on_path)}
@@ -1617,6 +1629,20 @@
 	.detail-empty a {
 		color: var(--accent);
 		text-decoration: none;
+	}
+	.detail-retry {
+		margin-left: 0.5rem;
+		padding: 0.1rem 0.5rem;
+		font-size: 0.72rem;
+		color: var(--accent);
+		background: transparent;
+		border: 1px solid var(--accent);
+		border-radius: 0.25rem;
+		cursor: pointer;
+	}
+	.detail-retry:hover {
+		background: var(--accent);
+		color: var(--bg);
 	}
 
 	.host-chips {
