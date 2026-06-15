@@ -658,7 +658,7 @@
 																<Layers size={12} /> Workloads ({wls.length})
 															</div>
 															<div class="space-y-1.5">
-																{#each wls as wl (wl.owner_kind + '/' + wl.owner)}
+																{#each wls as wl, wi (wl.owner_kind + '/' + wl.owner + '#' + wi)}
 																	<div class="rounded-lg border border-[var(--border-color)]/40 px-3 py-2">
 																		<div class="flex flex-wrap items-center gap-2">
 																			<span class="text-sm font-medium text-[var(--text-secondary)]">{wl.owner || '—'}</span>
@@ -667,7 +667,7 @@
 																		</div>
 																		{#if wl.containers.length}
 																			<div class="mt-1.5 flex flex-col gap-1.5 border-t border-[var(--border-color)]/30 pt-1.5">
-																				{#each wl.containers as c (c.name + c.image)}
+																				{#each wl.containers as c, ci (c.name + '@' + c.image + '#' + ci)}
 																					{@const href = imageHref(c)}
 																					<div class="flex flex-wrap items-baseline gap-x-2 gap-y-1 leading-none">
 																						<Container size={11} class="shrink-0 self-center text-[var(--text-muted)]" />
