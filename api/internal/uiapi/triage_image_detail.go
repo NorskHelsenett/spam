@@ -248,12 +248,24 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 	}
 
 	// Clusters currently running the digest, with per-cluster exposure.
-	// Names resolve display_name → ror_cluster_name → cluster_id so the
-	// panel shows the ROR cluster name when it's been synced.
+	// The friendly name is read straight from the cluster_record JSONB
+	// (ror_metadata.cluster_name, then the env-injected `cluster` label,
+	// then the ROR slug) — the same source the image profile page uses.
+	// The clusters-table join is only a secondary source for an admin
+	// display_name override: cluster_record.cluster_id is the
+	// kube-system UID, whereas clusters.cluster_id is the ROR slug, so
+	// that join misses for most clusters and can't be relied on for the
+	// name (which is why this panel used to show the raw UID).
 	clusterQ := `
 		SELECT
 			cd.cluster_id,
-			COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), cd.cluster_id) AS name,
+			COALESCE(
+				NULLIF(c.display_name, ''),
+				NULLIF(cd.ror_cluster_name, ''),
+				NULLIF(cd.cluster_label, ''),
+				NULLIF(cd.ror_slug, ''),
+				cd.cluster_id
+			) AS name,
 			cd.namespaces,
 			EXISTS (
 				SELECT 1 FROM publicly_exposed_digests ed
@@ -261,6 +273,9 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 			) AS exposed
 		FROM (
 			SELECT cr.data->>'cluster_id' AS cluster_id,
+			       NULLIF(MAX(cr.data->'ror_metadata'->>'cluster_name'), '')        AS ror_cluster_name,
+			       NULLIF(MAX(cr.data->'ror_metadata'->>'cluster_id'), '')          AS ror_slug,
+			       NULLIF(MAX(NULLIF(cr.data->>'cluster', cr.data->>'cluster_id')), '') AS cluster_label,
 			       string_agg(DISTINCT cr.data->>'namespace', ', ' ORDER BY cr.data->>'namespace') AS namespaces
 			FROM cluster_record cr
 			WHERE cr.data->>'kind' = 'Container'
