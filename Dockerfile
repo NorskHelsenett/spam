@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.npm \
     NODE_OPTIONS=--max-old-space-size=4096 npm run build
 
 # 2. Go build stage
-FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26-alpine AS gobuilder
+FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26.4-alpine AS gobuilder
 # Cross-compilation setup
 ARG TARGETOS
 ARG TARGETARCH
