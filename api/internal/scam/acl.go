@@ -83,8 +83,19 @@ func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	if len(ids) == 0 {
 		return "", nil, true
 	}
-	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (ror_slug <> '' AND ror_slug IN (?))))"
-	return frag, []any{ids, ids}, false
+	// Resolve each grant id against three identifier domains:
+	//   - cluster_id       local grants (kube-system UID)
+	//   - ror_slug         ROR slug-keyed grants (TRIM'd: ROR is
+	//                      inconsistent about trailing whitespace, and
+	//                      this heals existing dirty rows without a
+	//                      migration)
+	//   - ror_cluster_uid  ROR UUID-keyed grants (post identifier
+	//                      migration ROR keys grants by the cluster UUID,
+	//                      which matches neither cluster_id nor the slug)
+	// The clusters table is small, so the lost ror_slug index use is
+	// negligible.
+	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (TRIM(ror_slug) <> '' AND TRIM(ror_slug) IN (?)) OR (ror_cluster_uid <> '' AND ror_cluster_uid IN (?))))"
+	return frag, []any{ids, ids, ids}, false
 }
 
 // hiddenNamespaceWhere compiles the admin-curated hidden-namespace

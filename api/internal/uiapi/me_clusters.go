@@ -26,6 +26,7 @@ type meClusterAccess struct {
 	RorSlug         string `json:"ror_slug,omitempty"`
 	RorClusterName  string `json:"ror_cluster_name,omitempty"`
 	RorEnv          string `json:"ror_env,omitempty"`
+	RorClusterUID   string `json:"ror_cluster_uid,omitempty"`
 	Resolved        bool   `json:"resolved"`
 	Read            bool   `json:"read"`
 	Create          bool   `json:"create"`
@@ -128,20 +129,25 @@ func resolveMeClusters(r *http.Request, db *gorm.DB, idents []string, access map
 		RorSlug        string
 		RorClusterName string
 		RorEnv         string
+		RorClusterUID  string
 	}
 
-	// One indexed read resolves every grant. Match on any of the three
+	// One indexed read resolves every grant. Match on any of the four
 	// identifier columns; the guards keep empty ror_* columns from
 	// matching a blank-but-present grant key (idents are non-empty).
+	// ror_cluster_uid is what ROR keys grants by after its identifier
+	// migration (UUID), so a grant that matches neither cluster_id nor
+	// the slug still resolves here.
 	var rows []clusterRow
 	if db != nil && len(idents) > 0 {
 		_ = db.WithContext(r.Context()).Raw(`
-			SELECT cluster_id, display_name, ror_slug, ror_cluster_name, ror_env
+			SELECT cluster_id, display_name, ror_slug, ror_cluster_name, ror_env, ror_cluster_uid
 			FROM clusters
 			WHERE cluster_id IN (?)
 			   OR (ror_slug <> '' AND ror_slug IN (?))
 			   OR (ror_cluster_name <> '' AND ror_cluster_name IN (?))
-		`, idents, idents, idents).Scan(&rows).Error
+			   OR (ror_cluster_uid <> '' AND ror_cluster_uid IN (?))
+		`, idents, idents, idents, idents).Scan(&rows).Error
 	}
 
 	// Index resolved rows by every identifier they answer to, so a ROR
@@ -159,6 +165,11 @@ func resolveMeClusters(r *http.Request, db *gorm.DB, idents []string, access map
 		if row.RorClusterName != "" {
 			if _, seen := byIdent[row.RorClusterName]; !seen {
 				byIdent[row.RorClusterName] = row
+			}
+		}
+		if row.RorClusterUID != "" {
+			if _, seen := byIdent[row.RorClusterUID]; !seen {
+				byIdent[row.RorClusterUID] = row
 			}
 		}
 	}
@@ -185,6 +196,7 @@ func resolveMeClusters(r *http.Request, db *gorm.DB, idents []string, access map
 				entry.RorSlug = row.RorSlug
 				entry.RorClusterName = row.RorClusterName
 				entry.RorEnv = row.RorEnv
+				entry.RorClusterUID = row.RorClusterUID
 				entry.Resolved = true
 			}
 			merged[key] = entry
