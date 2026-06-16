@@ -806,23 +806,16 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			IngressCount   int64     `gorm:"column:ingress_count"`
 			LastSeen       time.Time `gorm:"column:last_seen"`
 		}
-		// rorMetadata is the nested object on the wire; omitempty so
-		// it disappears entirely for clusters without a ROR binding.
-		type rorMetadata struct {
-			Slug        string `json:"slug,omitempty"`
-			ClusterName string `json:"cluster_name,omitempty"`
-			Env         string `json:"env,omitempty"`
-		}
 		type outRow struct {
-			ClusterID    string       `json:"cluster_id"`
-			ClusterName  string       `json:"cluster_name,omitempty"`
-			RorMetadata  *rorMetadata `json:"ror_metadata,omitempty"`
-			Environment  string       `json:"environment,omitempty"`
-			Containers   int64        `json:"containers"`
-			Images       int64        `json:"images"`
-			Namespaces   int64        `json:"namespaces"`
-			IngressCount int64        `json:"ingress_count"`
-			LastSeen     time.Time    `json:"last_seen"`
+			ClusterID    string          `json:"cluster_id"`
+			ClusterName  string          `json:"cluster_name,omitempty"`
+			RorMetadata  *rorMetadataDTO `json:"ror_metadata,omitempty"`
+			Environment  string          `json:"environment,omitempty"`
+			Containers   int64           `json:"containers"`
+			Images       int64           `json:"images"`
+			Namespaces   int64           `json:"namespaces"`
+			IngressCount int64           `json:"ingress_count"`
+			LastSeen     time.Time       `json:"last_seen"`
 		}
 		out := []outRow{}
 		ctx := r.Context()
@@ -865,24 +858,43 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 		var searchArgs []any
 		if searchQuery != "" {
 			pattern := "%" + searchQuery + "%"
+			// Match the MV's ROR columns and the clusters-table fallback
+			// (c.*), so a cluster findable by its ROR name on the detail
+			// page is also findable in this list even when the MV row's
+			// ROR columns are NULL.
 			searchWhere = `AND (
 				cs.cluster_id        ILIKE ? OR
 				cs.cluster_name      ILIKE ? OR
 				cs.ror_slug          ILIKE ? OR
 				cs.ror_cluster_name  ILIKE ? OR
+				c.ror_slug           ILIKE ? OR
+				c.ror_cluster_name   ILIKE ? OR
+				c.display_name       ILIKE ? OR
 				cs.environment       ILIKE ?
 			)`
-			searchArgs = []any{pattern, pattern, pattern, pattern, pattern}
+			searchArgs = []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
 		}
 
+		// ROR fields fall back to the clusters table — the durable
+		// ROR-binding store written by upsertClusterRorBinding and the ROR
+		// sync. The MV derives ROR only from the records currently in
+		// cluster_record, so a stale MV (or a group whose live records
+		// dropped their ror_metadata) shows NULL ROR columns even though
+		// the binding exists. The detail handler (/api/cluster/{id})
+		// already falls back this way; mirroring it here keeps the list
+		// page and the detail page in agreement.
 		query := `
 			SELECT
-			    cs.cluster_id, cs.cluster_name,
-			    cs.ror_slug, cs.ror_cluster_name, cs.ror_env,
+			    cs.cluster_id,
+			    cs.cluster_name,
+			    COALESCE(NULLIF(cs.ror_slug, ''),         NULLIF(c.ror_slug, ''))         AS ror_slug,
+			    COALESCE(NULLIF(cs.ror_cluster_name, ''), NULLIF(c.ror_cluster_name, '')) AS ror_cluster_name,
+			    COALESCE(NULLIF(cs.ror_env, ''),          NULLIF(c.ror_env, ''))          AS ror_env,
 			    cs.environment,
 			    cs.containers, cs.images, cs.namespaces, cs.ingress_count,
 			    cs.last_seen
 			FROM cluster_summary cs
+			LEFT JOIN clusters c ON c.cluster_id = cs.cluster_id
 			` + livenessJoin + `
 			WHERE TRUE ` + aclWhere + ` ` + searchWhere + `
 			ORDER BY cs.last_seen DESC
@@ -909,22 +921,10 @@ func ClusterSummaryHandler(db *gorm.DB) http.HandlerFunc {
 			if r.ClusterName != nil {
 				row.ClusterName = *r.ClusterName
 			}
-			// ROR triple is all-or-nothing: when no record carried
-			// ror_metadata, every ROR column is NULL and the nested
-			// object is omitted entirely. Gate the object on slug
-			// presence because slug is the load-bearing identifier
-			// (name/env can be empty strings even when a binding
-			// exists; slug is always present when ror_metadata is).
-			if r.RorSlug != nil {
-				meta := &rorMetadata{Slug: *r.RorSlug}
-				if r.RorClusterName != nil {
-					meta.ClusterName = *r.RorClusterName
-				}
-				if r.RorEnv != nil {
-					meta.Env = *r.RorEnv
-				}
-				row.RorMetadata = meta
-			}
+			// ROR columns already COALESCE the MV value with the
+			// clusters-table fallback in SQL; newRorMetadata omits the
+			// object when all three are empty.
+			row.RorMetadata = newRorMetadata(deref(r.RorSlug), deref(r.RorClusterName), deref(r.RorEnv))
 			out = append(out, row)
 		}
 		writeJSON(w, http.StatusOK, out)

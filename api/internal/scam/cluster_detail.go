@@ -461,15 +461,7 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		rorEnv := firstNonEmpty(summary.RorEnv, resolved.RorEnv)
 		displayName := firstNonEmpty(rorName, clusterName, rorSlug, resolved.DisplayName, clusterID)
 
-		type rorMeta struct {
-			Slug        string `json:"slug,omitempty"`
-			ClusterName string `json:"cluster_name,omitempty"`
-			Env         string `json:"env,omitempty"`
-		}
-		var ror *rorMeta
-		if rorSlug != "" || rorName != "" || rorEnv != "" {
-			ror = &rorMeta{Slug: rorSlug, ClusterName: rorName, Env: rorEnv}
-		}
+		ror := newRorMetadata(rorSlug, rorName, rorEnv)
 
 		// Pod total derived from workload groups (cluster_summary doesn't
 		// carry a pod count, only containers).
@@ -479,12 +471,12 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		resp := struct {
-			ClusterID   string     `json:"cluster_id"`
-			DisplayName string     `json:"display_name"`
-			ClusterName string     `json:"cluster_name,omitempty"`
-			RorMetadata *rorMeta   `json:"ror_metadata,omitempty"`
-			Environment string     `json:"environment,omitempty"`
-			LastSeen    *time.Time `json:"last_seen,omitempty"`
+			ClusterID   string          `json:"cluster_id"`
+			DisplayName string          `json:"display_name"`
+			ClusterName string          `json:"cluster_name,omitempty"`
+			RorMetadata *rorMetadataDTO `json:"ror_metadata,omitempty"`
+			Environment string          `json:"environment,omitempty"`
+			LastSeen    *time.Time      `json:"last_seen,omitempty"`
 			Counts      struct {
 				Containers int64 `json:"containers"`
 				Images     int64 `json:"images"`
