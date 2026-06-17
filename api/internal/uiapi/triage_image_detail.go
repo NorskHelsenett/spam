@@ -206,11 +206,9 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service, c cache.Store) http.
 // set so the UI can say "+N outside your access" without naming them.
 func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.DB, payload triageImageDetailPayload) {
 	resp := triageImageDetailResponse{
-		Vulns:        payload.Vulns,
-		VulnTotal:    payload.VulnTotal,
-		Hosts:        payload.Hosts,
-		Clusters:     []TriageImageCluster{},
-		ClusterTotal: len(payload.AllClusters),
+		Vulns:     payload.Vulns,
+		VulnTotal: payload.VulnTotal,
+		Clusters:  []TriageImageCluster{},
 	}
 	if resp.Vulns == nil {
 		resp.Vulns = []TriageImageVuln{}
@@ -235,23 +233,29 @@ func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.D
 		http.Error(w, "failed to scope results", http.StatusInternalServerError)
 		return
 	}
+	// ClusterTotal counts only namespace-visible clusters so the UI's
+	// "+N outside your access" reflects ACL-denied clusters only. A cluster
+	// the digest runs in solely within hidden namespaces is neither shown
+	// nor counted — it isn't "outside your access", it's just hidden, so
+	// counting it would surface a phantom "+1 outside your access".
+	clusterTotal := 0
 	for _, cl := range payload.AllClusters {
-		if !unrestricted {
-			if _, ok := readable[cl.ClusterID]; !ok {
-				continue
-			}
-		}
-		// Trim hidden namespaces from the per-cluster list. A cluster that
-		// runs the digest only in hidden namespaces drops out entirely —
-		// from this caller's view the image isn't running anywhere visible
-		// there.
+		// Hidden-namespace trim first (independent of ACL): a cluster that
+		// runs the digest only in hidden namespaces drops out entirely.
 		orig := cl.Namespaces
 		cl.Namespaces = filterHiddenNamespaceList(orig, isNamespaceHidden)
 		if orig != "" && cl.Namespaces == "" {
 			continue
 		}
+		clusterTotal++
+		if !unrestricted {
+			if _, ok := readable[cl.ClusterID]; !ok {
+				continue
+			}
+		}
 		resp.Clusters = append(resp.Clusters, cl)
 	}
+	resp.ClusterTotal = clusterTotal
 
 	writeJSON(w, http.StatusOK, resp)
 }
