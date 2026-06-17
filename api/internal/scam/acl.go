@@ -131,10 +131,15 @@ func hiddenNamespaceMatch(r *http.Request, db *gorm.DB) func(string) bool {
 // canReadCluster is the per-cluster gate used by chain-style handlers
 // that take an explicit cluster_id query parameter.
 //
-// Patterns sourced from ROR identify the cluster by slug rather than
-// kube-system UID. When the direct equality check misses, fall through
-// to a binding lookup and re-check against the slug — the RORProvider
-// cache makes the second Grants call cheap.
+// A grant may identify the cluster by any of three identity domains —
+// kube-system cluster_id (local grants), ROR slug, or ROR cluster UID
+// (post identifier migration). When the direct equality check against
+// the passed cluster_id misses, resolve the cluster's slug and UID from
+// the clusters table and re-check each. This mirrors the three-domain
+// resolution in clusterACLFilterCol; keeping only two domains here is
+// what let a UID-granted cluster appear in the list yet 404 on its
+// chain/detail endpoints. The RORProvider cache makes the extra Grants
+// calls cheap.
 func canReadCluster(r *http.Request, db *gorm.DB, clusterID string) (bool, error) {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin || subj.IsGlobalReader {
@@ -144,13 +149,22 @@ func canReadCluster(r *http.Request, db *gorm.DB, clusterID string) (bool, error
 	if ok, err := acl.CanReadCluster(r.Context(), p, subj, clusterID); err != nil || ok {
 		return ok, err
 	}
-	var rorSlug string
-	_ = db.WithContext(r.Context()).Raw(
-		`SELECT ror_slug FROM clusters WHERE cluster_id = ? AND ror_slug <> ''`,
-		clusterID,
-	).Scan(&rorSlug).Error
-	if rorSlug == "" {
-		return false, nil
+	var row struct {
+		RorSlug       string
+		RorClusterUID string
 	}
-	return acl.CanReadCluster(r.Context(), p, subj, rorSlug)
+	_ = db.WithContext(r.Context()).Raw(
+		`SELECT TRIM(ror_slug) AS ror_slug, COALESCE(ror_cluster_uid, '') AS ror_cluster_uid
+		 FROM clusters WHERE cluster_id = ?`,
+		clusterID,
+	).Scan(&row).Error
+	for _, alt := range []string{row.RorSlug, row.RorClusterUID} {
+		if alt == "" {
+			continue
+		}
+		if ok, err := acl.CanReadCluster(r.Context(), p, subj, alt); err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
 }
