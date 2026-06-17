@@ -261,10 +261,14 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 		SELECT
 			cd.cluster_id,
 			COALESCE(
-				NULLIF(c.display_name, ''),
 				NULLIF(cs.ror_cluster_name, ''),
 				NULLIF(c.ror_cluster_name, ''),
 				NULLIF(cd.ror_cluster_name, ''),
+				-- admin display_name override, but only when it's a real
+				-- label: clusters rows are seeded with display_name = the
+				-- kube UID, so an unedited row would otherwise mask the
+				-- (correct) ROR name above.
+				NULLIF(NULLIF(c.display_name, ''), cd.cluster_id),
 				NULLIF(cs.cluster_name, ''),
 				NULLIF(cd.cluster_label, ''),
 				NULLIF(cs.ror_slug, ''),
@@ -393,9 +397,9 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 		SELECT DISTINCT
 			ed.host,
 			COALESCE(
-				NULLIF(c.display_name, ''),
 				NULLIF(cs.ror_cluster_name, ''),
 				NULLIF(c.ror_cluster_name, ''),
+				NULLIF(NULLIF(c.display_name, ''), ed.cluster_id),
 				NULLIF(cs.cluster_name, ''),
 				NULLIF(he.cluster, ''),
 				NULLIF(cs.ror_slug, ''),
