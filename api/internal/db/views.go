@@ -738,8 +738,13 @@ func VulnUnifiedViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 // view_unified_*_vulnerabilities at request time.
 func VulnCanonicalViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	var populated bool
+	// Require BOTH canonical MVs to be present (COUNT(*) = 2) and populated.
+	// A bare bool_and over IN(...) returns true when one MV is entirely
+	// absent from pg_matviews — only the surviving row is aggregated — which
+	// would send the admin fast path at a non-existent vuln_canonical_summary
+	// and 500. The COUNT guard makes a missing MV fall back safely instead.
 	err := db.WithContext(ctx).Raw(
-		"SELECT COALESCE(bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN (?, ?)",
+		"SELECT COALESCE(COUNT(*) = 2 AND bool_and(ispopulated), false) FROM pg_matviews WHERE matviewname IN (?, ?)",
 		vulnCanonicalViewNames[0], vulnCanonicalViewNames[1],
 	).Scan(&populated).Error
 	return populated, err
