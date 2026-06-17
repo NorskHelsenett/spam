@@ -96,8 +96,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 	addr := fmt.Sprintf(":%d", s.cfg.HTTPPort)
 	s.httpServer = &http.Server{
-		Addr:    addr,
-		Handler: r,
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	log.Printf("runner server listening on %s", addr)

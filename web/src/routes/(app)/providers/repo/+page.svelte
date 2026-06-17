@@ -835,19 +835,19 @@
 				<div class="grid grid-cols-2 gap-3">
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{details.stats.commits.toLocaleString()}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><GitCommit class="h-3 w-3" /> Commits</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><GitCommit class="h-3 w-3" /> Commits</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{details.stats.branches}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><GitBranch class="h-3 w-3" /> Branches</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><GitBranch class="h-3 w-3" /> Branches</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{details.stats.releases}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Tag class="h-3 w-3" /> Releases</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Tag class="h-3 w-3" /> Releases</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{Math.max(details.stats.contributors, contributors.length)}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Users class="h-3 w-3" /> Contributors</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Users class="h-3 w-3" /> Contributors</p>
 					</div>
 				</div>
 			</div>
@@ -862,19 +862,19 @@
 				<div class="grid grid-cols-2 gap-3">
 					<div>
 						<p class="text-2xl font-bold text-red-500">{securityData.vulnerabilities.critical}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldX class="h-3 w-3 text-red-500" /> Critical</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><ShieldX class="h-3 w-3 text-red-500" /> Critical</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-orange-500">{securityData.vulnerabilities.high}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-orange-500" /> High</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><ShieldAlert class="h-3 w-3 text-orange-500" /> High</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-yellow-500">{securityData.vulnerabilities.medium}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3 text-yellow-500" /> Medium</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3 text-yellow-500" /> Medium</p>
 					</div>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-secondary)]">{securityData.vulnerabilities.low}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3" /> Low</p>
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]"><Shield class="h-3 w-3" /> Low</p>
 					</div>
 				</div>
 			</button>

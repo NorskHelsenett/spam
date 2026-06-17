@@ -14,7 +14,7 @@
 #   - No other egress allowed
 
 # Build the Go image-scanner binary
-FROM golang:1.26-alpine AS builder
+FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
@@ -32,17 +32,17 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # the time of selection so we're never racing an upstream release-day
 # regression. Refresh these during scheduled maintenance, not reactively.
 FROM ghcr.io/anchore/syft:v1.42.3@sha256:5999d209a342e55e9edf70bf8930fb5b86d8f2a783fa401178372c50e21b1d36 AS syft
-FROM anchore/grype:v0.111.0@sha256:af9f30d1de4ecfbbcd2b674371e8df787879e16832af8ab81551b0bf1ec0ad5b AS grype
+FROM ncr.sky.nhn.no/dockerhub/anchore/grype:v0.111.0@sha256:af9f30d1de4ecfbbcd2b674371e8df787879e16832af8ab81551b0bf1ec0ad5b AS grype
 FROM gcr.io/go-containerregistry/crane:v0.21.4@sha256:acb1c5c819a62a89183c4688d3a4a6e0633df1ea2b6e41834f105e12417ac6c4 AS crane
 FROM gcr.io/projectsigstore/cosign:v2.6.3@sha256:4bedb8de1c5c1abd8dea60de704ba449402d238623fa8bb33d2ccaa9beffcbf5 AS cosign
 FROM ghcr.io/betterleaks/betterleaks:v1.1.1@sha256:8c1fdaaeef493bb27dda66051a2bf7874e5c6feeb5fe8eced1359afdbf8c2571 AS betterleaks
 # Trivy is opt-in per category (payload.scanners) — shipping the binary
 # keeps the opt-in one env flag away rather than a separate image.
-FROM aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
+FROM ncr.sky.nhn.no/dockerhub/aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c AS trivy
 
 # Runtime — alpine with GNU tar (busybox tar chokes on some OCI layer
 # formats) and ca-certificates for TLS to registries + DB sources.
-FROM alpine:3.20
+FROM ncr.sky.nhn.no/dockerhub/library/alpine:3.20
 
 RUN apk add --no-cache ca-certificates tar
 

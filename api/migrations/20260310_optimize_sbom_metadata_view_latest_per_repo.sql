@@ -1,6 +1,18 @@
 -- Optimize sbom_metadata_view to only materialize the latest SBOM per repo,
 -- matching the sbom_component_view optimization. Also replaces expression-based
 -- unique indexes (COALESCE) with plain column indexes required for CONCURRENTLY refresh.
+--
+-- Hash bump 2026-06: sbom_docs now extracts ONLY doc->'metadata' from the
+-- parsed document. The CTE is referenced by three branches, so Postgres
+-- materializes it — previously that meant writing every fully-parsed SBOM
+-- (the components array is the overwhelming bulk of a CycloneDX doc; the
+-- sboms TOAST is multiple GB) to the CTE materialization on every refresh,
+-- which spilled terabytes to temp files and put this view's REFRESH at
+-- ~230s mean, the single slowest statement in pg_stat_statements. Nothing
+-- downstream ever reads anything outside 'metadata', so the materialized
+-- CTE shrinks from gigabytes to kilobytes. The jsonb parse of the full
+-- document still happens (unavoidable — 'metadata' is part of the doc),
+-- but it happens streaming, once, without being persisted.
 
 DROP MATERIALIZED VIEW IF EXISTS sbom_metadata_view;
 
@@ -27,7 +39,7 @@ sbom_docs AS (
     s.format,
     s.created_at,
     s.ingested_by_user_id,
-    convert_from(s.content_bytes, 'utf8')::jsonb AS doc
+    (convert_from(s.content_bytes, 'utf8')::jsonb)->'metadata' AS meta
   FROM sboms s
   WHERE s.id IN (SELECT sbom_id FROM latest_bindings)
 ),
@@ -38,8 +50,7 @@ sbom_json AS (
     sd.created_at,
     sd.ingested_by_user_id,
     lb.asset_type,
-    lb.asset_ref_id,
-    sd.doc
+    lb.asset_ref_id
   FROM sbom_docs sd
   JOIN latest_bindings lb ON lb.sbom_id = sd.sbom_id
 ),
@@ -56,18 +67,18 @@ scanner AS (
     ) AS scanner_version
   FROM sbom_docs sd
   LEFT JOIN LATERAL jsonb_array_elements(
-    COALESCE(sd.doc->'metadata'->'tools'->'components', '[]'::jsonb)
+    COALESCE(sd.meta->'tools'->'components', '[]'::jsonb)
   ) AS t ON TRUE
   GROUP BY sd.sbom_id
 ),
 root_component AS (
   SELECT
     sd.sbom_id,
-    sd.doc->'metadata'->'component'->>'bom-ref' AS root_ref,
-    sd.doc->'metadata'->'component'->>'name' AS root_name,
-    sd.doc->'metadata'->'component'->>'type' AS root_type
+    sd.meta->'component'->>'bom-ref' AS root_ref,
+    sd.meta->'component'->>'name' AS root_name,
+    sd.meta->'component'->>'type' AS root_type
   FROM sbom_docs sd
-  WHERE sd.doc->'metadata'->'component' IS NOT NULL
+  WHERE sd.meta->'component' IS NOT NULL
 ),
 repo_bindings AS (
   SELECT

@@ -26,11 +26,17 @@ import (
 	"gorm.io/gorm"
 )
 
-// refreshMaxRuntime caps a single refresh invocation. Both MVs run via
-// REFRESH ... CONCURRENTLY (or a plain refresh on first populate) so
-// reads aren't blocked, but a runaway refresh would still hold the
-// advisory lock and starve subsequent triggers.
-const refreshMaxRuntime = 5 * time.Minute
+// refreshMaxRuntime caps a single refresh invocation. Its job is to
+// catch a genuinely *hung* refresh (so it can't hold the advisory lock
+// forever); it must NOT cancel a slow-but-progressing one. If it fires
+// mid-refresh, RefreshMaterializedViews returns before recording the
+// refresh timestamp, so the debounce never advances and every trigger
+// re-runs the rebuild — a self-reinforcing storm that starves the DB
+// (observed 2026-06: sbom_metadata_view's ~168s rebuild ballooned past a
+// 5m cap under contention, never stamped, and refreshed continuously).
+// sbom_metadata_view re-parses every SBOM document, so size this to the
+// worst-case contended runtime of both MVs, matching asset_risk's cap.
+const refreshMaxRuntime = 30 * time.Minute
 
 // refreshGate coalesces concurrent TriggerRefresh calls so high-volume
 // SBOM ingest spikes (CI batch finishing many runs at once) don't pile

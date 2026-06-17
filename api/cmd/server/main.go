@@ -17,6 +17,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/artifacts"
 	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/audit"
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -25,6 +26,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/config"
 	"github.com/NorskHelsenett/spam/internal/db"
 	"github.com/NorskHelsenett/spam/internal/events"
+	"github.com/NorskHelsenett/spam/internal/hiddenns"
 	"github.com/NorskHelsenett/spam/internal/hostexposure"
 	"github.com/NorskHelsenett/spam/internal/hostresolve"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
@@ -107,9 +109,18 @@ func run() error {
 		&scam.Cluster{},
 		&audit.Log{},
 		&acl.Grant{},
+		&hiddenns.HiddenNamespace{},
 	); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
 	}
+
+	// Admin-curated hidden namespaces also prune the cluster→image ACL
+	// inheritance branch, so regular users' vuln/triage lists skip
+	// images that only run in administrative namespaces. Wired here
+	// because the acl clause builders don't carry a DB handle.
+	acl.SetHiddenNamespaceClause(func(ctx context.Context, col string) (string, []any) {
+		return hiddenns.Clause(ctx, gormDB, col)
+	})
 
 	if err := db.EnsureViews(ctx, gormDB,
 		"migrations/20260211_create_unique_active_create_run_jobs.sql",
@@ -168,39 +179,55 @@ func run() error {
 		"migrations/20260527_create_vuln_canonical_assets.sql",
 		"migrations/20260527a_create_vuln_canonical_summary.sql",
 		"migrations/20260527_create_host_resolution.sql",
+		"migrations/20260610_asset_risk_v2_vuln_tier_signals.sql",
+		"migrations/20260610a_mv_refresh_source_version.sql",
+		"migrations/20260610a_create_llm_settings_and_asset_advisories.sql",
+		"migrations/20260611_host_resolution_public_dns.sql",
+		"migrations/20260611a_finding_chat_prompt_image_metadata.sql",
+		"migrations/20260611b_asset_risk_exposure_requires_public_dns.sql",
+		"migrations/20260612_fix_sbom_component_view_unique_index.sql",
+		"migrations/20260616_clusters_ror_cluster_uid.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
 
-	populateCtx, populateCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer populateCancel()
-	if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
-		return fmt.Errorf("populate views: %w", err)
+	// Self-healing backstop: if any migration-replay path restored the
+	// COALESCE expression index on sbom_component_view (which disqualifies
+	// it from REFRESH CONCURRENTLY), swap it back before the first refresh.
+	if err := db.EnsureSbomComponentViewIndex(ctx, gormDB); err != nil {
+		return fmt.Errorf("ensure sbom_component_view unique index: %w", err)
 	}
 
-	// Kick a coalesced refresh so we pick up any data accumulated since
-	// the last refresh (e.g. across a server restart). The advisory lock
-	// inside RefreshMaterializedViews makes this multi-replica safe —
-	// only one replica does the work; others observe ErrRefreshLockHeld
-	// and exit. Replaces the old REFRESH_SBOM_VIEWS job-queue path which
-	// burned worker slots on the lock contention.
-	sbomviews.TriggerRefresh(gormDB)
-
-	// First-populate the cascade of MVs in dependency order. They were
-	// created WITH NO DATA so HTTP serving starts immediately; this
-	// goroutine fills them in the background. Each step's advisory lock
-	// makes this safe across replicas — exactly one replica does the
-	// REFRESH work per family; the others observe ErrRefreshLockHeld and
-	// poll until the winning replica finishes.
+	// Materialized views populate in the BACKGROUND so HTTP serving and
+	// the liveness probe come up immediately. Readiness (/api/readyz)
+	// stays false until the base SBOM views are populated, so Kubernetes
+	// only routes traffic to this replica once it can answer vuln/triage
+	// queries. Populating synchronously on the startup path used to wedge
+	// boot behind a multi-minute REFRESH and, under a busy DB, triggered
+	// a liveness restart spiral (each killed pod left its REFRESH running
+	// server-side, piling up duplicates).
 	//
-	// Order matters: asset_risk's body joins view_unified_*_vulnerabilities
-	// and exposed_digests. Refreshing it before those populate raises
-	// SQLSTATE 55000 and leaves asset_risk empty until the next
-	// scan-completion trigger fires — on a fresh deploy with no scans
-	// yet, /api/triage stays empty indefinitely. Sequencing here avoids
-	// the race; ongoing refreshes use the existing TriggerRefresh gates.
+	// Order matters: sbom_component_view + sbom_metadata_view are the base
+	// layer (the vuln and asset_risk MVs join them), so they populate
+	// first; the dependent families follow, with asset_risk last because
+	// its body joins view_unified_*_vulnerabilities and exposed_digests —
+	// refreshing it before those populate raises SQLSTATE 55000 and leaves
+	// /api/triage empty until the next scan-completion trigger. Each step's
+	// advisory lock makes this safe across replicas: exactly one replica
+	// does the REFRESH work per family; others observe ErrRefreshLockHeld
+	// and poll until the winner finishes.
 	go func() {
 		ctx := context.Background()
+
+		populateCtx, populateCancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer populateCancel()
+		if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
+			log.Printf("populate sbom views: %v", err)
+		}
+		// Pick up any data accumulated since the last refresh (e.g. across
+		// a restart). Advisory-lock-gated, so multi-replica safe.
+		sbomviews.TriggerRefresh(gormDB)
+
 		var wg sync.WaitGroup
 		wg.Add(3)
 		go func() {
@@ -228,6 +255,11 @@ func run() error {
 		if err := assetrisk.EnsureFirstPopulate(ctx, gormDB); err != nil {
 			log.Printf("assetrisk first populate: %v", err)
 		}
+		// LLM advisory generation reads asset_risk, so it starts only
+		// after the first populate. No-ops while every llm_settings
+		// use case is disabled.
+		llmadvisory.SetSecretsKey(cfg.ProviderSecretsKey)
+		llmadvisory.StartWorker(ctx, gormDB)
 	}()
 
 	seedSQLPath := strings.TrimSpace(os.Getenv("SPAM_SEED_SQL"))
@@ -261,6 +293,11 @@ func run() error {
 		return fmt.Errorf("ensure kv_store table: %w", err)
 	}
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
+	// Readiness reflects base-MV population: the server serves immediately
+	// (liveness up) but /api/readyz stays 503 until sbom views are filled.
+	routerOpts.ReadinessCheck = func(ctx context.Context) (bool, error) {
+		return db.ViewsPopulated(ctx, gormDB)
+	}
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	routerOpts.SecretsKey = cfg.ProviderSecretsKey
@@ -327,6 +364,9 @@ func run() error {
 		Addr:              addr,
 		Handler:           router,
 		ReadHeaderTimeout: 15 * time.Second,
+		// No WriteTimeout: it would cut long-lived SSE streams. The
+		// JSON routes are bounded by per-route Chi timeouts instead.
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {

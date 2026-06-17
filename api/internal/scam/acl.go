@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/hiddenns"
 	"gorm.io/gorm"
 )
 
@@ -17,8 +18,8 @@ import (
 //	db.Raw(sql, append(aclArgs, otherArgs...)...).Scan(&rows)
 //
 // Results:
-//   - fragment = "TRUE" (no args) → admin or wildcard grant; no-op
-//     filter.
+//   - fragment = "TRUE" (no args) → admin, global_reader, or wildcard
+//     grant; no-op filter.
 //   - fragment with two `?` placeholders bound to the same []string of
 //     pattern identifiers → grant-scoped. The IN-clause subquery
 //     resolves each identifier as either a cluster_id (kube-system
@@ -56,7 +57,7 @@ func ClusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 // against that authoritative set.
 func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	subj := acl.SubjectFromRequest(r)
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return "TRUE", nil, false
 	}
 
@@ -82,8 +83,49 @@ func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 	if len(ids) == 0 {
 		return "", nil, true
 	}
-	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (ror_slug <> '' AND ror_slug IN (?))))"
-	return frag, []any{ids, ids}, false
+	// Resolve each grant id against three identifier domains:
+	//   - cluster_id       local grants (kube-system UID)
+	//   - ror_slug         ROR slug-keyed grants (TRIM'd: ROR is
+	//                      inconsistent about trailing whitespace, and
+	//                      this heals existing dirty rows without a
+	//                      migration)
+	//   - ror_cluster_uid  ROR UUID-keyed grants (post identifier
+	//                      migration ROR keys grants by the cluster UUID,
+	//                      which matches neither cluster_id nor the slug)
+	// The clusters table is small, so the lost ror_slug index use is
+	// negligible.
+	frag := "(" + col + " IN (SELECT cluster_id FROM clusters WHERE cluster_id IN (?) OR (TRIM(ror_slug) <> '' AND TRIM(ror_slug) IN (?)) OR (ror_cluster_uid <> '' AND ror_cluster_uid IN (?))))"
+	return frag, []any{ids, ids, ids}, false
+}
+
+// hiddenNamespaceWhere compiles the admin-curated hidden-namespace
+// patterns (hiddenns package) into an "AND …" fragment over the given
+// namespace column, or "" when nothing should be filtered. Admin and
+// global_reader keep the unfiltered fleet view — hiding administrative
+// namespaces (nhn-scam, nhn-ror, …) is a focus aid for regular users,
+// not an access boundary.
+func hiddenNamespaceWhere(r *http.Request, db *gorm.DB, col string) (string, []any) {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return "", nil
+	}
+	frag, args := hiddenns.Clause(r.Context(), db, col)
+	if frag == "" {
+		return "", nil
+	}
+	return "AND " + frag, args
+}
+
+// hiddenNamespaceMatch is the Go-side twin of hiddenNamespaceWhere for
+// handlers that group rows in memory (ClusterChainHandler). Returns a
+// predicate that reports whether a namespace should be hidden from the
+// caller.
+func hiddenNamespaceMatch(r *http.Request, db *gorm.DB) func(string) bool {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return func(string) bool { return false }
+	}
+	return hiddenns.MatcherFor(hiddenns.Patterns(r.Context(), db))
 }
 
 // canReadCluster is the per-cluster gate used by chain-style handlers
@@ -95,7 +137,7 @@ func clusterACLFilterCol(r *http.Request, col string) (string, []any, bool) {
 // cache makes the second Grants call cheap.
 func canReadCluster(r *http.Request, db *gorm.DB, clusterID string) (bool, error) {
 	subj := acl.SubjectFromRequest(r)
-	if subj.IsAdmin {
+	if subj.IsAdmin || subj.IsGlobalReader {
 		return true, nil
 	}
 	p := acl.ProviderFromRequest(r)

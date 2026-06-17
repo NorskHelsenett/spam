@@ -26,9 +26,14 @@ const (
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix   = "vuln:list:v5:"
-	summaryCacheTTL   = 7 * 24 * time.Hour
-	refreshMaxRuntime = 2 * time.Minute
+	listCachePrefix = "vuln:list:v5:"
+	summaryCacheTTL = 7 * 24 * time.Hour
+	// refreshMaxRuntime must outlast the worst-case contended rebuild of
+	// all four unified/canonical vuln MVs, not just the uncontended ~40s.
+	// If it fires mid-refresh the debounce timestamp never gets recorded
+	// and the family re-runs on every trigger — the storm that starved
+	// the DB on 2026-06. Sized to catch a true hang, not a slow refresh.
+	refreshMaxRuntime = 20 * time.Minute
 )
 
 type Summary struct {
@@ -204,7 +209,8 @@ func LoadSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 	// Cache miss (first request after deploy, or cache evicted) —
 	// compute inline. After this returns, subsequent requests within
 	// the same version see a cache hit.
-	return Refresh(ctx, db, time.Now().UTC())
+	summary, _, err := Refresh(ctx, db, time.Now().UTC())
+	return summary, err
 }
 
 // refreshGate coalesces concurrent TriggerRefresh calls. A single worker
@@ -260,7 +266,7 @@ func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
 		if unifiedViewsReady(ctx, db) {
 			return nil
 		}
-		if err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+		if _, err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
 			log.Printf("vulnmetrics: first populate refresh: %v", err)
 		}
 		select {
@@ -295,7 +301,7 @@ func TriggerRefresh(db *gorm.DB) {
 			// doesn't abort the refresh mid-flight; timeout bounds
 			// us against a hung DB query.
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
-			if _, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
+			if _, viewsRefreshed, err := Refresh(ctx, db, time.Now().UTC()); err != nil {
 				log.Printf("vulnmetrics: background refresh: %v", err)
 				// Skipping the assetrisk cascade is deliberate — asset_risk
 				// reads from the vuln_unified MVs, so refreshing it against
@@ -303,11 +309,15 @@ func TriggerRefresh(db *gorm.DB) {
 				// snapshot. The log line makes the staleness visible to ops
 				// instead of silently letting asset_risk drift.
 				log.Printf("vulnmetrics: skipping assetrisk cascade (vulnmetrics refresh failed)")
-			} else {
+			} else if viewsRefreshed {
 				// asset_risk reads the unified vulnerability MVs. Cascade
 				// after the vuln refresh has had a chance to land instead
 				// of letting scan hooks trigger both families in parallel
-				// against mismatched snapshots.
+				// against mismatched snapshots. Gated on an actual REFRESH:
+				// a debounce-skipped pass left the MVs byte-identical, so
+				// rebuilding asset_risk from them would be a no-op — the
+				// unconditional cascade is what kept asset_risk rebuilding
+				// at its debounce floor around the clock.
 				assetrisk.TriggerRefresh(db)
 			}
 			cancel()
@@ -325,7 +335,12 @@ func TriggerRefresh(db *gorm.DB) {
 	}()
 }
 
-func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, error) {
+// Refresh rebuilds the unified vuln MVs (debounced) and recomputes the
+// summary/repos caches. The bool reports whether the MV refresh
+// actually executed — false means the debounce window or another
+// replica's in-flight refresh short-circuited it. TriggerRefresh uses
+// it to cascade asset_risk only when the views it reads changed.
+func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, bool, error) {
 	// Refresh the unified vuln MVs first so computeSummary / computeRepos
 	// observe the freshest scan data. ErrRefreshLockHeld means another
 	// replica is already refreshing — its result will land before ours
@@ -333,21 +348,22 @@ func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, e
 	// failures fall through; computeSummary will then either see stale
 	// data (acceptable) or, on first start, return zero-value rows
 	// (handled by the unpopulated guard in LoadSummary / LoadListPage).
-	if err := spamdb.RefreshVulnUnifiedViews(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+	viewsRefreshed, err := spamdb.RefreshVulnUnifiedViews(ctx, db)
+	if err != nil && err != spamdb.ErrRefreshLockHeld {
 		log.Printf("vulnmetrics: refresh unified views: %v", err)
 	}
 
 	summary, err := computeSummary(ctx, db)
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 	repos, err := computeRepos(ctx, db)
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 	version, err := querySummaryVersion(ctx, db)
 	if err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 
 	store := cache.NewPostgresStore(db)
@@ -355,20 +371,20 @@ func Refresh(ctx context.Context, db *gorm.DB, capturedAt time.Time) (Summary, e
 		Version: version,
 		Summary: summary,
 	}, summaryCacheTTL); err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 	if err := cache.SetJSON(ctx, store, reposCacheKey, cachedRepos{
 		Version: version,
 		Rows:    repos,
 	}, summaryCacheTTL); err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 
 	if err := upsertSnapshot(ctx, db, capturedAt.UTC(), summary); err != nil {
-		return Summary{}, err
+		return Summary{}, viewsRefreshed, err
 	}
 
-	return summary, nil
+	return summary, viewsRefreshed, nil
 }
 
 func Clear(ctx context.Context, db *gorm.DB) error {

@@ -7,6 +7,9 @@
 package assetrisk
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"math"
 	"time"
 )
@@ -51,6 +54,32 @@ type Signals struct {
 	// as a posture signal even when no individual dep is archived.
 	MaxMajorBehind      int   `json:"max_major_behind"        gorm:"column:max_major_behind"`
 	MajorBehindDepCount int64 `json:"major_behind_dep_count"  gorm:"column:major_behind_dep_count"`
+
+	// Full severity spectrum + fixability beyond criticals, so the
+	// deprioritized bucket can explain itself ("medium/low only",
+	// "no fix available").
+	MediumCount   int64 `json:"medium_count"      gorm:"column:medium_count"`
+	LowCount      int64 `json:"low_count"         gorm:"column:low_count"`
+	HasFixForHigh bool  `json:"has_fix_for_high"  gorm:"column:has_fix_for_high"`
+
+	// KEV detail: fixability, CISA ransomware flag, BOD 22-01 due
+	// date, and the worst EPSS among KEV vulns.
+	KEVFixableCount    int64   `json:"kev_fixable_count"    gorm:"column:kev_fixable_count"`
+	KEVRansomwareCount int64   `json:"kev_ransomware_count" gorm:"column:kev_ransomware_count"`
+	KEVDuePassed       bool    `json:"kev_due_passed"       gorm:"column:kev_due_passed"`
+	KEVEPSSMax         float32 `json:"kev_epss_max"         gorm:"column:kev_epss_max"`
+
+	// Exposure-scoped vuln signals: only vulns carried by a digest
+	// that is itself internet-reachable. Exact for images (digest =
+	// exposure unit), pre-aggregated per cluster.
+	ExposedKEVCount      int64   `json:"exposed_kev_count"      gorm:"column:exposed_kev_count"`
+	ExposedCriticalCount int64   `json:"exposed_critical_count" gorm:"column:exposed_critical_count"`
+	ExposedEPSSMax       float32 `json:"exposed_epss_max"       gorm:"column:exposed_epss_max"`
+
+	// Deployment spread (images only): one rebuild, ClusterCount
+	// redeploys, ExposedClusterCount of which face the internet.
+	ClusterCount        int64 `json:"cluster_count"         gorm:"column:cluster_count"`
+	ExposedClusterCount int64 `json:"exposed_cluster_count" gorm:"column:exposed_cluster_count"`
 }
 
 // ThreatScore turns acute-risk signals into a 0..100 number where
@@ -64,9 +93,11 @@ func ThreatScore(s Signals) int {
 		score += 35
 	}
 
-	// KEV — confirmed exploited in the wild. Stacks with exposure.
+	// KEV — confirmed exploited in the wild. Stacks with exposure;
+	// ExposedKEVCount is exact (the KEV vuln itself sits on an
+	// exposed digest), not the old asset-level conjunction.
 	switch {
-	case s.KEVCount > 0 && s.InternetExposed:
+	case s.ExposedKEVCount > 0:
 		score += 30
 	case s.KEVCount > 0:
 		score += 20
@@ -198,56 +229,119 @@ func TrustGrade(score int) string {
 	}
 }
 
-// Tier classifies an asset into the page's three buckets, plus a
-// "skip" bucket for rows below the actionable threshold so the watch
-// list doesn't bloat with noise. The composite cutoff is
-// threat + (100 - trust) >= 20, which means a perfectly clean asset
-// (Threat 0, Trust 100) computes to 0 and falls out, while anything
-// with even one warning crosses the line.
+// Tier classifies an asset into the page's buckets. The rules are
+// purely vuln-driven — KEV (confirmed exploited in the wild), EPSS
+// (predicted exploitation), internet exposure, severity, fixability,
+// plus active leaked secrets. Posture signals (SBOM, signing, scan
+// age, dep health) never move an asset between tiers; they surface
+// through TrustScore/ContextReasons as display-only context.
 //
-// Tiers are checked in priority order — fix_now wins over this_week
-// when both predicates match.
+// Tier meanings:
+//
+//	fix_now       actively exploited or near-certain exploitation,
+//	              and reachable from the internet / already leaking.
+//	this_week     confirmed or highly likely exploitation, but not
+//	              internet-reachable — a controlled patch window is
+//	              acceptable.
+//	watch         real risk with no urgency signal; normal patch
+//	              cadence. Conditions can escalate it (a KEV fix
+//	              shipping moves T1 → W1).
+//	deprioritized findings exist (or scan data is missing) but none
+//	              warrant action — shown with an explicit reason so
+//	              "ignore this" is a decision, not an omission.
+//	skip          scanned and clean; not returned at all.
+//
+// Tiers are checked in priority order — first match wins.
 const (
-	TierFixNow   = "fix_now"
-	TierThisWeek = "this_week"
-	TierWatch    = "watch"
-	TierSkip     = "skip"
+	TierFixNow        = "fix_now"
+	TierThisWeek      = "this_week"
+	TierWatch         = "watch"
+	TierDeprioritized = "deprioritized"
+	TierSkip          = "skip"
 )
 
-// AttentionThreshold is the cutoff below which assets drop out of the
-// watch tier. Tunable in one place so the API/UI stay consistent.
-const AttentionThreshold = 20
+// EPSS bands. FIRST suggests ~0.1 as the operational "elevated"
+// cutoff (top ~5% of CVEs); 0.5 is near-certain weaponization
+// territory (top ~0.5%) — rare enough to never cause false urgency.
+const (
+	EPSSVeryHigh = 0.5
+	EPSSElevated = 0.1
+)
 
 func Tier(s Signals) string {
+	// fix_now — exploited or near-certain, and reachable / leaking.
 	if s.ActiveSecretCount > 0 {
-		return TierFixNow
+		return TierFixNow // F1: live credential = breach-in-waiting
 	}
-	if s.KEVCount > 0 && s.InternetExposed {
-		return TierFixNow
+	if s.ExposedKEVCount > 0 {
+		return TierFixNow // F2: KEV on an internet-exposed digest
 	}
-	if s.KEVCount > 0 && s.HasFixForCritical {
-		return TierFixNow
+	if s.KEVRansomwareCount > 0 && s.KEVFixableCount > 0 {
+		return TierFixNow // F3: ransomware-campaign KEV with a patch
+	}
+	if s.ExposedCriticalCount > 0 && s.ExposedEPSSMax >= EPSSVeryHigh {
+		return TierFixNow // F4: exposed critical, ≥50% exploit odds
 	}
 
+	// this_week — confirmed/likely exploitation, not reachable.
+	if s.KEVFixableCount > 0 {
+		return TierThisWeek // W1: exploited in the wild, patch exists
+	}
+	if s.KEVCount > 0 && s.KEVDuePassed {
+		return TierThisWeek // W2: KEV past its CISA BOD 22-01 due date
+	}
+	if s.EPSSMax >= EPSSVeryHigh && (s.CriticalCount > 0 || s.HighCount > 0) {
+		return TierThisWeek // W3: very likely exploitation, severe impact
+	}
+	if s.ExposedCriticalCount > 0 && s.ExposedEPSSMax >= EPSSElevated {
+		return TierThisWeek // W4: exposed critical, elevated exploit odds
+	}
+
+	// watch — real risk, no urgency signal.
 	if s.KEVCount > 0 {
-		return TierThisWeek
+		return TierWatch // T1: KEV with no fix, not exposed, not overdue
 	}
-	if s.CriticalCount > 0 && s.EPSSMax >= 0.10 {
-		return TierThisWeek
+	if s.EPSSMax >= EPSSElevated && (s.CriticalCount > 0 || s.HighCount > 0) {
+		return TierWatch // T2: elevated exploit odds, severe impact
 	}
-	if s.ScanAgeDays > 30 && (s.CriticalCount > 0 || s.HighCount > 0) {
-		return TierThisWeek
+	if s.EPSSMax >= EPSSVeryHigh {
+		return TierWatch // T3: very high EPSS on medium/low-only impact
 	}
-	if s.AssetType == "repo" && s.SignedCommitsPct < 50 && s.CriticalCount > 0 {
-		return TierThisWeek
+	if s.CriticalCount > 0 && s.HasFixForCritical {
+		return TierWatch // T4: fixable criticals — routine patching
+	}
+	if s.InternetExposed && (s.CriticalCount > 0 || s.HighCount > 0) {
+		return TierWatch // T5: exposed and severe, nothing predicts exploit
 	}
 
-	threat := ThreatScore(s)
-	trust := TrustScore(s)
-	if threat+(100-trust) >= AttentionThreshold {
-		return TierWatch
+	// deprioritized — explicitly not worth acting on, with a reason.
+	if s.CriticalCount > 0 || s.HighCount > 0 || s.MediumCount > 0 || s.LowCount > 0 {
+		return TierDeprioritized
 	}
+	if !s.HasSBOM || s.LastScanAt == nil {
+		return TierDeprioritized // visibility gap — "complete" stays honest
+	}
+
 	return TierSkip
+}
+
+// SignalsHash fingerprints the tier-relevant signals of an asset.
+// LLM-generated advisories are cached against this hash so a summary
+// regenerates only when something that could change the advisory
+// actually changed. Scan-age / posture fields are deliberately
+// excluded — they drift daily without altering the vuln story.
+func SignalsHash(s Signals) string {
+	key := fmt.Sprintf("v1|%s|%s|%d|%d|%d|%d|%d|%d|%d|%t|%t|%t|%.4f|%.4f|%.4f|%d|%t|%d|%d",
+		s.AssetType, s.AssetID,
+		s.CriticalCount, s.HighCount, s.MediumCount, s.LowCount,
+		s.KEVCount, s.KEVFixableCount, s.KEVRansomwareCount,
+		s.KEVDuePassed, s.HasFixForCritical, s.HasFixForHigh,
+		s.EPSSMax, s.KEVEPSSMax, s.ExposedEPSSMax,
+		s.ExposedKEVCount, s.InternetExposed,
+		s.ClusterCount, s.ExposedClusterCount,
+	)
+	sum := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(sum[:8])
 }
 
 func clamp(v, lo, hi int) int {

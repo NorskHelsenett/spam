@@ -65,6 +65,19 @@ func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
 		return nil
 	}
 
+	// Both MVs project purely off cluster_record — if nothing there
+	// changed since the last refresh (and the last refresh is recent
+	// enough that the heartbeat-driven last_seen columns haven't
+	// drifted too far), a rebuild would be a no-op. Off-peak ingest is
+	// mostly no-op heartbeats, so this turns the around-the-clock
+	// floor-rate rebuilding into rebuild-on-change with a 30-minute
+	// freshness backstop.
+	sourceVersion := clusterRecordSourceVersion(ctx, db)
+	if materializedViewsSourceVersionMatches(ctx, db, clusterMVNames, sourceVersion) &&
+		materializedViewsRecentlyRefreshed(ctx, db, clusterMVNames, clusterDerivedViewMaxSkipAge) {
+		return nil
+	}
+
 	sqlDB, err := db.WithContext(ctx).DB()
 	if err != nil {
 		return fmt.Errorf("get raw db: %w", err)
@@ -100,5 +113,5 @@ func RefreshClusterSummaryView(ctx context.Context, db *gorm.DB) error {
 		}
 	}
 
-	return recordMaterializedViewRefresh(ctx, db, clusterMVNames, time.Now().UTC())
+	return recordMaterializedViewRefresh(ctx, db, clusterMVNames, time.Now().UTC(), sourceVersion)
 }

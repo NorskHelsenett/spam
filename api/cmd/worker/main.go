@@ -18,6 +18,7 @@ import (
 	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/imagescan"
 	"github.com/NorskHelsenett/spam/internal/jobs"
+	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"github.com/NorskHelsenett/spam/internal/poller"
 	"github.com/NorskHelsenett/spam/internal/providerconfig"
 	"github.com/NorskHelsenett/spam/internal/runner"
@@ -182,6 +183,9 @@ func run() error {
 
 	// Create provider store and poller for commit-based polling
 	providerStore := providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
+	// ADVISORY_BACKFILL jobs decrypt the LLM API key with the same
+	// secrets key that protects provider PATs.
+	llmadvisory.SetSecretsKey(cfg.ProviderSecretsKey)
 	if warnings := providerStore.VerifyKey(ctx); len(warnings) > 0 {
 		for _, w := range warnings {
 			log.Printf("WARNING: provider secret key: %s", w)

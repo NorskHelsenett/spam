@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -76,9 +77,23 @@ type Result struct {
 	VEXDetail        string `json:"vex_detail,omitempty"`
 }
 
-// LookupPURL returns cached vulnerability results for a versioned PURL,
-// refreshing from OSV when the cache is stale or missing.
+// LookupPURL returns vulnerability results for a versioned PURL: OSV
+// data (cached for 24 h) merged with image-scanner findings already
+// stored locally. OSV coverage is incomplete for some ecosystems —
+// Alpine apk packages in particular — so grype/trivy findings fill
+// the gap.
 func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error) {
+	results, err := lookupOSV(ctx, db, purl)
+	if err != nil {
+		return nil, err
+	}
+	results = mergeScanFindings(ctx, db, purl, results)
+	return applyVEX(ctx, db, purl, results)
+}
+
+// lookupOSV returns cached OSV results for a versioned PURL, refreshing
+// from the OSV API when the cache is stale or missing.
+func lookupOSV(ctx context.Context, db *gorm.DB, purl string) ([]Result, error) {
 	// Check whether we have fresh cached data.
 	var cached []ComponentVulnerability
 	if err := db.WithContext(ctx).Where("purl = ?", purl).Find(&cached).Error; err != nil {
@@ -86,7 +101,7 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 	}
 
 	if len(cached) > 0 && time.Since(cached[0].CheckedAt) < cacheTTL {
-		return applyVEX(ctx, db, purl, toResults(cached))
+		return toResults(cached), nil
 	}
 
 	// Fetch from OSV.
@@ -94,7 +109,7 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 	if err != nil {
 		// Return stale cache on error rather than failing.
 		if len(cached) > 0 {
-			return applyVEX(ctx, db, purl, toResults(cached))
+			return toResults(cached), nil
 		}
 		return nil, fmt.Errorf("osv query: %w", err)
 	}
@@ -132,7 +147,85 @@ func LookupPURL(ctx context.Context, db *gorm.DB, purl string) ([]Result, error)
 		db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&sentinel)
 	}
 
-	return applyVEX(ctx, db, purl, fresh)
+	return fresh, nil
+}
+
+// mergeScanFindings adds CVEs that image scanners (grype/trivy) reported
+// for the same package name and installed version, skipping ids OSV
+// already returned. Findings are matched by name because scanners store
+// bare package names ("chromium"), not PURL paths.
+func mergeScanFindings(ctx context.Context, db *gorm.DB, purl string, results []Result) []Result {
+	names := purlNameCandidates(purl)
+	version := purlVersion(purl)
+	if len(names) == 0 || version == "" {
+		return results
+	}
+
+	var rows []struct {
+		VulnID       string
+		Severity     string
+		Title        string
+		FixedVersion string
+		Scanner      string
+	}
+	err := db.WithContext(ctx).Raw(`
+		SELECT DISTINCT ON (vuln_id) vuln_id, severity, title, fixed_version, scanner
+		FROM image_vuln_findings
+		WHERE pkg_name IN ? AND installed_version = ?
+		ORDER BY vuln_id, created_at DESC`, names, version).Scan(&rows).Error
+	if err != nil {
+		// Non-fatal: scanner findings are additive on top of OSV data.
+		return results
+	}
+
+	seen := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		seen[r.VulnID] = struct{}{}
+	}
+	for _, f := range rows {
+		if _, ok := seen[f.VulnID]; ok {
+			continue
+		}
+		seen[f.VulnID] = struct{}{}
+		results = append(results, Result{
+			VulnID:   f.VulnID,
+			Summary:  f.Title,
+			Severity: strings.ToUpper(f.Severity),
+			FixedIn:  f.FixedVersion,
+			Source:   f.Scanner,
+		})
+	}
+	return results
+}
+
+// purlNameCandidates returns the package names a PURL may be stored
+// under in scanner findings: the full namespace/name path and the bare
+// name. apk findings use the bare name ("chromium" for
+// pkg:apk/alpine/chromium), while scoped npm packages keep their
+// namespace ("@babel/core" for pkg:npm/%40babel/core).
+func purlNameCandidates(purl string) []string {
+	p := strings.TrimPrefix(purl, "pkg:")
+	if i := strings.LastIndex(p, "@"); i >= 0 {
+		p = p[:i]
+	}
+	for _, sep := range []byte{'?', '#'} {
+		if i := strings.IndexByte(p, sep); i >= 0 {
+			p = p[:i]
+		}
+	}
+	parts := strings.SplitN(p, "/", 2)
+	if len(parts) < 2 || parts[1] == "" {
+		return nil
+	}
+	rest := parts[1]
+	if unescaped, err := url.PathUnescape(rest); err == nil {
+		rest = unescaped
+	}
+	names := []string{rest}
+	if i := strings.LastIndex(rest, "/"); i >= 0 && rest[i+1:] != "" {
+		names = append(names, rest[i+1:])
+	}
+	return names
 }
 
 // SetVEX upserts a VEX override for a PURL+vulnID pair. When the

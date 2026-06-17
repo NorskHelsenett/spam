@@ -16,6 +16,7 @@
 	import ButtonGroup from '$lib/components/ButtonGroup.svelte';
 	import ContributorAvatars from '$lib/components/ContributorAvatars.svelte';
 	import UserHoverCard from '$lib/components/UserHoverCard.svelte';
+	import Tooltip from '$lib/components/Tooltip.svelte';
 	import Eye from 'lucide-svelte/icons/eye';
 	import EyeOff from 'lucide-svelte/icons/eye-off';
 	import RotateCw from 'lucide-svelte/icons/rotate-cw';
@@ -276,6 +277,9 @@
 			<button type="button" class="btn btn-ghost">Ghost</button>
 			<button type="button" class="btn btn-primary" disabled>Disabled</button>
 			<button type="button" class="btn btn-outline">Outline</button>
+			<!-- Warning outline: actions that leave the current context
+			     (modal-exiting links, external advisories) -->
+			<button type="button" class="btn btn-warning">Warning</button>
 			<!-- Split button: single pill, left = primary action, right = darker dropdown trigger -->
 			<div class="relative" bind:this={splitBtnEl}>
 				<div class="flex overflow-hidden rounded-[999px] border border-[var(--border-color)] bg-[var(--hover-bg)]">
@@ -486,7 +490,12 @@
 		<div class="grid gap-6 lg:grid-cols-3">
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
 				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Tab selector</p>
-				<TabSelector options={mockTabs} bind:value={tabValue} />
+				<!-- Backed by --main-content-bg: the tab track is a translucent
+				     mix of that color, so on a bare card the pill reads wrong.
+				     This matches how it sits in the page's upper panel. -->
+				<div class="mt-3 rounded-xl bg-[var(--main-content-bg)] p-3">
+					<TabSelector options={mockTabs} bind:value={tabValue} />
+				</div>
 				<p class="mt-2 text-xs text-[var(--text-tertiary)]">Selected: {tabValue}</p>
 			</div>
 			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
@@ -540,6 +549,30 @@
 						<p class="mb-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">No avatar (fallback initials)</p>
 						<ContributorAvatars contributors={[mockContributors[2], mockContributors[3]]} />
 					</div>
+				</div>
+			</div>
+
+			<div class="rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 p-4">
+				<p class="text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Tooltip</p>
+				<p class="mb-3 text-xs text-[var(--text-tertiary)]">Portalled, theme-aware tooltip with arrow; flips below the trigger when out of headroom. Plain text or rich snippet content.</p>
+				<div class="flex flex-wrap items-center gap-4">
+					<Tooltip text="Plain text tooltip — one sentence of context for any element.">
+						<span class="pill pill-info">hover me</span>
+					</Tooltip>
+					<Tooltip width={17}>
+						<span class="pill pill-warning">EPSS 92.4%</span>
+						{#snippet content()}
+							<p class="text-xs font-semibold text-[var(--text-bright)]">EPSS 92.4%</p>
+							<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
+								Probability that this CVE is exploited in the wild within the next 30 days.
+							</p>
+							<p class="mt-1 text-[11px] text-[var(--text-muted)]">Higher than 99% of all scored CVEs.</p>
+							<p class="mt-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">FIRST.org · updated daily</p>
+						{/snippet}
+					</Tooltip>
+					<Tooltip text="Buttons work as triggers too.">
+						<button type="button" class="btn btn-ghost">with button</button>
+					</Tooltip>
 				</div>
 			</div>
 

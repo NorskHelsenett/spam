@@ -262,6 +262,18 @@ html.light button.shadow-md {
   color: var(--text-bright);
 }
 
+/* Warning-toned outline: actions that navigate away from the
+   current context (modal-leaving links, external advisories). */
+.btn-warning {
+  background: transparent;
+  color: var(--warning);
+  border: 1px solid color-mix(in srgb, var(--warning) 40%, transparent);
+}
+
+.btn-warning:hover {
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+}
+
 .btn-outline {
   background: transparent;
   color: var(--text-bright);

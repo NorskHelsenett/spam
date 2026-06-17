@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/assets"
 	"github.com/NorskHelsenett/spam/internal/auth"
 	"github.com/NorskHelsenett/spam/internal/cache"
+	"github.com/NorskHelsenett/spam/internal/vulnerabilities"
 	"gorm.io/gorm"
 )
 
@@ -33,6 +35,167 @@ type UnifiedDependency struct {
 	ImageCount   int      `json:"image_count"`      // How many container images use this
 	HasDirect    bool     `json:"has_direct"`       // At least one version is direct
 	Scopes       []string `json:"scopes,omitempty"` // All unique scopes across versions
+}
+
+// dependencyExportCTEs is the shared WITH-clause body for both CSV export
+// queries. merged holds repo-bound rows (SBOM ⋈ manifest per
+// repo+component+version); image_rows holds image-bound SBOM components,
+// which the list endpoint also counts and which would otherwise vanish from
+// exports (base-image OS packages live only here). merged_all unions both:
+// image rows carry the image reference in image_ref and inherit the source
+// repo for ACL/email purposes only when the image's source is verified —
+// same rule as acl.ReadableImageClause.
+const dependencyExportCTEs = `
+	WITH sbom_rows AS (
+		SELECT DISTINCT
+			r.id as repo_id,
+			r.provider,
+			r.org,
+			r.slug,
+			COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+			NULLIF(s.purl, '') as component_purl,
+			COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
+			s.kind as ecosystem
+		FROM sbom_component_view s
+		JOIN repo_commits rc ON rc.id = s.asset_ref_id
+		JOIN repos r ON r.id = rc.repo_id
+		WHERE s.is_root = false
+		  AND s.purl IS NOT NULL
+		  AND s.asset_type = 'REPO_COMMIT'
+		  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+	),
+	manifest_rows AS (
+		SELECT DISTINCT
+			r.id as repo_id,
+			r.provider,
+			r.org,
+			r.slug,
+			COALESCE(md.version, '') as version,
+			NULL::text as component_purl,
+			md.name as component_name,
+			md.ecosystem as ecosystem
+		FROM manifest_dependencies md
+		JOIN manifests m ON m.id = md.manifest_id
+		JOIN repos r ON r.id = m.repo_id
+		WHERE md.name IS NOT NULL
+	),
+	merged AS (
+		SELECT
+			COALESCE(s.repo_id, m.repo_id) as repo_id,
+			COALESCE(s.provider, m.provider) as provider,
+			COALESCE(s.org, m.org) as org,
+			COALESCE(s.slug, m.slug) as slug,
+			COALESCE(s.version, m.version) as version,
+			COALESCE(s.component_purl, m.component_purl, '') as component_purl,
+			COALESCE(s.component_name, m.component_name) as component_name,
+			COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
+			(s.repo_id IS NOT NULL) as has_sbom,
+			(m.repo_id IS NOT NULL) as has_manifest
+		FROM sbom_rows s
+		FULL OUTER JOIN manifest_rows m
+			ON s.repo_id = m.repo_id
+			AND s.component_name = m.component_name
+			AND s.ecosystem = m.ecosystem
+			AND s.version = m.version
+	),
+	image_rows AS (
+		SELECT DISTINCT
+			CASE WHEN id.verified_source = true AND COALESCE(id.source_repo_id, '') <> ''
+				THEN id.source_repo_id ELSE NULL END as repo_id,
+			(id.registry || '/' || id.repository) as image_ref,
+			COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+			NULLIF(s.purl, '') as component_purl,
+			COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
+			s.kind as ecosystem
+		FROM sbom_component_view s
+		JOIN image_digests id ON id.id = s.asset_ref_id
+		WHERE s.is_root = false
+		  AND s.purl IS NOT NULL
+		  AND s.asset_type = 'IMAGE_DIGEST'
+		  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
+	),
+	merged_all AS (
+		SELECT repo_id, provider, org, slug, NULL::text as image_ref,
+			version, component_purl, component_name, ecosystem, has_sbom, has_manifest
+		FROM merged
+		UNION ALL
+		SELECT repo_id, NULL::text, NULL::text, NULL::text, image_ref,
+			version, component_purl, component_name, ecosystem, true, false
+		FROM image_rows
+	)
+`
+
+// appendDependencyExportFilters appends the shared WHERE conditions for the
+// export queries: search, ecosystem, repo and source filters over merged_all.
+// Source semantics mirror the list endpoint so the export contains every
+// package the filtered table shows: "sbom"/"manifest" mean "has data from
+// that source" (not exclusively), and "both" is package-level — a package
+// verified by both sources anywhere, not only repo+version tuples present
+// in both.
+func appendDependencyExportFilters(query string, args []interface{}, parsedSearch parsedDependencySearch, search, ecosystem, repoID, source string) (string, []interface{}) {
+	if parsedSearch.Structured {
+		predicate, predicateArgs := buildStructuredDependencyPredicate("merged_all.component_name", "merged_all.version", parsedSearch.Groups)
+		if predicate != "" {
+			query += ` AND ` + predicate
+			args = append(args, predicateArgs...)
+		}
+	} else if search != "" {
+		query += ` AND (merged_all.component_name ILIKE ? OR merged_all.component_purl ILIKE ?)`
+		args = append(args, "%"+search+"%", "%"+search+"%")
+	}
+	if ecosystem != "" {
+		query += ` AND merged_all.ecosystem = ?`
+		args = append(args, ecosystem)
+	}
+	if repoID != "" {
+		query += ` AND merged_all.repo_id = ?`
+		args = append(args, repoID)
+	}
+
+	switch source {
+	case "sbom":
+		query += ` AND merged_all.has_sbom = true`
+	case "manifest":
+		query += ` AND merged_all.has_manifest = true`
+	case "both":
+		sub := `SELECT component_name, ecosystem FROM merged_all`
+		if repoID != "" {
+			sub += ` WHERE repo_id = ?`
+			args = append(args, repoID)
+		}
+		sub += ` GROUP BY component_name, ecosystem HAVING BOOL_OR(has_sbom) AND BOOL_OR(has_manifest)`
+		query += ` AND (merged_all.component_name, merged_all.ecosystem) IN (` + sub + `)`
+	}
+	return query, args
+}
+
+// buildDependencyExportQuery assembles the SQL for the forensics CSV export.
+// spam_url builds its query-string '?' via chr(63): GORM's bind-var scanner
+// replaces every literal '?' in raw SQL, even inside string literals, so a
+// plain '?' would silently consume the first filter argument.
+func buildDependencyExportQuery(aclSQL string, aclArgs []interface{}, parsedSearch parsedDependencySearch, search, ecosystem, repoID, source string) (string, []interface{}) {
+	query := dependencyExportCTEs + `
+		SELECT DISTINCT
+			COALESCE(merged_all.image_ref, concat_ws('/', merged_all.provider, merged_all.org, merged_all.slug)) as repo,
+			merged_all.version,
+			merged_all.component_purl,
+			merged_all.component_name,
+			merged_all.ecosystem,
+			CASE WHEN merged_all.image_ref IS NULL THEN
+				('/providers/repo' || chr(63) || 'provider=' || merged_all.provider || '&path=' || merged_all.org || '/' || merged_all.slug
+					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
+				)
+			ELSE '' END AS spam_url
+		FROM merged_all
+		LEFT JOIN repos r ON r.id = merged_all.repo_id
+		LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+		WHERE ` + aclSQL
+
+	args := []interface{}{}
+	args = append(args, aclArgs...)
+	query, args = appendDependencyExportFilters(query, args, parsedSearch, search, ecosystem, repoID, source)
+	query += ` ORDER BY repo ASC, merged_all.component_name ASC, merged_all.version ASC`
+	return query, args
 }
 
 // DependencyExportCSVHandler exports expanded dependency rows for forensics.
@@ -64,105 +227,7 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 			return
 		}
 		aclSQL, aclArgs := aclWhereFragment(repoClause)
-
-		query := `
-			WITH sbom_rows AS (
-				SELECT DISTINCT
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
-					NULLIF(s.purl, '') as component_purl,
-					COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
-					s.kind as ecosystem
-				FROM sbom_component_view s
-				JOIN repo_commits rc ON rc.id = s.asset_ref_id
-				JOIN repos r ON r.id = rc.repo_id
-				WHERE s.is_root = false
-				  AND s.purl IS NOT NULL
-				  AND s.asset_type = 'REPO_COMMIT'
-				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
-			),
-			manifest_rows AS (
-				SELECT DISTINCT
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					COALESCE(md.version, '') as version,
-					NULL::text as component_purl,
-					md.name as component_name,
-					md.ecosystem as ecosystem
-				FROM manifest_dependencies md
-				JOIN manifests m ON m.id = md.manifest_id
-				JOIN repos r ON r.id = m.repo_id
-				WHERE md.name IS NOT NULL
-			),
-			merged AS (
-				SELECT
-					COALESCE(s.repo_id, m.repo_id) as repo_id,
-					COALESCE(s.provider, m.provider) as provider,
-					COALESCE(s.org, m.org) as org,
-					COALESCE(s.slug, m.slug) as slug,
-					COALESCE(s.version, m.version) as version,
-					COALESCE(s.component_purl, m.component_purl, '') as component_purl,
-					COALESCE(s.component_name, m.component_name) as component_name,
-					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
-					(s.repo_id IS NOT NULL) as has_sbom,
-					(m.repo_id IS NOT NULL) as has_manifest
-				FROM sbom_rows s
-				FULL OUTER JOIN manifest_rows m
-					ON s.repo_id = m.repo_id
-					AND s.component_name = m.component_name
-					AND s.ecosystem = m.ecosystem
-					AND s.version = m.version
-			)
-			SELECT DISTINCT
-				concat_ws('/', merged.provider, merged.org, merged.slug) as repo,
-				merged.version,
-				merged.component_purl,
-				merged.component_name,
-				merged.ecosystem,
-				('/providers/repo?provider=' || merged.provider || '&path=' || merged.org || '/' || merged.slug
-					|| CASE WHEN COALESCE(pi.base_url, '') <> '' THEN '&base_url=' || pi.base_url ELSE '' END
-				) AS spam_url
-			FROM merged
-			LEFT JOIN repos r ON r.id = merged.repo_id
-			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-			WHERE ` + aclSQL
-
-		args := []interface{}{}
-		args = append(args, aclArgs...)
-		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("component_name", "version", parsedSearch.Groups)
-			if predicate != "" {
-				query += ` AND ` + predicate
-				args = append(args, predicateArgs...)
-			}
-		} else if search != "" {
-			query += ` AND (component_name ILIKE ? OR component_purl ILIKE ?)`
-			args = append(args, "%"+search+"%", "%"+search+"%")
-		}
-		if ecosystem != "" {
-			query += ` AND ecosystem = ?`
-			args = append(args, ecosystem)
-		}
-		if repoID != "" {
-			query += ` AND repo_id = ?`
-			args = append(args, repoID)
-		}
-
-		switch source {
-		case "sbom":
-			query += ` AND has_sbom = true AND has_manifest = false`
-		case "manifest":
-			query += ` AND has_sbom = false AND has_manifest = true`
-		case "both":
-			query += ` AND has_sbom = true AND has_manifest = true`
-		}
-
-		query += ` ORDER BY repo ASC, component_name ASC, version ASC`
+		query, args := buildDependencyExportQuery(aclSQL, aclArgs, parsedSearch, search, ecosystem, repoID, source)
 
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
@@ -219,6 +284,34 @@ func DependencyExportCSVHandler(db *gorm.DB, authService *auth.Service) http.Han
 	}
 }
 
+// buildDependencyFullExportQuery assembles the SQL for the full CSV export
+// (forensics columns plus repo URL inputs and repo_id for the contributor
+// email lookup). Same CTEs and source semantics as buildDependencyExportQuery.
+func buildDependencyFullExportQuery(aclSQL string, aclArgs []interface{}, parsedSearch parsedDependencySearch, search, ecosystem, repoID, source string) (string, []interface{}) {
+	query := dependencyExportCTEs + `
+		SELECT DISTINCT
+			merged_all.repo_id,
+			COALESCE(merged_all.image_ref, concat_ws('/', merged_all.provider, merged_all.org, merged_all.slug)) as repo,
+			merged_all.version,
+			merged_all.component_purl,
+			merged_all.component_name,
+			merged_all.ecosystem,
+			COALESCE(merged_all.provider, '') as provider,
+			COALESCE(merged_all.org, '') as org,
+			COALESCE(merged_all.slug, '') as slug,
+			COALESCE(pi.base_url, '') as provider_base_url
+		FROM merged_all
+		LEFT JOIN repos r ON r.id = merged_all.repo_id
+		LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
+		WHERE ` + aclSQL
+
+	args := []interface{}{}
+	args = append(args, aclArgs...)
+	query, args = appendDependencyExportFilters(query, args, parsedSearch, search, ecosystem, repoID, source)
+	query += ` ORDER BY repo ASC, merged_all.component_name ASC, merged_all.version ASC`
+	return query, args
+}
+
 // DependencyExportFullCSVHandler exports expanded dependency rows plus URLs and contributor emails.
 func DependencyExportFullCSVHandler(db *gorm.DB, authService *auth.Service) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -247,106 +340,7 @@ func DependencyExportFullCSVHandler(db *gorm.DB, authService *auth.Service) http
 			return
 		}
 		aclSQL, aclArgs := aclWhereFragment(repoClause)
-
-		query := `
-			WITH sbom_rows AS (
-				SELECT DISTINCT
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
-					NULLIF(s.purl, '') as component_purl,
-					COALESCE(s.package_name, s.normalized_name, s.name) as component_name,
-					s.kind as ecosystem
-				FROM sbom_component_view s
-				JOIN repo_commits rc ON rc.id = s.asset_ref_id
-				JOIN repos r ON r.id = rc.repo_id
-				WHERE s.is_root = false
-				  AND s.purl IS NOT NULL
-				  AND s.asset_type = 'REPO_COMMIT'
-				  AND COALESCE(s.package_name, s.normalized_name, s.name) IS NOT NULL
-			),
-			manifest_rows AS (
-				SELECT DISTINCT
-					r.id as repo_id,
-					r.provider,
-					r.org,
-					r.slug,
-					COALESCE(md.version, '') as version,
-					NULL::text as component_purl,
-					md.name as component_name,
-					md.ecosystem as ecosystem
-				FROM manifest_dependencies md
-				JOIN manifests m ON m.id = md.manifest_id
-				JOIN repos r ON r.id = m.repo_id
-				WHERE md.name IS NOT NULL
-			),
-			merged AS (
-				SELECT
-					COALESCE(s.repo_id, m.repo_id) as repo_id,
-					COALESCE(s.provider, m.provider) as provider,
-					COALESCE(s.org, m.org) as org,
-					COALESCE(s.slug, m.slug) as slug,
-					COALESCE(s.version, m.version) as version,
-					COALESCE(s.component_purl, m.component_purl, '') as component_purl,
-					COALESCE(s.component_name, m.component_name) as component_name,
-					COALESCE(s.ecosystem, m.ecosystem) as ecosystem,
-					(s.repo_id IS NOT NULL) as has_sbom,
-					(m.repo_id IS NOT NULL) as has_manifest
-				FROM sbom_rows s
-				FULL OUTER JOIN manifest_rows m
-					ON s.repo_id = m.repo_id
-					AND s.component_name = m.component_name
-					AND s.ecosystem = m.ecosystem
-					AND s.version = m.version
-			)
-			SELECT DISTINCT
-				merged.repo_id,
-				concat_ws('/', merged.provider, merged.org, merged.slug) as repo,
-				merged.version,
-				merged.component_purl,
-				merged.component_name,
-				merged.ecosystem,
-				merged.provider,
-				merged.org,
-				merged.slug,
-				COALESCE(pi.base_url, '') as provider_base_url
-			FROM merged
-			LEFT JOIN repos r ON r.id = merged.repo_id
-			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id
-			WHERE ` + aclSQL
-
-		args := []interface{}{}
-		args = append(args, aclArgs...)
-		if parsedSearch.Structured {
-			predicate, predicateArgs := buildStructuredDependencyPredicate("merged.component_name", "merged.version", parsedSearch.Groups)
-			if predicate != "" {
-				query += ` AND ` + predicate
-				args = append(args, predicateArgs...)
-			}
-		} else if search != "" {
-			query += ` AND (merged.component_name ILIKE ? OR merged.component_purl ILIKE ?)`
-			args = append(args, "%"+search+"%", "%"+search+"%")
-		}
-		if ecosystem != "" {
-			query += ` AND merged.ecosystem = ?`
-			args = append(args, ecosystem)
-		}
-		if repoID != "" {
-			query += ` AND merged.repo_id = ?`
-			args = append(args, repoID)
-		}
-		switch source {
-		case "sbom":
-			query += ` AND merged.has_sbom = true AND merged.has_manifest = false`
-		case "manifest":
-			query += ` AND merged.has_sbom = false AND merged.has_manifest = true`
-		case "both":
-			query += ` AND merged.has_sbom = true AND merged.has_manifest = true`
-		}
-
-		query += ` ORDER BY repo ASC, merged.component_name ASC, merged.version ASC`
+		query, args := buildDependencyFullExportQuery(aclSQL, aclArgs, parsedSearch, search, ecosystem, repoID, source)
 
 		rows, err := db.WithContext(r.Context()).Raw(query, args...).Rows()
 		if err != nil {
@@ -512,6 +506,7 @@ func DependencyDetailExportCSVHandler(db *gorm.DB, authService *auth.Service) ht
 			assetType := "repo"
 			if a.AssetType == "IMAGE_DIGEST" {
 				assetType = "image"
+				repository = strings.Trim(strings.TrimSpace(a.ImageRegistry)+"/"+strings.TrimSpace(a.ImageRepository), "/")
 			} else {
 				repository = strings.Trim(strings.TrimSpace(a.Org)+"/"+strings.TrimSpace(a.Slug), "/")
 			}
@@ -653,23 +648,65 @@ func buildSpamRepoURL(baseURL, providerType, org, slug, providerBaseURL string) 
 	return baseURL + u
 }
 
+// loadContributorEmailsByRepo merges contributor emails from two sources:
+// repo_commits.author_email (captured durably by the runner via git log)
+// and the provider cache in kv_store (repo:cache:<id> — contributors and
+// recent commits from the provider API). The legacy repo_caches table this
+// used to read was transient (d371158→65632a7); fresh installs never have
+// it, so reading it returned no emails at all.
 func loadContributorEmailsByRepo(db *gorm.DB, ctx context.Context, repoIDs []string) map[string]string {
 	out := make(map[string]string, len(repoIDs))
 	if len(repoIDs) == 0 {
 		return out
 	}
-	type row struct {
-		RepoID           string
-		ContributorsJSON string
-		CommitsJSON      string
+	sets := make(map[string]map[string]struct{}, len(repoIDs))
+	add := func(repoID, email string) {
+		e := strings.TrimSpace(email)
+		if e == "" {
+			return
+		}
+		set, ok := sets[repoID]
+		if !ok {
+			set = map[string]struct{}{}
+			sets[repoID] = set
+		}
+		set[e] = struct{}{}
 	}
-	var rows []row
+
+	type commitRow struct {
+		RepoID      string
+		AuthorEmail string
+	}
+	var commitRows []commitRow
 	if err := db.WithContext(ctx).
-		Table("repo_caches").
-		Select("repo_id, contributors_json, commits_json").
-		Where("repo_id IN ?", repoIDs).
-		Find(&rows).Error; err != nil {
-		return out
+		Table("repo_commits").
+		Select("DISTINCT repo_id, author_email").
+		Where("repo_id IN ? AND COALESCE(author_email, '') <> ''", repoIDs).
+		Find(&commitRows).Error; err != nil {
+		log.Printf("contributor emails: repo_commits query error: %v", err)
+	}
+	for _, r := range commitRows {
+		add(r.RepoID, r.AuthorEmail)
+	}
+
+	keys := make([]string, 0, len(repoIDs))
+	keyToRepo := make(map[string]string, len(repoIDs))
+	for _, id := range repoIDs {
+		k := assets.RepoCacheKey(id)
+		keys = append(keys, k)
+		keyToRepo[k] = id
+	}
+	type kvRow struct {
+		Key   string
+		Value []byte
+	}
+	var kvRows []kvRow
+	if err := db.WithContext(ctx).
+		Table("kv_store").
+		Select("key, value").
+		Where("key IN ? AND (expires_at IS NULL OR expires_at > now())", keys).
+		Find(&kvRows).Error; err != nil {
+		log.Printf("contributor emails: kv_store query error: %v", err)
 	}
 	type contributor struct {
 		Email string `json:"email"`
@@ -677,39 +714,37 @@ func loadContributorEmailsByRepo(db *gorm.DB, ctx context.Context, repoIDs []str
 	type commit struct {
 		AuthorEmail string `json:"author_email"`
 	}
-	for _, r := range rows {
-		set := map[string]struct{}{}
-
-		if strings.TrimSpace(r.ContributorsJSON) != "" {
+	for _, row := range kvRows {
+		repoID := keyToRepo[row.Key]
+		var data assets.RepoCacheData
+		if err := json.Unmarshal(row.Value, &data); err != nil {
+			continue
+		}
+		if strings.TrimSpace(data.ContributorsJSON) != "" {
 			var contributors []contributor
-			if err := json.Unmarshal([]byte(r.ContributorsJSON), &contributors); err == nil {
+			if err := json.Unmarshal([]byte(data.ContributorsJSON), &contributors); err == nil {
 				for _, c := range contributors {
-					e := strings.TrimSpace(c.Email)
-					if e == "" {
-						continue
-					}
-					set[e] = struct{}{}
+					add(repoID, c.Email)
 				}
 			}
 		}
-		if strings.TrimSpace(r.CommitsJSON) != "" {
+		if strings.TrimSpace(data.CommitsJSON) != "" {
 			var commits []commit
-			if err := json.Unmarshal([]byte(r.CommitsJSON), &commits); err == nil {
+			if err := json.Unmarshal([]byte(data.CommitsJSON), &commits); err == nil {
 				for _, c := range commits {
-					e := strings.TrimSpace(c.AuthorEmail)
-					if e == "" {
-						continue
-					}
-					set[e] = struct{}{}
+					add(repoID, c.AuthorEmail)
 				}
 			}
 		}
+	}
+
+	for repoID, set := range sets {
 		emails := make([]string, 0, len(set))
 		for e := range set {
 			emails = append(emails, e)
 		}
 		sort.Strings(emails)
-		out[r.RepoID] = strings.Join(emails, ";")
+		out[repoID] = strings.Join(emails, ";")
 	}
 	return out
 }
@@ -729,6 +764,9 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 					r.slug,
 					r.provider_instance_id,
 					rc.commit_sha,
+					NULL::text as image_registry,
+					NULL::text as image_repository,
+					NULL::text as image_digest,
 					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
 					'sbom' as source,
 					NULL as manifest_path,
@@ -757,6 +795,54 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 		sbomCTE += `)`
 		cteParts = append(cteParts, sbomCTE)
 		selectParts = append(selectParts, `SELECT * FROM sbom_assets`)
+
+		// Image-bound SBOM components (asset_type IMAGE_DIGEST). repo_id
+		// resolves to the image's source repo only when the source is
+		// verified — same rule as acl.ReadableImageClause — so the caller's
+		// ACL post-filter and the contributor-email lookup both work;
+		// unverified/unresolved images keep repo_id NULL and fall back to
+		// admin-only in the caller.
+		imageCTE := `
+			image_assets AS (
+				SELECT DISTINCT
+					'IMAGE_DIGEST' as asset_type,
+					CASE WHEN id.verified_source = true AND COALESCE(id.source_repo_id, '') <> ''
+						THEN id.source_repo_id ELSE NULL END as repo_id,
+					NULL::text as provider,
+					NULL::text as org,
+					NULL::text as slug,
+					NULL::text as provider_instance_id,
+					NULL::text as commit_sha,
+					id.registry as image_registry,
+					id.repository as image_repository,
+					id.digest as image_digest,
+					COALESCE(s.version, NULLIF(s.purl_version, ''), '') as version,
+					'sbom' as source,
+					NULL as manifest_path,
+					NULL as manifest_type,
+					false as direct,
+					NULL as scope,
+					sb.created_at
+				FROM sbom_component_view s
+				JOIN sbom_bindings sb ON sb.sbom_id = s.sbom_id
+				  AND sb.asset_type = 'IMAGE_DIGEST'
+				  AND sb.asset_ref_id = s.asset_ref_id
+				JOIN image_digests id ON id.id = sb.asset_ref_id
+				WHERE s.is_root = false
+				  AND s.purl IS NOT NULL
+				  AND s.kind = ?
+				  AND COALESCE(s.package_name, s.normalized_name, s.name) = ?
+		`
+		args = append(args, ecosystem, name)
+		if len(versions) > 0 {
+			imageCTE += ` AND COALESCE(s.version, NULLIF(s.purl_version, ''), '') IN (` + inPlaceholders(len(versions)) + `)`
+			for _, v := range versions {
+				args = append(args, v)
+			}
+		}
+		imageCTE += `)`
+		cteParts = append(cteParts, imageCTE)
+		selectParts = append(selectParts, `SELECT * FROM image_assets`)
 	}
 	if source == "" || source == "manifest" {
 		manifestCTE := `
@@ -769,6 +855,9 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 					r.slug,
 					r.provider_instance_id,
 					'' as commit_sha,
+					NULL::text as image_registry,
+					NULL::text as image_repository,
+					NULL::text as image_digest,
 					md.version,
 					'manifest' as source,
 					m.path as manifest_path,
@@ -800,12 +889,15 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 		)
 		SELECT
 			ca.asset_type,
-			ca.repo_id,
-			COALESCE(pi.display_name, ca.provider) as provider,
-			ca.provider_instance_id as provider_id,
-			ca.org,
-			ca.slug,
+			COALESCE(ca.repo_id, '') as repo_id,
+			COALESCE(pi.display_name, ca.provider, '') as provider,
+			COALESCE(ca.provider_instance_id, '') as provider_id,
+			COALESCE(ca.org, '') as org,
+			COALESCE(ca.slug, '') as slug,
 			ca.commit_sha,
+			COALESCE(ca.image_registry, '') as image_registry,
+			COALESCE(ca.image_repository, '') as image_repository,
+			COALESCE(ca.image_digest, '') as image_digest,
 			ca.version,
 			ca.source,
 			ca.manifest_path,
@@ -828,7 +920,8 @@ func queryDependencyAssetsForExport(db *gorm.DB, ctx context.Context, name, ecos
 		var commitSHA, manifestPath, manifestType, scope sql.NullString
 		if err := rows.Scan(
 			&a.AssetType, &a.RepoID, &a.Provider, &a.ProviderID, &a.Org, &a.Slug,
-			&commitSHA, &a.Version, &a.Source, &manifestPath, &manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
+			&commitSHA, &a.ImageRegistry, &a.ImageRepository, &a.ImageDigest,
+			&a.Version, &a.Source, &manifestPath, &manifestType, &a.Direct, &scope, &a.ProviderBaseURL,
 		); err != nil {
 			continue
 		}
@@ -1333,6 +1426,7 @@ type DependencyVersionInfo struct {
 	Version   string   `json:"version"`
 	RepoCount int      `json:"repo_count"`
 	Sources   []string `json:"sources"` // "sbom", "manifest", or both
+	VulnCount int      `json:"vuln_count,omitempty"`
 }
 
 // DependencyAsset describes where a dependency is used (from SBOM or manifest)
@@ -1539,6 +1633,17 @@ func DependencyDetailHandler(db *gorm.DB, authService *auth.Service) http.Handle
 		if len(versions) == 0 {
 			http.Error(w, "dependency not found", http.StatusNotFound)
 			return
+		}
+
+		versionNames := make([]string, 0, len(versions))
+		for _, v := range versions {
+			if v.Version != "" {
+				versionNames = append(versionNames, v.Version)
+			}
+		}
+		vulnCounts := vulnerabilities.CountByVersion(r.Context(), db, overallPURL.String, name, versionNames)
+		for i := range versions {
+			versions[i].VulnCount = vulnCounts[versions[i].Version]
 		}
 
 		var licenses []string

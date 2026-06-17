@@ -15,11 +15,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// refreshMaxRuntime caps a single refresh invocation. The MV refreshes
-// CONCURRENTLY so reads aren't blocked, but a runaway refresh would
-// still hold the advisory lock and starve subsequent triggers — the
-// timeout returns the conn to the pool instead.
-const refreshMaxRuntime = 2 * time.Minute
+// refreshMaxRuntime caps a single refresh invocation. It exists to catch
+// a genuinely hung refresh, not to cancel a slow-but-progressing one: if
+// it fires mid-refresh the debounce timestamp is never recorded and the
+// family re-runs on every trigger (the storm that starved the DB on
+// 2026-06, when a 2m cap tripped under contention). Sized well above the
+// uncontended ~7s so only a real hang trips it.
+const refreshMaxRuntime = 10 * time.Minute
 
 // refreshGate coalesces concurrent TriggerRefresh calls so high-volume
 // ingest spikes (Container churn) don't pile up redundant refreshes.

@@ -149,14 +149,14 @@
 </script>
 
 <svelte:head>
-	<title>User Access • Spam Monitor</title>
+	<title>Users · Settings — Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Users</h1>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Users</h2>
 				<p class="text-sm text-[var(--text-tertiary)]">Approve new access requests and adjust roles.</p>
 			</div>
 			<div class="flex items-center gap-4">

@@ -22,22 +22,22 @@
 
 <div class="flex items-center {gapClass} {textClass}">
 	{#if critical > 0}
-		<span class="flex items-center gap-1 font-semibold text-red-500">
+		<span class="flex items-normal gap-1 font-semibold text-red-500">
 			<ShieldX class={iconClass} />{critical}
 		</span>
 	{/if}
 	{#if high > 0}
-		<span class="flex items-center gap-1 font-semibold text-orange-500">
+		<span class="flex items-normal gap-1 font-semibold text-orange-500">
 			<ShieldAlert class={iconClass} />{high}
 		</span>
 	{/if}
 	{#if medium > 0}
-		<span class="flex items-center gap-1 font-semibold text-yellow-500">
+		<span class="flex items-normal gap-1 font-semibold text-yellow-500">
 			<Shield class={iconClass} />{medium}
 		</span>
 	{/if}
 	{#if low > 0}
-		<span class="flex items-center gap-1 text-[var(--text-secondary)]">
+		<span class="flex items-normal gap-1 text-[var(--text-secondary)]">
 			<Shield class={iconClass} />{low}
 		</span>
 	{/if}

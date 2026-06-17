@@ -462,14 +462,14 @@
 </script>
 
 <svelte:head>
-	<title>Database storage • Spam Monitor</title>
+	<title>Database · Settings — Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-8 sm:space-y-12">
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Database storage</h1>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Database storage</h2>
 				<p class="text-sm text-[var(--text-tertiary)]">
 					PostgreSQL size, row counts, and bloat signals. Useful for chasing performance issues.
 				</p>

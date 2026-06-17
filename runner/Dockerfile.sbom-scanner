@@ -10,7 +10,7 @@
 # All private/internal ranges (RFC 1918) are blocked.
 
 # Build the sbom-scanner Go binary
-FROM golang:1.26-alpine AS builder
+FROM ncr.sky.nhn.no/dockerhub/library/golang:1.26-alpine AS builder
 
 WORKDIR /build
 COPY go.mod go.sum* ./
@@ -24,10 +24,10 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # Grype — same Anchore toolchain as syft (which generates our SBOMs), so
 # we feed its output directly without any format translation.
-FROM anchore/grype:latest AS grype
+FROM ncr.sky.nhn.no/dockerhub/anchore/grype:latest AS grype
 
 # Runtime stage — minimal
-FROM alpine:3.20
+FROM ncr.sky.nhn.no/dockerhub/library/alpine:3.20
 
 RUN apk add --no-cache ca-certificates
 

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -39,6 +40,10 @@ type RouterOptions struct {
 	// admin /ror/probe endpoint returns 503; when set, it powers the
 	// admin probe and (later) the RORProvider in the ACL chain.
 	RORClient *ror.Client
+	// ReadinessCheck reports whether this replica can serve real traffic
+	// (base materialized views populated). Backs /api/readyz. When nil,
+	// readiness reflects DB reachability only.
+	ReadinessCheck func(context.Context) (bool, error)
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -49,12 +54,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var aclProvider acl.Provider
 	var secretsKey []byte
 	var rorClient *ror.Client
+	var readinessCheck func(context.Context) (bool, error)
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
 		secretsKey = opts.SecretsKey
 		rorClient = opts.RORClient
+		readinessCheck = opts.ReadinessCheck
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -94,7 +101,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// PUBLIC endpoints (no authentication).
 	//
 	// Only the following are intentionally reachable unauthenticated:
-	//   - /api/healthz              liveness probe
+	//   - /api/healthz              liveness probe (process only, no DB)
+	//   - /api/readyz               readiness probe (DB + MV populated)
 	//   - /api/scam/callcenter      SCAM agent ingest
 	//   - /api/scam/heartbeat       SCAM agent quiet-but-alive ping
 	//   - /api/auth/login           OIDC entry
@@ -108,7 +116,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// data because they never run without a valid session.
 	// ---------------------------------------------------------------
 
-	r.Get("/api/healthz", health.Handler(db))
+	r.Get("/api/healthz", health.LivenessHandler())
+	r.Get("/api/readyz", health.ReadinessHandler(db, readinessCheck))
 	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db, appCache))
 	r.Post("/api/scam/heartbeat", scam.HeartbeatHandler(db))
 
@@ -129,7 +138,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// session only (handler self-checks via LoadSession), not
 			// APIGuard. Returns the clusters the caller can see in ROR
 			// based on their EntraID identity + the service ApiKey.
-			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(authService, rorClient))
+			pub.Get("/api/me/clusters", uiapi.MeClustersHandler(db, authService, rorClient))
 		})
 
 		// Pending-approval SSE accepts a pending session (pre-approval),
@@ -204,6 +213,17 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.With(providerAudit).Post("/admin/providers/{id}/sync", uiapi.AdminProvidersSyncHandler(authService, providerStore, syncMgr))
 				api.Get("/admin/providers/sync/status", uiapi.AdminProvidersSyncStatusHandler(authService, providerStore, syncMgr))
 				api.With(providerAudit).Delete("/admin/providers/{id}", uiapi.AdminProvidersDeleteHandler(authService, providerStore, appCache))
+				// LLM advisory settings + prompt test bench. Writes are
+				// audited — prompt/model changes alter what every user
+				// reads on the triage page.
+				aiAudit := audit.Middleware(db, auditUserID, "admin.ai")
+				api.Get("/admin/ai/settings", uiapi.AdminAISettingsListHandler(db, authService))
+				api.With(aiAudit).Put("/admin/ai/settings/{use_case}", uiapi.AdminAISettingsUpdateHandler(db, authService))
+				api.Post("/admin/ai/test", uiapi.AdminAITestHandler(db, authService))
+				api.With(aiAudit).Post("/admin/ai/backfill", uiapi.AdminAIBackfillHandler(db, authService))
+				api.Get("/admin/ai/backfill/status", uiapi.AdminAIBackfillStatusHandler(db, authService))
+				api.Get("/admin/ai/models", uiapi.AdminAIModelsHandler(db, authService))
+
 				api.Post("/admin/views/refresh", uiapi.AdminViewsRefreshHandler(db, authService))
 				api.Get("/admin/views/status", uiapi.AdminViewsStatusHandler(db, authService))
 				api.Post("/admin/cache/clear", uiapi.AdminCacheClearHandler(db, authService))
@@ -220,6 +240,16 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 				api.Get("/admin/secrets/probe/audit", uiapi.AdminSecretProbeAuditHandler(db, authService))
 				api.Get("/admin/secrets/probe/inspect", uiapi.AdminSecretProbeInspectHandler(db, authService))
 				api.Post("/admin/secrets/probe/run", uiapi.AdminSecretProbeByHashHandler(db, authService))
+
+				// Admin-curated hidden namespaces — administrative
+				// namespaces (nhn-scam, nhn-ror, …) filtered out of
+				// regular users' cluster views so teams focus on their
+				// own workloads. Writes are audited: a pattern change
+				// alters what every non-admin user sees.
+				nsAudit := audit.Middleware(db, auditUserID, "admin.namespaces")
+				api.Get("/admin/namespaces/hidden", uiapi.AdminHiddenNamespacesListHandler(db, authService))
+				api.With(nsAudit).Post("/admin/namespaces/hidden", uiapi.AdminHiddenNamespacesCreateHandler(db, authService))
+				api.With(nsAudit).Delete("/admin/namespaces/hidden/{id}", uiapi.AdminHiddenNamespacesDeleteHandler(db, authService))
 
 				// Admin ACL grant management. Admin-only, audit-wrapped
 				// so every grant add/remove leaves a trail.
@@ -432,6 +462,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			// gate is intentionally not in this group, so adding a
 			// new endpoint here without ACL filtering would leak data.
 			approved.Get("/api/triage", uiapi.TriageHandler(db, authService))
+			approved.Get("/api/triage/image/{id}", uiapi.TriageImageDetailHandler(db, authService, appCache))
+			approved.Post("/api/triage/chat", uiapi.TriageChatHandler(db, authService))
 			approved.Get("/api/images/{id}", uiapi.ImageDetailHandler(db, authService))
 			approved.Get("/api/images/{id}/vulnerabilities", uiapi.ImageVulnerabilitiesHandler(db, authService))
 			approved.Get("/api/vuln/summary", uiapi.VulnSummaryHandler(db, authService))
@@ -441,7 +473,16 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Get("/api/vuln/trend", uiapi.VulnTrendHandler(db, authService))
 			approved.Get("/api/vulnerabilities/{vuln_id}", uiapi.VulnDetailHandler(db, authService))
 
+			// Single-cluster detail surface — the cluster-scope analogue of
+			// /api/images/{id}. {id} accepts the cluster_id, ROR slug, ROR
+			// name, or display name; the handler resolves and ACL-gates it.
+			approved.Get("/api/cluster/{id}", scam.ClusterDetailHandler(db))
+			// Cluster-scoped advisory list — lazy companion to the detail
+			// surface, grouped by canonical CVE over the cluster's images.
+			approved.Get("/api/cluster/{id}/vulnerabilities", scam.ClusterVulnerabilitiesHandler(db))
+
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
+			approved.Get("/api/agents", scam.AgentsHandler(db))
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
 			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))
 			approved.Get("/api/clusters/images/detail", scam.ImageDetailHandler(db))

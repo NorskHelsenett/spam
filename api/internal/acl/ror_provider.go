@@ -3,6 +3,7 @@ package acl
 import (
 	"context"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/cache"
@@ -129,6 +130,15 @@ func patternsFromLookup(lookup *ror.LookupResponse) []ScopePattern {
 	out := make([]ScopePattern, 0, len(clusterScope.Subject))
 	for clusterID, access := range clusterScope.Subject {
 		if !access.Read {
+			continue
+		}
+		// ROR keys cluster grants inconsistently — slugs often carry
+		// stray whitespace ("t-pps-001-y5r1 ") that breaks the exact
+		// ror_slug match in the cluster ACL filter and silently hides
+		// the cluster. Trim here, at the single point where ROR grants
+		// enter the ACL chain.
+		clusterID = strings.TrimSpace(clusterID)
+		if clusterID == "" {
 			continue
 		}
 		out = append(out, ScopePattern{ClusterID: clusterID})

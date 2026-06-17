@@ -218,7 +218,7 @@ The `spam-api` binary serves the HTTP frontend, OIDC login, and the SvelteKit
 SPA. Almost every setting on this binary is required at startup; the process
 will refuse to boot with placeholder secrets in production.
 
-**Database** — point at any Postgres 14+. Either set `DATABASE_URL` directly,
+**Database** — point at any Postgres 17+. Either set `DATABASE_URL` directly,
 or assemble a DSN from the discrete `POSTGRES_*` vars (the Bitnami Postgres
 chart is consumed via the discrete-vars path).
 

@@ -54,6 +54,11 @@ type Cluster struct {
 	RorSlug        string    `gorm:"size:255;column:ror_slug" json:"ror_slug,omitempty"`
 	RorClusterName string    `gorm:"size:255;column:ror_cluster_name" json:"ror_cluster_name,omitempty"`
 	RorEnv         string    `gorm:"size:255;column:ror_env" json:"ror_env,omitempty"`
+	// RorClusterUID is ROR's cluster UUID (the apikey identifier ROR keys
+	// ACL grants by — post identifier-migration). Distinct from ror_slug,
+	// which stays the human-readable slug; the ACL filter resolves
+	// UUID-keyed grants against this column.
+	RorClusterUID string `gorm:"size:255;column:ror_cluster_uid" json:"ror_cluster_uid,omitempty"`
 	FirstSeenAt    time.Time `json:"first_seen_at"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -71,6 +76,11 @@ type RorMetadata struct {
 	ClusterID   string `json:"cluster_id,omitempty"`
 	ClusterName string `json:"cluster_name,omitempty"`
 	Env         string `json:"env,omitempty"`
+	// ClusterUID is ROR's cluster UUID — the apikey identifier ROR keys
+	// ACL grants by (post identifier-migration). SCAM emits it alongside
+	// the slug (ClusterID) so SPAM can resolve a UUID-keyed grant without
+	// losing the readable slug. Empty from pre-UID agents.
+	ClusterUID string `json:"cluster_uid,omitempty"`
 }
 
 // Incoming is the expected shape of each record POSTed by a SCAM agent.

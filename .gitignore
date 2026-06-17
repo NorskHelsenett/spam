@@ -9,4 +9,4 @@ api/server
 runner/output/
 .DS_Store
 .fuse_*
-# .claude/worktrees/*
+.claude/

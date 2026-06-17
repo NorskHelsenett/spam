@@ -25,6 +25,13 @@ const (
 	// cadence — packages don't change health that fast and rate-
 	// limited registries thank us for the lower QPS.
 	JobTypeFetchDepHealth JobType = "FETCH_DEP_HEALTH"
+	// ADVISORY_BACKFILL generates LLM advisories for every fix_now
+	// asset whose cached advisory is missing or stale, without the
+	// background worker's per-cycle batch cap. Admin-triggered from
+	// /admin/ai; the partial unique index keeps one active at a time.
+	// Payload (AdvisoryBackfillPayload) may set replace to regenerate
+	// every urgent-tier advisory regardless of freshness.
+	JobTypeAdvisoryBackfill JobType = "ADVISORY_BACKFILL"
 	// DB_MAINTENANCE runs a safe-by-default Postgres maintenance op
 	// (ANALYZE or VACUUM ANALYZE) on a single named table. Driven from
 	// the admin Database page. We deliberately do not expose VACUUM
@@ -32,6 +39,17 @@ const (
 	// belong behind a separate, explicit code path.
 	JobTypeDBMaintenance JobType = "DB_MAINTENANCE"
 )
+
+// AdvisoryBackfillPayload is the payload for ADVISORY_BACKFILL jobs.
+// Replace=false (or an empty payload — pre-flag jobs) is the
+// original backlog drain: fix_now assets with a missing/stale
+// advisory. Replace=true regenerates every fix_now + this_week
+// advisory from scratch, replacing whatever is cached — needed when
+// the prompt or payload shape changes, since the signals hash only
+// tracks vuln data.
+type AdvisoryBackfillPayload struct {
+	Replace bool `json:"replace,omitempty"`
+}
 
 // VulnMetaFetchPayload is the payload for VULN_META_FETCH jobs —
 // one vuln_id per job. Kept single-id so a flaky external fetch

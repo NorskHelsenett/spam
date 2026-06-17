@@ -253,7 +253,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.contributors_json, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.contributors_json ILIKE ?
@@ -277,7 +277,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.details_json, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.details_json ILIKE ?
@@ -348,7 +348,7 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 					'' AS value,
 					LEFT(COALESCE(rc.readme_content, ''), 60000) AS source_text,
 					rc.synced_at AS created_at
-			FROM repo_caches rc
+			FROM `+repoCacheSQL+` rc
 			JOIN repos r ON r.id = rc.repo_id
 			LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
 			WHERE rc.readme_content ILIKE ?
@@ -358,68 +358,33 @@ func runAdvancedSearchQuery(db *gorm.DB, r *http.Request, query string, perTarge
 		return rows, err
 	case "vulnerability":
 		err := db.WithContext(r.Context()).Raw(`
-			SELECT * FROM (
-				-- Grype results — sbom-scanner emits this shape;
-				-- fields are lowercased and sit under matches[].
-				SELECT
-					'vulnerability' AS type,
-					'grype/' || tsr.id || '/' || (m->'vulnerability'->>'id') AS source_ref,
-					r.id AS repo_id,
-					r.provider,
-					COALESCE(pi.id, '') AS provider_id,
-					COALESCE(pi.base_url, '') AS base_url,
-					COALESCE(pi.owner_path, '') AS owner_path,
-					r.org,
-					r.slug,
-					m->'vulnerability'->>'id' AS title,
-					COALESCE(UPPER(m->'vulnerability'->>'severity'), 'UNKNOWN') AS value,
-					(COALESCE(m->'artifact'->>'name', '') || ' ' || COALESCE(m->'artifact'->>'version', '') || ' - ' || COALESCE(m->'vulnerability'->>'description', '')) AS source_text,
-					tsr.scanned_at AS created_at
-				FROM sbom_scan_results tsr
-				JOIN repos r ON r.id = tsr.repo_id
-				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
-				CROSS JOIN LATERAL jsonb_array_elements(COALESCE(tsr.raw_json->'matches', '[]'::jsonb)) AS m(m)
-				WHERE
-					m->'vulnerability'->>'id' ILIKE ?
-					OR m->'artifact'->>'name' ILIKE ?
-					OR m->'vulnerability'->>'description' ILIKE ?
-
-				UNION ALL
-
-				-- OSV results
-				SELECT DISTINCT ON (cv.vuln_id, rc.repo_id)
-					'vulnerability' AS type,
-					'osv/' || cv.vuln_id || '/' || rc.repo_id AS source_ref,
-					r.id AS repo_id,
-					r.provider,
-					COALESCE(pi.id, '') AS provider_id,
-					COALESCE(pi.base_url, '') AS base_url,
-					COALESCE(pi.owner_path, '') AS owner_path,
-					r.org,
-					r.slug,
-					cv.vuln_id AS title,
-					COALESCE(NULLIF(cv.severity, ''), 'UNKNOWN') AS value,
-					(COALESCE(sc.package_name, cv.purl, '') || ' ' || COALESCE(sc.purl_version, '') || ' - ' || COALESCE(cv.summary, '') || ' ' || COALESCE(cv.description, '')) AS source_text,
-					cv.checked_at AS created_at
-				FROM component_vulnerabilities cv
-				JOIN sbom_component_view sc ON sc.purl = cv.purl AND sc.is_root = false
-				JOIN repo_commits rc ON rc.id = sc.asset_ref_id AND sc.asset_type = 'REPO_COMMIT'
-				JOIN repos r ON r.id = rc.repo_id
-				LEFT JOIN provider_instances pi ON pi.id = r.provider_instance_id AND pi.enabled = true
-				WHERE cv.vuln_id <> '_none'
-				AND (
-					cv.vuln_id ILIKE ?
-					OR cv.summary ILIKE ?
-					OR cv.description ILIKE ?
-					OR sc.package_name ILIKE ?
-				)
-			) combined
-			ORDER BY created_at DESC
+			SELECT
+				'vulnerability' AS type,
+				'' AS source_ref,
+				'' AS repo_id,
+				'' AS provider,
+				'' AS provider_id,
+				'' AS base_url,
+				'' AS owner_path,
+				'' AS org,
+				'' AS slug,
+				vcs.vuln_id AS title,
+				COALESCE(NULLIF(vcs.severity, ''), 'UNKNOWN') AS value,
+				(
+					COALESCE(vcs.pkg_name, '') || ' ' ||
+					COALESCE(vcs.installed_version, '') || ' ' ||
+					COALESCE(vcs.title, '') || ' ' ||
+					COALESCE(vcs.description, '')
+				) AS source_text,
+				COALESCE(vcs.last_scanned_at, now()) AS created_at
+			FROM vuln_canonical_summary vcs
+			WHERE vcs.vuln_id ILIKE ?
+			   OR vcs.pkg_name ILIKE ?
+			   OR vcs.title ILIKE ?
+			   OR vcs.description ILIKE ?
+			ORDER BY vcs.sev_rank ASC, vcs.kev_known DESC, vcs.epss_score DESC, vcs.cve_year DESC NULLS LAST, vcs.vuln_id ASC
 			LIMIT ?
 		`,
-			// grype branch (3 placeholders)
-			like, like, like,
-			// OSV branch (4 placeholders)
 			like, like, like, like,
 			perTargetLimit,
 		).Scan(&rows).Error
@@ -778,7 +743,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 					COALESCE(rc.readme_content, '') AS readme_content,
 					COALESCE(rc.contributors_json, '') AS contributors_json,
 					COALESCE(rc.details_json, '') AS details_json
-				FROM repo_caches rc
+				FROM `+repoCacheSQL+` rc
 				JOIN repos r ON r.id = rc.repo_id
 				WHERE rc.repo_id = ?
 				LIMIT 1
@@ -790,13 +755,13 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.RepoID, resp.Provider, resp.Org, resp.Slug = row.RepoID, row.Provider, row.Org, row.Slug
 			if targetType == "contributor" {
 				resp.Raw = row.ContributorsJSON
-				resp.Metadata["source"] = "repo_caches.contributors_json"
+				resp.Metadata["source"] = "repo_cache.contributors_json"
 			} else if targetType == "language" {
 				resp.Raw = row.DetailsJSON
-				resp.Metadata["source"] = "repo_caches.details_json"
+				resp.Metadata["source"] = "repo_cache.details_json"
 			} else {
 				resp.Raw = row.ReadmeContent
-				resp.Metadata["source"] = "repo_caches.readme_content"
+				resp.Metadata["source"] = "repo_cache.readme_content"
 			}
 		case "commit":
 			var row struct {
@@ -856,7 +821,7 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 					COALESCE(rc.commits_json, '') AS commits,
 					COALESCE(rc.contributors_json, '') AS contribs
 				FROM repos r
-				LEFT JOIN repo_caches rc ON rc.repo_id = r.id
+				LEFT JOIN `+repoCacheSQL+` rc ON rc.repo_id = r.id
 				WHERE r.id = ?
 				LIMIT 1
 			`, sourceRef).Scan(&row).Error
@@ -869,28 +834,28 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 			resp.Metadata["repo"] = row.Org + "/" + row.Slug
 			resp.Metadata["provider"] = row.Provider
 		case "vulnerability":
-		// source_ref is one of:
-		//   grype/{tsr_id}/{vuln_id}   — sbom_scan_results row
-		//   osv/{vuln_id}/{repo_id}    — component_vulnerabilities (OSV lookup)
-		parts := strings.SplitN(sourceRef, "/", 3)
-		if len(parts) != 3 {
-			http.Error(w, "invalid source_ref for vulnerability", http.StatusBadRequest)
-			return
-		}
-		vulnSource, id1, id2 := parts[0], parts[1], parts[2]
-
-		switch vulnSource {
-		case "grype":
-			tsrID, vulnID := id1, id2
-			var vulnRow struct {
-				RepoID    string
-				Provider  string
-				Org       string
-				Slug      string
-				MatchJSON string `gorm:"column:match_json"`
-				Target    string
+			// source_ref is one of:
+			//   grype/{tsr_id}/{vuln_id}   — sbom_scan_results row
+			//   osv/{vuln_id}/{repo_id}    — component_vulnerabilities (OSV lookup)
+			parts := strings.SplitN(sourceRef, "/", 3)
+			if len(parts) != 3 {
+				http.Error(w, "invalid source_ref for vulnerability", http.StatusBadRequest)
+				return
 			}
-			err := db.WithContext(r.Context()).Raw(`
+			vulnSource, id1, id2 := parts[0], parts[1], parts[2]
+
+			switch vulnSource {
+			case "grype":
+				tsrID, vulnID := id1, id2
+				var vulnRow struct {
+					RepoID    string
+					Provider  string
+					Org       string
+					Slug      string
+					MatchJSON string `gorm:"column:match_json"`
+					Target    string
+				}
+				err := db.WithContext(r.Context()).Raw(`
 				SELECT
 					r.id AS repo_id,
 					r.provider,
@@ -904,34 +869,34 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 				WHERE tsr.id = ? AND m->'vulnerability'->>'id' = ?
 				LIMIT 1
 			`, tsrID, vulnID).Scan(&vulnRow).Error
-			if err != nil || vulnRow.RepoID == "" {
-				http.Error(w, "preview not found", http.StatusNotFound)
-				return
-			}
-			resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
-			resp.Raw = vulnRow.MatchJSON
-			resp.Metadata["vuln_id"] = vulnID
-			resp.Metadata["scan_id"] = tsrID
-			resp.Metadata["source"] = "grype"
-			if vulnRow.Target != "" {
-				resp.Metadata["target"] = vulnRow.Target
-			}
-		case "osv":
-			vulnID, repoID2 := id1, id2
-			var osvRow struct {
-				RepoID      string
-				Provider    string
-				Org         string
-				Slug        string
-				VulnID      string
-				Summary     string
-				Description string
-				Severity    string
-				FixedIn     string
-				PkgName     string
-				PkgVersion  string
-			}
-			err := db.WithContext(r.Context()).Raw(`
+				if err != nil || vulnRow.RepoID == "" {
+					http.Error(w, "preview not found", http.StatusNotFound)
+					return
+				}
+				resp.RepoID, resp.Provider, resp.Org, resp.Slug = vulnRow.RepoID, vulnRow.Provider, vulnRow.Org, vulnRow.Slug
+				resp.Raw = vulnRow.MatchJSON
+				resp.Metadata["vuln_id"] = vulnID
+				resp.Metadata["scan_id"] = tsrID
+				resp.Metadata["source"] = "grype"
+				if vulnRow.Target != "" {
+					resp.Metadata["target"] = vulnRow.Target
+				}
+			case "osv":
+				vulnID, repoID2 := id1, id2
+				var osvRow struct {
+					RepoID      string
+					Provider    string
+					Org         string
+					Slug        string
+					VulnID      string
+					Summary     string
+					Description string
+					Severity    string
+					FixedIn     string
+					PkgName     string
+					PkgVersion  string
+				}
+				err := db.WithContext(r.Context()).Raw(`
 				SELECT DISTINCT ON (cv.vuln_id)
 					r.id AS repo_id,
 					r.provider,
@@ -951,26 +916,26 @@ func AdvancedSearchPreviewHandler(db *gorm.DB, authService *auth.Service) http.H
 				WHERE cv.vuln_id = ? AND rc.repo_id = ?
 				LIMIT 1
 			`, vulnID, repoID2).Scan(&osvRow).Error
-			if err != nil || osvRow.RepoID == "" {
-				http.Error(w, "preview not found", http.StatusNotFound)
+				if err != nil || osvRow.RepoID == "" {
+					http.Error(w, "preview not found", http.StatusNotFound)
+					return
+				}
+				resp.RepoID, resp.Provider, resp.Org, resp.Slug = osvRow.RepoID, osvRow.Provider, osvRow.Org, osvRow.Slug
+				resp.Raw = osvRow.Description
+				resp.Metadata["vuln_id"] = osvRow.VulnID
+				resp.Metadata["summary"] = osvRow.Summary
+				resp.Metadata["severity"] = osvRow.Severity
+				resp.Metadata["source"] = "osv"
+				if osvRow.FixedIn != "" {
+					resp.Metadata["fixed_in"] = osvRow.FixedIn
+				}
+				if osvRow.PkgName != "" {
+					resp.Metadata["package"] = osvRow.PkgName + "@" + osvRow.PkgVersion
+				}
+			default:
+				http.Error(w, "unknown vulnerability source", http.StatusBadRequest)
 				return
 			}
-			resp.RepoID, resp.Provider, resp.Org, resp.Slug = osvRow.RepoID, osvRow.Provider, osvRow.Org, osvRow.Slug
-			resp.Raw = osvRow.Description
-			resp.Metadata["vuln_id"] = osvRow.VulnID
-			resp.Metadata["summary"] = osvRow.Summary
-			resp.Metadata["severity"] = osvRow.Severity
-			resp.Metadata["source"] = "osv"
-			if osvRow.FixedIn != "" {
-				resp.Metadata["fixed_in"] = osvRow.FixedIn
-			}
-			if osvRow.PkgName != "" {
-				resp.Metadata["package"] = osvRow.PkgName + "@" + osvRow.PkgVersion
-			}
-		default:
-			http.Error(w, "unknown vulnerability source", http.StatusBadRequest)
-			return
-		}
 		}
 
 		if repoID != "" && resp.RepoID != "" && repoID != resp.RepoID {

@@ -1218,8 +1218,8 @@ func ImageScanArtifactDownloadHandler(db *gorm.DB, authService *auth.Service) ht
 }
 
 // loadLinkedRepoContributors pulls the top-N committers from the cached
-// /providers/details payload stashed in repo_caches. Returns nil when the
-// cache is empty or malformed — the drawer just hides the contributors
+// /providers/details payload in kv_store (repo:cache:{id}). Returns nil when
+// the cache is empty or malformed — the drawer just hides the contributors
 // strip instead of blocking. Limit is applied in Go to keep the SQL simple.
 func loadLinkedRepoContributors(ctx context.Context, db *gorm.DB, repoID string, limit int) []ImageRepoContributor {
 	if repoID == "" || limit <= 0 {
@@ -1227,7 +1227,11 @@ func loadLinkedRepoContributors(ctx context.Context, db *gorm.DB, repoID string,
 	}
 	var raw string
 	if err := db.WithContext(ctx).Raw(
-		`SELECT contributors_json FROM repo_caches WHERE repo_id = ? LIMIT 1`, repoID,
+		`SELECT COALESCE(kv.value->>'contributors_json', '')
+		 FROM kv_store kv
+		 WHERE kv.key = 'repo:cache:' || ?
+		   AND (kv.expires_at IS NULL OR kv.expires_at > now())
+		 LIMIT 1`, repoID,
 	).Scan(&raw).Error; err != nil || raw == "" {
 		return nil
 	}

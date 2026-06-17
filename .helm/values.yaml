@@ -203,20 +203,32 @@ resources: {}
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 # startupProbe gates liveness/readiness during boot — gives up to
 # 60s (30 × 2s) for the server to bind before kubelet restarts the pod.
+# startup/liveness use /api/healthz, which is process-only (no DB) — the
+# server starts serving immediately, so these pass within seconds and a
+# slow/busy DB can never trigger a restart. Readiness uses /api/readyz,
+# which also checks that the base materialized views are populated;
+# failing readiness only withholds traffic (no restart), so it can stay
+# red for the minutes the background MV populate takes on a fresh deploy.
 startupProbe:
   httpGet:
     path: /api/healthz
     port: http
-  periodSeconds: 2
-  failureThreshold: 30
+  periodSeconds: 5
+  failureThreshold: 12
 livenessProbe:
   httpGet:
     path: /api/healthz
     port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
 readinessProbe:
   httpGet:
-    path: /api/healthz
+    path: /api/readyz
     port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
 
 # Additional volumes on the output Deployment definition.
 volumes: []
@@ -574,25 +586,30 @@ imageScanner:
   # against a single pathological image hanging the whole tick).
   scanDeadlineSeconds: 900
 
-  # /tmp scratch volume for crane/syft/grype. Was 512Mi tmpfs (RAM-backed)
-  # which ran out on any image >300MB because image extraction can briefly
-  # duplicate layers on disk. Now a disk-backed emptyDir pulling from node
-  # ephemeral storage — doesn't count against pod memory. Bump if a fat
-  # image still fills it (runtime: `kubectl -n spam exec <pod> -- df /tmp`).
-  tmpSizeLimit: 8Gi
+  # /tmp scratch volume. Subprocess temp (syft/grype image extraction)
+  # is routed into a per-job dir under /work via TMPDIR, so /tmp only
+  # holds incidental small files now. It used to be the extraction
+  # target, where temp dirs orphaned by scan-deadline kills accumulated
+  # across a lingering pod's scans until the kubelet evicted it for
+  # exceeding this cap — per-job temp under /work is cleaned with the
+  # job, so /tmp no longer needs multi-GB headroom.
+  tmpSizeLimit: 1Gi
 
   # Per-volume caps on the other disk-backed emptyDirs. Each is counted
   # against node ephemeral storage, so bounding them (rather than leaving
   # {} = unbounded) is what stops a single scanner from filling the node
   # and triggering DiskPressure eviction of neighbouring pods.
   #
-  #  work           — extracted image rootfs; scales with largest layer
+  #  work           — per-job scratch: syft/grype layer extraction (via
+  #                   TMPDIR), exported rootfs, and artifacts. Scales
+  #                   with image size; extraction can briefly hold both
+  #                   the layer tarballs and the unpacked tree.
   #  grypeCache     — grype vulnerability DB (~1 GiB uncompressed)
   #  trivyCache     — trivy vulnerability DB (similar size)
   #
   # Sum of tmp + work + grype + trivy should fit inside the container's
   # ephemeral-storage limit below (see resources.limits.ephemeral-storage).
-  workSizeLimit: 8Gi
+  workSizeLimit: 16Gi
   grypeCacheSizeLimit: 2Gi
   trivyCacheSizeLimit: 2Gi
 

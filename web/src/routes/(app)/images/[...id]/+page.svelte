@@ -25,7 +25,7 @@
 		Eye
 	} from 'lucide-svelte';
 	import TabSelector from '$lib/components/TabSelector.svelte';
-	import Dialog from '$lib/components/Dialog.svelte';
+	import VulnAdvisoryDialog from '$lib/components/VulnAdvisoryDialog.svelte';
 	import Loading from '$lib/components/Loading.svelte';
 
 	type LinkedRepo = {
@@ -437,15 +437,7 @@
 	const openAdvisoryDialog = (id: string) => {
 		advisoryDialogId = id;
 		advisoryDialogOpen = true;
-		if (!vulnDetails[id]) {
-			vulnDetails = { ...vulnDetails, [id]: { status: 'loading' } };
-			fetchVulnDetail(id);
-		}
 	};
-	const advisoryDialogDetail = $derived.by((): VulnDetail | null => {
-		const s = vulnDetails[advisoryDialogId];
-		return s && s.status === 'ready' ? s.data : null;
-	});
 
 	let prefetchedFor = $state<string>('');
 	$effect(() => {
@@ -578,25 +570,25 @@
 					<div class="grid grid-cols-2 gap-3">
 						<div>
 							<p class="text-2xl font-bold text-red-500">{severity.critical}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<ShieldX class="h-3 w-3 text-red-500" /> Critical
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-orange-500">{severity.high}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<ShieldAlert class="h-3 w-3 text-orange-500" /> High
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-yellow-500">{severity.medium}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Shield class="h-3 w-3 text-yellow-500" /> Medium
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-secondary)]">{severity.low}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Shield class="h-3 w-3" /> Low
 							</p>
 						</div>
@@ -609,19 +601,19 @@
 					<div class="grid grid-cols-2 gap-3">
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{clusterCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Server class="h-3 w-3" /> Clusters
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{namespaceCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Package class="h-3 w-3" /> Namespaces
 							</p>
 						</div>
 						<div>
 							<p class="text-2xl font-bold text-[var(--text-bright)]">{podCount}</p>
-							<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+							<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 								<Container class="h-3 w-3" /> Pods
 							</p>
 						</div>
@@ -633,7 +625,7 @@
 					<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Components</h3>
 					<div>
 						<p class="text-2xl font-bold text-[var(--text-bright)]">{componentCount.toLocaleString()}</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 							<FileBox class="h-3 w-3" /> Packages in SBOM
 						</p>
 					</div>
@@ -649,7 +641,7 @@
 						<p class="text-lg font-bold {secretCount > 0 ? 'text-orange-400' : 'text-[var(--text-secondary)]'}">
 							{secretCount.toLocaleString()}
 						</p>
-						<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+						<p class="flex items-normal gap-1 text-xs text-[var(--text-muted)]">
 							<KeyRound class="h-3 w-3" /> Secrets found
 						</p>
 					</div>
@@ -1017,7 +1009,7 @@
 										</tr>
 									</thead>
 									<tbody class="divide-y divide-[var(--border-color)]/20 text-[var(--text-secondary)]">
-										{#each image.image_secrets ?? [] as s, i (s.rule_id + '@' + (s.file ?? '') + ':' + (s.start_line ?? i))}
+										{#each image.image_secrets ?? [] as s, i (s.rule_id + '@' + (s.file ?? '') + ':' + (s.start_line ?? '') + '#' + i)}
 											<tr class="transition hover:bg-[var(--hover-bg-subtle)]">
 												<td class="px-4 py-2">
 													<p class="font-mono text-xs text-[var(--text-bright)]">{s.rule_id}</p>
@@ -1108,217 +1100,4 @@
 	{/if}
 </div>
 
-<Dialog bind:open={advisoryDialogOpen} maxWidth="max-w-4xl">
-	{#snippet children()}
-		{@const d = advisoryDialogDetail}
-		{@const isLoading = vulnDetails[advisoryDialogId]?.status === 'loading'}
-		{@const adv = advisoryDialogId ? advisoryLink(advisoryDialogId) : { href: '', label: '' }}
-		<div class="flex h-full min-h-0 flex-col">
-			<header class="flex items-start justify-between gap-4 border-b border-[var(--border-color)]/40 px-6 py-4">
-				<div class="min-w-0 flex-1">
-					<p class="font-mono text-xs text-[var(--text-tertiary)]">Advisory</p>
-					<h2 class="mt-0.5 truncate text-lg font-semibold text-[var(--text-bright)]">{advisoryDialogId}</h2>
-					{#if d?.title}
-						<p class="mt-0.5 truncate text-sm text-[var(--text-secondary)]">{d.title}</p>
-					{/if}
-				</div>
-				<div class="flex shrink-0 items-center gap-2">
-					<a
-						class="inline-flex items-center gap-1 rounded-lg border border-[var(--border-color)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:bg-[var(--hover-bg)]"
-						href={vulnUrl(advisoryDialogId)}
-					>
-						Open full page
-						<ExternalLink class="h-3 w-3" />
-					</a>
-				</div>
-			</header>
-			<div class="flex-1 overflow-y-auto px-6 py-4">
-				{#if isLoading || !d}
-					<div class="flex items-center gap-2 py-12 text-sm text-[var(--text-tertiary)]">
-						<div class="h-4 w-4 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>
-						Loading advisory…
-					</div>
-				{:else}
-					<div class="grid gap-5 lg:grid-cols-3">
-						<div class="lg:col-span-2 space-y-4">
-							{#if d.description}
-								<p class="whitespace-pre-line text-sm leading-relaxed text-[var(--text-secondary)]">{d.description}</p>
-							{:else if d.enrichment_loading}
-								<p class="text-xs italic text-[var(--text-muted)]">Enriching from upstream feeds — re-open in a moment.</p>
-							{:else}
-								<p class="text-xs italic text-[var(--text-muted)]">No description available. Use the canonical link on the right.</p>
-							{/if}
-
-							{#if d.authorities && d.authorities.length > 0}
-								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CVSS / severity by authority</h3>
-									<div class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										<table class="min-w-full border-separate border-spacing-0 text-sm">
-											<thead class="bg-[var(--hover-bg-subtle)] text-xs uppercase tracking-[0.18em] text-[var(--text-tertiary)]">
-												<tr>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">ID</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Severity</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">CVSS</th>
-													<th class="border-b border-[var(--border-color)]/40 px-3 py-2 text-left font-medium">Vector</th>
-												</tr>
-											</thead>
-											<tbody class="text-[var(--text-secondary)]">
-												{#each d.authorities as a, idx (a.vuln_id)}
-													{@const isLast = idx === d.authorities.length - 1}
-													<tr>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs text-[var(--text-bright)]">
-															{a.vuln_id}{#if a.is_primary} <span class="ml-1 rounded-full bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-[var(--accent)]">primary</span>{/if}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5">
-															{#if a.severity}
-																<span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-semibold {severityClass(a.severity)}">
-																	{a.severity}
-																</span>
-															{:else}
-																<span class="text-xs text-[var(--text-muted)]">—</span>
-															{/if}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 font-mono text-xs">
-															{a.cvss_score !== undefined && a.cvss_score !== null ? a.cvss_score.toFixed(1) : '—'}
-														</td>
-														<td class="{isLast ? '' : 'border-b border-[var(--border-color)]/20 '}px-3 py-1.5 truncate font-mono text-[11px] text-[var(--text-tertiary)]" title={a.cvss_vector ?? ''}>
-															{a.cvss_vector || '—'}
-														</td>
-													</tr>
-												{/each}
-											</tbody>
-										</table>
-									</div>
-								</div>
-							{/if}
-
-							{#if d.affected_repos && d.affected_repos.length > 0}
-								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-										Affected repos
-										{#if d.repo_count !== undefined && d.repo_count > d.affected_repos.length}
-											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_repos.length} of {d.repo_count}</span>
-										{/if}
-									</h3>
-									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										{#each d.affected_repos.slice(0, 8) as r, idx (r.repo_id)}
-											{@const isLast = idx === Math.min(d.affected_repos.length, 8) - 1}
-											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
-												<span class="min-w-0 truncate font-mono text-[var(--text-bright)]" title={r.repo_slug}>
-													{r.repo_slug || r.repo_id}
-												</span>
-												<a
-													class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
-													href={`/providers/repo?repo_id=${r.repo_id}${r.provider_instance_id ? `&provider_id=${r.provider_instance_id}` : ''}`}
-												>
-													<Eye class="h-3.5 w-3.5" />
-													View
-												</a>
-											</li>
-										{/each}
-									</ul>
-								</div>
-							{/if}
-
-							{#if d.affected_images && d.affected_images.length > 0}
-								<div>
-									<h3 class="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">
-										Affected images
-										{#if d.image_count !== undefined && d.image_count > d.affected_images.length}
-											<span class="ml-1 text-[10px] font-normal normal-case text-[var(--text-muted)]">— showing first {d.affected_images.length} of {d.image_count}</span>
-										{/if}
-									</h3>
-									<ul class="overflow-hidden rounded-xl border border-[var(--border-color)]/60">
-										{#each d.affected_images.slice(0, 8) as i, idx (i.image_id)}
-											{@const isLast = idx === Math.min(d.affected_images.length, 8) - 1}
-											<li class="{isLast ? '' : 'border-b border-[var(--border-color)]/30 '}flex items-center justify-between gap-3 px-3 py-2 text-xs">
-												<div class="min-w-0 flex-1">
-													<p class="truncate font-mono text-[var(--text-bright)]" title={i.image_slug}>{i.image_slug}</p>
-													{#if i.image_digest}
-														<p class="truncate font-mono text-[10px] text-[var(--text-tertiary)]">@{shortDigest(i.image_digest)}</p>
-													{/if}
-												</div>
-												{#if i.image_digest}
-													<a
-														class="btn btn-ghost shrink-0 py-1 px-2 text-[11px]"
-														href={`/images/${encodeURIComponent(i.image_digest)}`}
-													>
-														<Eye class="h-3.5 w-3.5" />
-														View
-													</a>
-												{/if}
-											</li>
-										{/each}
-									</ul>
-								</div>
-							{/if}
-						</div>
-
-						<aside class="space-y-2">
-							{#if d.kev_known}
-								<div class="rounded-xl border border-red-500/30 bg-red-500/5 px-3 py-2.5">
-									<div class="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-red-400">
-										<ShieldX class="h-3.5 w-3.5" /> CISA KEV
-									</div>
-									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-										Listed in CISA's <strong>Known Exploited Vulnerabilities</strong> catalog — confirmed in-the-wild use. Patch on KEV-mandated timelines.
-									</p>
-									<div class="mt-1.5 flex flex-wrap items-center gap-2 text-[11px]">
-										{#if d.kev_date_added}
-											<span class="text-[var(--text-tertiary)]">Added {formatShortDate(d.kev_date_added)}</span>
-										{/if}
-										{#if d.kev_known_ransomware}
-											<span class="rounded-full bg-red-500/20 px-1.5 py-0.5 font-semibold text-red-300">ransomware</span>
-										{/if}
-									</div>
-								</div>
-							{/if}
-
-							{#if d.epss_score !== undefined && d.epss_score !== null && d.epss_score > 0}
-								<div class="rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2.5">
-									<div class="flex items-center justify-between gap-2">
-										<div class="text-xs font-semibold uppercase tracking-wider text-orange-400">EPSS</div>
-										<span class="text-lg font-bold text-orange-300">{(d.epss_score * 100).toFixed(1)}%</span>
-									</div>
-									<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-										FIRST.org's <strong>Exploit Prediction Scoring System</strong>: daily-updated probability this CVE is exploited within 30 days.
-										{#if d.epss_percentile !== undefined && d.epss_percentile !== null}
-											Ranks above {(d.epss_percentile * 100).toFixed(0)}% of every CVE in the global EPSS feed.
-										{/if}
-									</p>
-								</div>
-							{/if}
-
-							<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
-								<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Canonical source</div>
-								<p class="mt-1 text-xs leading-relaxed text-[var(--text-secondary)]">
-									<strong>{adv.label}</strong> — CVSS vector, CWE, references, affected ranges.
-								</p>
-								<a
-									class="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-[var(--accent)] hover:underline"
-									href={adv.href}
-									target="_blank"
-									rel="noopener noreferrer"
-								>
-									Open on {adv.label}
-									<ExternalLink class="h-3 w-3" />
-								</a>
-							</div>
-
-							{#if d.sources && d.sources.length > 0}
-								<div class="rounded-xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40 px-3 py-2.5">
-									<div class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Sources</div>
-									<div class="mt-1.5 flex flex-wrap gap-1">
-										{#each d.sources as s}
-											<span class="rounded-full bg-[var(--hover-bg-subtle)] px-2 py-0.5 text-[11px] text-[var(--text-tertiary)]">{s}</span>
-										{/each}
-									</div>
-								</div>
-							{/if}
-						</aside>
-					</div>
-				{/if}
-			</div>
-		</div>
-	{/snippet}
-</Dialog>
+<VulnAdvisoryDialog bind:open={advisoryDialogOpen} vulnId={advisoryDialogId} />

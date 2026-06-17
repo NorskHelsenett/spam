@@ -77,7 +77,6 @@
 	// keep the previous data on screen while a refresh is in flight
 	// (no jarring flash).
 	let refreshing = $state(false);
-	let lastUpdated = $state<Date | null>(null);
 	// Per-feed manual-trigger state — disables the button between
 	// click and the next poll cycle so a user can't double-fire while
 	// the optimistic state is in flight.
@@ -111,7 +110,6 @@
 				const vr = (await viewsRes.json()) as MatViewsResponse;
 				matviews = vr.views ?? [];
 			}
-			lastUpdated = new Date();
 			error = '';
 		} catch {
 			error = 'Network error.';
@@ -182,14 +180,6 @@
 		return `${h}h ${m}m`;
 	};
 
-	const fmtRelative = (d: Date | null) => {
-		if (!d) return '';
-		const diff = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
-		if (diff < 5) return 'just now';
-		if (diff < 60) return `${diff}s ago`;
-		return `${Math.floor(diff / 60)}m ago`;
-	};
-
 	const fmtRelativeISO = (iso: string | null | undefined) => {
 		if (!iso) return '—';
 		const t = new Date(iso).getTime();
@@ -230,32 +220,10 @@
 </script>
 
 <svelte:head>
-	<title>Admin · Jobs — Spam Monitor</title>
+	<title>Jobs · Settings — Spam Monitor</title>
 </svelte:head>
 
 <div class="space-y-4">
-	<article class="panel-surface space-y-2 px-6 py-8 sm:px-10 sm:py-10">
-		<header class="flex items-start justify-between gap-4">
-			<div class="flex items-center gap-3">
-				<Layers class="h-10 w-10 flex-shrink-0 text-[var(--accent)]" />
-				<div>
-					<h1 class="text-2xl font-semibold text-[var(--text-bright)] sm:text-3xl">Jobs</h1>
-					<p class="text-sm text-[var(--text-tertiary)]">
-						Live queue across all worker pools. Updates every {POLL_INTERVAL_MS / 1000}s.
-					</p>
-				</div>
-			</div>
-			<div class="flex items-center gap-2 text-xs text-[var(--text-tertiary)]">
-				{#if refreshing}
-					<RefreshCw class="h-3 w-3 animate-spin" />
-				{/if}
-				{#if lastUpdated}
-					<span>Updated {fmtRelative(lastUpdated)}</span>
-				{/if}
-			</div>
-		</header>
-	</article>
-
 	{#if loading}
 		<div class="flex items-center justify-center py-20">
 			<div class="h-8 w-8 animate-spin rounded-full border-2 border-[var(--accent)] border-t-transparent"></div>

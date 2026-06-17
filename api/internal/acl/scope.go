@@ -195,12 +195,13 @@ func compileClusterRepoBridge(patterns []ScopePattern, alias string) (string, []
 			alias, join,
 		), nil
 	}
+	resolveSQL, resolveArgs := clusterGrantResolveSQL(ids)
 	return fmt.Sprintf(
 		"%s.id IN (SELECT DISTINCT d.source_repo_id FROM image_digests d %s "+
 			"WHERE d.verified_source = true AND d.source_repo_id <> '' "+
-			"AND cii.cluster_id IN ?)",
-		alias, join,
-	), []any{ids}
+			"AND cii.cluster_id IN (%s))",
+		alias, join, resolveSQL,
+	), resolveArgs
 }
 
 // ReadableClusterClause builds a WHERE fragment restricting rows of
@@ -298,7 +299,8 @@ func ReadableImageClause(ctx context.Context, p Provider, subj Subject, alias st
 		args = append(args, imageArgs...)
 	}
 
-	clusterImageSQL, clusterImageArgs := compileClusterImageInheritance(clusterPatterns, alias)
+	nsSQL, nsArgs := hiddenNamespaceExclusion(ctx, "namespace")
+	clusterImageSQL, clusterImageArgs := compileClusterImageInheritance(clusterPatterns, alias, nsSQL, nsArgs)
 	if clusterImageSQL != "" {
 		parts = append(parts, clusterImageSQL)
 		args = append(args, clusterImageArgs...)
@@ -420,6 +422,22 @@ func compileClusterPatterns(patterns []ScopePattern, alias string) (string, []an
 	return strings.Join(parts, " OR "), args, false
 }
 
+// clusterGrantResolveSQL returns a subquery (and its bind args) that
+// translates a set of ScopeCluster grant ids into the kube cluster_id
+// values used throughout the schema (cluster_image_inventory.cluster_id
+// etc). Grant ids are not always kube cluster_ids: ROR keys grants by
+// the cluster slug or, post identifier migration, by the ROR cluster
+// UUID — neither of which equals the kube cluster_id. We resolve all
+// three identifier domains against the clusters table so a
+// `... IN (<clusterGrantResolveSQL>)` predicate matches regardless of
+// how the grant was keyed. This mirrors scam.clusterACLFilterCol; the
+// clusters table is small so the unindexed ror_slug TRIM scan is
+// negligible.
+func clusterGrantResolveSQL(ids []string) (string, []any) {
+	return "SELECT cluster_id FROM clusters WHERE cluster_id IN ? OR (TRIM(ror_slug) <> '' AND TRIM(ror_slug) IN ?) OR (ror_cluster_uid <> '' AND ror_cluster_uid IN ?)",
+		[]any{ids, ids, ids}
+}
+
 // compileClusterImageInheritance turns cluster grants into a predicate
 // that matches images present in cluster_image_inventory for any of
 // the readable cluster_ids. The fragment is parenthesised so the
@@ -435,7 +453,13 @@ func compileClusterPatterns(patterns []ScopePattern, alias string) (string, []an
 // raw_registry, not the COALESCE'd `registry` column, is the join key
 // into image_digests.registry — same convention the scam ImageDetail
 // query uses.
-func compileClusterImageInheritance(patterns []ScopePattern, alias string) (string, []any) {
+//
+// nsSQL/nsArgs (from hiddenNamespaceExclusion, may be empty) prune the
+// inventory subquery so an image whose only running instances sit in
+// admin-curated hidden namespaces doesn't inherit visibility. An image
+// that also runs in one of the user's regular namespaces still matches
+// through that row.
+func compileClusterImageInheritance(patterns []ScopePattern, alias string, nsSQL string, nsArgs []any) (string, []any) {
 	if len(patterns) == 0 {
 		return "", nil
 	}
@@ -450,19 +474,25 @@ func compileClusterImageInheritance(patterns []ScopePattern, alias string) (stri
 			ids = append(ids, p.ClusterID)
 		}
 	}
+	nsWhere := ""
+	if nsSQL != "" {
+		nsWhere = " AND " + nsSQL
+	}
 	if wildcard {
 		return fmt.Sprintf(
-			"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory))",
-			alias, alias, alias,
-		), nil
+			"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE TRUE%s))",
+			alias, alias, alias, nsWhere,
+		), nsArgs
 	}
 	if len(ids) == 0 {
 		return "", nil
 	}
+	resolveSQL, resolveArgs := clusterGrantResolveSQL(ids)
+	args := append(resolveArgs, nsArgs...)
 	return fmt.Sprintf(
-		"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE cluster_id IN ?))",
-		alias, alias, alias,
-	), []any{ids}
+		"((%s.registry, %s.repository, %s.digest) IN (SELECT raw_registry, image, digest FROM cluster_image_inventory WHERE cluster_id IN (%s)%s))",
+		alias, alias, alias, resolveSQL, nsWhere,
+	), args
 }
 
 func compileImagePatterns(patterns []ScopePattern, alias string) (string, []any, bool) {

@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,9 +40,12 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 		return nil, fmt.Errorf("database handle: %w", err)
 	}
 
-	sqlDB.SetMaxIdleConns(10)
-	sqlDB.SetMaxOpenConns(25)
+	sqlDB.SetMaxIdleConns(envInt("SPAM_DB_MAX_IDLE_CONNS", 25))
+	sqlDB.SetMaxOpenConns(envInt("SPAM_DB_MAX_OPEN_CONNS", 50))
 	sqlDB.SetConnMaxLifetime(time.Hour)
+	// Recycle idle connections well before any server-side or network
+	// idle timeout closes them under us mid-request.
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -49,6 +55,21 @@ func Open(ctx context.Context, cfg Config) (*gorm.DB, error) {
 	}
 
 	return db, nil
+}
+
+// envInt reads a positive integer from the environment, falling back
+// to def when unset or invalid.
+func envInt(name string, def int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		log.Printf("db: ignoring invalid %s %q, using %d", name, raw, def)
+		return def
+	}
+	return n
 }
 
 // Close releases the underlying SQL database resources.

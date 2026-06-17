@@ -49,6 +49,7 @@
 	let results = $state<AdvancedSearchResult[]>([]);
 	let searchTimeout: ReturnType<typeof setTimeout> | null = null;
 	let searchPending = $state(false);
+	let searchAbort: AbortController | null = null;
 
 	let previewOpen = $state(false);
 	let previewLoading = $state(false);
@@ -75,6 +76,20 @@
 		{ value: 'language', label: 'Languages' },
 		{ value: 'readme', label: 'README files' }
 	];
+	const allSearchTargets: AdvancedSearchType[] = [
+		'repo',
+		'cluster',
+		'image',
+		'commit',
+		'vulnerability',
+		'contributor',
+		'language',
+		'manifest',
+		'sbom',
+		'secret',
+		'readme'
+	];
+	const TARGET_TIMEOUT_MS = 15_000;
 
 	const iconForType = (type: AdvancedSearchType) => {
 		switch (type) {
@@ -159,33 +174,109 @@
 			.map((part) => ({ text: part, match: part.toLowerCase() === term.toLowerCase() }));
 	};
 
+	let searchRun = 0;
+
+	const resultKey = (r: AdvancedSearchResult) =>
+		`${r.type}|${r.repo_id || ''}|${r.cluster_id || ''}|${r.image_id || ''}|${r.source_ref || ''}|${r.title}|${r.value || ''}`;
+
+	const sortResults = (items: AdvancedSearchResult[]) =>
+		items.sort((a, b) => {
+			const at = a.created_at ? new Date(a.created_at).getTime() : 0;
+			const bt = b.created_at ? new Date(b.created_at).getTime() : 0;
+			return bt - at;
+		});
+
+	const fetchTarget = async (q: string, searchTarget: AdvancedSearchType, signal: AbortSignal) => {
+		const params = new URLSearchParams({ q, per_page: '120', target: searchTarget });
+		const targetController = new AbortController();
+		let timedOut = false;
+		const abortTarget = () => targetController.abort();
+		const timeout = setTimeout(() => {
+			timedOut = true;
+			targetController.abort();
+		}, TARGET_TIMEOUT_MS);
+		signal.addEventListener('abort', abortTarget, { once: true });
+		try {
+			const res = await fetch(`/api/search/advanced?${params}`, {
+				credentials: 'include',
+				signal: targetController.signal
+			});
+			if (!res.ok) {
+				throw new Error(res.status === 401 ? 'Please log in.' : `Search failed for ${labelForType(searchTarget).toLowerCase()}.`);
+			}
+			return res.json();
+		} catch (e) {
+			if (timedOut) {
+				throw new Error(`Search timed out for ${labelForType(searchTarget).toLowerCase()}.`);
+			}
+			throw e;
+		} finally {
+			clearTimeout(timeout);
+			signal.removeEventListener('abort', abortTarget);
+		}
+	};
+
 	const loadResults = async () => {
+		const run = ++searchRun;
+		searchAbort?.abort();
 		if (!query.trim()) {
 			results = [];
 			error = '';
 			hasMore = false;
 			searchPending = false;
+			searchAbort = null;
 			return;
 		}
+		const controller = new AbortController();
+		searchAbort = controller;
 		searchPending = true;
 		loading = true;
 		error = '';
 		try {
-			const params = new URLSearchParams({ q: query.trim(), per_page: '120' });
-			if (target !== 'all') params.set('target', target);
-			const res = await fetch(`/api/search/advanced?${params}`, { credentials: 'include' });
-			if (!res.ok) {
-				error = res.status === 401 ? 'Please log in.' : 'Failed to run advanced search.';
-				results = [];
+			const q = query.trim();
+			if (target === 'all') {
+				const merged: AdvancedSearchResult[] = [];
+				const seen = new Set<string>();
+				const failedTargets: string[] = [];
+				let more = false;
+				for (const t of allSearchTargets) {
+					let data;
+					try {
+						data = await fetchTarget(q, t, controller.signal);
+					} catch (e) {
+						if (controller.signal.aborted || (e instanceof DOMException && e.name === 'AbortError')) return;
+						failedTargets.push(labelForType(t));
+						continue;
+					}
+					if (run !== searchRun) return;
+					more = more || Boolean(data.has_more);
+					for (const item of data.results || []) {
+						const key = resultKey(item);
+						if (seen.has(key)) continue;
+						seen.add(key);
+						merged.push(item);
+					}
+					results = sortResults([...merged]);
+					hasMore = more;
+				}
+				results = sortResults(merged);
+				hasMore = more;
+				error = failedTargets.length > 0 ? `Timed out or failed: ${failedTargets.join(', ')}. Results shown are incomplete.` : '';
 				return;
 			}
-			const data = await res.json();
+
+			const data = await fetchTarget(q, target as AdvancedSearchType, controller.signal);
+			if (run !== searchRun) return;
 			results = data.results || [];
 			hasMore = !!data.has_more;
-		} catch {
-			error = 'Failed to run advanced search.';
+		} catch (e) {
+			if (run !== searchRun) return;
+			if (e instanceof DOMException && e.name === 'AbortError') return;
+			error = e instanceof Error ? e.message : 'Failed to run advanced search.';
 			results = [];
 		} finally {
+			if (run !== searchRun) return;
+			if (searchAbort === controller) searchAbort = null;
 			loading = false;
 			searchPending = false;
 		}
@@ -196,7 +287,7 @@
 		searchPending = Boolean(query.trim());
 		searchTimeout = setTimeout(() => {
 			loadResults();
-		}, 220);
+		}, 450);
 	};
 
 	// openResult dispatches on entity type. Clusters and images aren't
@@ -215,6 +306,10 @@
 			}
 			return;
 		}
+		if (r.type === 'vulnerability') {
+			goto(`/vuln/${encodeURIComponent(r.title)}`);
+			return;
+		}
 		openRepo(r);
 	};
 
@@ -222,6 +317,7 @@
 		switch (type) {
 			case 'cluster': return 'Open cluster';
 			case 'image': return 'Open image';
+			case 'vulnerability': return 'Open vulnerability';
 			default: return 'Open repository';
 		}
 	};
@@ -232,6 +328,11 @@
 		if (r.provider_id) params.set('provider_id', r.provider_id);
 		else if (r.base_url) params.set('base_url', r.base_url);
 		goto(`/providers/repo?${params.toString()}`);
+	};
+
+	const openPreviewRepo = () => {
+		if (!previewFrom) return;
+		openRepo(previewFrom);
 	};
 
 	const openPreview = async (r: AdvancedSearchResult) => {
@@ -380,7 +481,7 @@
 		{/if}
 
 				<div class="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-[var(--border-color)]/60 bg-[var(--card-bg)]/40">
-					{#if loading || searchPending}
+					{#if (loading || searchPending) && results.length === 0}
 						<div class="flex h-full items-center justify-center">
 							<Loading message="Searching..." variant="spinner" size="md" />
 						</div>
@@ -461,6 +562,12 @@
 							<p class="text-sm text-[var(--text-muted)]">No advanced search matches for "{query}".</p>
 						</div>
 				{:else}
+				{#if loading || searchPending}
+					<div class="flex items-center justify-between border-b border-[var(--border-color)]/50 bg-[var(--hover-bg-subtle)] px-5 py-2 text-xs text-[var(--text-tertiary)]">
+						<span>Searching remaining targets...</span>
+						<span>{results.length} result{results.length === 1 ? '' : 's'} so far</span>
+					</div>
+				{/if}
 				<div class="flex-1 overflow-y-auto">
 					<table class="min-w-full divide-y divide-[var(--border-color)]/60 text-sm">
 						<thead class="text-xs uppercase tracking-[0.28em] text-[var(--text-tertiary)]">
@@ -595,7 +702,7 @@
 				{#if previewFrom}
 					<button
 						type="button"
-						onclick={() => openRepo(previewFrom)}
+						onclick={openPreviewRepo}
 						class="inline-flex shrink-0 items-center gap-1.5 pt-1 text-[11px] font-medium transition-opacity hover:opacity-70"
 						style="color: var(--accent);"
 					>

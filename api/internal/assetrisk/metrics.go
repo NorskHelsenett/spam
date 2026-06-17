@@ -24,9 +24,9 @@ const (
 	// growth before we need to slice the body up.
 	refreshMaxRuntime = 30 * time.Minute
 
-	// Default page size for the watch tier. The fix_now / this_week
-	// tiers are returned in full (they're operator-actionable, sized
-	// by reality, not pagination).
+	// Default page size for the watch + deprioritized tiers. The
+	// fix_now / this_week tiers are returned in full (they're
+	// operator-actionable, sized by reality, not pagination).
 	defaultWatchLimit = 50
 	maxWatchLimit     = 500
 
@@ -35,6 +35,11 @@ const (
 	// items something else is on fire — paginate later.
 	fixNowCap   = 100
 	thisWeekCap = 200
+
+	// clusterLensCap bounds the read-only cluster rollup. Clusters
+	// aren't tier rows — the fix happens at the image — so the lens
+	// just answers "which cluster is worst" and 50 is plenty.
+	clusterLensCap = 50
 )
 
 // Scope is the header strip on /app — operator's inventory + count of
@@ -62,6 +67,10 @@ type Scope struct {
 // TriageRow is one asset's row in the response. Embeds Signals so the
 // raw inputs travel with the computed scores — the UI can render the
 // "show your work" expand panel without a separate fetch.
+//
+// Reasons carry the vuln-driven justification for the tier; Context
+// carries posture signals (SBOM, signing, scan age, dep health) that
+// never influenced the tier and render separately.
 type TriageRow struct {
 	Signals
 	ThreatScore int      `json:"threat_score"`
@@ -69,35 +78,88 @@ type TriageRow struct {
 	TrustGrade  string   `json:"trust_grade"`
 	Tier        string   `json:"tier"`
 	Reasons     []Reason `json:"reasons"`
+	Context     []Reason `json:"context"`
+
+	// Advisory carries the cached LLM enrichment when one exists:
+	// the narrative summary and the shadow-mode agent verdict
+	// (recorded for evaluation, never acted on). Nil when the
+	// llmadvisory worker hasn't covered this asset yet.
+	Advisory *AdvisoryInfo `json:"advisory,omitempty"`
 }
 
-// WatchSection paginates the long tail of "warnings, but not urgent"
-// assets. Counts are unfiltered; rows is the page slice.
-type WatchSection struct {
-	Counts WatchCounts `json:"counts"`
-	Limit  int         `json:"limit"`
-	Offset int         `json:"offset"`
-	Rows   []TriageRow `json:"rows"`
+// AdvisoryInfo is the wire shape of one asset_advisories row. Stale
+// means the asset's signals changed after generation — the text may
+// describe a previous state.
+type AdvisoryInfo struct {
+	Summary              string    `json:"summary,omitempty"               gorm:"column:summary"`
+	SummaryModel         string    `json:"summary_model,omitempty"         gorm:"column:summary_model"`
+	Verdict              string    `json:"verdict,omitempty"               gorm:"column:verdict"`
+	VerdictJustification string    `json:"verdict_justification,omitempty" gorm:"column:verdict_justification"`
+	VerdictConfidence    float32   `json:"verdict_confidence,omitempty"    gorm:"column:verdict_confidence"`
+	VerdictMissingData   string    `json:"verdict_missing_data,omitempty"  gorm:"column:verdict_missing_data"`
+	GeneratedAt          time.Time `json:"generated_at"                    gorm:"column:generated_at"`
+	Stale                bool      `json:"stale,omitempty"                 gorm:"-"`
 }
 
-type WatchCounts struct {
-	Total   int `json:"total"`
-	Repo    int `json:"repo"`
-	Image   int `json:"image"`
-	Cluster int `json:"cluster"`
+// advisoryScanRow adds the cache-key columns to AdvisoryInfo for the
+// one bulk SELECT in loadAdvisories.
+type advisoryScanRow struct {
+	AdvisoryInfo
+	AssetType   string `gorm:"column:asset_type"`
+	AssetID     string `gorm:"column:asset_id"`
+	SignalsHash string `gorm:"column:signals_hash"`
+}
+
+// loadAdvisories pulls every cached advisory in one query. The table
+// only holds fix_now/this_week assets (worker-scoped), so it stays a
+// few hundred rows. Errors degrade to "no advisories" — the triage
+// page must not break because the LLM enrichment table is missing.
+func loadAdvisories(ctx context.Context, db *gorm.DB) map[string]advisoryScanRow {
+	var rows []advisoryScanRow
+	if err := db.WithContext(ctx).Raw(`SELECT * FROM asset_advisories`).Scan(&rows).Error; err != nil {
+		return nil
+	}
+	out := make(map[string]advisoryScanRow, len(rows))
+	for _, r := range rows {
+		out[r.AssetType+"|"+r.AssetID] = r
+	}
+	return out
+}
+
+// PagedSection paginates a long tier: watch ("warnings, but not
+// urgent") and deprioritized ("seen, explicitly parked"). Counts are
+// unfiltered; rows is the page slice.
+type PagedSection struct {
+	Counts SectionCounts `json:"counts"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+	Rows   []TriageRow   `json:"rows"`
+}
+
+type SectionCounts struct {
+	Total int `json:"total"`
+	Repo  int `json:"repo"`
+	Image int `json:"image"`
 }
 
 // TriageResponse is the wire shape of /api/triage. Single fat endpoint
 // — page is small enough that splitting it would just add round trips.
+//
+// Tiers contain images and repos only: the fix always happens at the
+// image (one rebuild, N redeploys), so cluster rows would duplicate
+// every image finding. Clusters is the read-only rollup lens ("which
+// cluster is worst"), excluded from all Scope totals.
 type TriageResponse struct {
-	Scope    Scope        `json:"scope"`
-	FixNow   []TriageRow  `json:"fix_now"`
-	ThisWeek []TriageRow  `json:"this_week"`
-	Watch    WatchSection `json:"watch"`
+	Scope         Scope        `json:"scope"`
+	FixNow        []TriageRow  `json:"fix_now"`
+	ThisWeek      []TriageRow  `json:"this_week"`
+	Watch         PagedSection `json:"watch"`
+	Deprioritized PagedSection `json:"deprioritized"`
+	Clusters      []TriageRow  `json:"clusters"`
 }
 
 // TriageParams is what the handler passes in: ACL fragments per asset
-// branch + watch-tier pagination/search.
+// branch + pagination/search for the watch and deprioritized tiers.
 //
 // Each branch's SQL fragment is interpolated into a WHERE predicate
 // against the asset_risk row. Use "TRUE" for unrestricted, "FALSE" to
@@ -106,6 +168,10 @@ type TriageParams struct {
 	WatchLimit  int
 	WatchOffset int
 	WatchSearch string
+
+	DeprioLimit  int
+	DeprioOffset int
+	DeprioSearch string
 
 	RepoSQL    string
 	RepoArgs   []any
@@ -154,7 +220,7 @@ func EnsureFirstPopulate(ctx context.Context, db *gorm.DB) error {
 		if assetRiskReady(ctx, db) {
 			return nil
 		}
-		if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+		if _, err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
 			log.Printf("assetrisk: first populate refresh: %v", err)
 		}
 		select {
@@ -184,12 +250,31 @@ func TriggerRefresh(db *gorm.DB) {
 	refreshGate.mu.Unlock()
 
 	go func() {
+		// Trailing-edge retry budget: a trigger that lands inside the
+		// debounce window is skipped (refreshed == false), and now
+		// that upstream cascades only fire on actual change, no
+		// follow-up trigger is guaranteed to come — the change would
+		// sit invisible until the next genuine upstream refresh,
+		// possibly hours later. Sleep out the window (inflight stays
+		// true, so concurrent triggers coalesce into the pending bit)
+		// and try once more. Budgeted so the worker can't nap-loop
+		// forever when sibling replicas keep winning the window; a
+		// second consecutive skip means another replica refreshed
+		// after our trigger arrived, which covers it.
+		retries := 2
 		for {
 			ctx, cancel := context.WithTimeout(context.Background(), refreshMaxRuntime)
-			if err := spamdb.RefreshAssetRiskView(ctx, db); err != nil && err != spamdb.ErrRefreshLockHeld {
+			refreshed, err := spamdb.RefreshAssetRiskView(ctx, db)
+			if err != nil && err != spamdb.ErrRefreshLockHeld {
 				log.Printf("assetrisk: background refresh: %v", err)
 			}
 			cancel()
+
+			if err == nil && !refreshed && retries > 0 {
+				retries--
+				time.Sleep(spamdb.AssetRiskRefreshDebounce() + 5*time.Second)
+				continue
+			}
 
 			refreshGate.mu.Lock()
 			if !refreshGate.pending {
@@ -199,6 +284,7 @@ func TriggerRefresh(db *gorm.DB) {
 			}
 			refreshGate.pending = false
 			refreshGate.mu.Unlock()
+			retries = 2
 		}
 	}()
 }
@@ -210,9 +296,11 @@ func TriggerRefresh(db *gorm.DB) {
 // formula in one place and trivially testable.
 func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageResponse, error) {
 	resp := TriageResponse{
-		FixNow:   []TriageRow{},
-		ThisWeek: []TriageRow{},
-		Watch:    WatchSection{Rows: []TriageRow{}, Limit: p.watchLimitOrDefault(), Offset: p.WatchOffset},
+		FixNow:        []TriageRow{},
+		ThisWeek:      []TriageRow{},
+		Watch:         PagedSection{Rows: []TriageRow{}, Limit: pageLimitOrDefault(p.WatchLimit), Offset: p.WatchOffset},
+		Deprioritized: PagedSection{Rows: []TriageRow{}, Limit: pageLimitOrDefault(p.DeprioLimit), Offset: p.DeprioOffset},
+		Clusters:      []TriageRow{},
 	}
 
 	if !assetRiskReady(ctx, db) {
@@ -239,30 +327,55 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 		}
 	}
 
-	// Score every row, partition by tier.
-	var watchAll []TriageRow
+	advisories := loadAdvisories(ctx, db)
+
+	// Score every row. Images and repos partition into tiers; cluster
+	// rows go to the read-only lens — the fix happens at the image,
+	// so cluster rows in the tiers would just duplicate every image
+	// finding once per cluster running it.
+	var watchAll, deprioAll []TriageRow
 	for _, sig := range rows {
+		tier := Tier(sig)
 		row := TriageRow{
 			Signals:     sig,
 			ThreatScore: ThreatScore(sig),
 			TrustScore:  TrustScore(sig),
-			Tier:        Tier(sig),
-			Reasons:     Reasons(sig),
+			Tier:        tier,
+			Reasons:     TierReasons(sig, tier),
+			Context:     ContextReasons(sig),
 		}
 		row.TrustGrade = TrustGrade(row.TrustScore)
-		switch row.Tier {
+		if adv, ok := advisories[sig.AssetType+"|"+sig.AssetID]; ok {
+			info := adv.AdvisoryInfo
+			info.Stale = adv.SignalsHash != SignalsHash(sig)
+			row.Advisory = &info
+		}
+		if sig.AssetType == "cluster" {
+			if tier != TierSkip {
+				resp.Clusters = append(resp.Clusters, row)
+			}
+			continue
+		}
+		switch tier {
 		case TierFixNow:
 			resp.FixNow = append(resp.FixNow, row)
 		case TierThisWeek:
 			resp.ThisWeek = append(resp.ThisWeek, row)
 		case TierWatch:
 			watchAll = append(watchAll, row)
+		case TierDeprioritized:
+			deprioAll = append(deprioAll, row)
 		}
 	}
 
 	rankTriage(resp.FixNow)
 	rankTriage(resp.ThisWeek)
 	rankTriage(watchAll)
+	rankTriage(deprioAll)
+	rankTriage(resp.Clusters)
+	if len(resp.Clusters) > clusterLensCap {
+		resp.Clusters = resp.Clusters[:clusterLensCap]
+	}
 
 	// Capture true tier totals BEFORE the response-side caps trim the
 	// row arrays. The dashboard reads these so the header strip shows
@@ -272,10 +385,9 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 	resp.Scope.ThisWeekTotal = len(resp.ThisWeek)
 
 	// AvgTrust over every actionable row (fix_now + this_week + watch
-	// pre-pagination). Computed here so it stays stable as the operator
-	// pages through the watch tier on the client — the previous
-	// client-side average drifted because it summed only the current
-	// watch page (default 50 of N).
+	// pre-pagination). Deprioritized is excluded — it's the ignore
+	// pile, and clusters aren't tier rows. Computed server-side so it
+	// stays stable as the operator pages through watch on the client.
 	if total := resp.Scope.FixNowTotal + resp.Scope.ThisWeekTotal + len(watchAll); total > 0 {
 		var sum int
 		for _, r := range resp.FixNow {
@@ -297,35 +409,11 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 		resp.ThisWeek = resp.ThisWeek[:thisWeekCap]
 	}
 
-	// Watch tier search is applied client-side over the in-memory
-	// page since the post-ACL set is small. If it ever bloats, push
-	// the ILIKE into loadAllRows.
-	if q := strings.TrimSpace(p.WatchSearch); q != "" {
-		needle := strings.ToLower(q)
-		filtered := watchAll[:0]
-		for _, r := range watchAll {
-			if strings.Contains(strings.ToLower(r.AssetSlug), needle) {
-				filtered = append(filtered, r)
-			}
-		}
-		watchAll = filtered
-	}
-
-	resp.Watch.Counts.Total = len(watchAll)
-	for _, r := range watchAll {
-		switch r.AssetType {
-		case "repo":
-			resp.Watch.Counts.Repo++
-		case "image":
-			resp.Watch.Counts.Image++
-		case "cluster":
-			resp.Watch.Counts.Cluster++
-		}
-	}
-
-	off := clamp(p.WatchOffset, 0, len(watchAll))
-	end := clamp(off+resp.Watch.Limit, 0, len(watchAll))
-	resp.Watch.Rows = watchAll[off:end]
+	// Search + pagination for the long-tail tiers is applied
+	// client-side over the in-memory set since the post-ACL set is
+	// small. If it ever bloats, push the ILIKE into loadAllRows.
+	paginateSection(&resp.Watch, watchAll, p.WatchSearch, p.WatchOffset)
+	paginateSection(&resp.Deprioritized, deprioAll, p.DeprioSearch, p.DeprioOffset)
 
 	// NeedsAttention reports the un-capped sum so "300 across 6754" is
 	// honest — the previous len(FixNow)+len(ThisWeek) was post-cap and
@@ -336,18 +424,62 @@ func LoadTriage(ctx context.Context, db *gorm.DB, p TriageParams) (TriageRespons
 	return resp, nil
 }
 
-// rankTriage sorts a tier's rows by composite urgency: higher Threat
-// first, then lower Trust (worse trust is worse), then asset_slug for
-// stable ordering between requests.
+// paginateSection applies slug search, per-type counts, and the page
+// slice to one long-tail section (watch / deprioritized).
+func paginateSection(sec *PagedSection, all []TriageRow, search string, offset int) {
+	if q := strings.TrimSpace(search); q != "" {
+		needle := strings.ToLower(q)
+		filtered := all[:0]
+		for _, r := range all {
+			if strings.Contains(strings.ToLower(r.AssetSlug), needle) {
+				filtered = append(filtered, r)
+			}
+		}
+		all = filtered
+	}
+
+	sec.Counts.Total = len(all)
+	for _, r := range all {
+		switch r.AssetType {
+		case "repo":
+			sec.Counts.Repo++
+		case "image":
+			sec.Counts.Image++
+		}
+	}
+
+	off := clamp(offset, 0, len(all))
+	end := clamp(off+sec.Limit, 0, len(all))
+	sec.Rows = all[off:end]
+}
+
+// rankTriage sorts a tier's rows by exploitation urgency, banded the
+// same way the tier rules read: live secrets, then KEV-on-exposed,
+// then any KEV, then EPSS descending (the user-facing "ordered by
+// EPSS"), then critical volume, then asset_slug for stable ordering
+// between requests.
 func rankTriage(rows []TriageRow) {
 	sort.SliceStable(rows, func(i, j int) bool {
-		if rows[i].ThreatScore != rows[j].ThreatScore {
-			return rows[i].ThreatScore > rows[j].ThreatScore
+		a, b := rows[i].Signals, rows[j].Signals
+		if (a.ActiveSecretCount > 0) != (b.ActiveSecretCount > 0) {
+			return a.ActiveSecretCount > 0
 		}
-		if rows[i].TrustScore != rows[j].TrustScore {
-			return rows[i].TrustScore < rows[j].TrustScore
+		if a.ActiveSecretCount != b.ActiveSecretCount {
+			return a.ActiveSecretCount > b.ActiveSecretCount
 		}
-		return rows[i].AssetSlug < rows[j].AssetSlug
+		if a.ExposedKEVCount != b.ExposedKEVCount {
+			return a.ExposedKEVCount > b.ExposedKEVCount
+		}
+		if (a.KEVCount > 0) != (b.KEVCount > 0) {
+			return a.KEVCount > 0
+		}
+		if a.EPSSMax != b.EPSSMax {
+			return a.EPSSMax > b.EPSSMax
+		}
+		if a.CriticalCount != b.CriticalCount {
+			return a.CriticalCount > b.CriticalCount
+		}
+		return a.AssetSlug < b.AssetSlug
 	})
 }
 
@@ -382,7 +514,11 @@ func loadAllRows(ctx context.Context, db *gorm.DB, p TriageParams) ([]Signals, *
 			has_fix_for_critical, active_secret_count, internet_exposed,
 			signed_commits_pct, image_signed, scan_age_days, last_scan_at, has_sbom,
 			worst_dep_health_score, archived_dep_count, deprecated_dep_count,
-			max_major_behind, major_behind_dep_count
+			max_major_behind, major_behind_dep_count,
+			medium_count, low_count, has_fix_for_high,
+			kev_fixable_count, kev_ransomware_count, kev_due_passed, kev_epss_max,
+			exposed_kev_count, exposed_critical_count, exposed_epss_max,
+			cluster_count, exposed_cluster_count
 		FROM asset_risk ar
 		LEFT JOIN image_digests d ON ar.asset_type = 'image' AND ar.asset_id = d.id
 		WHERE
@@ -406,12 +542,12 @@ func loadAllRows(ctx context.Context, db *gorm.DB, p TriageParams) ([]Signals, *
 	return rows, refreshedAt, nil
 }
 
-func (p TriageParams) watchLimitOrDefault() int {
-	if p.WatchLimit <= 0 {
+func pageLimitOrDefault(limit int) int {
+	if limit <= 0 {
 		return defaultWatchLimit
 	}
-	if p.WatchLimit > maxWatchLimit {
+	if limit > maxWatchLimit {
 		return maxWatchLimit
 	}
-	return p.WatchLimit
+	return limit
 }

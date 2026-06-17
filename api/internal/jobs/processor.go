@@ -15,6 +15,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/NorskHelsenett/spam/internal/assetrisk"
+	"github.com/NorskHelsenett/spam/internal/llmadvisory"
 	"github.com/NorskHelsenett/spam/internal/dephealth"
 	"github.com/NorskHelsenett/spam/internal/events"
 	"github.com/NorskHelsenett/spam/internal/sbomviews"
@@ -79,6 +80,8 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchDepHealth(ctx, db, job.ID)
 	case JobTypeDBMaintenance:
 		return processDBMaintenance(ctx, db, job)
+	case JobTypeAdvisoryBackfill:
+		return processAdvisoryBackfill(ctx, db, job)
 	default:
 		// IMAGE_SCAN jobs fall into "unknown" here on purpose: the worker
 		// excludes them in ClaimNextJob, so reaching this branch would mean
@@ -582,4 +585,30 @@ func NextRetryTime(attempts, maxAttempts int, now time.Time) time.Time {
 		delay = maxDelay
 	}
 	return now.Add(delay)
+}
+
+// processAdvisoryBackfill drains the LLM advisory backlog in one go
+// (no per-cycle cap), streaming progress into the job result so the
+// admin page can render "37/120". An empty payload keeps the
+// original fix_now stale-only scope; replace regenerates every
+// urgent-tier advisory.
+func processAdvisoryBackfill(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {
+	var opts AdvisoryBackfillPayload
+	if len(job.Payload) > 0 {
+		if err := json.Unmarshal(job.Payload, &opts); err != nil {
+			return nil, fmt.Errorf("invalid ADVISORY_BACKFILL payload: %w", err)
+		}
+	}
+	generated, total, err := llmadvisory.Backfill(ctx, db, opts.Replace, func(done, total int) {
+		payload, jsonErr := json.Marshal(map[string]any{
+			"status": "generating", "done": done, "total": total,
+		})
+		if jsonErr == nil {
+			db.WithContext(ctx).Model(&Job{}).Where("id = ?", job.ID).Update("result", payload)
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "complete", "generated": generated, "total": total}, nil
 }

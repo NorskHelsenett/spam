@@ -36,7 +36,7 @@
 	let activeTab: string = $state('');
 
 	// Providers come from the admin-managed list. No client-side add flow:
-	// configuration lives in /admin/providers and is the only source.
+	// configuration lives in /admin/settings/providers and is the only source.
 	let customProviders: CustomProvider[] = $state([]);
 
 	// GitHub state
@@ -880,7 +880,7 @@
 					</p>
 				</div>
 				<a
-					href="/admin/providers"
+					href="/admin/settings/providers"
 					class="text-sm font-medium text-[var(--accent)] hover:underline"
 				>
 					Open admin settings →
