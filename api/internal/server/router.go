@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -39,6 +40,10 @@ type RouterOptions struct {
 	// admin /ror/probe endpoint returns 503; when set, it powers the
 	// admin probe and (later) the RORProvider in the ACL chain.
 	RORClient *ror.Client
+	// ReadinessCheck reports whether this replica can serve real traffic
+	// (base materialized views populated). Backs /api/readyz. When nil,
+	// readiness reflects DB reachability only.
+	ReadinessCheck func(context.Context) (bool, error)
 }
 
 // NewRouter wires the HTTP routes and middleware for the API server.
@@ -49,12 +54,14 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	var aclProvider acl.Provider
 	var secretsKey []byte
 	var rorClient *ror.Client
+	var readinessCheck func(context.Context) (bool, error)
 	if opts != nil {
 		providerStore = opts.ProviderStore
 		appCache = opts.Cache
 		aclProvider = opts.ACLProvider
 		secretsKey = opts.SecretsKey
 		rorClient = opts.RORClient
+		readinessCheck = opts.ReadinessCheck
 	}
 	if appCache == nil {
 		appCache = cache.NewMemory()
@@ -94,7 +101,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// PUBLIC endpoints (no authentication).
 	//
 	// Only the following are intentionally reachable unauthenticated:
-	//   - /api/healthz              liveness probe
+	//   - /api/healthz              liveness probe (process only, no DB)
+	//   - /api/readyz               readiness probe (DB + MV populated)
 	//   - /api/scam/callcenter      SCAM agent ingest
 	//   - /api/scam/heartbeat       SCAM agent quiet-but-alive ping
 	//   - /api/auth/login           OIDC entry
@@ -108,7 +116,8 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 	// data because they never run without a valid session.
 	// ---------------------------------------------------------------
 
-	r.Get("/api/healthz", health.Handler(db))
+	r.Get("/api/healthz", health.LivenessHandler())
+	r.Get("/api/readyz", health.ReadinessHandler(db, readinessCheck))
 	r.Post("/api/scam/callcenter", scam.CallcenterHandler(db, appCache))
 	r.Post("/api/scam/heartbeat", scam.HeartbeatHandler(db))
 

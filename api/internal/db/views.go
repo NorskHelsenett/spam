@@ -698,6 +698,16 @@ func viewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
 	return populated, err
 }
 
+// ViewsPopulated reports whether the base SBOM materialized views
+// (sbom_component_view, sbom_metadata_view) hold data. The readiness probe
+// uses this: a replica only serves traffic once the base views — which the
+// vuln and asset_risk MVs join — are populated. It is a cheap pg_matviews
+// catalog read and reflects global DB state, so it is correct across
+// replicas regardless of which one performed the populate.
+func ViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error) {
+	return viewsPopulated(ctx, db)
+}
+
 // ErrRefreshLockHeld is returned by RefreshMaterializedViews when another
 // process holds the advisory lock. Callers should treat this as a transient
 // condition and retry rather than silently succeeding.

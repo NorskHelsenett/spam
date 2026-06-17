@@ -203,20 +203,32 @@ resources: {}
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 # startupProbe gates liveness/readiness during boot — gives up to
 # 60s (30 × 2s) for the server to bind before kubelet restarts the pod.
+# startup/liveness use /api/healthz, which is process-only (no DB) — the
+# server starts serving immediately, so these pass within seconds and a
+# slow/busy DB can never trigger a restart. Readiness uses /api/readyz,
+# which also checks that the base materialized views are populated;
+# failing readiness only withholds traffic (no restart), so it can stay
+# red for the minutes the background MV populate takes on a fresh deploy.
 startupProbe:
   httpGet:
     path: /api/healthz
     port: http
-  periodSeconds: 2
-  failureThreshold: 30
+  periodSeconds: 5
+  failureThreshold: 12
 livenessProbe:
   httpGet:
     path: /api/healthz
     port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 6
 readinessProbe:
   httpGet:
-    path: /api/healthz
+    path: /api/readyz
     port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
 
 # Additional volumes on the output Deployment definition.
 volumes: []

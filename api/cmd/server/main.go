@@ -198,35 +198,36 @@ func run() error {
 		return fmt.Errorf("ensure sbom_component_view unique index: %w", err)
 	}
 
-	populateCtx, populateCancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer populateCancel()
-	if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
-		return fmt.Errorf("populate views: %w", err)
-	}
-
-	// Kick a coalesced refresh so we pick up any data accumulated since
-	// the last refresh (e.g. across a server restart). The advisory lock
-	// inside RefreshMaterializedViews makes this multi-replica safe —
-	// only one replica does the work; others observe ErrRefreshLockHeld
-	// and exit. Replaces the old REFRESH_SBOM_VIEWS job-queue path which
-	// burned worker slots on the lock contention.
-	sbomviews.TriggerRefresh(gormDB)
-
-	// First-populate the cascade of MVs in dependency order. They were
-	// created WITH NO DATA so HTTP serving starts immediately; this
-	// goroutine fills them in the background. Each step's advisory lock
-	// makes this safe across replicas — exactly one replica does the
-	// REFRESH work per family; the others observe ErrRefreshLockHeld and
-	// poll until the winning replica finishes.
+	// Materialized views populate in the BACKGROUND so HTTP serving and
+	// the liveness probe come up immediately. Readiness (/api/readyz)
+	// stays false until the base SBOM views are populated, so Kubernetes
+	// only routes traffic to this replica once it can answer vuln/triage
+	// queries. Populating synchronously on the startup path used to wedge
+	// boot behind a multi-minute REFRESH and, under a busy DB, triggered
+	// a liveness restart spiral (each killed pod left its REFRESH running
+	// server-side, piling up duplicates).
 	//
-	// Order matters: asset_risk's body joins view_unified_*_vulnerabilities
-	// and exposed_digests. Refreshing it before those populate raises
-	// SQLSTATE 55000 and leaves asset_risk empty until the next
-	// scan-completion trigger fires — on a fresh deploy with no scans
-	// yet, /api/triage stays empty indefinitely. Sequencing here avoids
-	// the race; ongoing refreshes use the existing TriggerRefresh gates.
+	// Order matters: sbom_component_view + sbom_metadata_view are the base
+	// layer (the vuln and asset_risk MVs join them), so they populate
+	// first; the dependent families follow, with asset_risk last because
+	// its body joins view_unified_*_vulnerabilities and exposed_digests —
+	// refreshing it before those populate raises SQLSTATE 55000 and leaves
+	// /api/triage empty until the next scan-completion trigger. Each step's
+	// advisory lock makes this safe across replicas: exactly one replica
+	// does the REFRESH work per family; others observe ErrRefreshLockHeld
+	// and poll until the winner finishes.
 	go func() {
 		ctx := context.Background()
+
+		populateCtx, populateCancel := context.WithTimeout(ctx, 30*time.Minute)
+		defer populateCancel()
+		if err := db.EnsureViewsPopulated(populateCtx, gormDB); err != nil {
+			log.Printf("populate sbom views: %v", err)
+		}
+		// Pick up any data accumulated since the last refresh (e.g. across
+		// a restart). Advisory-lock-gated, so multi-replica safe.
+		sbomviews.TriggerRefresh(gormDB)
+
 		var wg sync.WaitGroup
 		wg.Add(3)
 		go func() {
@@ -292,6 +293,11 @@ func run() error {
 		return fmt.Errorf("ensure kv_store table: %w", err)
 	}
 	routerOpts.Cache = cache.NewPostgresStore(gormDB)
+	// Readiness reflects base-MV population: the server serves immediately
+	// (liveness up) but /api/readyz stays 503 until sbom views are filled.
+	routerOpts.ReadinessCheck = func(ctx context.Context) (bool, error) {
+		return db.ViewsPopulated(ctx, gormDB)
+	}
 	routerOpts.HMACKey = strings.TrimSpace(os.Getenv("RUNNER_HMAC_KEY"))
 	routerOpts.ProviderStore = providerconfig.NewStore(gormDB, cfg.ProviderSecretsKey)
 	routerOpts.SecretsKey = cfg.ProviderSecretsKey
