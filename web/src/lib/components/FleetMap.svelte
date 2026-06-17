@@ -9,6 +9,8 @@
 	import Workflow from 'lucide-svelte/icons/workflow';
 	import X from 'lucide-svelte/icons/x';
 	import ArrowUpRight from 'lucide-svelte/icons/arrow-up-right';
+	import ShieldAlert from 'lucide-svelte/icons/shield-alert';
+	import DonutChart from '$lib/components/DonutChart.svelte';
 
 	// A dense status grid of every agent: one cell each, so 400+ fit on a
 	// screen. Cell SIZE = memory footprint (hogs are bigger). Each GROUP
@@ -141,6 +143,7 @@
 		if (groupBy === 'version') return PALETTE[hashIndex(key, PALETTE.length)];
 		return 'var(--blue)';
 	}
+	const envColor = (e: string) => ENV_COLORS[e.toLowerCase()] ?? PALETTE[hashIndex(e, PALETTE.length)];
 
 	// Health is a shade of the group's hue (see the CSS classes below):
 	// live = full hue, stale = dimmed, dead = a theme-neutral (light in
@@ -172,6 +175,30 @@
 		return { total: agents.length, live, stale, dead, attention, versions: versions.size };
 	});
 
+	const envSegments = $derived.by(() => {
+		const m = new Map<string, number>();
+		for (const a of agents) m.set(a.environment, (m.get(a.environment) ?? 0) + 1);
+		return [...m.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.map(([label, value]) => ({ label, value, color: envColor(label) }));
+	});
+
+	function agg(values: number[]) {
+		if (!values.length) return { avg: 0, median: 0, max: 0, min: 0 };
+		const s = [...values].sort((a, b) => a - b);
+		return {
+			avg: s.reduce((t, x) => t + x, 0) / s.length,
+			median: s[Math.floor(s.length / 2)],
+			max: s[s.length - 1],
+			min: s[0]
+		};
+	}
+	const stats = $derived.by(() => ({
+		mem: agg(agents.map((a) => a.rssBytes)),
+		cpu: agg(agents.map((a) => a.cpuPct)),
+		gor: agg(agents.map((a) => a.goroutines))
+	}));
+
 	const groups = $derived.by(() => {
 		if (groupBy === 'none') return [{ key: 'All agents', color: 'var(--blue)', agents }];
 		const m = new Map<string, FleetAgent[]>();
@@ -189,14 +216,55 @@
 </script>
 
 <div class="flex flex-col gap-5" role="group" aria-label="Fleet map">
-	<!-- KPIs -->
-	<div class="grid grid-cols-3 gap-3 sm:grid-cols-6">
-		{#each [['Agents', kpis.total, 'var(--text-bright)'], ['Live', kpis.live, 'var(--green)'], ['Stale', kpis.stale, 'var(--yellow)'], ['Dead', kpis.dead, 'var(--red)'], ['Needs attn', kpis.attention, 'var(--orange)'], ['Versions', kpis.versions, 'var(--blue)']] as [label, value, color]}
+	<!-- Overview: environment donut (left) + stat cards (right, two rows) -->
+	<div class="grid gap-4 lg:grid-cols-[minmax(220px,18rem)_1fr] lg:items-center">
+		<div class="metric-card rounded-2xl p-4">
+			<DonutChart title="Environments" total={kpis.total} segments={envSegments} />
+		</div>
+		<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+			<!-- Row 1 — counts / health -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
-				<p class="text-2xl font-bold tabular-nums" style="color:{color}">{value}</p>
-				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">{label}</h3>
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Agents</h3>
+				<p class="text-3xl font-bold tabular-nums text-[var(--text-bright)]">{kpis.total}</p>
+				<p class="text-xs text-[var(--text-muted)]">{kpis.live} live · {kpis.stale} stale · {kpis.dead} dead</p>
 			</div>
-		{/each}
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Need attention</h3>
+				<p class="text-3xl font-bold tabular-nums" style="color:var(--warning)">{kpis.attention}</p>
+				<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+					<ShieldAlert size={12} color="var(--warning)" /> stale, dead or flapping
+				</p>
+			</div>
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Versions</h3>
+				<p class="text-3xl font-bold tabular-nums text-[var(--text-bright)]">{kpis.versions}</p>
+				<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+					<Tag size={12} color="var(--blue)" /> distinct builds
+				</p>
+			</div>
+			<!-- Row 2 — resource usage (avg big · median + max/min caption) -->
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Memory</h3>
+				<p class="text-3xl font-bold tabular-nums text-[var(--text-bright)]">{fmtBytes(stats.mem.avg)}</p>
+				<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+					<MemoryStick size={12} color="var(--memory-color)" /> med {fmtBytes(stats.mem.median)} · ↑{fmtBytes(stats.mem.max)} ↓{fmtBytes(stats.mem.min)}
+				</p>
+			</div>
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">CPU</h3>
+				<p class="text-3xl font-bold tabular-nums text-[var(--text-bright)]">{stats.cpu.avg.toFixed(1)}%</p>
+				<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+					<Cpu size={12} color="var(--cpu-color)" /> med {stats.cpu.median.toFixed(1)}% · ↑{stats.cpu.max.toFixed(1)}% ↓{stats.cpu.min.toFixed(1)}%
+				</p>
+			</div>
+			<div class="metric-card space-y-1 rounded-2xl p-4">
+				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Goroutines</h3>
+				<p class="text-3xl font-bold tabular-nums text-[var(--text-bright)]">{Math.round(stats.gor.avg)}</p>
+				<p class="flex items-center gap-1 text-xs text-[var(--text-muted)]">
+					<Workflow size={12} color="var(--orange)" /> med {stats.gor.median} · ↑{stats.gor.max} ↓{stats.gor.min}
+				</p>
+			</div>
+		</div>
 	</div>
 
 	<!-- Group control (centered) -->
