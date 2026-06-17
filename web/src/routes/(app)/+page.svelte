@@ -926,10 +926,22 @@
 											{#if detail.hosts.length > 0}
 												<div class="host-chips">
 													{#each detail.hosts as h}
-														<span class="host-chip" title="{h.cluster || h.cluster_id} / {h.namespace}">
-															{#if h.tls}<Lock size={11} />{:else}<Globe size={11} />{/if}
-															{h.host}
-														</span>
+														<Tooltip width={17}>
+															<span class="host-chip cursor-pointer">
+																{#if h.tls}<Lock size={11} />{:else}<Globe size={11} />{/if}
+																{h.host}
+															</span>
+															{#snippet content()}
+																<p class="text-xs font-semibold text-[var(--text-bright)]">{h.cluster || h.cluster_id}</p>
+																{#if h.cluster && h.cluster !== h.cluster_id}
+																	<p class="mt-0.5 text-[11px] text-[var(--text-muted)]">{h.cluster_id}</p>
+																{/if}
+																{#if h.namespace}
+																	<p class="mt-1.5 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">Namespace</p>
+																	<p class="mt-0.5 text-xs leading-relaxed text-[var(--text-secondary)]">{h.namespace}</p>
+																{/if}
+															{/snippet}
+														</Tooltip>
 													{/each}
 												</div>
 											{:else}

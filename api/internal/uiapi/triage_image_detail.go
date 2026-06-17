@@ -251,18 +251,22 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 	// The friendly name is read straight from the cluster_record JSONB
 	// (ror_metadata.cluster_name, then the env-injected `cluster` label,
 	// then the ROR slug) — the same source the image profile page uses.
-	// The clusters-table join is only a secondary source for an admin
-	// display_name override: cluster_record.cluster_id is the
-	// kube-system UID, whereas clusters.cluster_id is the ROR slug, so
-	// that join misses for most clusters and can't be relied on for the
-	// name (which is why this panel used to show the raw UID).
+	// The clusters table (keyed by the same kube-system UID) is the
+	// primary name source: its ror_cluster_name / ror_slug columns are
+	// the resolved ROR identity, the same ones vuln_detail.go reads.
+	// The Container records themselves rarely carry ror_metadata (it
+	// rides the cluster-kind record), so cd.ror_* is only a fallback —
+	// reading the embedded metadata alone is why this panel used to
+	// show the raw UID.
 	clusterQ := `
 		SELECT
 			cd.cluster_id,
 			COALESCE(
 				NULLIF(c.display_name, ''),
+				NULLIF(c.ror_cluster_name, ''),
 				NULLIF(cd.ror_cluster_name, ''),
 				NULLIF(cd.cluster_label, ''),
+				NULLIF(c.ror_slug, ''),
 				NULLIF(cd.ror_slug, ''),
 				cd.cluster_id
 			) AS name,
@@ -377,14 +381,24 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 
 	// Exposed domains serving this digest, via the same exposed_digests
 	// projection the tier's exposure signals use.
+	// cluster is the friendly name resolved the same way as the runs-in
+	// list (clusters-table ROR identity first, then the env label), so
+	// the Entry tooltip names the cluster instead of leaking the UID.
 	hostQ := `
 		SELECT DISTINCT
 			ed.host,
-			COALESCE(he.cluster, '') AS cluster,
+			COALESCE(
+				NULLIF(c.display_name, ''),
+				NULLIF(c.ror_cluster_name, ''),
+				NULLIF(he.cluster, ''),
+				NULLIF(c.ror_slug, ''),
+				ed.cluster_id
+			) AS cluster,
 			ed.cluster_id,
 			ed.namespace,
 			COALESCE(he.tls, false)  AS tls
 		FROM exposed_digests ed
+		LEFT JOIN clusters c ON c.cluster_id = ed.cluster_id
 		LEFT JOIN host_exposure he
 		  ON he.cluster_id = ed.cluster_id
 		 AND he.namespace  = ed.namespace
