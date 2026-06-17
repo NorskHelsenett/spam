@@ -15,7 +15,7 @@ import (
 //
 // This helper lives here (not in scam/acl.go) so uiapi can reuse it
 // without reaching into the scam package's unexported filter.
-func readableClusterIDSet(r *http.Request, _ *gorm.DB) (map[string]struct{}, bool, error) {
+func readableClusterIDSet(r *http.Request, db *gorm.DB) (map[string]struct{}, bool, error) {
 	subj := acl.SubjectFromRequest(r)
 	if subj.IsAdmin || subj.IsGlobalReader {
 		return nil, true, nil
@@ -28,14 +28,35 @@ func readableClusterIDSet(r *http.Request, _ *gorm.DB) (map[string]struct{}, boo
 	if err != nil {
 		return nil, false, err
 	}
-	set := make(map[string]struct{}, len(patterns))
+	var grantIDs []string
 	for _, p := range patterns {
 		if p.IsWildcard() {
 			return nil, true, nil
 		}
 		if p.ClusterID != "" {
-			set[p.ClusterID] = struct{}{}
+			grantIDs = append(grantIDs, p.ClusterID)
 		}
+	}
+	if len(grantIDs) == 0 {
+		return map[string]struct{}{}, false, nil
+	}
+	// Grant ids are not always kube cluster_ids: ROR keys grants by the
+	// cluster slug or, post identifier migration, by the ROR cluster
+	// UUID. Triage rows store the kube cluster_id in asset_id, so we
+	// resolve all three identifier domains against the clusters table —
+	// the same translation scam.clusterACLFilterCol performs. Without
+	// this, ROR-derived grants never match any cluster asset_id.
+	var clusterIDs []string
+	if err := db.WithContext(r.Context()).
+		Table("clusters").
+		Where("cluster_id IN ? OR (TRIM(ror_slug) <> '' AND TRIM(ror_slug) IN ?) OR (ror_cluster_uid <> '' AND ror_cluster_uid IN ?)",
+			grantIDs, grantIDs, grantIDs).
+		Pluck("cluster_id", &clusterIDs).Error; err != nil {
+		return nil, false, err
+	}
+	set := make(map[string]struct{}, len(clusterIDs))
+	for _, id := range clusterIDs {
+		set[id] = struct{}{}
 	}
 	return set, false, nil
 }
