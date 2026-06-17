@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { X, Container, ExternalLink, ShieldAlert, GitBranch } from 'lucide-svelte';
+	import { isAdmin } from '$lib/stores/session';
 
 	type LinkedRepo = {
 		repo_id: string;
@@ -30,7 +31,9 @@
 	};
 
 	type ClusterUsage = {
-		cluster: string;
+		cluster_id: string;
+		cluster_name?: string;
+		ror_metadata?: { slug?: string; cluster_name?: string; env?: string };
 		namespace: string;
 		pod_count: number;
 		first_seen: string;
@@ -71,6 +74,13 @@
 	let detail: ImageDetail | null = $state(null);
 	let loading = $state(true);
 	let error = $state('');
+
+	// Resolve a cluster's display name from the API shape (cluster_id +
+	// optional env cluster_name + nested ror_metadata): ROR name → env
+	// label → ROR slug → kube-system UID — same precedence as the API's
+	// other cluster-name surfaces.
+	const clusterName = (u: ClusterUsage): string =>
+		u.ror_metadata?.cluster_name || u.cluster_name || u.ror_metadata?.slug || u.cluster_id || '—';
 
 	$effect(() => {
 		if (!imageId) return;
@@ -244,7 +254,7 @@
 						{#each detail.cluster_usage as u}
 							<li class="flex items-center justify-between gap-3 px-3 py-1.5 text-xs">
 								<span class="min-w-0 truncate text-[var(--text-secondary)]">
-									<span class="font-medium text-[var(--text-bright)]">{u.cluster || '—'}</span>
+									<span class="font-medium text-[var(--text-bright)]">{clusterName(u)}</span>
 									<span class="text-[var(--text-muted)]"> / </span>
 									<span>{u.namespace || '—'}</span>
 								</span>
@@ -255,8 +265,10 @@
 				</div>
 			{/if}
 
-			<!-- Scan history -->
-			{#if detail.scan_history && detail.scan_history.length > 0}
+			<!-- Scan history — links into the admin-only Runs queue, whose
+			     CREATE_RUN artifacts can surface credentials. Hidden from
+			     users without that access (only admins reach jobs/scan/runs). -->
+			{#if $isAdmin && detail.scan_history && detail.scan_history.length > 0}
 				<div class="mt-5">
 					<h4 class="mb-2 text-xs uppercase tracking-[0.2em] text-[var(--text-muted)]">Scan history</h4>
 					<ul class="space-y-1.5">
