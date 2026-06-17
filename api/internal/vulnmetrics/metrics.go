@@ -26,9 +26,14 @@ const (
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
 	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix   = "vuln:list:v5:"
-	summaryCacheTTL   = 7 * 24 * time.Hour
-	refreshMaxRuntime = 2 * time.Minute
+	listCachePrefix = "vuln:list:v5:"
+	summaryCacheTTL = 7 * 24 * time.Hour
+	// refreshMaxRuntime must outlast the worst-case contended rebuild of
+	// all four unified/canonical vuln MVs, not just the uncontended ~40s.
+	// If it fires mid-refresh the debounce timestamp never gets recorded
+	// and the family re-runs on every trigger — the storm that starved
+	// the DB on 2026-06. Sized to catch a true hang, not a slow refresh.
+	refreshMaxRuntime = 20 * time.Minute
 )
 
 type Summary struct {
