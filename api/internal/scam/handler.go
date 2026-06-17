@@ -624,9 +624,21 @@ func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
 		var body struct {
 			ClusterID string `json:"cluster_id"`
+			// Optional self-metrics (enriched heartbeat). Absent on a
+			// liveness-only ping from an older agent.
+			Version         string  `json:"version"`
+			Commit          string  `json:"commit"`
+			GoVersion       string  `json:"go_version"`
+			UptimeSeconds   int64   `json:"uptime_seconds"`
+			Goroutines      int     `json:"goroutines"`
+			HeapAllocBytes  int64   `json:"heap_alloc_bytes"`
+			RSSBytes        int64   `json:"rss_bytes"`
+			CPUSecondsTotal float64 `json:"cpu_seconds_total"`
+			NumGC           int64   `json:"num_gc"`
+			GCPauseMsTotal  float64 `json:"gc_pause_ms_total"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -636,12 +648,147 @@ func HeartbeatHandler(db *gorm.DB) http.HandlerFunc {
 			http.Error(w, "cluster_id required", http.StatusBadRequest)
 			return
 		}
-		if err := touchClusterSession(r.Context(), db, body.ClusterID, time.Now().UTC(), 0); err != nil {
+		now := time.Now().UTC()
+		if err := touchClusterSession(r.Context(), db, body.ClusterID, now, 0); err != nil {
 			log.Printf("heartbeat: touch session %s: %v", body.ClusterID, err)
 			http.Error(w, "database error", http.StatusInternalServerError)
 			return
 		}
+		// Store self-metrics only when present, so a liveness-only ping
+		// never zeroes a previously reported snapshot. cpu_pct is derived
+		// from the cpu_seconds_total delta vs the previous sample.
+		if body.Version != "" || body.UptimeSeconds > 0 {
+			if err := db.WithContext(r.Context()).Exec(`
+				UPDATE cluster_sessions SET
+				    agent_version = ?, agent_commit = ?, go_version = ?,
+				    uptime_seconds = ?, goroutines = ?, heap_alloc_bytes = ?, rss_bytes = ?,
+				    num_gc = ?, gc_pause_ms_total = ?,
+				    cpu_pct = CASE
+				        WHEN prev_sample_at IS NOT NULL AND ?::float8 >= prev_cpu_seconds
+				        THEN GREATEST(0, (?::float8 - prev_cpu_seconds)
+				             / GREATEST(EXTRACT(EPOCH FROM (?::timestamptz - prev_sample_at)), 1) * 100)
+				        ELSE cpu_pct END,
+				    cpu_seconds_total = ?::float8,
+				    prev_cpu_seconds = ?::float8,
+				    prev_sample_at = ?::timestamptz
+				WHERE cluster_id = ?
+			`, body.Version, body.Commit, body.GoVersion,
+				body.UptimeSeconds, body.Goroutines, body.HeapAllocBytes, body.RSSBytes,
+				body.NumGC, body.GCPauseMsTotal,
+				body.CPUSecondsTotal, body.CPUSecondsTotal, now,
+				body.CPUSecondsTotal, body.CPUSecondsTotal, now,
+				body.ClusterID).Error; err != nil {
+				log.Printf("heartbeat: store health %s: %v", body.ClusterID, err)
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// AgentsHandler returns one row per known cluster agent for the fleet
+// view: identity (kube-system cluster_id + ROR name/env), the build it
+// reports, a health state derived from how recently it last checked in,
+// and the self-metrics from its heartbeat. ACL-scoped like the other
+// cluster lists. JSON keys match the web FleetAgent type.
+func AgentsHandler(db *gorm.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		type agentRow struct {
+			ClusterID     string  `json:"clusterId"`
+			Name          string  `json:"name"`
+			Environment   string  `json:"environment"`
+			Zone          string  `json:"zone"`
+			Version       string  `json:"version"`
+			Commit        string  `json:"commit"`
+			Health        string  `json:"health"`
+			UptimeSeconds int64   `json:"uptimeSeconds"`
+			RSSBytes      int64   `json:"rssBytes"`
+			CPUPct        float64 `json:"cpuPct"`
+			Goroutines    int     `json:"goroutines"`
+			Flapping      bool    `json:"flapping"`
+		}
+		out := []agentRow{}
+
+		aclFrag, aclArgs, deny := clusterACLFilterCol(r, "cs.cluster_id")
+		if deny {
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
+		aclWhere := ""
+		var args []any
+		if aclFrag != "" && aclFrag != "TRUE" {
+			aclWhere = "AND " + aclFrag
+			args = append(args, aclArgs...)
+		}
+
+		type scanRow struct {
+			ClusterID     string  `gorm:"column:cluster_id"`
+			Name          string  `gorm:"column:name"`
+			Environment   string  `gorm:"column:environment"`
+			Version       string  `gorm:"column:version"`
+			Commit        string  `gorm:"column:commit"`
+			AgeSeconds    float64 `gorm:"column:age_seconds"`
+			UptimeSeconds int64   `gorm:"column:uptime_seconds"`
+			RSSBytes      int64   `gorm:"column:rss_bytes"`
+			CPUPct        float64 `gorm:"column:cpu_pct"`
+			Goroutines    int     `gorm:"column:goroutines"`
+		}
+		var rows []scanRow
+		query := `
+			SELECT
+			    cs.cluster_id,
+			    COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), NULLIF(c.ror_slug, ''), cs.cluster_id) AS name,
+			    COALESCE(NULLIF(c.ror_env, ''), '') AS environment,
+			    COALESCE(cs.agent_version, '') AS version,
+			    COALESCE(cs.agent_commit, '') AS commit,
+			    EXTRACT(EPOCH FROM (NOW() - cs.last_push_at)) AS age_seconds,
+			    COALESCE(cs.uptime_seconds, 0) AS uptime_seconds,
+			    COALESCE(cs.rss_bytes, 0) AS rss_bytes,
+			    COALESCE(cs.cpu_pct, 0) AS cpu_pct,
+			    COALESCE(cs.goroutines, 0) AS goroutines
+			FROM cluster_sessions cs
+			LEFT JOIN clusters c ON c.cluster_id = cs.cluster_id
+			WHERE TRUE ` + aclWhere + `
+			ORDER BY cs.last_push_at DESC`
+		if err := db.WithContext(r.Context()).Raw(query, args...).Scan(&rows).Error; err != nil {
+			log.Printf("agents: query: %v", err)
+			http.Error(w, "database error", http.StatusInternalServerError)
+			return
+		}
+
+		liveWin := resolveLiveWindow().Seconds()
+		const deadAfter = 7 * 24 * 3600 // a week silent → dead
+		for _, s := range rows {
+			health := "live"
+			if s.AgeSeconds > deadAfter {
+				health = "dead"
+			} else if s.AgeSeconds > liveWin {
+				health = "stale"
+			}
+			version := s.Version
+			if version == "" {
+				version = "unknown"
+			}
+			env := s.Environment
+			if env == "" {
+				env = "unknown"
+			}
+			out = append(out, agentRow{
+				ClusterID:     s.ClusterID,
+				Name:          s.Name,
+				Environment:   env,
+				Zone:          "",
+				Version:       version,
+				Commit:        s.Commit,
+				Health:        health,
+				UptimeSeconds: s.UptimeSeconds,
+				RSSBytes:      s.RSSBytes,
+				CPUPct:        s.CPUPct,
+				Goroutines:    s.Goroutines,
+				// Recently restarted (and still live) ≈ a flapping signal.
+				Flapping: health == "live" && s.UptimeSeconds > 0 && s.UptimeSeconds < 600,
+			})
+		}
+		writeJSON(w, http.StatusOK, out)
 	}
 }
 

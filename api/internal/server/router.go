@@ -473,6 +473,7 @@ func NewRouter(db *gorm.DB, authService *auth.Service, shutdown <-chan struct{},
 			approved.Get("/api/cluster/{id}/vulnerabilities", scam.ClusterVulnerabilitiesHandler(db))
 
 			approved.Get("/api/clusters/summary", scam.ClusterSummaryHandler(db))
+			approved.Get("/api/agents", scam.AgentsHandler(db))
 			approved.Get("/api/clusters/registry-distribution", scam.RegistryDistributionHandler(db))
 			approved.Get("/api/clusters/exposure", scam.ExposureHandler(db))
 			approved.Get("/api/clusters/images/detail", scam.ImageDetailHandler(db))

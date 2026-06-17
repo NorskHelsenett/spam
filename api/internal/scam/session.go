@@ -32,6 +32,24 @@ type ClusterSession struct {
 	// 0 when a SCAM agent restarts because the agent restarts its
 	// counter from 0 — any mismatch triggers SCAM to reconcile.
 	LastSeenEventID int64 `gorm:"not null;default:0;column:last_seen_event_id"`
+
+	// Agent health, reported on the heartbeat (best-effort — NULL until an
+	// agent on a build that reports self-metrics checks in). cpu_pct is
+	// derived server-side from the delta of cpu_seconds_total between
+	// samples; prev_* hold the previous sample for that calculation.
+	AgentVersion    string     `gorm:"column:agent_version"`
+	AgentCommit     string     `gorm:"column:agent_commit"`
+	GoVersion       string     `gorm:"column:go_version"`
+	UptimeSeconds   int64      `gorm:"column:uptime_seconds"`
+	Goroutines      int        `gorm:"column:goroutines"`
+	HeapAllocBytes  int64      `gorm:"column:heap_alloc_bytes"`
+	RSSBytes        int64      `gorm:"column:rss_bytes"`
+	CPUSecondsTotal float64    `gorm:"column:cpu_seconds_total"`
+	CPUPct          float64    `gorm:"column:cpu_pct"`
+	PrevCPUSeconds  float64    `gorm:"column:prev_cpu_seconds"`
+	PrevSampleAt    *time.Time `gorm:"column:prev_sample_at"`
+	NumGC           int64      `gorm:"column:num_gc"`
+	GCPauseMsTotal  float64    `gorm:"column:gc_pause_ms_total"`
 }
 
 func (ClusterSession) TableName() string { return "cluster_sessions" }
