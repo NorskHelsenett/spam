@@ -336,7 +336,7 @@
 		{/if}
 		{#if pinned}
 			<a
-				href="/clusters/{active.clusterId}"
+				href="/cluster/{active.clusterId}"
 				class="mt-2.5 flex items-center justify-center gap-1.5 rounded-md border border-[var(--border-color)] bg-[var(--card-bg)] px-3 py-1.5 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--text-bright)]"
 			>
 				View cluster details
