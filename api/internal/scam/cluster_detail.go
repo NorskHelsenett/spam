@@ -388,6 +388,14 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 			Hosts     int    `json:"hosts"`
 		}
 
+		// Hide admin-curated namespaces (nhn-scam, nhn-ror, …) from
+		// non-admin callers, matching /api/clusters/chain. Applied to the
+		// per-namespace rollups, workloads, and hosts below so a regular
+		// user's cluster view stays focused on their own namespaces.
+		// Admin/global_reader get an always-false matcher (no filtering).
+		isNamespaceHidden := hiddenNamespaceMatch(r, db)
+		hidAnyNamespace := false
+
 		workloads := make([]workloadGroup, 0, len(podRows))
 		nsAgg := map[string]*namespaceSummary{}
 		getNS := func(ns string) *namespaceSummary {
@@ -400,6 +408,10 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		}
 
 		for _, p := range podRows {
+			if isNamespaceHidden(p.Namespace) {
+				hidAnyNamespace = true
+				continue
+			}
 			cs := []container{}
 			if p.ContainersJSON != "" {
 				_ = json.Unmarshal([]byte(p.ContainersJSON), &cs)
@@ -426,11 +438,21 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 			n.Workloads++
 			n.Pods += p.PodCount
 		}
+		visibleServiceNS := 0
 		for _, s := range svcRows {
+			if isNamespaceHidden(s.Namespace) {
+				hidAnyNamespace = true
+				continue
+			}
 			getNS(s.Namespace).Services = s.Cnt
+			visibleServiceNS++
 		}
 		hosts := make([]hostRow, 0, len(hostRows))
 		for _, h := range hostRows {
+			if isNamespaceHidden(h.Namespace) {
+				hidAnyNamespace = true
+				continue
+			}
 			hosts = append(hosts, h)
 			getNS(h.Namespace).Hosts++
 		}
@@ -512,8 +534,10 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		resp.Counts.Containers = summary.Containers
 		resp.Counts.Images = summary.Images
 		// Namespace card uses the MV count when present (matches the list
-		// page) and the live-derived namespace set otherwise.
-		if summary.Namespaces > 0 {
+		// page) and the live-derived namespace set otherwise. When hidden
+		// namespaces were filtered out, the MV count over-counts, so fall
+		// back to the filtered live set so the card matches the list shown.
+		if summary.Namespaces > 0 && !hidAnyNamespace {
 			resp.Counts.Namespaces = int(summary.Namespaces)
 		} else {
 			resp.Counts.Namespaces = len(namespaces)
@@ -521,7 +545,7 @@ func ClusterDetailHandler(db *gorm.DB) http.HandlerFunc {
 		resp.Counts.Ingresses = summary.IngressCount
 		resp.Counts.Workloads = len(workloads)
 		resp.Counts.Pods = podTotal
-		resp.Counts.Services = len(svcRows)
+		resp.Counts.Services = visibleServiceNS
 		resp.Counts.Hosts = len(hosts)
 
 		resp.Security.Critical = sec.Critical

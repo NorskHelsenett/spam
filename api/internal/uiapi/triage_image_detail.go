@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -214,8 +215,19 @@ func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.D
 	if resp.Vulns == nil {
 		resp.Vulns = []TriageImageVuln{}
 	}
-	if resp.Hosts == nil {
-		resp.Hosts = []TriageImageHost{}
+
+	// Hide admin-curated namespaces from non-admin callers, matching the
+	// cluster detail page. Applied per-caller (not in the cached payload)
+	// since the matcher is subject-dependent: drop exposed hosts in hidden
+	// namespaces, and trim each cluster's namespace list.
+	isNamespaceHidden := hiddenNamespacePredicate(r, db)
+
+	resp.Hosts = make([]TriageImageHost, 0, len(payload.Hosts))
+	for _, h := range payload.Hosts {
+		if isNamespaceHidden(h.Namespace) {
+			continue
+		}
+		resp.Hosts = append(resp.Hosts, h)
 	}
 
 	readable, unrestricted, aclErr := readableClusterIDSet(r, db)
@@ -224,16 +236,42 @@ func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.D
 		return
 	}
 	for _, cl := range payload.AllClusters {
-		if unrestricted {
-			resp.Clusters = append(resp.Clusters, cl)
+		if !unrestricted {
+			if _, ok := readable[cl.ClusterID]; !ok {
+				continue
+			}
+		}
+		// Trim hidden namespaces from the per-cluster list. A cluster that
+		// runs the digest only in hidden namespaces drops out entirely —
+		// from this caller's view the image isn't running anywhere visible
+		// there.
+		orig := cl.Namespaces
+		cl.Namespaces = filterHiddenNamespaceList(orig, isNamespaceHidden)
+		if orig != "" && cl.Namespaces == "" {
 			continue
 		}
-		if _, ok := readable[cl.ClusterID]; ok {
-			resp.Clusters = append(resp.Clusters, cl)
-		}
+		resp.Clusters = append(resp.Clusters, cl)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// filterHiddenNamespaceList trims a ", "-joined namespace list (the shape
+// TriageImageCluster.Namespaces carries from string_agg) down to the
+// namespaces the predicate does not hide, preserving order.
+func filterHiddenNamespaceList(joined string, hidden func(string) bool) string {
+	if joined == "" {
+		return ""
+	}
+	parts := strings.Split(joined, ", ")
+	kept := parts[:0]
+	for _, ns := range parts {
+		if hidden(ns) {
+			continue
+		}
+		kept = append(kept, ns)
+	}
+	return strings.Join(kept, ", ")
 }
 
 // computeTriageImageDetail runs the six-query panel scan: the full

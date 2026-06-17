@@ -4,8 +4,22 @@ import (
 	"net/http"
 
 	"github.com/NorskHelsenett/spam/internal/acl"
+	"github.com/NorskHelsenett/spam/internal/hiddenns"
 	"gorm.io/gorm"
 )
+
+// hiddenNamespacePredicate returns a predicate reporting whether a
+// namespace is admin-hidden for this caller. Admin and global_reader see
+// the whole fleet (no-op matcher), mirroring scam.hiddenNamespaceMatch;
+// regular users get the admin-curated hidden-namespace patterns applied.
+// Hidden namespaces are a focus aid, not an access boundary.
+func hiddenNamespacePredicate(r *http.Request, db *gorm.DB) func(string) bool {
+	subj := acl.SubjectFromRequest(r)
+	if subj.IsAdmin || subj.IsGlobalReader {
+		return func(string) bool { return false }
+	}
+	return hiddenns.MatcherFor(hiddenns.Patterns(r.Context(), db))
+}
 
 // readableClusterIDSet returns the set of cluster_ids the subject can
 // see plus a bool indicating "unrestricted" (admin / global_reader /
