@@ -18,4 +18,6 @@ export interface FleetAgent {
 	cpuPct: number;
 	goroutines: number;
 	flapping: boolean;
+	/** ISO timestamp of the agent's last heartbeat. */
+	lastSeen: string;
 }

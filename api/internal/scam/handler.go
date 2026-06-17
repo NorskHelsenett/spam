@@ -703,8 +703,9 @@ func AgentsHandler(db *gorm.DB) http.HandlerFunc {
 			UptimeSeconds int64   `json:"uptimeSeconds"`
 			RSSBytes      int64   `json:"rssBytes"`
 			CPUPct        float64 `json:"cpuPct"`
-			Goroutines    int     `json:"goroutines"`
-			Flapping      bool    `json:"flapping"`
+			Goroutines    int       `json:"goroutines"`
+			Flapping      bool      `json:"flapping"`
+			LastSeen      time.Time `json:"lastSeen"`
 		}
 		out := []agentRow{}
 
@@ -729,14 +730,15 @@ func AgentsHandler(db *gorm.DB) http.HandlerFunc {
 			AgeSeconds    float64 `gorm:"column:age_seconds"`
 			UptimeSeconds int64   `gorm:"column:uptime_seconds"`
 			RSSBytes      int64   `gorm:"column:rss_bytes"`
-			CPUPct        float64 `gorm:"column:cpu_pct"`
-			Goroutines    int     `gorm:"column:goroutines"`
+			CPUPct        float64   `gorm:"column:cpu_pct"`
+			Goroutines    int       `gorm:"column:goroutines"`
+			LastSeen      time.Time `gorm:"column:last_seen"`
 		}
 		var rows []scanRow
 		query := `
 			SELECT
 			    cs.cluster_id,
-			    COALESCE(NULLIF(c.display_name, ''), NULLIF(c.ror_cluster_name, ''), NULLIF(c.ror_slug, ''), cs.cluster_id) AS name,
+			    COALESCE(NULLIF(c.ror_cluster_name, ''), NULLIF(c.ror_slug, ''), NULLIF(c.display_name, ''), cs.cluster_id) AS name,
 			    COALESCE(NULLIF(c.ror_env, ''), '') AS environment,
 			    COALESCE(cs.agent_version, '') AS version,
 			    COALESCE(cs.agent_commit, '') AS commit,
@@ -744,7 +746,8 @@ func AgentsHandler(db *gorm.DB) http.HandlerFunc {
 			    COALESCE(cs.uptime_seconds, 0) AS uptime_seconds,
 			    COALESCE(cs.rss_bytes, 0) AS rss_bytes,
 			    COALESCE(cs.cpu_pct, 0) AS cpu_pct,
-			    COALESCE(cs.goroutines, 0) AS goroutines
+			    COALESCE(cs.goroutines, 0) AS goroutines,
+			    cs.last_push_at AS last_seen
 			FROM cluster_sessions cs
 			LEFT JOIN clusters c ON c.cluster_id = cs.cluster_id
 			WHERE TRUE ` + aclWhere + `
@@ -784,6 +787,7 @@ func AgentsHandler(db *gorm.DB) http.HandlerFunc {
 				RSSBytes:      s.RSSBytes,
 				CPUPct:        s.CPUPct,
 				Goroutines:    s.Goroutines,
+				LastSeen:      s.LastSeen,
 				// Recently restarted (and still live) ≈ a flapping signal.
 				Flapping: health == "live" && s.UptimeSeconds > 0 && s.UptimeSeconds < 600,
 			})

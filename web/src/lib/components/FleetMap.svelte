@@ -7,6 +7,7 @@
 	import MemoryStick from 'lucide-svelte/icons/memory-stick';
 	import Cpu from 'lucide-svelte/icons/cpu';
 	import Workflow from 'lucide-svelte/icons/workflow';
+	import History from 'lucide-svelte/icons/history';
 	import X from 'lucide-svelte/icons/x';
 	import ArrowUpRight from 'lucide-svelte/icons/arrow-up-right';
 	import ShieldAlert from 'lucide-svelte/icons/shield-alert';
@@ -213,6 +214,15 @@
 
 	const fmtBytes = (b: number) => (b >= 1 << 30 ? (b / (1 << 30)).toFixed(1) + ' GiB' : Math.round(b / (1 << 20)) + ' MiB');
 	const fmtUptime = (s: number) => (s >= 86400 ? Math.floor(s / 86400) + 'd' : s >= 3600 ? Math.floor(s / 3600) + 'h' : Math.floor(s / 60) + 'm');
+	const fmtAgo = (iso: string) => {
+		const ms = Date.now() - new Date(iso).getTime();
+		if (!isFinite(ms) || ms < 0) return '—';
+		const s = Math.floor(ms / 1000);
+		if (s < 60) return s + 's ago';
+		if (s < 3600) return Math.floor(s / 60) + 'm ago';
+		if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+		return Math.floor(s / 86400) + 'd ago';
+	};
 </script>
 
 <div class="flex flex-col gap-5" role="group" aria-label="Fleet map">
@@ -311,7 +321,7 @@
 		class="fleet-popover fixed z-[100] w-64 rounded-lg border border-[var(--border-color)] bg-[var(--bg-hard)] p-3 text-xs shadow-xl {pinned ? '' : 'pointer-events-none'}"
 		style="left:{pos.left}px; top:{pos.top}px; visibility:{placed ? 'visible' : 'hidden'}"
 	>
-		<div class="mb-1 flex items-center justify-between gap-2">
+		<div class="mb-3 flex items-center justify-between gap-2">
 			<span class="font-semibold text-[var(--text-bright)]">{active.name}</span>
 			<div class="flex items-center gap-1.5">
 				<span class="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide" style="background:{HEALTH_BADGE[active.health]};color:var(--bg-hard)">{active.health}</span>
@@ -323,7 +333,7 @@
 			</div>
 		</div>
 		<div class="flex flex-col gap-1">
-			{#each [{ icon: Tag, color: 'var(--blue)', label: 'version', value: active.version }, { icon: Layers, color: 'var(--aqua)', label: 'environment', value: active.environment }, { icon: Clock, color: 'var(--green)', label: 'uptime', value: fmtUptime(active.uptimeSeconds) }, { icon: MemoryStick, color: 'var(--memory-color)', label: 'memory', value: fmtBytes(active.rssBytes) }, { icon: Cpu, color: 'var(--cpu-color)', label: 'cpu', value: active.cpuPct.toFixed(1) + '%' }, { icon: Workflow, color: 'var(--orange)', label: 'goroutines', value: String(active.goroutines) }] as row}
+			{#each [{ icon: Tag, color: 'var(--blue)', label: 'version', value: active.version }, { icon: Layers, color: 'var(--aqua)', label: 'environment', value: active.environment }, { icon: History, color: 'var(--yellow)', label: 'last seen', value: fmtAgo(active.lastSeen) }, { icon: Clock, color: 'var(--green)', label: 'uptime', value: fmtUptime(active.uptimeSeconds) }, { icon: MemoryStick, color: 'var(--memory-color)', label: 'memory', value: fmtBytes(active.rssBytes) }, { icon: Cpu, color: 'var(--cpu-color)', label: 'cpu', value: active.cpuPct.toFixed(1) + '%' }, { icon: Workflow, color: 'var(--orange)', label: 'goroutines', value: String(active.goroutines) }] as row}
 			<div class="flex items-center gap-2">
 				<row.icon size={13} color={row.color} />
 				<span class="text-[var(--text-muted)]">{row.label}</span>

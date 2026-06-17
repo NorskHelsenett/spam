@@ -32,6 +32,13 @@ function makeAgent(i: number): FleetAgent {
 	const r = Math.random();
 	const health: FleetHealth = r > 0.92 ? 'stale' : r > 0.88 ? 'dead' : 'live';
 	const outlier = Math.random() > 0.96;
+	// last seen consistent with health: live = minutes, stale = days, dead = weeks ago.
+	const ageMs =
+		health === 'live'
+			? Math.random() * 3600_000
+			: health === 'stale'
+				? (1 + Math.random() * 5) * 86400_000
+				: (8 + Math.random() * 22) * 86400_000;
 	return {
 		clusterId: `c-${env}-${String(i).padStart(3, '0')}`,
 		name: `${env.slice(0, 1)}-${zones[0].slice(3, 6)}-${String(i).padStart(3, '0')}`,
@@ -44,7 +51,8 @@ function makeAgent(i: number): FleetAgent {
 		rssBytes: Math.floor((outlier ? 220 + Math.random() * 180 : 30 + Math.random() * 90) * (1 << 20)),
 		cpuPct: outlier ? 8 + Math.random() * 12 : Math.random() * 5,
 		goroutines: Math.floor(20 + Math.random() * (outlier ? 400 : 60)),
-		flapping: health === 'live' && Math.random() > 0.97
+		flapping: health === 'live' && Math.random() > 0.97,
+		lastSeen: new Date(Date.now() - ageMs).toISOString()
 	};
 }
 
