@@ -396,7 +396,7 @@
 		animation-play-state: paused;
 		/* A ring in the section background so an expanded cell never blends
 		   into same-coloured neighbours it overlaps — it stands out. */
-		box-shadow: 0 0 0 2px var(--card-bg);
+		box-shadow: 0 0 0 3.3px var(--card-bg);
 	}
 	/* The pinned cell stays marked while its popover is open. */
 	.fleet-cell.pinned {

@@ -248,24 +248,26 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 	}
 
 	// Clusters currently running the digest, with per-cluster exposure.
-	// The friendly name is read straight from the cluster_record JSONB
-	// (ror_metadata.cluster_name, then the env-injected `cluster` label,
-	// then the ROR slug) — the same source the image profile page uses.
-	// The clusters table (keyed by the same kube-system UID) is the
-	// primary name source: its ror_cluster_name / ror_slug columns are
-	// the resolved ROR identity, the same ones vuln_detail.go reads.
-	// The Container records themselves rarely carry ror_metadata (it
-	// rides the cluster-kind record), so cd.ror_* is only a fallback —
-	// reading the embedded metadata alone is why this panel used to
-	// show the raw UID.
+	// Names are *carried over* from cluster_summary, which already
+	// resolves each cluster's identity (ror_cluster_name → env
+	// cluster_name → ror_slug) by scanning ALL of a cluster's records.
+	// That's the load-bearing source: ror_metadata and the env label
+	// ride the cluster-kind record, so deriving a name from the digest's
+	// own Container records (cd.*) almost always misses and the panel
+	// fell back to the raw UID. The clusters table supplies an admin
+	// display_name override (and a backstop for clusters not yet in the
+	// freshly-refreshed summary MV); cd.* stays as a last-ditch fallback.
 	clusterQ := `
 		SELECT
 			cd.cluster_id,
 			COALESCE(
 				NULLIF(c.display_name, ''),
+				NULLIF(cs.ror_cluster_name, ''),
 				NULLIF(c.ror_cluster_name, ''),
 				NULLIF(cd.ror_cluster_name, ''),
+				NULLIF(cs.cluster_name, ''),
 				NULLIF(cd.cluster_label, ''),
+				NULLIF(cs.ror_slug, ''),
 				NULLIF(c.ror_slug, ''),
 				NULLIF(cd.ror_slug, ''),
 				cd.cluster_id
@@ -288,7 +290,8 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 			  AND cr.data->>'pod_phase' = 'Running'
 			GROUP BY cr.data->>'cluster_id'
 		) cd
-		LEFT JOIN clusters c ON c.cluster_id = cd.cluster_id
+		LEFT JOIN clusters c        ON c.cluster_id  = cd.cluster_id
+		LEFT JOIN cluster_summary cs ON cs.cluster_id = cd.cluster_id
 		ORDER BY exposed DESC, name
 	`
 	if err := db.WithContext(ctx).Raw(clusterQ, digest, digest).
@@ -381,16 +384,21 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 
 	// Exposed domains serving this digest, via the same exposed_digests
 	// projection the tier's exposure signals use.
-	// cluster is the friendly name resolved the same way as the runs-in
-	// list (clusters-table ROR identity first, then the env label), so
-	// the Entry tooltip names the cluster instead of leaking the UID.
+	// cluster is the friendly name carried over from cluster_summary
+	// (same resolution as the runs-in list), so the Entry tooltip names
+	// the cluster instead of leaking the UID. clusters-table display_name
+	// overrides; he.cluster (env label) is a backstop for clusters not
+	// yet in the refreshed summary MV.
 	hostQ := `
 		SELECT DISTINCT
 			ed.host,
 			COALESCE(
 				NULLIF(c.display_name, ''),
+				NULLIF(cs.ror_cluster_name, ''),
 				NULLIF(c.ror_cluster_name, ''),
+				NULLIF(cs.cluster_name, ''),
 				NULLIF(he.cluster, ''),
+				NULLIF(cs.ror_slug, ''),
 				NULLIF(c.ror_slug, ''),
 				ed.cluster_id
 			) AS cluster,
@@ -398,7 +406,8 @@ func computeTriageImageDetail(ctx context.Context, db *gorm.DB, imageID, digest 
 			ed.namespace,
 			COALESCE(he.tls, false)  AS tls
 		FROM exposed_digests ed
-		LEFT JOIN clusters c ON c.cluster_id = ed.cluster_id
+		LEFT JOIN clusters c        ON c.cluster_id  = ed.cluster_id
+		LEFT JOIN cluster_summary cs ON cs.cluster_id = ed.cluster_id
 		LEFT JOIN host_exposure he
 		  ON he.cluster_id = ed.cluster_id
 		 AND he.namespace  = ed.namespace
