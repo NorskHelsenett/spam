@@ -217,11 +217,11 @@
 
 <div class="flex flex-col gap-5" role="group" aria-label="Fleet map">
 	<!-- Overview: environment donut (left) + stat cards (right, two rows) -->
-	<div class="grid gap-4 lg:grid-cols-[minmax(220px,18rem)_1fr] lg:items-center">
-		<div class="metric-card rounded-2xl p-4">
+	<div class="grid gap-4 lg:grid-cols-[26rem_1fr]">
+		<div class="metric-card flex flex-col justify-center rounded-2xl p-4">
 			<DonutChart title="Environments" total={kpis.total} segments={envSegments} />
 		</div>
-		<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+		<div class="grid grid-cols-2 gap-4 sm:grid-cols-3">
 			<!-- Row 1 — counts / health -->
 			<div class="metric-card space-y-1 rounded-2xl p-4">
 				<h3 class="text-xs font-semibold uppercase tracking-wider text-[var(--text-tertiary)]">Agents</h3>
