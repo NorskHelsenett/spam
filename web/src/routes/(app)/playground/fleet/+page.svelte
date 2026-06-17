@@ -1,59 +1,11 @@
 <script lang="ts">
 	import FleetMap from '$lib/components/FleetMap.svelte';
-	import type { FleetAgent, FleetHealth } from '$lib/fleet';
+	import { generateFleet } from '$lib/fleetMock';
 
-	// ---- mock fleet -------------------------------------------------------
-	// Stand-in for GET /api/agents until the backend lands. Shaped exactly
-	// like the planned endpoint so FleetMap is wired for real data unchanged.
-	// Final home: its own tab right of Database under /admin/settings.
-	const ENVS = ['prod', 'prod', 'prod', 'staging', 'test', 'dev'];
-	const ZONES: Record<string, string[]> = {
-		prod: ['dc-oslo-a', 'dc-oslo-b', 'dc-bergen-a'],
-		staging: ['dc-oslo-b', 'dc-trondheim-a'],
-		test: ['dc-trondheim-a'],
-		dev: ['dc-oslo-a']
-	};
-	const TARGET = 'v0.3.0';
-	const VERSIONS: [string, number][] = [
-		['v0.3.0', 0.58],
-		['v0.2.0', 0.26],
-		['v0.1.0', 0.1],
-		['feat-agent-healthz', 0.06]
-	];
-
-	function pickWeighted(opts: [string, number][]): string {
-		let r = Math.random();
-		for (const [v, w] of opts) {
-			if ((r -= w) <= 0) return v;
-		}
-		return opts[0][0];
-	}
-
-	function makeAgent(i: number): FleetAgent {
-		const env = ENVS[Math.floor(Math.random() * ENVS.length)];
-		const zones = ZONES[env];
-		const r = Math.random();
-		const health: FleetHealth = r > 0.92 ? 'stale' : r > 0.88 ? 'dead' : 'live';
-		const outlier = Math.random() > 0.96;
-		return {
-			clusterId: `c-${env}-${String(i).padStart(3, '0')}`,
-			name: `${env.slice(0, 1)}-${zones[0].slice(3, 6)}-${String(i).padStart(3, '0')}`,
-			environment: env,
-			zone: zones[Math.floor(Math.random() * zones.length)],
-			version: pickWeighted(VERSIONS),
-			commit: Math.random().toString(16).slice(2, 9),
-			health,
-			uptimeSeconds: Math.floor(Math.random() * 30 * 86400),
-			rssBytes: Math.floor((outlier ? 220 + Math.random() * 180 : 30 + Math.random() * 90) * (1 << 20)),
-			cpuPct: outlier ? 8 + Math.random() * 12 : Math.random() * 5,
-			goroutines: Math.floor(20 + Math.random() * (outlier ? 400 : 60)),
-			flapping: health === 'live' && Math.random() > 0.97
-		};
-	}
-
-	let agents = $state<FleetAgent[]>(Array.from({ length: 420 }, (_, i) => makeAgent(i)));
+	let agents = $state(generateFleet());
 
 	// ---- rollout simulation (previews the live SSE transition) ------------
+	const TARGET = 'v0.3.0';
 	let rolling = $state(false);
 	let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -106,7 +58,7 @@
 	function reset() {
 		if (timer) clearInterval(timer);
 		rolling = false;
-		agents = Array.from({ length: 420 }, (_, i) => makeAgent(i));
+		agents = generateFleet();
 	}
 
 	$effect(() => () => {
@@ -118,10 +70,9 @@
 	<section class="panel-surface space-y-6 px-6 py-8 sm:px-10 sm:py-10">
 		<header class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
 			<div>
-				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Fleet</h2>
+				<h2 class="text-xl font-semibold text-[var(--text-bright)]">Fleet (playground)</h2>
 				<p class="text-sm text-[var(--text-tertiary)]">
-					Every agent as a cell — size is memory, color is version or health, and failing agents
-					recolor themselves. Mock data; the buttons preview what the live SSE stream will drive.
+					Mock data. The buttons preview what the live SSE stream will drive.
 				</p>
 			</div>
 			<div class="flex shrink-0 gap-2">

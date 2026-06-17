@@ -22,7 +22,8 @@
 
 	const monitoringTabs: TabOption[] = [
 		{ value: '/admin/settings/jobs', label: 'Jobs' },
-		{ value: '/admin/settings/database', label: 'Database' }
+		{ value: '/admin/settings/database', label: 'Database' },
+		{ value: '/admin/settings/fleet', label: 'Fleet' }
 	];
 
 	const path = $derived($page.url?.pathname ?? '');
