@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/NorskHelsenett/spam/internal/auth"
@@ -205,17 +206,26 @@ func TriageImageDetailHandler(db *gorm.DB, _ *auth.Service, c cache.Store) http.
 // set so the UI can say "+N outside your access" without naming them.
 func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.DB, payload triageImageDetailPayload) {
 	resp := triageImageDetailResponse{
-		Vulns:        payload.Vulns,
-		VulnTotal:    payload.VulnTotal,
-		Hosts:        payload.Hosts,
-		Clusters:     []TriageImageCluster{},
-		ClusterTotal: len(payload.AllClusters),
+		Vulns:     payload.Vulns,
+		VulnTotal: payload.VulnTotal,
+		Clusters:  []TriageImageCluster{},
 	}
 	if resp.Vulns == nil {
 		resp.Vulns = []TriageImageVuln{}
 	}
-	if resp.Hosts == nil {
-		resp.Hosts = []TriageImageHost{}
+
+	// Hide admin-curated namespaces from non-admin callers, matching the
+	// cluster detail page. Applied per-caller (not in the cached payload)
+	// since the matcher is subject-dependent: drop exposed hosts in hidden
+	// namespaces, and trim each cluster's namespace list.
+	isNamespaceHidden := hiddenNamespacePredicate(r, db)
+
+	resp.Hosts = make([]TriageImageHost, 0, len(payload.Hosts))
+	for _, h := range payload.Hosts {
+		if isNamespaceHidden(h.Namespace) {
+			continue
+		}
+		resp.Hosts = append(resp.Hosts, h)
 	}
 
 	readable, unrestricted, aclErr := readableClusterIDSet(r, db)
@@ -223,17 +233,49 @@ func writeTriageImageResponse(w http.ResponseWriter, r *http.Request, db *gorm.D
 		http.Error(w, "failed to scope results", http.StatusInternalServerError)
 		return
 	}
+	// ClusterTotal counts only namespace-visible clusters so the UI's
+	// "+N outside your access" reflects ACL-denied clusters only. A cluster
+	// the digest runs in solely within hidden namespaces is neither shown
+	// nor counted — it isn't "outside your access", it's just hidden, so
+	// counting it would surface a phantom "+1 outside your access".
+	clusterTotal := 0
 	for _, cl := range payload.AllClusters {
-		if unrestricted {
-			resp.Clusters = append(resp.Clusters, cl)
+		// Hidden-namespace trim first (independent of ACL): a cluster that
+		// runs the digest only in hidden namespaces drops out entirely.
+		orig := cl.Namespaces
+		cl.Namespaces = filterHiddenNamespaceList(orig, isNamespaceHidden)
+		if orig != "" && cl.Namespaces == "" {
 			continue
 		}
-		if _, ok := readable[cl.ClusterID]; ok {
-			resp.Clusters = append(resp.Clusters, cl)
+		clusterTotal++
+		if !unrestricted {
+			if _, ok := readable[cl.ClusterID]; !ok {
+				continue
+			}
 		}
+		resp.Clusters = append(resp.Clusters, cl)
 	}
+	resp.ClusterTotal = clusterTotal
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// filterHiddenNamespaceList trims a ", "-joined namespace list (the shape
+// TriageImageCluster.Namespaces carries from string_agg) down to the
+// namespaces the predicate does not hide, preserving order.
+func filterHiddenNamespaceList(joined string, hidden func(string) bool) string {
+	if joined == "" {
+		return ""
+	}
+	parts := strings.Split(joined, ", ")
+	kept := parts[:0]
+	for _, ns := range parts {
+		if hidden(ns) {
+			continue
+		}
+		kept = append(kept, ns)
+	}
+	return strings.Join(kept, ", ")
 }
 
 // computeTriageImageDetail runs the six-query panel scan: the full

@@ -520,6 +520,12 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			return
 		}
 
+		// Hide admin-curated namespaces from non-admin callers, matching
+		// the cluster detail page and triage panel. Applied to the
+		// cluster-usage rollup and the per-cluster workload list below so
+		// the image profile's "where it runs" surfaces stay consistent.
+		isNamespaceHidden := hiddenNamespacePredicate(r, db)
+
 		resp := ImageDetailResponse{
 			ID:         img.ID,
 			Registry:   img.Registry,
@@ -800,6 +806,9 @@ func ImageDetailHandler(db *gorm.DB, _ *auth.Service) http.HandlerFunc {
 			`, queryArgs...).Scan(&usage).Error
 			resp.ClusterUsage = make([]ImageClusterUsageRow, 0, len(usage))
 			for _, u := range usage {
+				if isNamespaceHidden(u.Namespace) {
+					continue
+				}
 				row := ImageClusterUsageRow{
 					ClusterID: u.ClusterID,
 					Namespace: u.Namespace,
@@ -983,6 +992,11 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			return
 		}
 
+		// Hide admin-curated namespaces from non-admin callers, matching
+		// the image profile and cluster surfaces — applied to the
+		// per-cluster workload rollup below.
+		isNamespaceHidden := hiddenNamespacePredicate(r, db)
+
 		type imageHeader struct {
 			ID         string     `gorm:"column:id"`
 			Registry   string     `gorm:"column:registry"`
@@ -1106,6 +1120,9 @@ func RepoWorkloadsHandler(db *gorm.DB, authService *auth.Service) http.HandlerFu
 			byDigest[h.Digest] = make(map[string]*ClusterJSON)
 		}
 		for _, w := range wlRows {
+			if isNamespaceHidden(w.Namespace) {
+				continue
+			}
 			clusters, ok := byDigest[w.Digest]
 			if !ok {
 				continue
