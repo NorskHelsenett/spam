@@ -364,6 +364,21 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			}
 		}
 
+		// The snapshot apply + session/ACK writes below run on a detached,
+		// bounded context rather than r.Context(). When the DB is briefly
+		// contended a SCAM agent's HTTP client can time out and cancel
+		// r.Context() mid-request — which aborted applySnapshot before it
+		// tombstoned stale rows AND aborted touchClusterSession before it
+		// advanced last_seen_event_id. The stranded ACK made the agent see
+		// an event_id mismatch and re-push the full snapshot, a reconcile
+		// storm that re-churned cluster_record on every retry (and never
+		// converged while the cancellation persisted). Completing this work
+		// server-side regardless of the client connection lets the ACK
+		// advance so the next push converges. The upsert batch above
+		// already runs detached (db.Exec, no r.Context()).
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelWrite()
+
 		// Apply Snapshot records after the regular upsert. Tombstone
 		// rows for (cluster_id, target_kind) whose computed
 		// resource-key isn't in resource_keys, gated on
@@ -374,7 +389,7 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if snap.ClusterID != "" {
 				clusterIDs[snap.ClusterID] = struct{}{}
 			}
-			if err := applySnapshot(r.Context(), db, snap, now); err != nil {
+			if err := applySnapshot(writeCtx, db, snap, now); err != nil {
 				log.Printf("callcenter: snapshot apply (cluster=%s target_kind=%s snapshot_id=%s): %v",
 					snap.ClusterID, snap.TargetKind, snap.SnapshotID, err)
 				// Don't fail the whole batch on snapshot apply errors —
@@ -394,10 +409,10 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// touchClusterSession). No-op when the batch carried no
 		// ror_metadata for this cluster.
 		for clusterID := range clusterIDs {
-			if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
+			if err := touchClusterSession(writeCtx, db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
 				log.Printf("callcenter: touch session %s: %v", clusterID, err)
 			}
-			upsertClusterRorBinding(r.Context(), db, clusterID, rorByCluster[clusterID])
+			upsertClusterRorBinding(writeCtx, db, clusterID, rorByCluster[clusterID])
 		}
 
 		if len(items) > 0 || len(snapshots) > 0 {
@@ -464,7 +479,7 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 				ClusterID string `json:"cluster_id"`
 			}
 			if err := json.Unmarshal(items[0].data, &first); err == nil && first.ClusterID != "" {
-				ackLastSeen = lookupLastSeenEventID(r.Context(), db, first.ClusterID)
+				ackLastSeen = lookupLastSeenEventID(writeCtx, db, first.ClusterID)
 			}
 		}
 
