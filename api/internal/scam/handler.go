@@ -349,7 +349,21 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 							WHEN EXCLUDED.is_present THEN NULL
 							ELSE COALESCE(cluster_record.tombstoned_at, EXCLUDED.tombstoned_at)
 						END,
-						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)`)
+						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)
+					WHERE cluster_record.data IS DISTINCT FROM EXCLUDED.data
+					   OR cluster_record.is_present IS DISTINCT FROM EXCLUDED.is_present`)
+				// The DO UPDATE WHERE skips the write entirely when neither the
+				// resource's data nor its presence changed. Without it, a re-push
+				// of unchanged state (the common case — agents re-send their full
+				// set on every reconcile/heartbeat) still rewrote the row, and
+				// since every UPDATE is a new MVCC tuple that's pure dead-tuple
+				// churn: it's what bloated cluster_record at multi-GB/hour. Row
+				// event_id may lag on a skipped no-op, which is harmless — the
+				// ACK watermark lives on cluster_sessions.last_seen_event_id,
+				// advanced separately by touchClusterSession. received_at also
+				// stops tracking "last push" for unchanged rows and instead
+				// tracks "last change", consistent with last_change_at and the
+				// MV source fingerprint that already keys on it.
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
 					// Surface the underlying GORM error so silent 500s
