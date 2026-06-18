@@ -25,8 +25,10 @@ const (
 	facetsCacheKey  = "vuln:facets:v1"
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
-	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v5:"
+	// keep serving the previous ordering until their 7-day TTL. v6:
+	// summaryVersion changed shape (MV-refresh watermark), so the hashed
+	// key differs; bump so no v5 entry is ever consulted.
+	listCachePrefix = "vuln:list:v6:"
 	summaryCacheTTL = 7 * 24 * time.Hour
 	// refreshMaxRuntime must outlast the worst-case contended rebuild of
 	// all four unified/canonical vuln MVs, not just the uncontended ~40s.
@@ -160,11 +162,22 @@ type VulnListParams struct {
 	ImageArgs []any
 }
 
+// summaryVersion is the cache-invalidation watermark for every vuln
+// dashboard read (summary, repos, facets, list). It is the last-refresh
+// timestamp of the unified/canonical vuln MV family — see
+// db.VulnViewsRefreshedAt for why this, and not the source-table
+// watermarks, is the correct key: the cached responses are a pure function
+// of those MVs, so they must invalidate exactly when the MVs rebuild and
+// not on every source-table write.
+//
+// The previous shape captured four separate scan/OSV/VEX/image-scan
+// maxes. Once the MV refresh interval was decoupled from ingestion (raised
+// to hourly), those source watermarks advanced every few seconds while the
+// MV data stayed identical, so the caches were perpetually "stale" and
+// every read recomputed against the DB. Keying on the MV refresh time
+// restores effective caching.
 type summaryVersion struct {
-	LastScanAt      *time.Time `json:"last_scan_at" gorm:"column:last_scan_at"`
-	LastOSVAt       *time.Time `json:"last_osv_at" gorm:"column:last_osv_at"`
-	LastVEXAt       *time.Time `json:"last_vex_at" gorm:"column:last_vex_at"`
-	LastImageScanAt *time.Time `json:"last_image_scan_at" gorm:"column:last_image_scan_at"`
+	VulnViewsRefreshedAt *time.Time `json:"vuln_views_refreshed_at"`
 }
 
 type cachedSummary struct {
@@ -564,8 +577,8 @@ type cachedFacets struct {
 
 // LoadFacets returns the distinct sources + CVE years currently present
 // in the unified vuln views. Versioned against the same summaryVersion
-// (scan / OSV / VEX / image-scan watermarks) as LoadSummary so the cache
-// drops the moment any scan activity could have introduced new values.
+// (the vuln MV refresh watermark) as LoadSummary so the cache drops the
+// moment a rebuild could have introduced new values.
 func LoadFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
 	store := cache.NewPostgresStore(db)
 
@@ -666,9 +679,11 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 // LoadListPage returns a paginated page of grouped vulnerabilities,
 // plus the total group count for the same filters. Cached per
 // (version, filters, ACL scope, page); invalidated implicitly via
-// summaryVersion — any scan / OSV / VEX / image-scan completion
-// changes the version hash, so stale keys are orphaned and expire
-// via TTL. Fresh after every scan without a manual bust.
+// summaryVersion — a vuln MV rebuild bumps the refresh watermark and
+// changes the version hash, so stale keys are orphaned and expire via
+// TTL. Fresh after every rebuild without a manual bust. (Source-table
+// writes between rebuilds intentionally do NOT invalidate: the page is
+// read from the MVs, whose contents don't change until they refresh.)
 func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
 	// 50 is the default; 100 caps the page so a single request can't
 	// pull the whole table. Old code defaulted to 100 and capped at
@@ -1592,15 +1607,15 @@ func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArg
 }
 
 func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, error) {
-	var version summaryVersion
-	err := db.WithContext(ctx).Raw(`
-		SELECT
-			(SELECT MAX(scanned_at) FROM sbom_scan_results)         AS last_scan_at,
-			(SELECT MAX(checked_at) FROM component_vulnerabilities) AS last_osv_at,
-			(SELECT MAX(created_at) FROM component_vex)             AS last_vex_at,
-			(SELECT MAX(finished_at) FROM image_scan_runs)          AS last_image_scan_at
-	`).Scan(&version).Error
-	return version, err
+	// The vuln dashboard caches are a pure function of the unified/canonical
+	// vuln MVs, so the MV's own last-refresh time is the correct (and cheap,
+	// PK-indexed) invalidation watermark. See db.VulnViewsRefreshedAt and the
+	// summaryVersion doc comment.
+	at, err := spamdb.VulnViewsRefreshedAt(ctx, db)
+	if err != nil {
+		return summaryVersion{}, err
+	}
+	return summaryVersion{VulnViewsRefreshedAt: at}, nil
 }
 
 func computeRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
@@ -1680,10 +1695,7 @@ func upsertSnapshot(ctx context.Context, db *gorm.DB, capturedAt time.Time, summ
 }
 
 func sameVersion(a, b summaryVersion) bool {
-	return sameTime(a.LastScanAt, b.LastScanAt) &&
-		sameTime(a.LastOSVAt, b.LastOSVAt) &&
-		sameTime(a.LastVEXAt, b.LastVEXAt) &&
-		sameTime(a.LastImageScanAt, b.LastImageScanAt)
+	return sameTime(a.VulnViewsRefreshedAt, b.VulnViewsRefreshedAt)
 }
 
 func sameTime(a, b *time.Time) bool {

@@ -770,6 +770,33 @@ func VulnCanonicalViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error)
 	return populated, err
 }
 
+// VulnViewsRefreshedAt returns the most recent refresh timestamp recorded
+// for the unified/canonical vuln MV family. This is the correct cache-
+// invalidation watermark for the vuln dashboard reads (summary, list,
+// repos, facets): their content is a pure function of those four MVs, so a
+// cached response stays valid until — and only until — the MVs are actually
+// rebuilt.
+//
+// Returns nil when no refresh has been recorded yet (cold start, before the
+// first populate). Reads materialized_view_refreshes by its primary key
+// (name), so it is a tiny indexed lookup. It deliberately replaces the
+// previous read-path watermark, which ran four MAX() scans over the
+// high-churn scan/OSV/VEX/image-scan source tables on every dashboard
+// request — those tables advance every few seconds under continuous
+// ingestion, so they invalidated the caches constantly even though the MVs
+// (now refreshed at most hourly) had not changed.
+func VulnViewsRefreshedAt(ctx context.Context, db *gorm.DB) (*time.Time, error) {
+	var row struct {
+		RefreshedAt *time.Time `gorm:"column:refreshed_at"`
+	}
+	err := db.WithContext(ctx).Raw(`
+		SELECT MAX(refreshed_at) AS refreshed_at
+		FROM materialized_view_refreshes
+		WHERE name IN (?, ?, ?, ?)
+	`, vulnUnifiedViewNames[0], vulnUnifiedViewNames[1], vulnUnifiedViewNames[2], vulnUnifiedViewNames[3]).Scan(&row).Error
+	return row.RefreshedAt, err
+}
+
 // RefreshVulnUnifiedViews refreshes the unified vuln MVs under a
 // dedicated advisory lock so concurrent triggers across replicas
 // serialize. Reuses refreshView for the CONCURRENTLY+fallback logic
