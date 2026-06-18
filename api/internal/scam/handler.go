@@ -233,6 +233,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// every line, so the per-record overwrite is cheap and the
 		// final value is whatever the agent reported last.
 		rorByCluster := make(map[string]*RorMetadata, 1)
+		// First cluster_id seen in the batch. Used to ACK the real
+		// last_seen_event_id even when the push carried no data records,
+		// so a record-less push can't return a 0 ACK that the agent reads
+		// as drift (see the ACK block below).
+		var firstClusterID string
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -242,6 +247,9 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if err := validate(incoming); err != nil {
 				rejected++
 				continue
+			}
+			if firstClusterID == "" && incoming.ClusterID != "" {
+				firstClusterID = incoming.ClusterID
 			}
 			if incoming.RorMetadata != nil && incoming.RorMetadata.ClusterID != "" && incoming.ClusterID != "" {
 				rorByCluster[incoming.ClusterID] = incoming.RorMetadata
@@ -473,14 +481,17 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// it fires a reconcile snapshot. Single-cluster batches are
 		// the common case (one agent = one cluster); we ack the first
 		// cluster encountered, which is that cluster.
+		// Always ACK the real last_seen_event_id for the batch's cluster,
+		// even when the push carried no data records (snapshot-only, or a
+		// metrics/heartbeat-style push routed through callcenter). The
+		// previous version left ackLastSeen=0 whenever len(items)==0, which
+		// an agent reads as an event_id mismatch and answers with a full
+		// reconcile snapshot — so a record-less push every N minutes would
+		// trigger a reconcile every N minutes regardless of actual drift,
+		// re-churning cluster_record on a fixed cadence.
 		var ackLastSeen int64
-		if len(items) > 0 {
-			var first struct {
-				ClusterID string `json:"cluster_id"`
-			}
-			if err := json.Unmarshal(items[0].data, &first); err == nil && first.ClusterID != "" {
-				ackLastSeen = lookupLastSeenEventID(writeCtx, db, first.ClusterID)
-			}
+		if firstClusterID != "" {
+			ackLastSeen = lookupLastSeenEventID(writeCtx, db, firstClusterID)
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{
