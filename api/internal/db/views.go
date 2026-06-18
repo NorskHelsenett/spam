@@ -63,13 +63,33 @@ const (
 	hostExposureViewRefreshInterval = 5 * time.Minute
 	// asset_risk (~15s), cascaded from the vuln + host-exposure + dep-health
 	// + secret-probe paths, so it is the most-triggered family.
-	assetRiskViewRefreshInterval = 5 * time.Minute
+	//
+	// Raised 5m → 60m: with 400+ scanner agents ingesting around the clock
+	// the trigger never goes cold, so a short window just pins the DB
+	// rebuilding this family near-continuously (it was ~85% of all DB time
+	// in pg_stat_statements). asset_risk backs the triage dashboard — an
+	// aggregate that tolerates hour-scale staleness — and the scheduled
+	// REFRESH_MV driver job (see jobs.processRefreshMV) plus the read-path
+	// stale-while-revalidate in vulnmetrics keep it fresh on demand. This
+	// caps the steady-state rebuild rate at once/hour regardless of how
+	// many agents are ingesting.
+	assetRiskViewRefreshInterval = 60 * time.Minute
 	// Four unified/canonical vuln MVs; view_unified_image_vulnerabilities
-	// alone is ~33s to rebuild.
-	vulnUnifiedViewRefreshInterval = 5 * time.Minute
+	// alone is ~33s to rebuild and scales with the dataset.
+	//
+	// Raised 5m → 60m for the same reason as assetRiskViewRefreshInterval:
+	// these back fleet-wide vuln dashboards that are read on demand (the
+	// summary/list caches revalidate against a data-version watermark, so
+	// a viewer still gets fresh numbers via TriggerRefresh) and the
+	// REFRESH_MV job guarantees a periodic rebuild independent of ingest.
+	vulnUnifiedViewRefreshInterval = 60 * time.Minute
 	// sbom_metadata_view (~204s) + sbom_component_view — by far the most
-	// expensive family; SBOM metadata changes slowly so a long window is fine.
-	sbomViewRefreshInterval = 15 * time.Minute
+	// expensive family; its CONCURRENTLY rebuild grows with the dataset and
+	// can overlap the vuln + cluster refreshes, all contending for the same
+	// disk I/O. SBOM metadata changes slowly and a source fingerprint
+	// already skips the rebuild when nothing changed, so a longer window
+	// costs no freshness and reduces refresh overlap.
+	sbomViewRefreshInterval = 30 * time.Minute
 )
 
 // Maximum age of the last actual refresh for the source-fingerprint

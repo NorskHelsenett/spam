@@ -80,6 +80,10 @@ func ProcessJob(ctx context.Context, db *gorm.DB, job *Job, runExecutor RunExecu
 		return processFetchDepHealth(ctx, db, job.ID)
 	case JobTypeDBMaintenance:
 		return processDBMaintenance(ctx, db, job)
+	case JobTypePruneJobs:
+		return processPruneJobs(ctx, db)
+	case JobTypeRefreshMV:
+		return processRefreshMV(ctx, db)
 	case JobTypeAdvisoryBackfill:
 		return processAdvisoryBackfill(ctx, db, job)
 	default:
@@ -225,8 +229,10 @@ const vulnMetaEnqueueCap = 1000
 // Duplicate-key collisions from the ux_jobs_vuln_meta_active partial
 // unique index are expected during normal operation (two replicas /
 // two scan-completion hooks racing on the same id between the
-// missing-check and CreateJob) and are silently skipped, matching
-// the pattern in scheduleNextFeedRefresh.
+// missing-check and CreateJob). OnConflictDoNothing makes those a
+// server-side no-op so they don't raise a Postgres ERROR or burn a
+// failed transaction per collision — this path enqueues hundreds of
+// ids per scan, so the constraint-violation log spam added up fast.
 func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) {
 	missing, err := vulnmeta.IDsMissingMetadata(ctx, db, vulnIDs)
 	if err != nil {
@@ -235,13 +241,10 @@ func EnqueueVulnMetaFetches(ctx context.Context, db *gorm.DB, vulnIDs []string) 
 	}
 	for _, id := range missing {
 		if _, err := CreateJob(ctx, db, CreateJobInput{
-			Type:    JobTypeVulnMetaFetch,
-			Payload: VulnMetaFetchPayload{VulnID: id},
+			Type:                JobTypeVulnMetaFetch,
+			Payload:             VulnMetaFetchPayload{VulnID: id},
+			OnConflictDoNothing: true,
 		}); err != nil {
-			if strings.Contains(err.Error(), "duplicate key") ||
-				strings.Contains(err.Error(), "ux_jobs_vuln_meta_active") {
-				continue
-			}
 			log.Printf("vulnmeta: enqueue %s: %v", id, err)
 		}
 	}
@@ -299,6 +302,43 @@ func EnqueueMissingVulnMeta(ctx context.Context, db *gorm.DB) {
 // Bytes are negligible (~1.5k rows JSON).
 const kevRefreshInterval = 6 * time.Hour
 
+// mvRefreshInterval is how often the REFRESH_MV driver job fires the
+// expensive MV families' debounced TriggerRefresh entry points. It is
+// deliberately shorter than the per-family debounce windows in the db
+// package (60m for vuln/asset_risk, 15m for SBOM) — the debounce decides
+// whether a rebuild actually runs, so the driver just has to tick often
+// enough that no family drifts much past its own window during an idle
+// stretch. The point of the job is to make refresh cadence a property of
+// the schedule, not of how many scanner agents happen to be ingesting.
+const mvRefreshInterval = 10 * time.Minute
+
+// jobPruneInterval is the cadence of the PRUNE_JOBS retention sweep.
+const jobPruneInterval = 24 * time.Hour
+
+// Retention windows for terminal job rows. SUCCEEDED rows (the bulk —
+// VULN_META_FETCH alone is hundreds of thousands) are short-lived
+// bookkeeping, so they go quickly; FAILED rows are kept longer because
+// they're the audit trail for debugging a broken feed/scan.
+const (
+	jobRetentionSucceeded = 14 * 24 * time.Hour
+	jobRetentionFailed    = 30 * 24 * time.Hour
+)
+
+// PRUNE_JOBS deletes in bounded batches rather than one statement. The
+// first sweep after this ships clears a large accumulated backlog; a
+// single unbounded DELETE there is a minutes-long transaction that holds
+// row locks, bloats WAL, and competes for I/O with everything else on a
+// busy DB. Small batches with a short pause keep each statement quick and
+// let other work (and autovacuum) interleave.
+const (
+	jobPruneBatchSize  = 5000
+	jobPruneBatchPause = 100 * time.Millisecond
+	// jobPruneMaxBatches backstops a pathological loop; 5M rows per sweep
+	// is far above any real backlog, and the daily cadence picks up the
+	// rest if it were ever exceeded.
+	jobPruneMaxBatches = 1000
+)
+
 // epssDailyHourLocal is the local hour-of-day for the EPSS daily
 // refresh. FIRST.org publishes a single CSV per UTC day; we pin the
 // fetch to early-morning local time so analysts arriving for the day
@@ -343,6 +383,10 @@ func nextFeedRunAt(jobType JobType, from time.Time) time.Time {
 		// upstream registries (npm/PyPI/etc) + GitHub API have rate
 		// limits we don't want to burn on noise.
 		return from.Add(7 * 24 * time.Hour)
+	case JobTypeRefreshMV:
+		return from.Add(mvRefreshInterval)
+	case JobTypePruneJobs:
+		return from.Add(jobPruneInterval)
 	default:
 		// Unknown feed type — return a safe default; the caller
 		// shouldn't reach here, the switch above is exhaustive over
@@ -471,44 +515,143 @@ func scheduleNextFeedRefresh(ctx context.Context, db *gorm.DB, jobType JobType) 
 // no-op silently. Call from the worker boot path so a fresh deploy
 // picks up feeds without waiting for the previous schedule to fire.
 func EnsureFeedRefreshScheduled(ctx context.Context, db *gorm.DB) {
-	now := time.Now()
 	for _, jobType := range []JobType{JobTypeFetchKEV, JobTypeFetchEPSS, JobTypeFetchDepHealth} {
-		// If a queued/retry job already exists, the unique index
-		// would reject a fresh insert anyway — but checking first
-		// keeps the log clean.
-		var pending int64
-		if err := db.WithContext(ctx).Model(&Job{}).
-			Where("type = ? AND status IN ?", jobType, []JobStatus{JobStatusQueued, JobStatusRetry}).
-			Count(&pending).Error; err == nil && pending > 0 {
-			continue
-		}
+		ensureRecurringJobScheduled(ctx, db, jobType)
+	}
+}
 
-		// If we ran successfully recently enough, the next slot is
-		// after now — schedule there so we don't double-fetch on a
-		// quick restart cycle. Otherwise fetch immediately.
-		var lastSuccess time.Time
-		_ = db.WithContext(ctx).Model(&Job{}).
-			Select("COALESCE(MAX(finished_at), '1970-01-01')").
-			Where("type = ? AND status = ?", jobType, JobStatusSucceeded).
-			Scan(&lastSuccess).Error
+// EnsureMaintenanceJobsScheduled queues the recurring maintenance jobs
+// (REFRESH_MV, PRUNE_JOBS) at startup using the same self-rescheduling
+// machinery as the bulk feeds. Each handler enqueues its own follow-up
+// on success; the ux_jobs_refresh_mv_active / ux_jobs_prune_jobs_active
+// partial unique indexes keep multi-replica boots from double-queueing.
+// Call from the worker boot path alongside EnsureFeedRefreshScheduled.
+func EnsureMaintenanceJobsScheduled(ctx context.Context, db *gorm.DB) {
+	for _, jobType := range []JobType{JobTypeRefreshMV, JobTypePruneJobs} {
+		ensureRecurringJobScheduled(ctx, db, jobType)
+	}
+}
 
-		runAt := now
-		if !lastSuccess.IsZero() {
-			if next := nextFeedRunAt(jobType, lastSuccess); next.After(now) {
-				runAt = next
-			}
-		}
+// ensureRecurringJobScheduled queues one self-rescheduling job type when
+// none is already pending. Shared by EnsureFeedRefreshScheduled and
+// EnsureMaintenanceJobsScheduled — all of these jobs follow the same
+// pattern: a partial unique index gates the active row, the handler
+// schedules its successor via nextFeedRunAt, and the boot hook backfills
+// the first run if the schedule lapsed across a restart.
+func ensureRecurringJobScheduled(ctx context.Context, db *gorm.DB, jobType JobType) {
+	now := time.Now()
 
-		if _, err := CreateJob(ctx, db, CreateJobInput{
-			Type:  jobType,
-			RunAt: runAt,
-		}); err != nil {
-			if !strings.Contains(err.Error(), "duplicate key") &&
-				!strings.Contains(err.Error(), "ux_jobs_fetch_") {
-				log.Printf("ensure %s scheduled: %v", jobType, err)
-			}
+	// If a queued/retry job already exists, the unique index would reject
+	// a fresh insert anyway — but checking first keeps the log clean.
+	var pending int64
+	if err := db.WithContext(ctx).Model(&Job{}).
+		Where("type = ? AND status IN ?", jobType, []JobStatus{JobStatusQueued, JobStatusRetry}).
+		Count(&pending).Error; err == nil && pending > 0 {
+		return
+	}
+
+	// If we ran successfully recently enough, the next slot is after now —
+	// schedule there so we don't double-fire on a quick restart cycle.
+	// Otherwise run immediately.
+	var lastSuccess time.Time
+	_ = db.WithContext(ctx).Model(&Job{}).
+		Select("COALESCE(MAX(finished_at), '1970-01-01')").
+		Where("type = ? AND status = ?", jobType, JobStatusSucceeded).
+		Scan(&lastSuccess).Error
+
+	runAt := now
+	if !lastSuccess.IsZero() {
+		if next := nextFeedRunAt(jobType, lastSuccess); next.After(now) {
+			runAt = next
 		}
 	}
+
+	if _, err := CreateJob(ctx, db, CreateJobInput{
+		Type:  jobType,
+		RunAt: runAt,
+	}); err != nil {
+		if !strings.Contains(err.Error(), "duplicate key") &&
+			!strings.Contains(err.Error(), "ux_jobs_") {
+			log.Printf("ensure %s scheduled: %v", jobType, err)
+		}
+	}
+}
+
+// processRefreshMV is the scheduled MV-refresh driver. It fires the
+// debounced TriggerRefresh entry points for the expensive view families
+// and immediately reschedules itself, so refresh cadence is governed by
+// this job's interval (and each family's debounce window) rather than by
+// scanner-agent ingestion volume.
+//
+// vulnmetrics.TriggerRefresh cascades to asset_risk after the unified
+// vuln MVs actually change, so we don't trigger asset_risk directly. The
+// cheap cluster_summary / host_exposure families are left on their event
+// triggers — they rebuild in well under a second and their sources
+// (cluster_record) change continuously anyway. TriggerRefresh returns
+// immediately (work happens in a coalesced background goroutine), so the
+// job finishes fast and the actual rebuild is debounce-gated downstream.
+func processRefreshMV(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	vulnmetrics.TriggerRefresh(db)
+	sbomviews.TriggerRefresh(db)
+	scheduleNextFeedRefresh(ctx, db, JobTypeRefreshMV)
+	return map[string]string{"status": "triggered"}, nil
+}
+
+// processPruneJobs deletes terminal job rows older than their retention
+// window so the queue table doesn't grow without bound. Only SUCCEEDED
+// and FAILED rows are touched — QUEUED / RUNNING / RETRY are live work
+// and must never be deleted. Deletion is batched (see pruneJobsByStatus)
+// so a large first-sweep backlog doesn't turn into one long, lock-holding
+// transaction. Reschedules the next sweep on success.
+func processPruneJobs(ctx context.Context, db *gorm.DB) (interface{}, error) {
+	now := time.Now()
+
+	deletedSuccess, err := pruneJobsByStatus(ctx, db, JobStatusSucceeded, now.Add(-jobRetentionSucceeded))
+	if err != nil {
+		return nil, fmt.Errorf("prune succeeded jobs: %w", err)
+	}
+	deletedFailed, err := pruneJobsByStatus(ctx, db, JobStatusFailed, now.Add(-jobRetentionFailed))
+	if err != nil {
+		return nil, fmt.Errorf("prune failed jobs: %w", err)
+	}
+
+	scheduleNextFeedRefresh(ctx, db, JobTypePruneJobs)
+	return map[string]any{
+		"status":          "ok",
+		"deleted_success": deletedSuccess,
+		"deleted_failed":  deletedFailed,
+	}, nil
+}
+
+// pruneJobsByStatus deletes terminal jobs of one status finished before
+// olderThan, in batches of jobPruneBatchSize. Postgres has no DELETE ...
+// LIMIT, so each batch deletes a bounded id set chosen by a subquery.
+// Loops until a batch comes back short (backlog drained) or the safety
+// cap is hit, pausing briefly between batches to spread I/O.
+func pruneJobsByStatus(ctx context.Context, db *gorm.DB, status JobStatus, olderThan time.Time) (int64, error) {
+	var total int64
+	for i := 0; i < jobPruneMaxBatches; i++ {
+		res := db.WithContext(ctx).Exec(`
+			DELETE FROM jobs
+			WHERE id IN (
+				SELECT id FROM jobs
+				WHERE status = ? AND finished_at IS NOT NULL AND finished_at < ?
+				LIMIT ?
+			)`, status, olderThan, jobPruneBatchSize)
+		if res.Error != nil {
+			return total, res.Error
+		}
+		total += res.RowsAffected
+		if res.RowsAffected < jobPruneBatchSize {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(jobPruneBatchPause):
+		}
+	}
+	return total, nil
 }
 
 func processProbeSecrets(ctx context.Context, db *gorm.DB, job *Job) (interface{}, error) {

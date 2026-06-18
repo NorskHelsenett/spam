@@ -20,16 +20,27 @@ import (
 // resets it per process start; SPAM uses it via cluster_sessions
 // .last_seen_event_id to ACK the highest id stored per cluster, so
 // SCAM can detect drift (mismatch -> reconcile snapshot).
+// Index notes: cluster_record is extremely write-heavy (every SCAM agent
+// rewrites its records continuously — far more UPDATEs than INSERTs), so
+// each secondary index is pure write amplification unless something
+// actually reads it. ReceivedAt and EventID previously carried `index`
+// tags that GORM materialised into idx_cluster_record_received_at /
+// idx_cluster_record_event_id; both showed zero scans in
+// pg_stat_user_indexes (received_at filters are served as residuals behind
+// the cluster_id/namespace indexes; event_id is only ever written here —
+// the ACK counter lives on cluster_sessions). The tags are dropped so
+// AutoMigrate won't recreate the indexes after the one-off DROP in
+// 20260618_drop_unused_cluster_record_indexes.sql.
 type Record struct {
 	ID             uuid.UUID      `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	Data           datatypes.JSON `gorm:"type:jsonb;not null" json:"data"`
-	ReceivedAt     time.Time      `gorm:"not null;index" json:"received_at"`
+	ReceivedAt     time.Time      `gorm:"not null" json:"received_at"`
 	IsPresent      bool           `gorm:"not null;default:true" json:"is_present"`
 	FirstSeenAt    time.Time      `gorm:"not null;default:now()" json:"first_seen_at"`
 	LastChangeAt   time.Time      `gorm:"not null;default:now()" json:"last_change_at"`
 	TombstonedAt   *time.Time     `json:"tombstoned_at,omitempty"`
 	LastSnapshotID *string        `json:"last_snapshot_id,omitempty"`
-	EventID        *int64         `gorm:"index;column:event_id" json:"event_id,omitempty"`
+	EventID        *int64         `gorm:"column:event_id" json:"event_id,omitempty"`
 }
 
 func (Record) TableName() string { return "cluster_record" }

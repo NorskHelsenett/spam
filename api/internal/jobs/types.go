@@ -38,6 +38,19 @@ const (
 	// FULL or REINDEX here — those acquire AccessExclusiveLock and
 	// belong behind a separate, explicit code path.
 	JobTypeDBMaintenance JobType = "DB_MAINTENANCE"
+	// PRUNE_JOBS deletes terminal (SUCCEEDED/FAILED) job rows older than
+	// the retention window so the queue table doesn't grow unbounded —
+	// VULN_META_FETCH alone leaves hundreds of thousands of SUCCEEDED rows
+	// over a few months. Self-rescheduling on a daily cadence, gated by
+	// ux_jobs_prune_jobs_active so replicas can't double-queue.
+	JobTypePruneJobs JobType = "PRUNE_JOBS"
+	// REFRESH_MV is the scheduled driver for the expensive materialized-view
+	// families (unified vuln + asset_risk cascade, and the SBOM views). It
+	// fires their debounced TriggerRefresh entry points on a fixed cadence
+	// so refresh frequency is driven by a predictable schedule rather than
+	// by scanner-agent ingestion volume. Self-rescheduling, gated by
+	// ux_jobs_refresh_mv_active.
+	JobTypeRefreshMV JobType = "REFRESH_MV"
 )
 
 // AdvisoryBackfillPayload is the payload for ADVISORY_BACKFILL jobs.

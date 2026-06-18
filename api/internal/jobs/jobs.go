@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type CreateJobInput struct {
@@ -16,6 +17,15 @@ type CreateJobInput struct {
 	Payload     interface{}
 	RunAt       time.Time
 	MaxAttempts int
+	// OnConflictDoNothing makes the INSERT a no-op (instead of raising a
+	// unique-violation error) when a partial-unique-index dedup constraint
+	// already holds — e.g. ux_jobs_vuln_meta_active. Without it, the
+	// high-frequency VULN_META_FETCH enqueue path logs a Postgres ERROR and
+	// burns a failed transaction on every expected collision (two replicas
+	// or two scan hooks racing the same vuln_id). With it, the conflict is
+	// silently skipped server-side. On conflict the returned job carries a
+	// generated ID but no row is written (RowsAffected = 0).
+	OnConflictDoNothing bool
 }
 
 // CreateJob inserts a new queued job.
@@ -69,7 +79,11 @@ func CreateJobTx(ctx context.Context, tx *gorm.DB, input CreateJobInput) (*Job, 
 		RunAt:       runAt,
 	}
 
-	if err := tx.WithContext(ctx).Create(&job).Error; err != nil {
+	insert := tx.WithContext(ctx)
+	if input.OnConflictDoNothing {
+		insert = insert.Clauses(clause.OnConflict{DoNothing: true})
+	}
+	if err := insert.Create(&job).Error; err != nil {
 		return nil, err
 	}
 
