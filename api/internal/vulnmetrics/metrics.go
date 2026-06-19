@@ -520,17 +520,22 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 // counts at today, so the curve still terminates at the scoped summary
 // card's open count.
 func trendScopedFromCanonical(ctx context.Context, db *gorm.DB, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) ([]TrendPoint, error) {
-	query := fmt.Sprintf(`
+	// ACL pushed into the per-asset_type UNION-ALL CTE so each branch can
+	// use its partial index instead of seq-scanning the MV. Bind order
+	// follows the WITH clauses: dates (days) then scoped_assets (ACL).
+	cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
+	query := `
 		WITH dates AS (
 			SELECT (CURRENT_DATE - g)::date AS d
 			FROM generate_series(0, ?::int - 1) AS g
 		),
+		scoped_assets AS (` + cte + `),
 		per_canonical AS (
 			SELECT canonical_id,
 			       MIN(sev_rank) AS sev_rank,
 			       MIN(last_scanned_at::date) AS first_day
-			FROM vuln_canonical_assets vca
-			WHERE %s AND last_scanned_at IS NOT NULL
+			FROM scoped_assets vca
+			WHERE last_scanned_at IS NOT NULL
 			GROUP BY canonical_id
 		)
 		SELECT
@@ -544,11 +549,10 @@ func trendScopedFromCanonical(ctx context.Context, db *gorm.DB, days int, repoSQ
 		LEFT JOIN per_canonical pc ON TRUE
 		GROUP BY d.d
 		ORDER BY d.d ASC
-	`, canonicalAssetWhere(repoSQL, imageSQL))
+	`
 
 	args := []any{days}
-	args = append(args, repoArgs...)
-	args = append(args, imageArgs...)
+	args = append(args, aclArgs...)
 
 	var rows []TrendPoint
 	if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
@@ -1333,44 +1337,42 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 	if imageSQL == "" {
 		imageSQL = "FALSE"
 	}
+	repoArgs := append([]any{}, p.RepoArgs...)
+	imageArgs := append([]any{}, p.ImageArgs...)
 	// Repo-detail drill-down: narrow the repo branch to the one repo and
 	// drop the image branch entirely, matching buildAssetUnionSQL. The
-	// v.repo_id reference is rewritten to asset_id by canonicalAssetWhere.
+	// v.repo_id reference is rewritten to asset_id by scopedAssetsCTE.
 	if p.RepoID != "" {
 		repoSQL = fmt.Sprintf("(%s) AND v.repo_id = ?", repoSQL)
+		repoArgs = append(repoArgs, p.RepoID)
 		imageSQL = "FALSE"
+		imageArgs = nil
 	}
 
-	// ACL predicate, rewritten from the unified-view alias shape to
-	// vuln_canonical_assets columns. Args follow canonicalAssetWhere's
-	// repo-branch-then-image-branch order, with the repo_id bind (if any)
-	// sitting inside the repo branch after RepoArgs.
-	where := []string{canonicalAssetWhere(repoSQL, imageSQL)}
-	var whereArgs []any
-	whereArgs = append(whereArgs, p.RepoArgs...)
-	if p.RepoID != "" {
-		whereArgs = append(whereArgs, p.RepoID)
-	}
-	whereArgs = append(whereArgs, p.ImageArgs...)
+	// ACL lives inside the UNION-ALL CTE so each asset_type branch can use
+	// its partial index; the remaining filters apply to the unioned set.
+	cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
 
+	var filt []string
+	var filtArgs []any
 	if len(p.Severities) > 0 {
-		where = append(where, "vca.severity IN ?")
-		whereArgs = append(whereArgs, p.Severities)
+		filt = append(filt, "vca.severity IN ?")
+		filtArgs = append(filtArgs, p.Severities)
 	}
 	if len(p.Sources) > 0 {
 		// sources is the per-asset jsonb source list; ?| matches any.
-		where = append(where, "vca.sources ?| ?")
-		whereArgs = append(whereArgs, p.Sources)
+		filt = append(filt, "vca.sources ?| ?")
+		filtArgs = append(filtArgs, p.Sources)
 	}
 	if p.FixOnly {
-		where = append(where, "vca.has_fix")
+		filt = append(filt, "vca.has_fix")
 	}
 	if p.KEVOnly {
-		where = append(where, "EXISTS (SELECT 1 FROM cisa_kev_entries kev WHERE kev.cve_id = vca.canonical_id)")
+		filt = append(filt, "EXISTS (SELECT 1 FROM cisa_kev_entries kev WHERE kev.cve_id = vca.canonical_id)")
 	}
 	if p.EPSSMin > 0 {
-		where = append(where, "EXISTS (SELECT 1 FROM epss_entries epss WHERE epss.cve_id = vca.canonical_id AND epss.score >= ?)")
-		whereArgs = append(whereArgs, p.EPSSMin)
+		filt = append(filt, "EXISTS (SELECT 1 FROM epss_entries epss WHERE epss.cve_id = vca.canonical_id AND epss.score >= ?)")
+		filtArgs = append(filtArgs, p.EPSSMin)
 	}
 	if len(p.Years) > 0 {
 		var nums []int
@@ -1382,8 +1384,8 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 			nums = append(nums, n)
 		}
 		if len(nums) > 0 {
-			where = append(where, "vca.cve_year IN ?")
-			whereArgs = append(whereArgs, nums)
+			filt = append(filt, "vca.cve_year IN ?")
+			filtArgs = append(filtArgs, nums)
 		}
 	}
 	if q := strings.TrimSpace(p.Query); q != "" {
@@ -1391,7 +1393,7 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 		// asset_slug is a row-level column here, so unlike the admin path
 		// it needs no canonical_assets EXISTS subquery. Alias search keys
 		// on the canonical id, mirroring loadListPageFromSummary.
-		where = append(where, `(
+		filt = append(filt, `(
 			LOWER(vca.canonical_id) LIKE ? OR LOWER(vca.title) LIKE ? OR LOWER(vca.pkg_name) LIKE ? OR LOWER(vca.asset_slug) LIKE ?
 			OR EXISTS (
 				SELECT 1 FROM vuln_metadata vm2
@@ -1399,15 +1401,21 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 				  AND LOWER(vm2.aliases::text) LIKE ?
 			)
 		)`)
-		whereArgs = append(whereArgs, needle, needle, needle, needle, needle)
+		filtArgs = append(filtArgs, needle, needle, needle, needle, needle)
 	}
 
-	whereClause := "WHERE " + strings.Join(where, " AND ")
+	filterClause := ""
+	if len(filt) > 0 {
+		filterClause = "WHERE " + strings.Join(filt, " AND ")
+	}
 
 	// Total = distinct canonical ids the caller can see after filters.
+	// ACL args (CTE) precede the filter args in bind order.
 	var total int
-	countSQL := "SELECT COUNT(DISTINCT canonical_id)::int FROM vuln_canonical_assets vca " + whereClause
-	if err := db.WithContext(ctx).Raw(countSQL, whereArgs...).Scan(&total).Error; err != nil {
+	countSQL := "WITH scoped_assets AS (" + cte + ") SELECT COUNT(DISTINCT canonical_id)::int FROM scoped_assets vca " + filterClause
+	countArgs := append([]any{}, aclArgs...)
+	countArgs = append(countArgs, filtArgs...)
+	if err := db.WithContext(ctx).Raw(countSQL, countArgs...).Scan(&total).Error; err != nil {
 		return VulnListResponse{}, err
 	}
 
@@ -1416,7 +1424,8 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 	// `grouped` CTE) and merging the per-asset source lists. KEV / EPSS
 	// feeds join on the canonical id for the exploit-weighted ORDER BY.
 	pageSQL := `
-		WITH grouped AS (
+		WITH scoped_assets AS (` + cte + `),
+		grouped AS (
 			SELECT
 				canonical_id AS vuln_id,
 				MIN(sev_rank) AS sev_rank,
@@ -1442,8 +1451,8 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 				)) AS assets,
 				COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
 				COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
-			FROM vuln_canonical_assets vca
-			` + whereClause + `
+			FROM scoped_assets vca
+			` + filterClause + `
 			GROUP BY canonical_id
 		)
 		SELECT
@@ -1466,7 +1475,8 @@ func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (Vul
 		         g.vuln_id                       ASC
 		LIMIT ? OFFSET ?
 	`
-	pageArgs := append([]any{}, whereArgs...)
+	pageArgs := append([]any{}, aclArgs...)
+	pageArgs = append(pageArgs, filtArgs...)
 	pageArgs = append(pageArgs, p.Limit, p.Offset)
 
 	var raws []listGroupRow
@@ -1506,6 +1516,36 @@ func canonicalAssetWhere(repoSQL, imageSQL string) string {
 	rc := strings.ReplaceAll(repoSQL, "v.repo_id", "asset_id")
 	ic := strings.ReplaceAll(imageSQL, "v.image_id", "asset_id")
 	return fmt.Sprintf("((asset_type = 'repo' AND %s) OR (asset_type = 'image' AND %s))", rc, ic)
+}
+
+// scopedAssetsCTE builds a UNION ALL of the two asset-type branches over
+// vuln_canonical_assets, each constrained to a single asset_type so the
+// partial indexes (idx_vuln_canonical_assets_repo / _image, both on
+// asset_id) can drive a semi-join against the caller's small readable-id
+// set. The body is meant to seed a `WITH scoped_assets AS (...)` CTE that
+// downstream queries group / filter over.
+//
+// Why not canonicalAssetWhere's single OR predicate: ORing the two
+// asset_type branches into one WHERE forces Postgres to seq-scan the
+// whole MV — neither partial index covers an asset_type-spanning OR — so
+// the scoped dashboard paid a full-table scan per request even for a
+// tiny grant. Splitting into per-asset_type branches restores index use.
+//
+// repoSQL / imageSQL are the unified-view-shaped ACL fragments (alias
+// `v`, columns v.repo_id / v.image_id); the v.<col> references are
+// rewritten to asset_id, same convention as canonicalAssetWhere. Args
+// are returned in repo-branch-then-image-branch order.
+func scopedAssetsCTE(repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (string, []any) {
+	repoPred := "asset_type = 'repo' AND " + strings.ReplaceAll(repoSQL, "v.repo_id", "asset_id")
+	imagePred := "asset_type = 'image' AND " + strings.ReplaceAll(imageSQL, "v.image_id", "asset_id")
+	cte := fmt.Sprintf(`
+		SELECT * FROM vuln_canonical_assets WHERE %s
+		UNION ALL
+		SELECT * FROM vuln_canonical_assets WHERE %s
+	`, repoPred, imagePred)
+	args := append([]any{}, repoArgs...)
+	args = append(args, imageArgs...)
+	return cte, args
 }
 
 // buildAssetUnionSQL returns the CTE body plus its bind args. Repo and
@@ -1739,19 +1779,21 @@ func computeSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repo
 
 	var countSQL string
 	if canonicalReady {
-		// Fast path: read directly from the pre-aggregated MV. The
-		// canonical-aware (asset, canonical) dedup is already baked in,
-		// so this is just a COUNT FILTER over an indexed table.
-		countSQL = fmt.Sprintf(`
+		// Fast path: read the pre-aggregated MV through the per-asset_type
+		// UNION-ALL CTE so each branch uses its partial index instead of
+		// seq-scanning the whole MV (the OR predicate from
+		// canonicalAssetWhere couldn't). The (asset, canonical) dedup is
+		// already baked in, so this is a COUNT FILTER over the scoped set.
+		cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
+		countArgs = aclArgs
+		countSQL = "WITH scoped_assets AS (" + cte + `)
 			SELECT
 				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
 				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
 				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
 				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
 				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
-			FROM vuln_canonical_assets
-			WHERE %s
-		`, canonicalAssetWhere(repoSQL, imageSQL))
+			FROM scoped_assets`
 	} else {
 		// Fallback used during the bootstrap window where the canonical
 		// MVs are still first-populating. Same canonical-aware dedup as

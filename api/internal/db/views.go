@@ -89,7 +89,20 @@ const (
 	// disk I/O. SBOM metadata changes slowly and a source fingerprint
 	// already skips the rebuild when nothing changed, so a longer window
 	// costs no freshness and reduces refresh overlap.
-	sbomViewRefreshInterval = 30 * time.Minute
+	//
+	// Raised 30m -> 6h: sbom_component_view's CONCURRENTLY rebuild now runs
+	// ~21 min and pins the Postgres node near 100% CPU for that whole window
+	// (it recomputes all ~28M component rows by re-exploding every SBOM's
+	// JSONB, even though an SBOM is immutable after upload). With 400+ agents
+	// ingesting continuously the source fingerprint never goes cold, so a 30m
+	// window meant the rebuild ran effectively back-to-back (~70% duty cycle)
+	// and starved the SCAM callcenter ingest path of CPU — agents saw
+	// `context deadline exceeded` and entered reconcile/backoff loops. The
+	// component data backs SBOM/dependency dashboards that tolerate multi-hour
+	// staleness, so 6h caps the rebuild at ~4/day. This is a bridge: the
+	// durable fix populates a regular sbom_component table incrementally at
+	// ingest and retires this full rebuild entirely.
+	sbomViewRefreshInterval = 6 * time.Hour
 )
 
 // Maximum age of the last actual refresh for the source-fingerprint
