@@ -219,6 +219,12 @@ func run() error {
 	// makes this safe to call from every replica.
 	jobs.EnsureFeedRefreshScheduled(ctx, gormDB)
 
+	// Recurring maintenance: the REFRESH_MV driver (drives MV refreshes
+	// on a schedule instead of per-ingest) and the PRUNE_JOBS retention
+	// sweep (keeps the jobs table from growing unbounded). Same self-
+	// rescheduling + partial-unique-index pattern as the feeds above.
+	jobs.EnsureMaintenanceJobsScheduled(ctx, gormDB)
+
 	// Semaphore to limit concurrent job processing
 	sem := make(chan struct{}, cfg.Concurrency)
 

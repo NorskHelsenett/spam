@@ -299,13 +299,24 @@ postgresql:
   primary:
     # Extra postgres command-line args. Used to enable
     # pg_stat_statements (powers the /admin/database slow-queries
-    # view). Changing this list requires a postgres restart because
-    # shared_preload_libraries is a postmaster-level setting.
+    # view) and to tune WAL sizing. Changing this list requires a
+    # postgres restart because shared_preload_libraries is a
+    # postmaster-level setting.
     #
     # After the StatefulSet rolls with this enabled, an operator must
     # run once (as superuser) in the spam DB:
     #   CREATE EXTENSION pg_stat_statements;
     # The SPAM app user is not a superuser and cannot do this itself.
+    #
+    # max_wal_size is raised from the 1GB default: under the agent write
+    # volume the WAL filled fast enough to force checkpoints far more often
+    # than checkpoint_timeout ("checkpoints are occurring too frequently"),
+    # with the I/O spikes that come with them. A larger ceiling spaces
+    # checkpoints out;
+    # min_wal_size keeps recycled segments around so the steady write
+    # stream doesn't thrash WAL file creation. NOTE: deployments that
+    # override extraArgs must carry these entries too, since Helm replaces
+    # (not merges) list values.
     extraArgs:
       - "-c"
       - "shared_preload_libraries=pg_stat_statements"
@@ -313,6 +324,10 @@ postgresql:
       - "pg_stat_statements.max=10000"
       - "-c"
       - "pg_stat_statements.track=top"
+      - "-c"
+      - "max_wal_size=4GB"
+      - "-c"
+      - "min_wal_size=1GB"
 
     # Persistent volume configuration
     persistence:

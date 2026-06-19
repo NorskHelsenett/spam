@@ -233,6 +233,11 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// every line, so the per-record overwrite is cheap and the
 		// final value is whatever the agent reported last.
 		rorByCluster := make(map[string]*RorMetadata, 1)
+		// First cluster_id seen in the batch. Used to ACK the real
+		// last_seen_event_id even when the push carried no data records,
+		// so a record-less push can't return a 0 ACK that the agent reads
+		// as drift (see the ACK block below).
+		var firstClusterID string
 		for _, item := range raw {
 			var incoming Incoming
 			if err := json.Unmarshal(item, &incoming); err != nil {
@@ -242,6 +247,9 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if err := validate(incoming); err != nil {
 				rejected++
 				continue
+			}
+			if firstClusterID == "" && incoming.ClusterID != "" {
+				firstClusterID = incoming.ClusterID
 			}
 			if incoming.RorMetadata != nil && incoming.RorMetadata.ClusterID != "" && incoming.ClusterID != "" {
 				rorByCluster[incoming.ClusterID] = incoming.RorMetadata
@@ -341,7 +349,21 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 							WHEN EXCLUDED.is_present THEN NULL
 							ELSE COALESCE(cluster_record.tombstoned_at, EXCLUDED.tombstoned_at)
 						END,
-						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)`)
+						event_id = GREATEST(cluster_record.event_id, EXCLUDED.event_id)
+					WHERE cluster_record.data IS DISTINCT FROM EXCLUDED.data
+					   OR cluster_record.is_present IS DISTINCT FROM EXCLUDED.is_present`)
+				// The DO UPDATE WHERE skips the write entirely when neither the
+				// resource's data nor its presence changed. Without it, a re-push
+				// of unchanged state (the common case — agents re-send their full
+				// set on every reconcile/heartbeat) still rewrote the row, and
+				// since every UPDATE is a new MVCC tuple that's pure dead-tuple
+				// churn: it's what bloated cluster_record at multi-GB/hour. Row
+				// event_id may lag on a skipped no-op, which is harmless — the
+				// ACK watermark lives on cluster_sessions.last_seen_event_id,
+				// advanced separately by touchClusterSession. received_at also
+				// stops tracking "last push" for unchanged rows and instead
+				// tracks "last change", consistent with last_change_at and the
+				// MV source fingerprint that already keys on it.
 
 				if err := db.Exec(sb.String(), args...).Error; err != nil {
 					// Surface the underlying GORM error so silent 500s
@@ -364,6 +386,21 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			}
 		}
 
+		// The snapshot apply + session/ACK writes below run on a detached,
+		// bounded context rather than r.Context(). When the DB is briefly
+		// contended a SCAM agent's HTTP client can time out and cancel
+		// r.Context() mid-request — which aborted applySnapshot before it
+		// tombstoned stale rows AND aborted touchClusterSession before it
+		// advanced last_seen_event_id. The stranded ACK made the agent see
+		// an event_id mismatch and re-push the full snapshot, a reconcile
+		// storm that re-churned cluster_record on every retry (and never
+		// converged while the cancellation persisted). Completing this work
+		// server-side regardless of the client connection lets the ACK
+		// advance so the next push converges. The upsert batch above
+		// already runs detached (db.Exec, no r.Context()).
+		writeCtx, cancelWrite := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancelWrite()
+
 		// Apply Snapshot records after the regular upsert. Tombstone
 		// rows for (cluster_id, target_kind) whose computed
 		// resource-key isn't in resource_keys, gated on
@@ -374,7 +411,7 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 			if snap.ClusterID != "" {
 				clusterIDs[snap.ClusterID] = struct{}{}
 			}
-			if err := applySnapshot(r.Context(), db, snap, now); err != nil {
+			if err := applySnapshot(writeCtx, db, snap, now); err != nil {
 				log.Printf("callcenter: snapshot apply (cluster=%s target_kind=%s snapshot_id=%s): %v",
 					snap.ClusterID, snap.TargetKind, snap.SnapshotID, err)
 				// Don't fail the whole batch on snapshot apply errors —
@@ -394,10 +431,10 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// touchClusterSession). No-op when the batch carried no
 		// ror_metadata for this cluster.
 		for clusterID := range clusterIDs {
-			if err := touchClusterSession(r.Context(), db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
+			if err := touchClusterSession(writeCtx, db, clusterID, now, int64(maxEventIDByCluster[clusterID])); err != nil {
 				log.Printf("callcenter: touch session %s: %v", clusterID, err)
 			}
-			upsertClusterRorBinding(r.Context(), db, clusterID, rorByCluster[clusterID])
+			upsertClusterRorBinding(writeCtx, db, clusterID, rorByCluster[clusterID])
 		}
 
 		if len(items) > 0 || len(snapshots) > 0 {
@@ -458,14 +495,17 @@ func CallcenterHandler(db *gorm.DB, _ cache.Store) http.HandlerFunc {
 		// it fires a reconcile snapshot. Single-cluster batches are
 		// the common case (one agent = one cluster); we ack the first
 		// cluster encountered, which is that cluster.
+		// Always ACK the real last_seen_event_id for the batch's cluster,
+		// even when the push carried no data records (snapshot-only, or a
+		// metrics/heartbeat-style push routed through callcenter). The
+		// previous version left ackLastSeen=0 whenever len(items)==0, which
+		// an agent reads as an event_id mismatch and answers with a full
+		// reconcile snapshot — so a record-less push every N minutes would
+		// trigger a reconcile every N minutes regardless of actual drift,
+		// re-churning cluster_record on a fixed cadence.
 		var ackLastSeen int64
-		if len(items) > 0 {
-			var first struct {
-				ClusterID string `json:"cluster_id"`
-			}
-			if err := json.Unmarshal(items[0].data, &first); err == nil && first.ClusterID != "" {
-				ackLastSeen = lookupLastSeenEventID(r.Context(), db, first.ClusterID)
-			}
+		if firstClusterID != "" {
+			ackLastSeen = lookupLastSeenEventID(writeCtx, db, firstClusterID)
 		}
 
 		writeJSON(w, http.StatusOK, ingestResponse{

@@ -25,9 +25,19 @@ const (
 	facetsCacheKey  = "vuln:facets:v1"
 	// Bump the prefix when the list ORDER BY or shape changes — the
 	// summaryVersion only tracks data freshness, so old entries would
-	// keep serving the previous ordering until their 7-day TTL.
-	listCachePrefix = "vuln:list:v5:"
-	summaryCacheTTL = 7 * 24 * time.Hour
+	// keep serving the previous ordering until their 7-day TTL. v6:
+	// summaryVersion changed shape (MV-refresh watermark), so the hashed
+	// key differs; bump so no v5 entry is ever consulted.
+	listCachePrefix = "vuln:list:v6:"
+	// Per-subject scoped caches. Like the list cache they embed the
+	// caller's ACL fragments + args in the hashed key and are versioned
+	// on the MV-refresh watermark, so two callers with identical readable
+	// sets share an entry and every entry invalidates exactly when the
+	// vuln MVs rebuild. v1: introduced when the scoped summary/trend paths
+	// moved onto vuln_canonical_assets.
+	summaryScopedCachePrefix = "vuln:summaryscoped:v1:"
+	trendScopedCachePrefix   = "vuln:trendscoped:v1:"
+	summaryCacheTTL          = 7 * 24 * time.Hour
 	// refreshMaxRuntime must outlast the worst-case contended rebuild of
 	// all four unified/canonical vuln MVs, not just the uncontended ~40s.
 	// If it fires mid-refresh the debounce timestamp never gets recorded
@@ -160,11 +170,22 @@ type VulnListParams struct {
 	ImageArgs []any
 }
 
+// summaryVersion is the cache-invalidation watermark for every vuln
+// dashboard read (summary, repos, facets, list). It is the last-refresh
+// timestamp of the unified/canonical vuln MV family — see
+// db.VulnViewsRefreshedAt for why this, and not the source-table
+// watermarks, is the correct key: the cached responses are a pure function
+// of those MVs, so they must invalidate exactly when the MVs rebuild and
+// not on every source-table write.
+//
+// The previous shape captured four separate scan/OSV/VEX/image-scan
+// maxes. Once the MV refresh interval was decoupled from ingestion (raised
+// to hourly), those source watermarks advanced every few seconds while the
+// MV data stayed identical, so the caches were perpetually "stale" and
+// every read recomputed against the DB. Keying on the MV refresh time
+// restores effective caching.
 type summaryVersion struct {
-	LastScanAt      *time.Time `json:"last_scan_at" gorm:"column:last_scan_at"`
-	LastOSVAt       *time.Time `json:"last_osv_at" gorm:"column:last_osv_at"`
-	LastVEXAt       *time.Time `json:"last_vex_at" gorm:"column:last_vex_at"`
-	LastImageScanAt *time.Time `json:"last_image_scan_at" gorm:"column:last_image_scan_at"`
+	VulnViewsRefreshedAt *time.Time `json:"vuln_views_refreshed_at"`
 }
 
 type cachedSummary struct {
@@ -421,22 +442,24 @@ func LoadTrend(ctx context.Context, db *gorm.DB, days int) ([]TrendPoint, error)
 
 // LoadTrendScoped is the narrow-grant counterpart to LoadTrend. The
 // daily snapshot table is fleet-global with no per-asset breakdown,
-// so for callers with narrower visibility we recompute the series on
-// the fly from the unified vuln views.
+// so for callers with narrower visibility we recompute the series.
 //
 // Semantics: for each day in the window, count the caller's open
-// canonical vulns whose last-scan date is on or before that day. The
+// canonical vulns whose activation date is on or before that day. The
 // curve grows monotonically toward today, where today's value equals
-// the scoped summary card's open count (every canonical with any
-// scanned_at <= today is counted). The cumulative form replaces an
-// earlier scan-day binning that left "today = 0" whenever no scan
-// happened to finish on the current day — the chart looked broken
-// next to a summary card showing thousands of open findings.
+// the scoped summary card's open count (every canonical with a scan
+// date <= today is counted). The cumulative form replaces an earlier
+// scan-day binning that left "today = 0" whenever no scan happened to
+// finish on the current day — the chart looked broken next to a summary
+// card showing thousands of open findings.
 //
-// repoSQL / imageSQL are the same ACL predicates LoadSummaryScoped
-// and VulnListHandler pass — predicates against the `v` alias on the
-// unified views. Empty or "FALSE" excludes that branch. Like
-// LoadSummaryScoped this path is intentionally uncached.
+// repoSQL / imageSQL are the same ACL predicates LoadSummaryScoped and
+// VulnListHandler pass — predicates against the `v` alias on the unified
+// views. Empty or "FALSE" excludes that branch.
+//
+// Cached per (subject ACL fragments, days) against the MV-refresh
+// watermark, so a rebuild invalidates exactly when the underlying MVs
+// change — same scheme as the list cache.
 func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) ([]TrendPoint, error) {
 	if days <= 0 {
 		days = 30
@@ -444,23 +467,107 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 	if !unifiedViewsReady(ctx, db) {
 		return []TrendPoint{}, nil
 	}
-	repoSQL = strings.TrimSpace(repoSQL)
-	if repoSQL == "" {
-		repoSQL = "FALSE"
-	}
-	imageSQL = strings.TrimSpace(imageSQL)
-	if imageSQL == "" {
-		imageSQL = "FALSE"
+
+	store := cache.NewPostgresStore(db)
+	version, versionErr := querySummaryVersion(ctx, db)
+	var cacheKey string
+	if versionErr == nil {
+		cacheKey = trendScopedCacheKey(version, days, repoSQL, repoArgs, imageSQL, imageArgs)
+		if entry, ok, err := cache.GetJSON[cachedTrend](ctx, store, cacheKey); err == nil && ok {
+			if sameVersion(entry.Version, version) {
+				return entry.Rows, nil
+			}
+		}
 	}
 
-	// scoped → canonical_per_asset collapses (asset, vuln) findings
-	// onto canonical_id and worst severity. per_canonical further
-	// dedupes across assets so each canonical contributes exactly
-	// once to a given day, with its earliest observed scan date as
-	// the activation day. The final SELECT cross-joins the date axis
-	// against per_canonical and counts whatever has activated by
-	// each day — today picks up everything, so it lines up with the
-	// summary card.
+	rsql := strings.TrimSpace(repoSQL)
+	if rsql == "" {
+		rsql = "FALSE"
+	}
+	isql := strings.TrimSpace(imageSQL)
+	if isql == "" {
+		isql = "FALSE"
+	}
+
+	var rows []TrendPoint
+	var err error
+	if canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db); canonicalReady {
+		rows, err = trendScopedFromCanonical(ctx, db, days, rsql, repoArgs, isql, imageArgs)
+	} else {
+		rows, err = trendScopedFromUnified(ctx, db, days, rsql, repoArgs, isql, imageArgs)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		rows = []TrendPoint{}
+	}
+
+	if versionErr == nil && cacheKey != "" {
+		_ = cache.SetJSON(ctx, store, cacheKey, cachedTrend{Version: version, Rows: rows}, summaryCacheTTL)
+	}
+	return rows, nil
+}
+
+// trendScopedFromCanonical builds the cumulative series from the
+// pre-aggregated vuln_canonical_assets MV. Canonicalization and sev_rank
+// are baked in, so this collapses straight to per-canonical and skips
+// the request-time UNION + vuln_metadata join the bootstrap fallback
+// does. The activation day is the canonical's earliest per-asset
+// last_scanned_at — the MV carries last_scanned_at, not the first scan,
+// so the historical ramp leans slightly toward recent days versus the
+// fallback. The endpoint is unaffected: every canonical with a scan date
+// counts at today, so the curve still terminates at the scoped summary
+// card's open count.
+func trendScopedFromCanonical(ctx context.Context, db *gorm.DB, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) ([]TrendPoint, error) {
+	// ACL pushed into the per-asset_type UNION-ALL CTE so each branch can
+	// use its partial index instead of seq-scanning the MV. Bind order
+	// follows the WITH clauses: dates (days) then scoped_assets (ACL).
+	cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
+	query := `
+		WITH dates AS (
+			SELECT (CURRENT_DATE - g)::date AS d
+			FROM generate_series(0, ?::int - 1) AS g
+		),
+		scoped_assets AS (` + cte + `),
+		per_canonical AS (
+			SELECT canonical_id,
+			       MIN(sev_rank) AS sev_rank,
+			       MIN(last_scanned_at::date) AS first_day
+			FROM scoped_assets vca
+			WHERE last_scanned_at IS NOT NULL
+			GROUP BY canonical_id
+		)
+		SELECT
+			TO_CHAR(d.d, 'YYYY-MM-DD') AS date,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 1 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS critical,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 2 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS high,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 3 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS medium,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 4 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS low,
+			COALESCE(SUM(CASE WHEN pc.sev_rank = 5 AND pc.first_day <= d.d THEN 1 ELSE 0 END), 0)::int AS unknown
+		FROM dates d
+		LEFT JOIN per_canonical pc ON TRUE
+		GROUP BY d.d
+		ORDER BY d.d ASC
+	`
+
+	args := []any{days}
+	args = append(args, aclArgs...)
+
+	var rows []TrendPoint
+	if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// trendScopedFromUnified is the bootstrap fallback used before the
+// canonical MVs populate. It re-aggregates from the per-finding unified
+// views at request time: scoped → canonical_per_asset collapses
+// (asset, vuln) findings onto canonical_id + worst severity, per_canonical
+// dedupes across assets, and the activation day is the earliest observed
+// scan date.
+func trendScopedFromUnified(ctx context.Context, db *gorm.DB, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) ([]TrendPoint, error) {
 	query := fmt.Sprintf(`
 		WITH dates AS (
 			SELECT (CURRENT_DATE - g)::date AS d
@@ -518,9 +625,6 @@ func LoadTrendScoped(ctx context.Context, db *gorm.DB, days int, repoSQL string,
 	if err := db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	if rows == nil {
-		rows = []TrendPoint{}
-	}
 	return rows, nil
 }
 
@@ -564,8 +668,8 @@ type cachedFacets struct {
 
 // LoadFacets returns the distinct sources + CVE years currently present
 // in the unified vuln views. Versioned against the same summaryVersion
-// (scan / OSV / VEX / image-scan watermarks) as LoadSummary so the cache
-// drops the moment any scan activity could have introduced new values.
+// (the vuln MV refresh watermark) as LoadSummary so the cache drops the
+// moment a rebuild could have introduced new values.
 func LoadFacets(ctx context.Context, db *gorm.DB) (Facets, error) {
 	store := cache.NewPostgresStore(db)
 
@@ -663,12 +767,49 @@ func listCacheKey(version summaryVersion, p VulnListParams) string {
 	return fmt.Sprintf("%s%x", listCachePrefix, h.Sum64())
 }
 
+// cachedTrend is the scoped-trend cache payload. Reuses summaryVersion
+// (the MV-refresh watermark) so a rebuild orphans the entry.
+type cachedTrend struct {
+	Version summaryVersion `json:"version"`
+	Rows    []TrendPoint   `json:"rows"`
+}
+
+// summaryScopedCacheKey / trendScopedCacheKey hash the caller's ACL
+// fragments (+ days for trend) alongside the version, mirroring
+// listCacheKey: identical readable sets collide onto one entry, which is
+// correct because the result is a pure function of those fragments and
+// the MV contents at that version.
+func summaryScopedCacheKey(version summaryVersion, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(version)
+	_ = enc.Encode(struct {
+		RepoSQL, ImageSQL   string
+		RepoArgs, ImageArgs []any
+	}{repoSQL, imageSQL, repoArgs, imageArgs})
+	return fmt.Sprintf("%s%x", summaryScopedCachePrefix, h.Sum64())
+}
+
+func trendScopedCacheKey(version summaryVersion, days int, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) string {
+	h := fnv.New64a()
+	enc := json.NewEncoder(h)
+	_ = enc.Encode(version)
+	_ = enc.Encode(struct {
+		Days                int
+		RepoSQL, ImageSQL   string
+		RepoArgs, ImageArgs []any
+	}{days, repoSQL, imageSQL, repoArgs, imageArgs})
+	return fmt.Sprintf("%s%x", trendScopedCachePrefix, h.Sum64())
+}
+
 // LoadListPage returns a paginated page of grouped vulnerabilities,
 // plus the total group count for the same filters. Cached per
 // (version, filters, ACL scope, page); invalidated implicitly via
-// summaryVersion — any scan / OSV / VEX / image-scan completion
-// changes the version hash, so stale keys are orphaned and expire
-// via TTL. Fresh after every scan without a manual bust.
+// summaryVersion — a vuln MV rebuild bumps the refresh watermark and
+// changes the version hash, so stale keys are orphaned and expire via
+// TTL. Fresh after every rebuild without a manual bust. (Source-table
+// writes between rebuilds intentionally do NOT invalidate: the page is
+// read from the MVs, whose contents don't change until they refresh.)
 func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
 	// 50 is the default; 100 caps the page so a single request can't
 	// pull the whole table. Old code defaulted to 100 and capped at
@@ -706,16 +847,27 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		return VulnListResponse{Total: 0, Limit: p.Limit, Offset: p.Offset, Items: []VulnGroup{}}, nil
 	}
 
-	// Admin path: repo/image fragments evaluate to "TRUE" (or empty,
-	// which the helpers below normalise to TRUE). Combined with no
-	// per-repo narrowing, that's the signal to take the canonical
-	// summary MV fast-path.
+	// Canonical MV paths. Both read pre-aggregated, indexed MVs and skip
+	// the request-time UNION + vuln_metadata join + scanner-variant
+	// collapse that the bootstrap fallback below performs.
+	//
+	//   - Admin path (no per-repo narrowing, unrestricted fragments) reads
+	//     the per-canonical vuln_canonical_summary MV directly.
+	//   - Scoped path reads vuln_canonical_assets, whose (asset, canonical)
+	//     grain lets the caller's ACL filter on the indexed asset columns
+	//     before grouping to one row per canonical.
 	canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db)
 	isAdminListing := p.RepoID == "" &&
 		(strings.TrimSpace(p.RepoSQL) == "" || strings.TrimSpace(p.RepoSQL) == "TRUE") &&
 		(strings.TrimSpace(p.ImageSQL) == "" || strings.TrimSpace(p.ImageSQL) == "TRUE")
-	if canonicalReady && isAdminListing {
-		resp, err := loadListPageFromSummary(ctx, db, p)
+	if canonicalReady {
+		var resp VulnListResponse
+		var err error
+		if isAdminListing {
+			resp, err = loadListPageFromSummary(ctx, db, p)
+		} else {
+			resp, err = loadListPageScoped(ctx, db, p)
+		}
 		if err != nil {
 			return VulnListResponse{}, err
 		}
@@ -728,6 +880,9 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		return resp, nil
 	}
 
+	// Bootstrap fallback: the canonical MVs are not yet populated (fresh
+	// deploy, before the first refresh), so re-aggregate from the
+	// per-finding unified views at request time.
 	base, args := buildAssetUnionSQL(p)
 
 	// Row-level filters on the UNION result (apply before GROUP BY so
@@ -912,31 +1067,58 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 	groupArgs = append(groupArgs, whereArgs...)
 	groupArgs = append(groupArgs, p.Limit, p.Offset)
 
-	type groupRow struct {
-		VulnID             string          `gorm:"column:vuln_id"`
-		SevRank            int             `gorm:"column:sev_rank"`
-		CVEYear            *int            `gorm:"column:cve_year"`
-		Severity           string          `gorm:"column:severity"`
-		PkgName            string          `gorm:"column:pkg_name"`
-		InstalledVersion   string          `gorm:"column:installed_version"`
-		FixedVersion       string          `gorm:"column:fixed_version"`
-		Title              string          `gorm:"column:title"`
-		Description        string          `gorm:"column:description"`
-		Sources            json.RawMessage `gorm:"column:sources"`
-		Assets             json.RawMessage `gorm:"column:assets"`
-		RepoCount          int             `gorm:"column:repo_count"`
-		ImageCount         int             `gorm:"column:image_count"`
-		KEVKnown           bool            `gorm:"column:kev_known"`
-		KEVKnownRansomware bool            `gorm:"column:kev_known_ransomware"`
-		KEVDateAdded       *time.Time      `gorm:"column:kev_date_added"`
-		EPSSScore          float32         `gorm:"column:epss_score"`
-		EPSSPercentile     float32         `gorm:"column:epss_percentile"`
-	}
-	var raws []groupRow
+	var raws []listGroupRow
 	if err := db.WithContext(ctx).Raw(groupSQL, groupArgs...).Scan(&raws).Error; err != nil {
 		return VulnListResponse{}, err
 	}
 
+	resp := VulnListResponse{
+		Total:  total,
+		Limit:  p.Limit,
+		Offset: p.Offset,
+		Items:  finalizeListItems(ctx, db, raws),
+	}
+
+	if versionErr == nil && cacheKey != "" {
+		_ = cache.SetJSON(ctx, store, cacheKey, cachedListEntry{
+			Version:  version,
+			Response: resp,
+		}, summaryCacheTTL)
+	}
+
+	return resp, nil
+}
+
+// listGroupRow is the raw scan target shared by all three list query
+// paths (admin summary MV, scoped canonical-assets, bootstrap union).
+// Every path projects this exact column set so they can share
+// finalizeListItems for the JSON decode + metadata enrichment pass.
+type listGroupRow struct {
+	VulnID             string          `gorm:"column:vuln_id"`
+	SevRank            int             `gorm:"column:sev_rank"`
+	CVEYear            *int            `gorm:"column:cve_year"`
+	Severity           string          `gorm:"column:severity"`
+	PkgName            string          `gorm:"column:pkg_name"`
+	InstalledVersion   string          `gorm:"column:installed_version"`
+	FixedVersion       string          `gorm:"column:fixed_version"`
+	Title              string          `gorm:"column:title"`
+	Description        string          `gorm:"column:description"`
+	Sources            json.RawMessage `gorm:"column:sources"`
+	Assets             json.RawMessage `gorm:"column:assets"`
+	RepoCount          int             `gorm:"column:repo_count"`
+	ImageCount         int             `gorm:"column:image_count"`
+	KEVKnown           bool            `gorm:"column:kev_known"`
+	KEVKnownRansomware bool            `gorm:"column:kev_known_ransomware"`
+	KEVDateAdded       *time.Time      `gorm:"column:kev_date_added"`
+	EPSSScore          float32         `gorm:"column:epss_score"`
+	EPSSPercentile     float32         `gorm:"column:epss_percentile"`
+}
+
+// finalizeListItems decodes the aggregated JSON columns and runs the one
+// bulk vuln_metadata pass (aliases + OSV applicable-fix override) every
+// list query path shares. items[i].VulnID is the canonical id, so the
+// MetadataForMany lookup matches on canonical_id OR vuln_id.
+func finalizeListItems(ctx context.Context, db *gorm.DB, raws []listGroupRow) []VulnGroup {
 	items := make([]VulnGroup, 0, len(raws))
 	for _, r := range raws {
 		var sources []string
@@ -973,17 +1155,6 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 		})
 	}
 
-	// One bulk metadata lookup serves two purposes for the page:
-	//   - Aliases per group so the UI can show cross-references
-	//     (CVE ↔ GHSA ↔ BIT) beside the canonical id.
-	//   - OSV affected-ranges data for the fix-version override —
-	//     scanners sometimes report the first range's fix on multi-
-	//     interval advisories even when the installed version lives
-	//     in a later interval (valkey 8.1.3-0 getting fix=7.2.11 when
-	//     the applicable fix is 8.1.4).
-	//
-	// items[i].VulnID is the canonical from the GROUP BY, so we
-	// query MetadataForMany which matches on canonical_id OR vuln_id.
 	if len(items) > 0 {
 		ids := make([]string, 0, len(items))
 		for _, it := range items {
@@ -995,8 +1166,8 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 				if meta == nil {
 					continue
 				}
-				// Aliases: strip the canonical itself from the list
-				// shown as cross-references.
+				// Aliases: drop the canonical itself from the
+				// cross-reference list shown beside it.
 				aliases := vulnmeta.Aliases(meta)
 				out := aliases[:0]
 				for _, a := range aliases {
@@ -1007,9 +1178,8 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 				if len(out) > 0 {
 					items[i].Aliases = out
 				}
-				// Fix-version override: use OSV's own range data when
-				// available. Scanner value stays when no OSV affected
-				// entry matches the package / installed version.
+				// Fix-version override: prefer OSV's own range data when
+				// it resolves for this package / installed version.
 				if fix := vulnmeta.ApplicableFix(
 					vulnmeta.ExtractOSVAffected(meta),
 					items[i].PkgName,
@@ -1020,22 +1190,7 @@ func LoadListPage(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListR
 			}
 		}
 	}
-
-	resp := VulnListResponse{
-		Total:  total,
-		Limit:  p.Limit,
-		Offset: p.Offset,
-		Items:  items,
-	}
-
-	if versionErr == nil && cacheKey != "" {
-		_ = cache.SetJSON(ctx, store, cacheKey, cachedListEntry{
-			Version:  version,
-			Response: resp,
-		}, summaryCacheTTL)
-	}
-
-	return resp, nil
+	return items
 }
 
 // loadListPageFromSummary is the admin fast-path. Reads directly from
@@ -1149,106 +1304,191 @@ func loadListPageFromSummary(ctx context.Context, db *gorm.DB, p VulnListParams)
 	pageArgs := append([]any{}, whereArgs...)
 	pageArgs = append(pageArgs, p.Limit, p.Offset)
 
-	type groupRow struct {
-		VulnID             string          `gorm:"column:vuln_id"`
-		SevRank            int             `gorm:"column:sev_rank"`
-		CVEYear            *int            `gorm:"column:cve_year"`
-		Severity           string          `gorm:"column:severity"`
-		PkgName            string          `gorm:"column:pkg_name"`
-		InstalledVersion   string          `gorm:"column:installed_version"`
-		FixedVersion       string          `gorm:"column:fixed_version"`
-		Title              string          `gorm:"column:title"`
-		Description        string          `gorm:"column:description"`
-		Sources            json.RawMessage `gorm:"column:sources"`
-		Assets             json.RawMessage `gorm:"column:assets"`
-		RepoCount          int             `gorm:"column:repo_count"`
-		ImageCount         int             `gorm:"column:image_count"`
-		KEVKnown           bool            `gorm:"column:kev_known"`
-		KEVKnownRansomware bool            `gorm:"column:kev_known_ransomware"`
-		KEVDateAdded       *time.Time      `gorm:"column:kev_date_added"`
-		EPSSScore          float32         `gorm:"column:epss_score"`
-		EPSSPercentile     float32         `gorm:"column:epss_percentile"`
-	}
-	var raws []groupRow
+	var raws []listGroupRow
 	if err := db.WithContext(ctx).Raw(pageSQL, pageArgs...).Scan(&raws).Error; err != nil {
 		return VulnListResponse{}, err
-	}
-
-	items := make([]VulnGroup, 0, len(raws))
-	for _, r := range raws {
-		var sources []string
-		if len(r.Sources) > 0 {
-			_ = json.Unmarshal(r.Sources, &sources)
-		}
-		var assets []VulnAsset
-		if len(r.Assets) > 0 {
-			_ = json.Unmarshal(r.Assets, &assets)
-		}
-		if sources == nil {
-			sources = []string{}
-		}
-		if assets == nil {
-			assets = []VulnAsset{}
-		}
-		items = append(items, VulnGroup{
-			VulnID:             r.VulnID,
-			Severity:           r.Severity,
-			PkgName:            r.PkgName,
-			InstalledVersion:   r.InstalledVersion,
-			FixedVersion:       r.FixedVersion,
-			Title:              r.Title,
-			Description:        r.Description,
-			Sources:            sources,
-			Assets:             assets,
-			RepoCount:          r.RepoCount,
-			ImageCount:         r.ImageCount,
-			KEVKnown:           r.KEVKnown,
-			KEVKnownRansomware: r.KEVKnownRansomware,
-			KEVDateAdded:       r.KEVDateAdded,
-			EPSSScore:          r.EPSSScore,
-			EPSSPercentile:     r.EPSSPercentile,
-		})
-	}
-
-	// Same MetadataForMany pass as the legacy path so the UI gets
-	// aliases and the OSV applicable-fix override.
-	if len(items) > 0 {
-		ids := make([]string, 0, len(items))
-		for _, it := range items {
-			ids = append(ids, it.VulnID)
-		}
-		if metas, err := vulnmeta.MetadataForMany(ctx, db, ids); err == nil {
-			for i := range items {
-				meta := metas[items[i].VulnID]
-				if meta == nil {
-					continue
-				}
-				aliases := vulnmeta.Aliases(meta)
-				out := aliases[:0]
-				for _, a := range aliases {
-					if a != items[i].VulnID {
-						out = append(out, a)
-					}
-				}
-				if len(out) > 0 {
-					items[i].Aliases = out
-				}
-				if fix := vulnmeta.ApplicableFix(
-					vulnmeta.ExtractOSVAffected(meta),
-					items[i].PkgName,
-					items[i].InstalledVersion,
-				); fix != "" {
-					items[i].FixedVersion = fix
-				}
-			}
-		}
 	}
 
 	return VulnListResponse{
 		Total:  total,
 		Limit:  p.Limit,
 		Offset: p.Offset,
-		Items:  items,
+		Items:  finalizeListItems(ctx, db, raws),
+	}, nil
+}
+
+// loadListPageScoped is the narrow-grant counterpart to
+// loadListPageFromSummary. Admins read the per-canonical
+// vuln_canonical_summary MV; scoped callers can't, because that MV is
+// already collapsed across assets and ACL filters at asset grain. This
+// reads vuln_canonical_assets instead — one row per (asset, canonical)
+// with canonicalization, sev_rank, and display fields baked in at
+// refresh time — applies the caller's ACL on the indexed
+// (asset_type, asset_id) columns, then groups to one row per canonical.
+// It replaces the old request-time UNION of the per-finding views +
+// vuln_metadata join + scanner-variant collapse (buildAssetUnionSQL)
+// that scoped users used to pay on every page load.
+func loadListPageScoped(ctx context.Context, db *gorm.DB, p VulnListParams) (VulnListResponse, error) {
+	repoSQL := strings.TrimSpace(p.RepoSQL)
+	if repoSQL == "" {
+		repoSQL = "FALSE"
+	}
+	imageSQL := strings.TrimSpace(p.ImageSQL)
+	if imageSQL == "" {
+		imageSQL = "FALSE"
+	}
+	repoArgs := append([]any{}, p.RepoArgs...)
+	imageArgs := append([]any{}, p.ImageArgs...)
+	// Repo-detail drill-down: narrow the repo branch to the one repo and
+	// drop the image branch entirely, matching buildAssetUnionSQL. The
+	// v.repo_id reference is rewritten to asset_id by scopedAssetsCTE.
+	if p.RepoID != "" {
+		repoSQL = fmt.Sprintf("(%s) AND v.repo_id = ?", repoSQL)
+		repoArgs = append(repoArgs, p.RepoID)
+		imageSQL = "FALSE"
+		imageArgs = nil
+	}
+
+	// ACL lives inside the UNION-ALL CTE so each asset_type branch can use
+	// its partial index; the remaining filters apply to the unioned set.
+	cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
+
+	var filt []string
+	var filtArgs []any
+	if len(p.Severities) > 0 {
+		filt = append(filt, "vca.severity IN ?")
+		filtArgs = append(filtArgs, p.Severities)
+	}
+	if len(p.Sources) > 0 {
+		// sources is the per-asset jsonb source list; ?| matches any.
+		filt = append(filt, "vca.sources ?| ?")
+		filtArgs = append(filtArgs, p.Sources)
+	}
+	if p.FixOnly {
+		filt = append(filt, "vca.has_fix")
+	}
+	if p.KEVOnly {
+		filt = append(filt, "EXISTS (SELECT 1 FROM cisa_kev_entries kev WHERE kev.cve_id = vca.canonical_id)")
+	}
+	if p.EPSSMin > 0 {
+		filt = append(filt, "EXISTS (SELECT 1 FROM epss_entries epss WHERE epss.cve_id = vca.canonical_id AND epss.score >= ?)")
+		filtArgs = append(filtArgs, p.EPSSMin)
+	}
+	if len(p.Years) > 0 {
+		var nums []int
+		for _, y := range p.Years {
+			n, err := strconv.Atoi(strings.TrimSpace(y))
+			if err != nil || n <= 0 {
+				continue
+			}
+			nums = append(nums, n)
+		}
+		if len(nums) > 0 {
+			filt = append(filt, "vca.cve_year IN ?")
+			filtArgs = append(filtArgs, nums)
+		}
+	}
+	if q := strings.TrimSpace(p.Query); q != "" {
+		needle := "%" + strings.ToLower(q) + "%"
+		// asset_slug is a row-level column here, so unlike the admin path
+		// it needs no canonical_assets EXISTS subquery. Alias search keys
+		// on the canonical id, mirroring loadListPageFromSummary.
+		filt = append(filt, `(
+			LOWER(vca.canonical_id) LIKE ? OR LOWER(vca.title) LIKE ? OR LOWER(vca.pkg_name) LIKE ? OR LOWER(vca.asset_slug) LIKE ?
+			OR EXISTS (
+				SELECT 1 FROM vuln_metadata vm2
+				WHERE vm2.vuln_id = vca.canonical_id
+				  AND LOWER(vm2.aliases::text) LIKE ?
+			)
+		)`)
+		filtArgs = append(filtArgs, needle, needle, needle, needle, needle)
+	}
+
+	filterClause := ""
+	if len(filt) > 0 {
+		filterClause = "WHERE " + strings.Join(filt, " AND ")
+	}
+
+	// Total = distinct canonical ids the caller can see after filters.
+	// ACL args (CTE) precede the filter args in bind order.
+	var total int
+	countSQL := "WITH scoped_assets AS (" + cte + ") SELECT COUNT(DISTINCT canonical_id)::int FROM scoped_assets vca " + filterClause
+	countArgs := append([]any{}, aclArgs...)
+	countArgs = append(countArgs, filtArgs...)
+	if err := db.WithContext(ctx).Raw(countSQL, countArgs...).Scan(&total).Error; err != nil {
+		return VulnListResponse{}, err
+	}
+
+	// Group the (asset, canonical) rows to one per canonical, picking
+	// display fields from the worst-severity asset (mirrors the legacy
+	// `grouped` CTE) and merging the per-asset source lists. KEV / EPSS
+	// feeds join on the canonical id for the exploit-weighted ORDER BY.
+	pageSQL := `
+		WITH scoped_assets AS (` + cte + `),
+		grouped AS (
+			SELECT
+				canonical_id AS vuln_id,
+				MIN(sev_rank) AS sev_rank,
+				MAX(cve_year)::int AS cve_year,
+				(ARRAY_AGG(severity          ORDER BY sev_rank ASC, asset_id ASC))[1] AS severity,
+				(ARRAY_AGG(pkg_name          ORDER BY sev_rank ASC, asset_id ASC))[1] AS pkg_name,
+				(ARRAY_AGG(installed_version ORDER BY sev_rank ASC, asset_id ASC))[1] AS installed_version,
+				(ARRAY_AGG(fixed_version     ORDER BY sev_rank ASC, asset_id ASC))[1] AS fixed_version,
+				(ARRAY_AGG(title             ORDER BY sev_rank ASC, asset_id ASC))[1] AS title,
+				(ARRAY_AGG(description       ORDER BY sev_rank ASC, asset_id ASC))[1] AS description,
+				-- Merge the per-asset jsonb source lists into one distinct
+				-- set: array_agg gathers the group's jsonb arrays, unnest
+				-- yields each array, jsonb_array_elements_text flattens.
+				COALESCE(
+					(SELECT jsonb_agg(DISTINCT s)
+					 FROM unnest(array_agg(vca.sources)) AS arr,
+					      jsonb_array_elements_text(arr) AS s
+					 WHERE s IS NOT NULL AND s <> ''),
+					'[]'::jsonb
+				) AS sources,
+				jsonb_agg(DISTINCT jsonb_build_object(
+					'type', asset_type, 'id', asset_id, 'slug', asset_slug, 'digest', asset_digest
+				)) AS assets,
+				COUNT(DISTINCT CASE WHEN asset_type = 'repo'  THEN asset_id END)::int AS repo_count,
+				COUNT(DISTINCT CASE WHEN asset_type = 'image' THEN asset_id END)::int AS image_count
+			FROM scoped_assets vca
+			` + filterClause + `
+			GROUP BY canonical_id
+		)
+		SELECT
+			g.vuln_id, g.sev_rank, g.cve_year,
+			g.severity, g.pkg_name, g.installed_version, g.fixed_version,
+			g.title, g.description, g.sources, g.assets,
+			g.repo_count, g.image_count,
+			(kev.cve_id IS NOT NULL)              AS kev_known,
+			COALESCE(kev.known_ransomware, FALSE) AS kev_known_ransomware,
+			kev.date_added                        AS kev_date_added,
+			COALESCE(epss.score, 0)::float        AS epss_score,
+			COALESCE(epss.percentile, 0)::float   AS epss_percentile
+		FROM grouped g
+		LEFT JOIN cisa_kev_entries kev ON kev.cve_id = g.vuln_id
+		LEFT JOIN epss_entries     epss ON epss.cve_id = g.vuln_id
+		ORDER BY g.sev_rank                      ASC,
+		         (kev.cve_id IS NOT NULL)        DESC,
+		         COALESCE(epss.score, 0)         DESC,
+		         g.cve_year                      DESC NULLS LAST,
+		         g.vuln_id                       ASC
+		LIMIT ? OFFSET ?
+	`
+	pageArgs := append([]any{}, aclArgs...)
+	pageArgs = append(pageArgs, filtArgs...)
+	pageArgs = append(pageArgs, p.Limit, p.Offset)
+
+	var raws []listGroupRow
+	if err := db.WithContext(ctx).Raw(pageSQL, pageArgs...).Scan(&raws).Error; err != nil {
+		return VulnListResponse{}, err
+	}
+
+	return VulnListResponse{
+		Total:  total,
+		Limit:  p.Limit,
+		Offset: p.Offset,
+		Items:  finalizeListItems(ctx, db, raws),
 	}, nil
 }
 
@@ -1276,6 +1516,36 @@ func canonicalAssetWhere(repoSQL, imageSQL string) string {
 	rc := strings.ReplaceAll(repoSQL, "v.repo_id", "asset_id")
 	ic := strings.ReplaceAll(imageSQL, "v.image_id", "asset_id")
 	return fmt.Sprintf("((asset_type = 'repo' AND %s) OR (asset_type = 'image' AND %s))", rc, ic)
+}
+
+// scopedAssetsCTE builds a UNION ALL of the two asset-type branches over
+// vuln_canonical_assets, each constrained to a single asset_type so the
+// partial indexes (idx_vuln_canonical_assets_repo / _image, both on
+// asset_id) can drive a semi-join against the caller's small readable-id
+// set. The body is meant to seed a `WITH scoped_assets AS (...)` CTE that
+// downstream queries group / filter over.
+//
+// Why not canonicalAssetWhere's single OR predicate: ORing the two
+// asset_type branches into one WHERE forces Postgres to seq-scan the
+// whole MV — neither partial index covers an asset_type-spanning OR — so
+// the scoped dashboard paid a full-table scan per request even for a
+// tiny grant. Splitting into per-asset_type branches restores index use.
+//
+// repoSQL / imageSQL are the unified-view-shaped ACL fragments (alias
+// `v`, columns v.repo_id / v.image_id); the v.<col> references are
+// rewritten to asset_id, same convention as canonicalAssetWhere. Args
+// are returned in repo-branch-then-image-branch order.
+func scopedAssetsCTE(repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (string, []any) {
+	repoPred := "asset_type = 'repo' AND " + strings.ReplaceAll(repoSQL, "v.repo_id", "asset_id")
+	imagePred := "asset_type = 'image' AND " + strings.ReplaceAll(imageSQL, "v.image_id", "asset_id")
+	cte := fmt.Sprintf(`
+		SELECT * FROM vuln_canonical_assets WHERE %s
+		UNION ALL
+		SELECT * FROM vuln_canonical_assets WHERE %s
+	`, repoPred, imagePred)
+	args := append([]any{}, repoArgs...)
+	args = append(args, imageArgs...)
+	return cte, args
 }
 
 // buildAssetUnionSQL returns the CTE body plus its bind args. Repo and
@@ -1453,14 +1723,46 @@ func computeSummary(ctx context.Context, db *gorm.DB) (Summary, error) {
 // the caller has no readable assets at all (the handler should
 // short-circuit there anyway, this is belt-and-braces).
 //
-// The scoped path is intentionally uncached: results vary per-subject
-// and the per-page hit volume is bounded by the SPA dashboard load
-// pattern.
+// Cached per (subject ACL fragments) against the MV-refresh watermark:
+// two callers with identical readable sets share an entry and a rebuild
+// invalidates exactly when the underlying MVs change — same scheme as
+// the list and trend caches.
 func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (Summary, error) {
-	var summary Summary
 	if !unifiedViewsReady(ctx, db) {
-		return summary, nil
+		return Summary{}, nil
 	}
+
+	store := cache.NewPostgresStore(db)
+	version, versionErr := querySummaryVersion(ctx, db)
+	var cacheKey string
+	if versionErr == nil {
+		cacheKey = summaryScopedCacheKey(version, repoSQL, repoArgs, imageSQL, imageArgs)
+		if entry, ok, err := cache.GetJSON[cachedSummary](ctx, store, cacheKey); err == nil && ok {
+			if sameVersion(entry.Version, version) {
+				return entry.Summary, nil
+			}
+		}
+	}
+
+	summary, err := computeSummaryScoped(ctx, db, repoSQL, repoArgs, imageSQL, imageArgs)
+	if err != nil {
+		return Summary{}, err
+	}
+
+	if versionErr == nil && cacheKey != "" {
+		_ = cache.SetJSON(ctx, store, cacheKey, cachedSummary{Version: version, Summary: summary}, summaryCacheTTL)
+	}
+	return summary, nil
+}
+
+// computeSummaryScoped recomputes severity counts + SBOM metadata for an
+// ACL-scoped subset, reading the pre-aggregated vuln_canonical_assets MV
+// when populated and falling back to a request-time re-aggregation of the
+// unified views during the bootstrap window. The repoSQL / imageSQL
+// fragments are rewritten to the canonical-MV column shape via
+// canonicalAssetWhere — see its contract comment.
+func computeSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArgs []any, imageSQL string, imageArgs []any) (Summary, error) {
+	var summary Summary
 	canonicalReady, _ := spamdb.VulnCanonicalViewsPopulated(ctx, db)
 
 	repoSQL = strings.TrimSpace(repoSQL)
@@ -1477,19 +1779,21 @@ func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArg
 
 	var countSQL string
 	if canonicalReady {
-		// Fast path: read directly from the pre-aggregated MV. The
-		// canonical-aware (asset, canonical) dedup is already baked in,
-		// so this is just a COUNT FILTER over an indexed table.
-		countSQL = fmt.Sprintf(`
+		// Fast path: read the pre-aggregated MV through the per-asset_type
+		// UNION-ALL CTE so each branch uses its partial index instead of
+		// seq-scanning the whole MV (the OR predicate from
+		// canonicalAssetWhere couldn't). The (asset, canonical) dedup is
+		// already baked in, so this is a COUNT FILTER over the scoped set.
+		cte, aclArgs := scopedAssetsCTE(repoSQL, repoArgs, imageSQL, imageArgs)
+		countArgs = aclArgs
+		countSQL = "WITH scoped_assets AS (" + cte + `)
 			SELECT
 				COUNT(*) FILTER (WHERE sev_rank = 1)::int AS total_critical,
 				COUNT(*) FILTER (WHERE sev_rank = 2)::int AS total_high,
 				COUNT(*) FILTER (WHERE sev_rank = 3)::int AS total_medium,
 				COUNT(*) FILTER (WHERE sev_rank = 4)::int AS total_low,
 				COUNT(*) FILTER (WHERE sev_rank = 5)::int AS total_unknown
-			FROM vuln_canonical_assets
-			WHERE %s
-		`, canonicalAssetWhere(repoSQL, imageSQL))
+			FROM scoped_assets`
 	} else {
 		// Fallback used during the bootstrap window where the canonical
 		// MVs are still first-populating. Same canonical-aware dedup as
@@ -1592,15 +1896,15 @@ func LoadSummaryScoped(ctx context.Context, db *gorm.DB, repoSQL string, repoArg
 }
 
 func querySummaryVersion(ctx context.Context, db *gorm.DB) (summaryVersion, error) {
-	var version summaryVersion
-	err := db.WithContext(ctx).Raw(`
-		SELECT
-			(SELECT MAX(scanned_at) FROM sbom_scan_results)         AS last_scan_at,
-			(SELECT MAX(checked_at) FROM component_vulnerabilities) AS last_osv_at,
-			(SELECT MAX(created_at) FROM component_vex)             AS last_vex_at,
-			(SELECT MAX(finished_at) FROM image_scan_runs)          AS last_image_scan_at
-	`).Scan(&version).Error
-	return version, err
+	// The vuln dashboard caches are a pure function of the unified/canonical
+	// vuln MVs, so the MV's own last-refresh time is the correct (and cheap,
+	// PK-indexed) invalidation watermark. See db.VulnViewsRefreshedAt and the
+	// summaryVersion doc comment.
+	at, err := spamdb.VulnViewsRefreshedAt(ctx, db)
+	if err != nil {
+		return summaryVersion{}, err
+	}
+	return summaryVersion{VulnViewsRefreshedAt: at}, nil
 }
 
 func computeRepos(ctx context.Context, db *gorm.DB) ([]RepoRow, error) {
@@ -1680,10 +1984,7 @@ func upsertSnapshot(ctx context.Context, db *gorm.DB, capturedAt time.Time, summ
 }
 
 func sameVersion(a, b summaryVersion) bool {
-	return sameTime(a.LastScanAt, b.LastScanAt) &&
-		sameTime(a.LastOSVAt, b.LastOSVAt) &&
-		sameTime(a.LastVEXAt, b.LastVEXAt) &&
-		sameTime(a.LastImageScanAt, b.LastImageScanAt)
+	return sameTime(a.VulnViewsRefreshedAt, b.VulnViewsRefreshedAt)
 }
 
 func sameTime(a, b *time.Time) bool {

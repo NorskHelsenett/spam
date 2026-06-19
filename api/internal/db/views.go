@@ -63,13 +63,46 @@ const (
 	hostExposureViewRefreshInterval = 5 * time.Minute
 	// asset_risk (~15s), cascaded from the vuln + host-exposure + dep-health
 	// + secret-probe paths, so it is the most-triggered family.
-	assetRiskViewRefreshInterval = 5 * time.Minute
+	//
+	// Raised 5m → 60m: with 400+ scanner agents ingesting around the clock
+	// the trigger never goes cold, so a short window just pins the DB
+	// rebuilding this family near-continuously (it was ~85% of all DB time
+	// in pg_stat_statements). asset_risk backs the triage dashboard — an
+	// aggregate that tolerates hour-scale staleness — and the scheduled
+	// REFRESH_MV driver job (see jobs.processRefreshMV) plus the read-path
+	// stale-while-revalidate in vulnmetrics keep it fresh on demand. This
+	// caps the steady-state rebuild rate at once/hour regardless of how
+	// many agents are ingesting.
+	assetRiskViewRefreshInterval = 60 * time.Minute
 	// Four unified/canonical vuln MVs; view_unified_image_vulnerabilities
-	// alone is ~33s to rebuild.
-	vulnUnifiedViewRefreshInterval = 5 * time.Minute
+	// alone is ~33s to rebuild and scales with the dataset.
+	//
+	// Raised 5m → 60m for the same reason as assetRiskViewRefreshInterval:
+	// these back fleet-wide vuln dashboards that are read on demand (the
+	// summary/list caches revalidate against a data-version watermark, so
+	// a viewer still gets fresh numbers via TriggerRefresh) and the
+	// REFRESH_MV job guarantees a periodic rebuild independent of ingest.
+	vulnUnifiedViewRefreshInterval = 60 * time.Minute
 	// sbom_metadata_view (~204s) + sbom_component_view — by far the most
-	// expensive family; SBOM metadata changes slowly so a long window is fine.
-	sbomViewRefreshInterval = 15 * time.Minute
+	// expensive family; its CONCURRENTLY rebuild grows with the dataset and
+	// can overlap the vuln + cluster refreshes, all contending for the same
+	// disk I/O. SBOM metadata changes slowly and a source fingerprint
+	// already skips the rebuild when nothing changed, so a longer window
+	// costs no freshness and reduces refresh overlap.
+	//
+	// Raised 30m -> 6h: sbom_component_view's CONCURRENTLY rebuild now runs
+	// ~21 min and pins the Postgres node near 100% CPU for that whole window
+	// (it recomputes all ~28M component rows by re-exploding every SBOM's
+	// JSONB, even though an SBOM is immutable after upload). With 400+ agents
+	// ingesting continuously the source fingerprint never goes cold, so a 30m
+	// window meant the rebuild ran effectively back-to-back (~70% duty cycle)
+	// and starved the SCAM callcenter ingest path of CPU — agents saw
+	// `context deadline exceeded` and entered reconcile/backoff loops. The
+	// component data backs SBOM/dependency dashboards that tolerate multi-hour
+	// staleness, so 6h caps the rebuild at ~4/day. This is a bridge: the
+	// durable fix populates a regular sbom_component table incrementally at
+	// ingest and retires this full rebuild entirely.
+	sbomViewRefreshInterval = 6 * time.Hour
 )
 
 // Maximum age of the last actual refresh for the source-fingerprint
@@ -748,6 +781,33 @@ func VulnCanonicalViewsPopulated(ctx context.Context, db *gorm.DB) (bool, error)
 		vulnCanonicalViewNames[0], vulnCanonicalViewNames[1],
 	).Scan(&populated).Error
 	return populated, err
+}
+
+// VulnViewsRefreshedAt returns the most recent refresh timestamp recorded
+// for the unified/canonical vuln MV family. This is the correct cache-
+// invalidation watermark for the vuln dashboard reads (summary, list,
+// repos, facets): their content is a pure function of those four MVs, so a
+// cached response stays valid until — and only until — the MVs are actually
+// rebuilt.
+//
+// Returns nil when no refresh has been recorded yet (cold start, before the
+// first populate). Reads materialized_view_refreshes by its primary key
+// (name), so it is a tiny indexed lookup. It deliberately replaces the
+// previous read-path watermark, which ran four MAX() scans over the
+// high-churn scan/OSV/VEX/image-scan source tables on every dashboard
+// request — those tables advance every few seconds under continuous
+// ingestion, so they invalidated the caches constantly even though the MVs
+// (now refreshed at most hourly) had not changed.
+func VulnViewsRefreshedAt(ctx context.Context, db *gorm.DB) (*time.Time, error) {
+	var row struct {
+		RefreshedAt *time.Time `gorm:"column:refreshed_at"`
+	}
+	err := db.WithContext(ctx).Raw(`
+		SELECT MAX(refreshed_at) AS refreshed_at
+		FROM materialized_view_refreshes
+		WHERE name IN (?, ?, ?, ?)
+	`, vulnUnifiedViewNames[0], vulnUnifiedViewNames[1], vulnUnifiedViewNames[2], vulnUnifiedViewNames[3]).Scan(&row).Error
+	return row.RefreshedAt, err
 }
 
 // RefreshVulnUnifiedViews refreshes the unified vuln MVs under a

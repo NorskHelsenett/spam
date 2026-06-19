@@ -1,0 +1,31 @@
+-- Safety-net session timeouts for the application role, applied via
+-- ALTER ROLE so every new connection inherits them. statement_timeout,
+-- lock_timeout and idle_in_transaction_session_timeout are USERSET GUCs,
+-- so the connected role can set them on itself (CURRENT_USER avoids
+-- hard-coding the role name). Run by EnsureViews inside a transaction;
+-- ALTER ROLE is transaction-safe. Settings apply to NEW connections, so
+-- the pool picks them up as it recycles (ConnMaxIdleTime / ConnMaxLifetime).
+--
+-- Under heavy DB load the bounded app connection pool was getting clogged
+-- by queries that hung for minutes — the cascade behind "failed to persist
+-- user" login failures: once every pooled connection is stuck, new
+-- requests can't get a connection at all.
+--
+-- idle_in_transaction_session_timeout terminates sessions holding an open
+-- transaction (and its locks + connection) while doing nothing — the
+-- abandoned/stalled-request case. It never interrupts an actively-running
+-- statement, so MV refreshes and long scans are unaffected.
+--
+-- lock_timeout makes a statement that is *blocked waiting for a lock* give
+-- up quickly instead of queuing behind a long lock holder (e.g. a login
+-- INSERT waiting on a row lock). The MV refreshes take their cross-replica
+-- lock with pg_try_advisory_lock (non-blocking), so a refresh that loses a
+-- lock race simply retries on its next debounce tick.
+--
+-- statement_timeout is deliberately NOT set here: a blanket cap would kill
+-- the legitimately-long REFRESH MATERIALIZED VIEW CONCURRENTLY rebuilds.
+-- Capping normal queries needs those refresh sessions exempted first
+-- (SET statement_timeout = 0 on the dedicated refresh connection) — left
+-- as a follow-up.
+ALTER ROLE CURRENT_USER SET idle_in_transaction_session_timeout = '120s';
+ALTER ROLE CURRENT_USER SET lock_timeout = '15s';

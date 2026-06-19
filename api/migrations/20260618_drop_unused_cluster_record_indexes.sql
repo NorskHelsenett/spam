@@ -1,0 +1,34 @@
+-- OUT-OF-BAND migration — apply manually with psql, NOT via EnsureViews.
+--
+-- cluster_record is the most write-heavy table in the system (continuous
+-- agent UPDATEs), so dropping its indexes uses DROP INDEX CONCURRENTLY to
+-- avoid the ACCESS EXCLUSIVE lock a plain DROP would take — that lock would
+-- stall every in-flight agent push. CONCURRENTLY cannot run inside a
+-- transaction, so this file is deliberately left out of the EnsureViews
+-- migration list in cmd/server/main.go (EnsureViews wraps each file in a
+-- transaction). This matches the convention established by
+-- 20260617_fix_cluster_record_digest_index.sql.
+--
+-- All three indexes below showed zero scans in pg_stat_user_indexes while
+-- costing real write amplification on every record update:
+--
+--   idx_cluster_record_received_at — received_at filters are served as
+--       residual filters behind the cluster_id / namespace indexes, never
+--       via this standalone index.
+--   idx_cluster_record_event_id — GORM-materialised from the old `index`
+--       tag on Record.EventID (now removed so AutoMigrate won't recreate
+--       it).
+--   ix_cluster_record_event_id — partial twin of the above from 20260512a.
+--       event_id is only ever written on cluster_record; the ACK counter
+--       that reads it lives on cluster_sessions.
+--
+-- The corresponding GORM `index` tags were removed in scam/models.go in the
+-- same change, so these drops are durable across deploys. ix_ comes from a
+-- hash-gated migration that will not re-run, so it stays dropped too.
+--
+-- Apply with:
+--   kubectl -n spam exec spam-postgresql-0 -- \
+--     psql -U spam -d spam -f - < this_file.sql
+DROP INDEX CONCURRENTLY IF EXISTS idx_cluster_record_received_at;
+DROP INDEX CONCURRENTLY IF EXISTS idx_cluster_record_event_id;
+DROP INDEX CONCURRENTLY IF EXISTS ix_cluster_record_event_id;

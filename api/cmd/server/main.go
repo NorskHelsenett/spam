@@ -187,6 +187,9 @@ func run() error {
 		"migrations/20260611b_asset_risk_exposure_requires_public_dns.sql",
 		"migrations/20260612_fix_sbom_component_view_unique_index.sql",
 		"migrations/20260616_clusters_ror_cluster_uid.sql",
+		"migrations/20260618_create_unique_active_maintenance_jobs.sql",
+		"migrations/20260618_autovacuum_tuning.sql",
+		"migrations/20260618_session_timeouts.sql",
 	); err != nil {
 		return fmt.Errorf("bootstrap views: %w", err)
 	}
